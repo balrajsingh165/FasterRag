@@ -1,0 +1,135 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fasterrag"
+dynamic = ["version"]
+description = "Backend-only, all-in-one Retrieval-Augmented Generation framework engineered for very large datasets."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "fasterRag maintainers" }]
+keywords = [
+    "rag",
+    "retrieval-augmented-generation",
+    "vector-database",
+    "embeddings",
+    "fastapi",
+    "qdrant",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "fastapi>=0.115",
+    "pydantic>=2.8",
+    "pydantic-settings[yaml]>=2.4",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.27",
+    "mypy>=1.11",
+    "pre-commit>=3.8",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "types-pyyaml>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/balrajsingh165/FasterRag"
+Documentation = "https://github.com/balrajsingh165/FasterRag/tree/main/docs"
+Source = "https://github.com/balrajsingh165/FasterRag"
+Issues = "https://github.com/balrajsingh165/FasterRag/issues"
+Changelog = "https://github.com/balrajsingh165/FasterRag/blob/main/docs/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/fasterrag/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fasterrag"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = [
+    "A",
+    "ARG",
+    "B",
+    "C4",
+    "D",
+    "E",
+    "ERA",
+    "F",
+    "I",
+    "N",
+    "PT",
+    "RET",
+    "RUF",
+    "SIM",
+    "T20",
+    "TID",
+    "UP",
+    "W",
+]
+ignore = ["D203", "D213"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D100", "D103", "D104"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests", "scripts"]
+mypy_path = "scripts"
+strict = true
+warn_unreachable = true
+warn_unused_configs = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = ["fasterrag.*"]
+disallow_any_unimported = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["scripts"]
+addopts = "--strict-markers --strict-config"
+asyncio_mode = "auto"
+markers = [
+    "integration: requires containerized backends (testcontainers)",
+    "eval: retrieval eval harness over committed datasets",
+    "load: load-test scenarios run on reference hardware",
+    "soak: long-running stability runs",
+    "chaos: scripted fault-injection scenarios",
+    "mutation: mutation-testing runs",
+]
+
+[tool.coverage.run]
+source = ["src/fasterrag"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]

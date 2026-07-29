@@ -1,0 +1,43 @@
+# Local quality gates mirroring docs/testing-strategy.md §2. Install with: pre-commit install --install-hooks -t pre-commit -t commit-msg
+default_install_hook_types: [pre-commit, commit-msg]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy --strict
+        entry: mypy
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: pytest-unit
+        name: pytest (unit)
+        entry: pytest -q
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: commit-message-rule
+        name: single-line commit message, no trailers
+        entry: python scripts/check_commit_message.py
+        language: system
+        stages: [commit-msg]
