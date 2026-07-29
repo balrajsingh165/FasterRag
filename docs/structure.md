@@ -9,14 +9,17 @@ fasterRag/
 ├── CLAUDE.md                     # Always-loaded Claude Code instructions (ONLY doc kept at root)
 ├── README.md                     # Project overview + entry point into docs/
 ├── LICENSE
-├── config.yaml                   # All behavior (no secrets) — user-edited
+├── .gitignore                    # Ignores .env, caches, build artifacts
+├── config.yaml                   # All behavior (no secrets) — MUST match docs/config-reference.md example
 ├── .env.example                  # Template for secrets; real .env is git-ignored
 ├── pyproject.toml                # Project metadata, deps, tooling config
+├── .github/                      # PR template (rule enforcement), issue templates, SECURITY.md
 ├── docs/                         # ALL documentation lives here (rule: only CLAUDE.md stays at root)
 │   ├── scope.md  structure.md  flow.md  architecture.md
 │   ├── config-reference.md  api-reference.md  cli-reference.md  python-api.md
 │   ├── observability.md  deployment.md  security.md
 │   ├── testing-strategy.md  performance.md  benchmarks.md  integrations.md
+│   ├── glossary.md  references.md  archive-format.md
 │   ├── differentiators.md        # The twelve flagship capabilities (uniqueness contract)
 │   ├── reliability.md            # Reliability doctrine + resilience patterns
 │   ├── failure-modes.md          # FMEA table (component failure analysis)

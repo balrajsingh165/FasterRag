@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Differentiation and reliability layer (2026-07-29): `differentiators.md` (twelve flagship capabilities D1–D12 with acceptance tests and proof metrics), `reliability.md` (error taxonomy, resilience patterns), `failure-modes.md` (37-row FMEA), `slo.md` (SLIs, TBD-until-measured targets, error budget policy), `disaster-recovery.md` (backup inventory, restore drill, RPO/RTO).
 - Architecture Decision Records ADR-0001–ADR-0006 (MADR style).
 - `CLAUDE.md` instruction file, single universal task file `docs/todo.md`, detailed `README.md`.
+- Repository hardening (2026-07-29): `.gitignore`, `.env.example`, canonical default `config.yaml` (byte-consistent with the config-reference example), GitHub PR/issue templates enforcing the contribution rules, private vulnerability-reporting policy (`.github/SECURITY.md`), `docs/glossary.md` (canonical terminology), `docs/references.md` (external evidence bibliography R1–R14), `docs/archive-format.md` (D11 portability archive spec v1.0.0), and the golden-set JSONL schema in `docs/testing-strategy.md`.
 
 ### Changed
 

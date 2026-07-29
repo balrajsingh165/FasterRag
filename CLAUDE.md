@@ -98,6 +98,9 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 - [performance.md](docs/performance.md) — performance goals and measurement methodology
 - [benchmarks.md](docs/benchmarks.md) — the benchmark ledger (backs every claim)
 - [integrations.md](docs/integrations.md) — supported providers and how config enables them
+- [glossary.md](docs/glossary.md) — canonical terminology; use these meanings exactly
+- [references.md](docs/references.md) — external evidence sources backing every sourced claim
+- [archive-format.md](docs/archive-format.md) — portability archive specification (D11)
 - [CONTRIBUTING.md](docs/CONTRIBUTING.md) — contributor rules
 - [CHANGELOG.md](docs/CHANGELOG.md) — Keep a Changelog + SemVer
 - [docs/adr/](docs/adr/) — Architecture Decision Records (MADR)

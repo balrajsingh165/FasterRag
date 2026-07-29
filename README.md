@@ -89,6 +89,7 @@ All documentation lives in [`docs/`](docs/) (only `CLAUDE.md` and this README si
 | [reliability.md](docs/reliability.md) · [failure-modes.md](docs/failure-modes.md) · [slo.md](docs/slo.md) · [disaster-recovery.md](docs/disaster-recovery.md) | Error taxonomy, FMEA, SLIs/SLOs, backup + restore drill |
 | [testing-strategy.md](docs/testing-strategy.md) · [performance.md](docs/performance.md) · [benchmarks.md](docs/benchmarks.md) | Testing pyramid incl. chaos suite, measurement methodology, the benchmark ledger |
 | [differentiators.md](docs/differentiators.md) | The twelve capabilities, each with acceptance test + proof metric |
+| [glossary.md](docs/glossary.md) · [references.md](docs/references.md) · [archive-format.md](docs/archive-format.md) | Canonical terminology, external evidence sources, portability archive spec |
 | [adr/](docs/adr/) | Architecture Decision Records (MADR) |
 | [todo.md](docs/todo.md) | The ONE task file: done, in progress, pending, todo, future |
 | [CONTRIBUTING.md](docs/CONTRIBUTING.md) · [CHANGELOG.md](docs/CHANGELOG.md) | Rules and history |

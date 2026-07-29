@@ -58,6 +58,19 @@
 - [x] TASK-0069: Gate B documentation hardening complete (all Section 3 files exist with required sections) — ✅ 2026-07-29
 - [x] TASK-0070: Merge documentation branch to main and push — ✅ 2026-07-29
 
+### Phase 3 — repository hardening
+
+- [x] TASK-0088: Add .gitignore (secrets, caches, build artifacts) — ✅ 2026-07-29
+- [x] TASK-0089: Add .env.example matching the security.md variable inventory — ✅ 2026-07-29
+- [x] TASK-0090: Commit canonical default config.yaml, byte-consistent with the config-reference.md example — ✅ 2026-07-29
+- [x] TASK-0091: Add GitHub PR template (rule-enforcement checklist) and bug/feature issue templates — ✅ 2026-07-29
+- [x] TASK-0092: Add .github/SECURITY.md private vulnerability-reporting policy — ✅ 2026-07-29
+- [x] TASK-0093: Author docs/glossary.md pinning canonical terminology — ✅ 2026-07-29
+- [x] TASK-0094: Author docs/references.md consolidating external evidence sources (R1–R14) — ✅ 2026-07-29
+- [x] TASK-0095: Author docs/archive-format.md specifying the D11 portability archive (v1.0.0) — ✅ 2026-07-29
+- [x] TASK-0096: Add the golden-set JSONL schema to testing-strategy.md (shared by eval harness, D6, D7) — ✅ 2026-07-29
+- [x] TASK-0097: Merge repo-hardening branch to main and push — ✅ 2026-07-29
+
 ## In Progress
 
 _(empty)_
@@ -65,6 +78,7 @@ _(empty)_
 ## Pending
 
 - [ ] TASK-0020: Decide beta version number and stamp CHANGELOG Unreleased → 0.1.0-beta.1 on first release
+- [ ] TASK-0098: (maintainer action, GitHub settings) Enable branch protection on main — require PRs, block direct pushes
 
 ## Todo
 
