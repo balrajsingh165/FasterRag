@@ -52,10 +52,11 @@ fasterRag/
 │       │   ├── collections.py    # Collections CRUD (pending)
 │       │   └── admin.py          # Provisioning + admin endpoints (pending)
 │       ├── services/             # Business logic / use cases (orchestration)
-│       │   ├── ingestion.py      # Accept → enqueue → track jobs
-│       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate
-│       │   ├── collections.py    # Collection lifecycle
-│       │   └── provisioning.py   # Config-driven auto-provisioning (Qdrant/Langfuse/Grafana)
+│       │   ├── provisioning.py   # Config-driven auto-provisioning (Qdrant/Langfuse/Grafana)
+│       │   ├── doctor.py         # D10 preflight checks; gates provisioning
+│       │   ├── ingestion.py      # Accept → enqueue → track jobs (pending)
+│       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate (pending)
+│       │   └── collections.py    # Collection lifecycle (pending)
 │       ├── core/                 # RAG pipeline (pure domain logic)
 │       │   ├── parsing/          # PDF/HTML/MD/DOCX/OCR parsers, table extraction
 │       │   ├── chunking/         # fixed, recursive, semantic, layout, late, contextual
@@ -87,6 +88,7 @@ fasterRag/
 │           └── main.py           # fasterrag ingest|query|index|provision|status|benchmark|serve|worker
 └── tests/
     ├── unit/                     # Fast, isolated (mirrors src layout)
+    ├── contract/                 # Shared adapter contract suite every provider must pass
     ├── integration/              # Real adapters against containerized backends
     └── eval/                     # Retrieval eval harness + datasets (recall@k, MRR, nDCG, faithfulness)
 ```
@@ -96,7 +98,8 @@ fasterRag/
 | Directory | Responsibility |
 |---|---|
 | `api/` | HTTP surface only. Routers validate requests (Pydantic), call one service function, shape the response. **No business logic in routers.** |
-| `services/` | Use-case orchestration. Compose core pipeline pieces and adapters into ingestion, querying, collection, and provisioning workflows. Own transactions/job state. |
+| `services/` | Use-case orchestration. Compose core pipeline pieces and adapters into ingestion, querying, collection, provisioning, and diagnostic workflows. Own transactions/job state. |
+| `tests/contract/` | The shared adapter contract suite. Vendor-neutral by construction: a subclass supplies the adapter and collection fixtures, so third-party providers registered through entry points run the identical suite. |
 | `core/` | The RAG pipeline itself — parsing, chunking, retrieval, rerank, context assembly, generation. Pure domain logic; depends on adapter *interfaces*, never concrete vendors. |
 | `adapters/` | All vendor code (vector DBs, embedding providers, LLM providers). Each adapter implements a base interface; a factory instantiates the concrete one from config. Vendor types never leak past this boundary. |
 | `workers/` | Parallel execution: CPU pool for parse/chunk, stateful embedding pool, bounded queues, batch indexer. Owns backpressure and retry policy. |

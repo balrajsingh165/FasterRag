@@ -90,6 +90,14 @@
 - [x] TASK-0022: Implement config loader (pydantic-settings + YAML source, .env secrets, fail-fast validation incl. all cross-field rules) — ✅ 2026-07-29
 - [x] TASK-0039: Implement REST API app factory + routers (endpoints land incrementally per slice; /healthz + /readyz first) — ✅ 2026-07-29
 
+### Slice S2 — Qdrant adapter + doctor v1 (build phase)
+
+- [x] TASK-0023: Implement VectorDBAdapter base interface + factory (create_collection, upsert, search, update, delete, health) — ✅ 2026-07-30
+- [x] TASK-0024: Implement Qdrant reference adapter (docker | external | remote modes, 6333/6334 both handled, prefer_grpc, API key) — ✅ 2026-07-30
+- [x] TASK-0025: Implement Qdrant system-managed Docker provisioning (named volume enforced on Windows/WSL, both ports exposed) — ✅ 2026-07-30
+- [x] TASK-0073: Implement the shared adapter contract test suite (run against Qdrant in all three modes) — ✅ 2026-07-30
+- [x] TASK-0074: Implement fasterrag doctor v1 (Docker, ports, disk, RAM/GPU, DB reachability all modes, key validity, config validity; fix-it strings; provisioning gate) — ✅ 2026-07-30
+
 ## In Progress
 
 _(empty)_
@@ -99,6 +107,9 @@ _(empty)_
 - [ ] TASK-0020: Decide beta version number and stamp CHANGELOG Unreleased → 0.1.0-beta.1 on first release
 - [ ] TASK-0098: (maintainer action, GitHub settings) Enable branch protection on main — require PRs, block direct pushes
 - [ ] TASK-0108: (maintainer action) Review and merge branch `build/s1-skeleton` to main, then tag `v0.1.0-s1`
+- [ ] TASK-0109: (maintainer action) Review and merge branch `build/s2-qdrant-adapter` to main, then tag `v0.2.0-s2`
+- [ ] TASK-0110: Register the vector database health check with `/readyz` when the API first uses the adapter (S3/S4); the readiness registry exists and the adapter's `health()` is ready, but nothing wires them together yet
+- [ ] AUDIT-0007: deployment.md states every provisioned container runs non-root, but the Qdrant provisioner does not pass `--user` — the official image expects to own its storage volume and forcing a uid risks an unstartable container. Decide whether to verify a working non-root uid for the pinned image or to narrow the documented claim to the containers fasterRag builds itself
 - [ ] AUDIT-0006: `trace_id` format conflict — data-model.md gives Trace ids a `t_` prefix and states the id equals the value propagated through logs, spans, and problem responses, while api-reference.md's example and the "matches OTel trace" requirement imply a bare 32-hex OpenTelemetry trace id. S1 implements 32-hex lowercase for OTel compatibility; reconcile the two documents (either drop the `t_` prefix from the Trace row, or distinguish the Trace entity id from the propagated correlation id)
 
 ## Todo
