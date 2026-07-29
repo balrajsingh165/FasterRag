@@ -43,6 +43,7 @@ QDRANT_CONTAINER: Final = "fasterrag-qdrant"
 CONTAINER_LABEL: Final = "fasterrag.managed=true"
 
 QDRANT_SERVER_KEY_VAR: Final = "QDRANT__SERVICE__API_KEY"
+QDRANT_GRPC_PORT_VAR: Final = "QDRANT__SERVICE__GRPC_PORT"
 _QDRANT_REST_PORT: Final = 6333
 _QDRANT_GRPC_PORT: Final = 6334
 _QDRANT_STORAGE: Final = "/qdrant/storage"
@@ -226,6 +227,11 @@ def _run_arguments(settings: Settings) -> list[str]:
         f"{vector_db.grpc_port}:{_QDRANT_GRPC_PORT}",
         "--volume",
         f"{vector_db.docker.volume}:{_QDRANT_STORAGE}",
+        # CRITICAL: Qdrant leaves its gRPC interface disabled unless this is set. Publishing
+        # the port is not enough — without it only 6333 answers, which is exactly the
+        # failure recorded in docs/failure-modes.md row 15.
+        "--env",
+        f"{QDRANT_GRPC_PORT_VAR}={_QDRANT_GRPC_PORT}",
     ]
     if vector_db.api_key_env:
         args += ["--env", QDRANT_SERVER_KEY_VAR]

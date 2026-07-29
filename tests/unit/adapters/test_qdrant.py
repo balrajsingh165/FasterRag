@@ -3,6 +3,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from grpc import RpcError, StatusCode
 from qdrant_client import AsyncQdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
@@ -413,6 +414,54 @@ async def test_http_failures_map_onto_the_taxonomy(
 
     assert caught.value.code is code
     assert caught.value.retryable is retryable
+
+
+class FakeRpcError(RpcError):
+    """A gRPC failure carrying a status code, as grpc.aio raises."""
+
+    def __init__(self, status: StatusCode) -> None:
+        self._status = status
+
+    def code(self) -> StatusCode:
+        return self._status
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "retryable"),
+    [
+        (StatusCode.UNAUTHENTICATED, ErrorCode.EMBED_PROVIDER_ERROR, False),
+        (StatusCode.PERMISSION_DENIED, ErrorCode.EMBED_PROVIDER_ERROR, False),
+        (StatusCode.INVALID_ARGUMENT, ErrorCode.EMBED_PROVIDER_ERROR, False),
+        (StatusCode.NOT_FOUND, ErrorCode.NOT_FOUND, False),
+        (StatusCode.ALREADY_EXISTS, ErrorCode.CONFLICT, False),
+        (StatusCode.UNAVAILABLE, ErrorCode.EMBED_PROVIDER_ERROR, True),
+        (StatusCode.DEADLINE_EXCEEDED, ErrorCode.EMBED_PROVIDER_ERROR, True),
+    ],
+)
+async def test_grpc_failures_map_onto_the_taxonomy(
+    status: StatusCode, code: ErrorCode, retryable: bool
+) -> None:
+    client = FakeClient(raises=FakeRpcError(status))
+
+    with pytest.raises(FasterRagError) as caught:
+        await build(client).search(SearchQuery(collection="default", vector=[0.1]))
+
+    assert caught.value.code is code
+    assert caught.value.retryable is retryable
+
+
+async def test_a_grpc_auth_rejection_names_the_env_var_and_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("QDRANT_API_KEY", "super-secret-key")
+    client = FakeClient(raises=FakeRpcError(StatusCode.UNAUTHENTICATED))
+
+    with pytest.raises(FasterRagError) as caught:
+        await build(client).search(SearchQuery(collection="default", vector=[0.1]))
+
+    assert caught.value.retryable is False
+    assert "QDRANT_API_KEY" in caught.value.detail
+    assert "super-secret-key" not in str(caught.value)
 
 
 async def test_transport_failures_are_retryable() -> None:

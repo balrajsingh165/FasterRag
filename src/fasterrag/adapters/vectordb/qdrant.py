@@ -27,7 +27,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Final, cast
 
-from grpc import RpcError
+from grpc import RpcError, StatusCode
 from qdrant_client import AsyncQdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
@@ -68,6 +68,13 @@ _RANGE_OPERATORS: Final[frozenset[str]] = frozenset({"$gt", "$gte", "$lt", "$lte
 
 _AUTH_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
 _SERVER_ERROR_THRESHOLD: Final = 500
+
+_GRPC_AUTH_CODES: Final[frozenset[StatusCode]] = frozenset(
+    {StatusCode.UNAUTHENTICATED, StatusCode.PERMISSION_DENIED}
+)
+_GRPC_NON_RETRYABLE: Final[frozenset[StatusCode]] = frozenset(
+    {StatusCode.INVALID_ARGUMENT, StatusCode.FAILED_PRECONDITION, StatusCode.OUT_OF_RANGE}
+)
 
 _VENDOR_ERRORS: Final = (UnexpectedResponse, ResponseHandlingException, RpcError, OSError)
 
@@ -157,23 +164,60 @@ class QdrantAdapter(VectorDBAdapter):
             )
         return self._client
 
+    def _auth_error(self, operation: str, transport: str) -> ProviderError:
+        """Build the non-retryable error for a rejected credential."""
+        named = self._api_key_env or "vector_db.api_key_env"
+        return ProviderError(
+            f"qdrant rejected the credentials during {operation} over {transport}; "
+            f"check the key in the {named} environment variable and the server's "
+            "QDRANT__SERVICE__API_KEY",
+            code=ErrorCode.EMBED_PROVIDER_ERROR,
+            retryable=False,
+        )
+
+    def _translate_grpc(self, exc: RpcError, operation: str) -> FasterRagError:
+        """Map a gRPC failure onto the taxonomy.
+
+        gRPC reports status codes rather than HTTP statuses, so without this an
+        authentication rejection over gRPC would be classified as a transport blip and
+        retried until the breaker opened.
+        """
+        code_getter = getattr(exc, "code", None)
+        status = code_getter() if callable(code_getter) else None
+
+        if status in _GRPC_AUTH_CODES:
+            return self._auth_error(operation, "grpc")
+        if status is StatusCode.NOT_FOUND:
+            return FasterRagError(
+                f"qdrant reported a missing resource during {operation}",
+                code=ErrorCode.NOT_FOUND,
+            )
+        if status is StatusCode.ALREADY_EXISTS:
+            return FasterRagError(
+                f"qdrant reported a conflicting state during {operation}",
+                code=ErrorCode.CONFLICT,
+            )
+
+        name = status.name if isinstance(status, StatusCode) else "UNKNOWN"
+        return ProviderError(
+            f"qdrant failed during {operation} over grpc ({name})",
+            code=ErrorCode.EMBED_PROVIDER_ERROR,
+            retryable=status not in _GRPC_NON_RETRYABLE,
+        )
+
     def _translate(self, exc: BaseException, operation: str) -> FasterRagError:
         """Map a Qdrant client failure onto the typed error taxonomy.
 
         Authentication failures are never retried and name the environment variable
         rather than the key, so a credential cannot reach a log line.
         """
+        if isinstance(exc, RpcError):
+            return self._translate_grpc(exc, operation)
+
         if isinstance(exc, UnexpectedResponse) and exc.status_code is not None:
             status = exc.status_code
             if status in _AUTH_STATUSES:
-                named = self._api_key_env or "vector_db.api_key_env"
-                return ProviderError(
-                    f"qdrant rejected the credentials during {operation} (HTTP {status}); "
-                    f"check the key in the {named} environment variable and the server's "
-                    "QDRANT__SERVICE__API_KEY",
-                    code=ErrorCode.EMBED_PROVIDER_ERROR,
-                    retryable=False,
-                )
+                return self._auth_error(operation, f"http {status}")
             if status == 404:
                 return FasterRagError(
                     f"qdrant reported a missing resource during {operation}",

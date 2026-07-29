@@ -10,6 +10,7 @@ from fasterrag.services import provisioning
 from fasterrag.services.doctor import DoctorCheck, DoctorReport
 from fasterrag.services.provisioning import (
     QDRANT_CONTAINER,
+    QDRANT_GRPC_PORT_VAR,
     QDRANT_SERVER_KEY_VAR,
     ContainerState,
     DockerResult,
@@ -114,6 +115,18 @@ async def test_run_publishes_both_ports_and_mounts_the_named_volume(
     assert "6334:6334" in command
     assert "fasterrag_qdrant_storage:/qdrant/storage" in command
     assert "qdrant/qdrant:v1.9.0" in command
+
+
+@pytest.mark.usefixtures("gate_passes", "ready")
+async def test_the_container_is_told_to_enable_grpc(
+    docker: DockerRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    absent(monkeypatch)
+    monkeypatch.setenv("QDRANT_API_KEY", "secret-value")
+
+    await provision_qdrant(Settings())
+
+    assert f"{QDRANT_GRPC_PORT_VAR}=6334" in docker.command("run")
 
 
 @pytest.mark.usefixtures("gate_passes", "ready")
