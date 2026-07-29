@@ -40,6 +40,28 @@ Messy PDFs, complex tables, and scanned/OCR documents parsed → structured outp
 - Runs as `pytest -m eval` and via `fasterrag benchmark --suite eval`.
 - **Regression gate (D7)**: on every config or index change, CI runs the harness and **blocks** the change if recall@k drops > `eval.recall_tolerance` or nDCG drops > `eval.ndcg_tolerance`.
 
+**Golden-set schema** — shared by the eval harness, the regression gate (D7), and Autopilot (D6), so the three can never diverge. JSONL, one record per line:
+
+```json
+{"id": "q_0001", "query": "What does the vendor agreement say about termination?",
+ "relevant_chunk_ids": ["c_9f2", "c_a01"], "relevant_document_ids": ["d_112"],
+ "answer_reference": "Either party may terminate with 30 days written notice.",
+ "metadata": {"department": "legal"}, "source": "human", "created_at": "2026-07-29"}
+```
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `id` | str | ✅ | Stable query id, unique within the set. |
+| `query` | str | ✅ | The question. |
+| `relevant_chunk_ids` | list[str] | ✅ (may be empty for adversarial records) | Ground-truth chunks; basis for recall@k/MRR/nDCG. |
+| `relevant_document_ids` | list[str] | — | Document-level ground truth (used when chunk ids churn across re-chunking). |
+| `answer_reference` | str\|null | — | Reference answer; basis for faithfulness scoring. `null` + empty chunk ids = adversarial "unanswerable" record for D5 testing. |
+| `metadata` | object | — | Filter context the query should run with. |
+| `source` | str | ✅ | `human` \| `autopilot` (generated sets are marked; human-reviewed promotion flips the value). |
+| `created_at` | str | ✅ | ISO date. |
+
+Golden sets are versioned files; a set edit that changes scores is reviewed like code, and archives export them (`golden-set.jsonl`, [archive-format.md](archive-format.md)).
+
 ### 1.7 Load tests (k6 or Locust)
 
 Scripted scenarios (query-only, ingest-only, mixed) at stepped concurrency; publish p50/p95 **with the exact hardware spec** into the benchmark ledger. No load number is ever quoted without its hardware line.
