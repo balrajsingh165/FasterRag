@@ -1,6 +1,6 @@
 # scope.md — Vision, Goals, and Scope
 
-> **Assumption (control vs dashboard).** The requirements say the system is "terminal/API only, no GUI" and also "ships a web dashboard." These are reconciled as follows: the **control plane is exclusively the REST API and the CLI** — no graphical interface can create, modify, or drive the RAG. The **observability dashboard is a separate, optional, self-hosted web GUI used strictly for inspection** (metrics, traces, LLM input/output history), never for control. This reconciliation is treated as a project assumption throughout the documentation. See also [observability.md](observability.md).
+> **Assumption (control vs dashboard).** The requirements say the system is "terminal/API only, no GUI" and also "ships a web dashboard." These are reconciled as follows: the **control plane is exclusively programmatic — the REST API, the CLI, and the importable Python package** ([python-api.md](python-api.md), [ADR-0006](adr/ADR-0006-python-package-surface.md)) — no graphical interface can create, modify, or drive the RAG. The **observability dashboard is a separate, optional, self-hosted web GUI used strictly for inspection** (metrics, traces, LLM input/output history), never for control. This reconciliation is treated as a project assumption throughout the documentation. See also [observability.md](observability.md) and [ADR-0005](adr/ADR-0005-api-cli-only-control-plane.md).
 
 ## Vision
 
@@ -9,7 +9,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 Speed and efficiency come from three pillars:
 
 1. **Multi-worker parallel processing** across ingestion, chunking, embedding, and indexing — a CPU worker pool streams into a GPU/embedding worker pool so expensive workers never idle.
-2. **Maximum chunking quality** via a configurable, best-in-class chunking pipeline (fixed, recursive, semantic, layout-aware, late chunking, contextual enrichment).
+2. **Maximum chunking quality as the goal**, via a configurable chunking pipeline (fixed, recursive, semantic, layout-aware, late chunking, contextual enrichment) whose defaults follow the strongest published evidence.
 3. Aggressive **caching, batching, streaming, and async I/O** at every stage.
 
 **Total pluggability**: any vector database, any embedding model, any LLM provider — all selected purely through configuration (`config.yaml`), with secrets isolated in `.env`.
@@ -17,7 +17,8 @@ Speed and efficiency come from three pillars:
 ## Goals
 
 - Ship a beta that ingests, indexes, and serves retrieval-augmented generation over very large corpora (hundreds of GB of documents, hundreds of millions of chunks) on self-hosted hardware.
-- Best-in-class retrieval quality out of the box: hybrid dense + BM25 retrieval, Reciprocal Rank Fusion (k=60), and cross-encoder reranking enabled by default.
+- Retrieval quality that targets the strongest published results out of the box: hybrid dense + BM25 retrieval, Reciprocal Rank Fusion (k=60), and cross-encoder reranking enabled by default (measured by our own eval harness before any claim is made — see [benchmarks.md](benchmarks.md)).
+- Release fasterRag as an importable Python package (`pip install fasterrag`) with a stable public API, standalone components, and an entry-point plugin contract ([python-api.md](python-api.md)).
 - One config file drives everything; flipping a boolean provisions entire subsystems (Langfuse, Grafana, Qdrant) with no code changes.
 - Deterministic, measurable performance: every release ships benchmark numbers per [performance.md](performance.md).
 

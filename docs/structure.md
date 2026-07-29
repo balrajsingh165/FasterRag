@@ -14,7 +14,7 @@ fasterRag/
 ├── pyproject.toml                # Project metadata, deps, tooling config
 ├── docs/                         # ALL documentation lives here (rule: only CLAUDE.md stays at root)
 │   ├── scope.md  structure.md  flow.md  architecture.md
-│   ├── config-reference.md  api-reference.md  cli-reference.md
+│   ├── config-reference.md  api-reference.md  cli-reference.md  python-api.md
 │   ├── observability.md  deployment.md  security.md
 │   ├── testing-strategy.md  performance.md  benchmarks.md  integrations.md
 │   ├── differentiators.md        # The twelve flagship capabilities (uniqueness contract)

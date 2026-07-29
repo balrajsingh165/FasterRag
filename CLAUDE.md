@@ -82,6 +82,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 - [structure.md](docs/structure.md) — repository layout and layer responsibilities
 - [flow.md](docs/flow.md) — end-to-end Mermaid flows
 - [architecture.md](docs/architecture.md) — components, workers, adapters, scaling, fault tolerance
+- [python-api.md](docs/python-api.md) — importable package surface (`pip install fasterrag`), standalone components, plugin contract
 - [differentiators.md](docs/differentiators.md) — the twelve flagship capabilities (uniqueness contract)
 - [reliability.md](docs/reliability.md) — reliability doctrine, error taxonomy, resilience patterns
 - [failure-modes.md](docs/failure-modes.md) — FMEA table

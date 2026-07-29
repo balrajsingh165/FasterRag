@@ -53,7 +53,7 @@ Selected via `chunking.strategy` (see [config-reference.md](config-reference.md)
 
 | Strategy | Description |
 |---|---|
-| `fixed` | Fixed-size token windows with overlap. Baseline; fastest. |
+| `fixed` | Fixed-size token windows with overlap. Baseline; requires no model inference. |
 | `recursive` | Recursive/hierarchical splitting on structural separators (sections → paragraphs → sentences) down to target size. |
 | `semantic` | Split at semantic-similarity boundaries between adjacent sentences/passages. |
 | `layout` | Layout/document-structure-aware: respects headings, tables, lists, and reading order from the parser. |
