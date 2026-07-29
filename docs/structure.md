@@ -1,6 +1,6 @@
 # structure.md — Repository Structure
 
-> This documents the **intended** layout for the beta build. No implementation code exists yet; directories below are created only when their build tasks in [todo.md](todo.md) begin.
+> This documents the layout for the beta build. Directories are created only when their build tasks in [todo.md](todo.md) begin, so paths marked *(pending)* do not exist yet; everything else is in the tree today.
 
 ## Proposed directory tree
 
@@ -12,8 +12,12 @@ fasterRag/
 ├── .gitignore                    # Ignores .env, caches, build artifacts
 ├── config.yaml                   # All behavior (no secrets) — MUST match docs/config-reference.md example
 ├── .env.example                  # Template for secrets; real .env is git-ignored
-├── pyproject.toml                # Project metadata, deps, tooling config
+├── pyproject.toml                # Project metadata, deps, tooling config (ruff, mypy, pytest, coverage)
+├── .pre-commit-config.yaml       # Local mirror of the CI quality gates
+├── scripts/
+│   └── check_commit_message.py   # Enforces the single-line, no-trailer commit rule
 ├── .github/                      # PR template (rule enforcement), issue templates, SECURITY.md
+│   └── workflows/ci.yml          # Blocking gates: ruff, ruff format, mypy --strict, pytest
 ├── docs/                         # ALL documentation lives here (rule: only CLAUDE.md stays at root)
 │   ├── quickstart.md  scope.md  structure.md  flow.md  architecture.md
 │   ├── config-reference.md  api-reference.md  cli-reference.md  python-api.md
@@ -38,13 +42,15 @@ fasterRag/
 │       └── ADR-0005-api-cli-only-control-plane.md
 ├── src/
 │   └── fasterrag/
+│       ├── errors.py             # Typed error taxonomy + stable error-code table
 │       ├── api/                  # FastAPI routers (thin; zero business logic)
-│       │   ├── main.py           # App factory, lifespan, middleware
-│       │   ├── ingest.py         # POST /v1/ingest, job status
-│       │   ├── query.py          # POST /v1/query (+ SSE streaming)
-│       │   ├── collections.py    # Collections CRUD
-│       │   ├── health.py         # /healthz, /readyz
-│       │   └── admin.py          # Provisioning + admin endpoints
+│       │   ├── main.py           # App factory, lifespan, correlation middleware
+│       │   ├── problems.py       # RFC 9457 problem documents + exception handlers
+│       │   ├── health.py         # /healthz, /readyz (registry of dependency checks)
+│       │   ├── ingest.py         # POST /v1/ingest, job status (pending)
+│       │   ├── query.py          # POST /v1/query (+ SSE streaming) (pending)
+│       │   ├── collections.py    # Collections CRUD (pending)
+│       │   └── admin.py          # Provisioning + admin endpoints (pending)
 │       ├── services/             # Business logic / use cases (orchestration)
 │       │   ├── ingestion.py      # Accept → enqueue → track jobs
 │       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate
@@ -73,6 +79,7 @@ fasterRag/
 │       │   └── loader.py         # pydantic-settings YAML source + .env; fail-fast
 │       ├── cache/                # Embedding cache, semantic response cache
 │       ├── observability/        # Metrics, tracing, dashboard
+│       │   ├── logging.py        # Structured JSON logging + correlation ids
 │       │   ├── otel.py           # Span helpers (retrieval/reranker/context/generation)
 │       │   ├── metrics.py        # Metrics catalogue export
 │       │   └── dashboard/        # Read-only inspection UI (observability ONLY)

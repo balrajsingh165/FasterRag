@@ -55,6 +55,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `CIRCUIT_OPEN` | 503 | `ProviderError` | Circuit breaker open for the named provider (`detail` names it, `Retry-After` set). |
 | `PROVISIONING_FAILED` | 500 | `ProvisioningError` | Auto-provisioning step failed; `detail` carries the doctor-style fix-it hint. |
 | `CACHE_ERROR` | 500 | `CacheError` | Cache backend failure (system degrades to cache-off rather than failing queries; surfaced on admin endpoints). |
+| `NOT_READY` | 503 | — | A readiness dependency check failed; returned only by `/readyz`, with a `dependencies[]` extension member naming each check and its state. |
 | `INTERNAL` | 500 | `FasterRagError` | Anything unclassified. Always carries `trace_id`. Never returned without a problem body. |
 
 ---
@@ -184,7 +185,7 @@ On mid-stream failure: `event: error` with a problem document, then the stream c
 | Method + path | Purpose |
 |---|---|
 | `GET /healthz` | Liveness: process is up. Always 200 if the process can answer. No dependency checks. |
-| `GET /readyz` | Readiness: dependencies actually checked (vector DB `health()`, queue backend, config valid, circuit-breaker states). 200 when ready, 503 with a problem body listing failing dependencies otherwise. |
+| `GET /readyz` | Readiness: dependencies actually checked (vector DB `health()`, queue backend, config valid, circuit-breaker states). 200 with `{"status": "ready", "dependencies": [...]}` when every check passes; otherwise 503 with a `NOT_READY` problem body whose `dependencies[]` member lists each check and its state. Checks are registered by the slice that introduces the dependency, so the report always reflects what is actually verifiable. |
 
 ## Admin & provisioning
 
