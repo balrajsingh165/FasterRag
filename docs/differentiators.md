@@ -111,9 +111,9 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 - **What it is.** First-class export / import of documents, chunks, metadata, and the index manifest; a documented migration path between vector DBs (re-embed, or direct vector copy where dimensions match). Leaving fasterRag — or any vendor underneath it — is a supported feature, which is precisely why people can trust adopting it.
 - **Pain point it kills.** #17 vendor lock-in.
 - **Why it is unique.** Export elsewhere means writing a scraper against the vector DB. Here the portable archive + migration path is part of the product contract.
-- **Config keys.** None required (always available); `--include-vectors` at call time.
+- **Config keys.** None required (always available); `--include-vectors` at call time. Archive format specified in [archive-format.md](archive-format.md).
 - **CLI / API surface.** `fasterrag export --out <archive> [--include-vectors]`, `fasterrag import <archive> [--reembed] [--target-collection]`; `POST /v1/admin/export`, `POST /v1/admin/import`.
-- **Acceptance test.** Round-trip: export from Qdrant → import to pgvector (`--reembed`) and to a second Qdrant (vector copy) → eval metrics within tolerance of the source; archive schema validated.
+- **Acceptance test.** Round-trip: export from Qdrant → import to pgvector (`--reembed`) and to a second Qdrant (vector copy) → eval metrics within tolerance of the source; archive validated against [archive-format.md](archive-format.md).
 - **Proof metric.** Round-trip fidelity (chunk/metadata loss = 0; eval delta ≤ gate tolerance); export/import throughput (ledger).
 
 ## D12 — Chaos-Certified
