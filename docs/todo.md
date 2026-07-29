@@ -83,6 +83,13 @@
 - [x] TASK-0106: Cross-link Phase 4 docs from README, CLAUDE.md, and structure.md — ✅ 2026-07-29
 - [x] TASK-0107: Merge adoption-guides branch to main and push — ✅ 2026-07-29
 
+### Slice S1 — skeleton (build phase)
+
+- [x] TASK-0021: Scaffold repository per structure.md (pyproject, src layout, tooling: ruff, mypy strict, pytest, pre-commit) — ✅ 2026-07-29
+- [x] TASK-0072: Implement error-taxonomy base classes, RFC 9457 problem responses, structured logging with correlation ids — ✅ 2026-07-29
+- [x] TASK-0022: Implement config loader (pydantic-settings + YAML source, .env secrets, fail-fast validation incl. all cross-field rules) — ✅ 2026-07-29
+- [x] TASK-0039: Implement REST API app factory + routers (endpoints land incrementally per slice; /healthz + /readyz first) — ✅ 2026-07-29
+
 ## In Progress
 
 _(empty)_
@@ -91,17 +98,12 @@ _(empty)_
 
 - [ ] TASK-0020: Decide beta version number and stamp CHANGELOG Unreleased → 0.1.0-beta.1 on first release
 - [ ] TASK-0098: (maintainer action, GitHub settings) Enable branch protection on main — require PRs, block direct pushes
+- [ ] TASK-0108: (maintainer action) Review and merge branch `build/s1-skeleton` to main, then tag `v0.1.0-s1`
+- [ ] AUDIT-0006: `trace_id` format conflict — data-model.md gives Trace ids a `t_` prefix and states the id equals the value propagated through logs, spans, and problem responses, while api-reference.md's example and the "matches OTel trace" requirement imply a bare 32-hex OpenTelemetry trace id. S1 implements 32-hex lowercase for OTel compatibility; reconcile the two documents (either drop the `t_` prefix from the Trace row, or distinguish the Trace entity id from the propagated correlation id)
 
 ## Todo
 
-> **Gate C is NOT authorized.** Maintainer instruction (2026-07-29): documentation only — no implementation code. The slices below are fully specified and strictly ordered; work on any slice begins only on explicit maintainer authorization. Every slice ships on its own feature branch, meets the per-slice Definition of Done ([testing-strategy.md](testing-strategy.md) §4), and ends with a tag `v0.x.0-sN`.
-
-### S1 — Skeleton
-
-- [ ] TASK-0021: Scaffold repository per structure.md (pyproject, src layout, tooling: ruff, mypy strict, pytest, pre-commit)
-- [ ] TASK-0022: Implement config loader (pydantic-settings + YAML source, .env secrets, fail-fast validation incl. all cross-field rules)
-- [ ] TASK-0039: Implement REST API app factory + routers (endpoints land incrementally per slice; /healthz + /readyz first)
-- [ ] TASK-0072: Implement error-taxonomy base classes, RFC 9457 problem responses, structured logging with correlation ids
+> **Gate C authorized (2026-07-29).** The maintainer opened the build phase; slice S1 has shipped (see Done). The slices below remain fully specified and strictly ordered, and work on each one begins only on explicit maintainer authorization. Every slice ships on its own feature branch, meets the per-slice Definition of Done ([testing-strategy.md](testing-strategy.md) §4), and ends with a tag `v0.x.0-sN`.
 
 ### S2 — Qdrant adapter + doctor v1
 
