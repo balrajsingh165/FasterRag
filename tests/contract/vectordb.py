@@ -1,0 +1,259 @@
+"""The shared vector database adapter contract suite.
+
+One suite that every ``VectorDBAdapter`` implementation must pass, built-in or
+registered by a third party through the ``fasterrag.vectordb`` entry point. This is what
+turns "any vector database" into a tested promise instead of a hope
+(``docs/testing-strategy.md`` §1.5).
+
+To run it against an adapter, subclass :class:`VectorDBContract` and supply two
+fixtures:
+
+* ``adapter`` — a connected adapter under test.
+* ``collection`` — the name of a freshly created, empty collection, cleaned up
+  afterwards. Creating and dropping collections is vendor-specific setup, so it lives
+  in the subclass and keeps this suite free of any vendor import.
+
+Optionally override ``misconfigured_adapter`` to return an adapter holding invalid
+credentials; the authentication case is skipped explicitly when it is not supplied,
+never silently passed.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from fasterrag.adapters.vectordb.base import (
+    CollectionSpec,
+    Point,
+    PointSelector,
+    PointUpdate,
+    SearchQuery,
+    VectorDBAdapter,
+)
+from fasterrag.errors import EmbedError, ErrorCode, FasterRagError
+
+DIMENSIONS = 4
+
+VECTORS: dict[str, list[float]] = {
+    "a": [1.0, 0.0, 0.0, 0.0],
+    "b": [0.0, 1.0, 0.0, 0.0],
+    "c": [0.0, 0.0, 1.0, 0.0],
+}
+
+
+def point(point_id: str, collection: str, vector: list[float], **payload: object) -> Point:
+    """Build a point for the contract fixtures."""
+    return Point(point_id=point_id, collection=collection, vector=vector, payload=payload)
+
+
+class VectorDBContract:
+    """Behavior every vector database adapter must exhibit."""
+
+    @pytest.fixture
+    def misconfigured_adapter(self) -> VectorDBAdapter | None:
+        """Return an adapter with invalid credentials, or None to skip that case."""
+        return None
+
+    async def seed(self, adapter: VectorDBAdapter, collection: str) -> None:
+        """Write the standard three points used by the read-side cases."""
+        await adapter.upsert(
+            [
+                point("c_a", collection, VECTORS["a"], department="legal", year=2024),
+                point("c_b", collection, VECTORS["b"], department="legal", year=2020),
+                point("c_c", collection, VECTORS["c"], department="finance", year=2024),
+            ]
+        )
+
+    async def test_health_reports_a_reachable_backend(self, adapter: VectorDBAdapter) -> None:
+        status = await adapter.health()
+
+        assert status.healthy is True
+
+    async def test_creating_an_existing_collection_is_idempotent(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        spec = CollectionSpec(name=collection, dimensions=DIMENSIONS)
+
+        await adapter.create_collection(spec)
+        await adapter.create_collection(spec)
+
+    async def test_conflicting_dimensions_are_refused(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        with pytest.raises(FasterRagError) as caught:
+            await adapter.create_collection(
+                CollectionSpec(name=collection, dimensions=DIMENSIONS + 1)
+            )
+
+        assert caught.value.code is ErrorCode.CONFLICT
+
+    async def test_upserted_points_are_searchable_by_their_own_ids(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await self.seed(adapter, collection)
+
+        hits = await adapter.search(
+            SearchQuery(collection=collection, vector=VECTORS["a"], limit=3)
+        )
+
+        assert hits[0].point_id == "c_a"
+        assert hits[0].payload["department"] == "legal"
+
+    async def test_upsert_is_idempotent(self, adapter: VectorDBAdapter, collection: str) -> None:
+        await self.seed(adapter, collection)
+        await self.seed(adapter, collection)
+
+        hits = await adapter.search(
+            SearchQuery(collection=collection, vector=VECTORS["a"], limit=10)
+        )
+
+        assert len(hits) == 3
+        assert len({hit.point_id for hit in hits}) == 3
+
+    async def test_upsert_reports_how_many_points_it_wrote(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        result = await adapter.upsert(
+            [point(f"c_{index}", collection, VECTORS["a"]) for index in range(5)]
+        )
+
+        assert result.upserted == 5
+
+    async def test_search_respects_the_limit(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await self.seed(adapter, collection)
+
+        hits = await adapter.search(
+            SearchQuery(collection=collection, vector=VECTORS["a"], limit=2)
+        )
+
+        assert len(hits) == 2
+
+    async def test_equality_filters_are_pushed_down(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await self.seed(adapter, collection)
+
+        hits = await adapter.search(
+            SearchQuery(
+                collection=collection,
+                vector=VECTORS["a"],
+                limit=10,
+                filters={"department": "finance"},
+            )
+        )
+
+        assert [hit.point_id for hit in hits] == ["c_c"]
+
+    async def test_range_filters_are_pushed_down(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await self.seed(adapter, collection)
+
+        hits = await adapter.search(
+            SearchQuery(
+                collection=collection,
+                vector=VECTORS["a"],
+                limit=10,
+                filters={"year": {"$gte": 2024}},
+            )
+        )
+
+        assert {hit.point_id for hit in hits} == {"c_a", "c_c"}
+
+    async def test_set_membership_filters_are_pushed_down(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await self.seed(adapter, collection)
+
+        hits = await adapter.search(
+            SearchQuery(
+                collection=collection,
+                vector=VECTORS["a"],
+                limit=10,
+                filters={"department": {"$in": ["finance", "hr"]}},
+            )
+        )
+
+        assert {hit.point_id for hit in hits} == {"c_c"}
+
+    async def test_vectors_are_returned_on_request(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await self.seed(adapter, collection)
+
+        hits = await adapter.search(
+            SearchQuery(collection=collection, vector=VECTORS["a"], limit=1, with_vectors=True)
+        )
+
+        assert hits[0].vector is not None
+        assert len(hits[0].vector) == DIMENSIONS
+
+    async def test_updates_merge_metadata_without_touching_vectors(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await self.seed(adapter, collection)
+
+        await adapter.update(
+            [PointUpdate(point_id="c_a", collection=collection, payload={"reviewed": True})]
+        )
+        hits = await adapter.search(
+            SearchQuery(collection=collection, vector=VECTORS["a"], limit=1)
+        )
+
+        assert hits[0].point_id == "c_a"
+        assert hits[0].payload["reviewed"] is True
+        assert hits[0].payload["department"] == "legal"
+
+    async def test_delete_by_ids_removes_only_those_points(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await self.seed(adapter, collection)
+
+        await adapter.delete(PointSelector(collection=collection, point_ids=["c_a"]))
+        hits = await adapter.search(
+            SearchQuery(collection=collection, vector=VECTORS["a"], limit=10)
+        )
+
+        assert {hit.point_id for hit in hits} == {"c_b", "c_c"}
+
+    async def test_delete_by_filter_removes_matching_points(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await self.seed(adapter, collection)
+
+        await adapter.delete(PointSelector(collection=collection, filters={"department": "legal"}))
+        hits = await adapter.search(
+            SearchQuery(collection=collection, vector=VECTORS["a"], limit=10)
+        )
+
+        assert {hit.point_id for hit in hits} == {"c_c"}
+
+    async def test_dimension_mismatch_is_rejected(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        with pytest.raises(EmbedError) as caught:
+            await adapter.upsert([point("c_bad", collection, [1.0, 0.0])])
+
+        assert caught.value.retryable is False
+        assert str(DIMENSIONS) in caught.value.detail
+
+    async def test_an_unknown_collection_raises_a_typed_error(
+        self, adapter: VectorDBAdapter
+    ) -> None:
+        with pytest.raises(FasterRagError):
+            await adapter.search(
+                SearchQuery(collection="collection-that-does-not-exist", vector=VECTORS["a"])
+            )
+
+    async def test_invalid_credentials_are_not_retryable(
+        self, misconfigured_adapter: VectorDBAdapter | None
+    ) -> None:
+        if misconfigured_adapter is None:
+            pytest.skip("this adapter did not supply a misconfigured_adapter fixture")
+
+        with pytest.raises(FasterRagError) as caught:
+            await misconfigured_adapter.search(SearchQuery(collection="any", vector=VECTORS["a"]))
+
+        assert caught.value.retryable is False
