@@ -1,0 +1,151 @@
+# fasterRag configuration — drives ALL behavior. Contains NO secrets by policy:
+# secrets live in .env and are referenced here by environment-variable NAME only.
+# This file is the canonical default configuration and MUST stay byte-consistent with
+# the complete example in docs/config-reference.md (drift between the two is a bug).
+# Every integration toggle defaults to false.
+
+app:
+  host: 0.0.0.0
+  port: 8000
+  workers: 4
+  log_level: info
+
+vector_db:
+  provider: qdrant
+  mode: docker
+  host: localhost
+  port: 6333
+  grpc_port: 6334
+  prefer_grpc: false
+  api_key_env: QDRANT_API_KEY
+  docker:
+    image: qdrant/qdrant:v1.9.0
+    volume: fasterrag_qdrant_storage
+  collection:
+    default_name: default
+    distance: cosine
+    shard_number: 1
+    replication_factor: 1
+
+embeddings:
+  provider: huggingface
+  model: BAAI/bge-small-en-v1.5
+  api_key_env: null
+  batch_size: 64
+  dimensions: null
+  cache:
+    enabled: true
+    backend: disk
+  tiering:
+    enabled: false
+    rules: []
+
+llm:
+  provider: openai
+  model: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY
+  base_url: null
+  temperature: 0.1
+  max_tokens: 1024
+  streaming: true
+
+chunking:
+  strategy: recursive
+  chunk_size: 768
+  overlap: 64
+  contextual_enrichment: false
+  context_tokens: 75
+
+retrieval:
+  top_k: 10
+  hybrid: true
+  bm25_weight: 1.0
+  dense_weight: 1.0
+  rrf_k: 60
+  rerank: true
+  reranker_model: BAAI/bge-reranker-v2-m3
+  rerank_top_n: 100
+
+generation:
+  grounded_or_refuse: false
+  faithfulness_threshold: 0.7
+  citations: true
+
+cache:
+  semantic: false
+  similarity_threshold: 0.95
+  ttl: 3600
+  backend: memory
+
+workers:
+  cpu_pool_size: 0
+  embedding_pool_size: 1
+  queue_depth: 1000
+
+ingestion:
+  dedup: true
+  journal:
+    enabled: true
+    checkpoint_every: 100
+  dlq:
+    enabled: true
+    max_retries: 3
+  max_document_mb: 100
+
+index:
+  lockfile: true
+  reindex:
+    strategy: blue_green
+    eval_gate: true
+    rollback_retention_hours: 72
+
+reliability:
+  timeouts:
+    vector_db_ms: 5000
+    embeddings_ms: 30000
+    llm_ms: 120000
+  retries:
+    max_attempts: 3
+    backoff_base_ms: 250
+    backoff_max_ms: 10000
+    jitter: true
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5
+    reset_timeout_ms: 30000
+  degradation_ladder: true
+
+traces:
+  store: true
+  retention_days: 30
+  replay: true
+
+cost:
+  estimator: true
+  per_query_token_budget: 0
+  per_tenant_token_budget: 0
+
+autopilot:
+  enabled: false
+  golden_set_size: 100
+
+eval:
+  regression_gate: false
+  recall_tolerance: 0.02
+  ndcg_tolerance: 0.02
+
+observability:
+  dashboard: false
+  dashboard_port: 8080
+  otel: false
+  otel_endpoint: null
+  langfuse: false
+  grafana: false
+
+security:
+  auth: false
+  api_key_env: FASTERRAG_API_KEY
+  multi_tenancy: false
+  tenant_header: X-Tenant-ID
+  rate_limit_per_minute: 600
+  max_request_mb: 25
