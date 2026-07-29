@@ -15,11 +15,13 @@ fasterRag/
 ├── pyproject.toml                # Project metadata, deps, tooling config
 ├── .github/                      # PR template (rule enforcement), issue templates, SECURITY.md
 ├── docs/                         # ALL documentation lives here (rule: only CLAUDE.md stays at root)
-│   ├── scope.md  structure.md  flow.md  architecture.md
+│   ├── quickstart.md  scope.md  structure.md  flow.md  architecture.md
 │   ├── config-reference.md  api-reference.md  cli-reference.md  python-api.md
+│   ├── data-model.md  prompts.md  archive-format.md
 │   ├── observability.md  deployment.md  security.md
 │   ├── testing-strategy.md  performance.md  benchmarks.md  integrations.md
-│   ├── glossary.md  references.md  archive-format.md
+│   ├── cookbook.md  troubleshooting.md  migration-guide.md
+│   ├── glossary.md  references.md
 │   ├── differentiators.md        # The twelve flagship capabilities (uniqueness contract)
 │   ├── reliability.md            # Reliability doctrine + resilience patterns
 │   ├── failure-modes.md          # FMEA table (component failure analysis)

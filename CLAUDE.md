@@ -78,8 +78,14 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 
 ## Pointers (all under docs/)
 
+- [quickstart.md](docs/quickstart.md) — zero-to-answered-query walkthrough (CLI, Python, REST)
 - [scope.md](docs/scope.md) — vision, goals, non-goals, pain-point catalogue
 - [structure.md](docs/structure.md) — repository layout and layer responsibilities
+- [data-model.md](docs/data-model.md) — canonical entity schemas and invariants (never invent fields)
+- [prompts.md](docs/prompts.md) — the four LLM call-site contracts (P1–P4)
+- [cookbook.md](docs/cookbook.md) — configuration recipes
+- [troubleshooting.md](docs/troubleshooting.md) — symptom → cause → fix
+- [migration-guide.md](docs/migration-guide.md) — arriving from another RAG framework
 - [flow.md](docs/flow.md) — end-to-end Mermaid flows
 - [architecture.md](docs/architecture.md) — components, workers, adapters, scaling, fault tolerance
 - [python-api.md](docs/python-api.md) — importable package surface (`pip install fasterrag`), standalone components, plugin contract

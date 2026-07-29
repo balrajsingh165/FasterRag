@@ -71,6 +71,18 @@
 - [x] TASK-0096: Add the golden-set JSONL schema to testing-strategy.md (shared by eval harness, D6, D7) — ✅ 2026-07-29
 - [x] TASK-0097: Merge repo-hardening branch to main and push — ✅ 2026-07-29
 
+### Phase 4 — adoption guides and build-de-risking specs
+
+- [x] TASK-0099: Documentation consistency audit (relative links, config-key drift vs config.yaml, error codes, metric names, CLI commands) — zero real defects found — ✅ 2026-07-29
+- [x] TASK-0100: Author quickstart.md (zero-to-answered-query for CLI, Python, and REST paths) — ✅ 2026-07-29
+- [x] TASK-0101: Author data-model.md (canonical entity schemas, ID scheme, cross-entity invariants) — ✅ 2026-07-29
+- [x] TASK-0102: Author prompts.md (P1 generation, P2 contextual enrichment, P3 faithfulness, P4 golden-set contracts) — ✅ 2026-07-29
+- [x] TASK-0103: Author troubleshooting.md (symptom → cause → fix, user-facing inverse of the FMEA) — ✅ 2026-07-29
+- [x] TASK-0104: Author cookbook.md (nine composable configuration recipes) — ✅ 2026-07-29
+- [x] TASK-0105: Author migration-guide.md (concept mapping, migration procedure, honest trade-offs) — ✅ 2026-07-29
+- [x] TASK-0106: Cross-link Phase 4 docs from README, CLAUDE.md, and structure.md — ✅ 2026-07-29
+- [x] TASK-0107: Merge adoption-guides branch to main and push — ✅ 2026-07-29
+
 ## In Progress
 
 _(empty)_

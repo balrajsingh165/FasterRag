@@ -74,6 +74,10 @@ All documentation lives in [`docs/`](docs/) (only `CLAUDE.md` and this README si
 
 | Read this | For |
 |---|---|
+| **[quickstart.md](docs/quickstart.md)** | **Start here** — zero to an answered query via CLI, Python, or REST |
+| [cookbook.md](docs/cookbook.md) | Ready-made config recipes (local/air-gapped, max accuracy, cost-optimized, multi-tenant, …) |
+| [migration-guide.md](docs/migration-guide.md) | Coming from LangChain / LlamaIndex / Haystack / a hand-rolled stack |
+| [troubleshooting.md](docs/troubleshooting.md) | Symptom → cause → fix |
 | [scope.md](docs/scope.md) | Vision, goals, non-goals, the 22-point RAG pain-point catalogue and mitigations |
 | [architecture.md](docs/architecture.md) | Workers, batching, chunking strategies, hybrid retrieval, caching, fault tolerance |
 | [flow.md](docs/flow.md) | End-to-end Mermaid flows (ingestion, worker hand-off, query, cache, provisioning) |
@@ -82,6 +86,8 @@ All documentation lives in [`docs/`](docs/) (only `CLAUDE.md` and this README si
 | [python-api.md](docs/python-api.md) | The importable package surface, standalone components, plugin contract |
 | [api-reference.md](docs/api-reference.md) | REST endpoints, SSE streaming semantics, RFC 9457 error model |
 | [cli-reference.md](docs/cli-reference.md) | Every command and flag |
+| [data-model.md](docs/data-model.md) | Canonical entity schemas (Document, Chunk, Job, Trace, IndexLock) and their invariants |
+| [prompts.md](docs/prompts.md) | The four LLM call-site contracts: generation, enrichment, faithfulness, golden-set |
 | [integrations.md](docs/integrations.md) | Vector DBs, embedding/LLM providers, observability tools |
 | [observability.md](docs/observability.md) | Metrics catalogue, tracing, dashboard, Langfuse/Grafana auto-provisioning |
 | [deployment.md](docs/deployment.md) | Self-hosting modes, sizing, revert playbook |
