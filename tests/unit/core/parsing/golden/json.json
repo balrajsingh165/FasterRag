@@ -1,0 +1,57 @@
+{
+  "parser": "json",
+  "mime_type": "application/json",
+  "flags": [],
+  "metadata": {},
+  "blocks": [
+    {
+      "kind": "heading",
+      "text": "agreement",
+      "page": null,
+      "section": "agreement",
+      "level": 1
+    },
+    {
+      "kind": "paragraph",
+      "text": "title: Vendor Agreement",
+      "page": null,
+      "section": "agreement",
+      "level": null
+    },
+    {
+      "kind": "heading",
+      "text": "agreement.termination",
+      "page": null,
+      "section": "agreement > agreement.termination",
+      "level": 2
+    },
+    {
+      "kind": "paragraph",
+      "text": "notice_days: 30; cure_days: 15",
+      "page": null,
+      "section": "agreement > agreement.termination",
+      "level": null
+    },
+    {
+      "kind": "heading",
+      "text": "agreement.parties",
+      "page": null,
+      "section": "agreement > agreement.parties",
+      "level": 2
+    },
+    {
+      "kind": "paragraph",
+      "text": "agreement.parties[0]: Acme",
+      "page": null,
+      "section": "agreement > agreement.parties",
+      "level": null
+    },
+    {
+      "kind": "paragraph",
+      "text": "agreement.parties[1]: Globex",
+      "page": null,
+      "section": "agreement > agreement.parties",
+      "level": null
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "parser": "csv",
+  "mime_type": "text/csv",
+  "flags": [
+    "tables_detected"
+  ],
+  "metadata": {
+    "columns": [
+      "name",
+      "department",
+      "year"
+    ],
+    "row_count": 2
+  },
+  "blocks": [
+    {
+      "kind": "table",
+      "text": "name: Alice; department: legal; year: 2024\nname: Bob; department: finance; year: 2020",
+      "page": null,
+      "section": null,
+      "level": null
+    }
+  ]
+}

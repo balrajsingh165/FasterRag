@@ -1,0 +1,47 @@
+{
+  "parser": "pdf-layout",
+  "mime_type": "application/pdf",
+  "flags": [],
+  "metadata": {
+    "author": "Legal Team",
+    "page_count": 2,
+    "title": "Vendor Agreement"
+  },
+  "blocks": [
+    {
+      "kind": "heading",
+      "text": "Vendor Agreement",
+      "page": 1,
+      "section": "Vendor Agreement",
+      "level": 1
+    },
+    {
+      "kind": "paragraph",
+      "text": "Intro paragraph about the agreement.",
+      "page": 1,
+      "section": "Vendor Agreement",
+      "level": null
+    },
+    {
+      "kind": "heading",
+      "text": "3. Termination",
+      "page": 1,
+      "section": "Vendor Agreement > 3. Termination",
+      "level": 2
+    },
+    {
+      "kind": "paragraph",
+      "text": "Either party may terminate with 30 days written notice.",
+      "page": 1,
+      "section": "Vendor Agreement > 3. Termination",
+      "level": null
+    },
+    {
+      "kind": "paragraph",
+      "text": "Second page body text continues here.",
+      "page": 2,
+      "section": "Vendor Agreement > 3. Termination",
+      "level": null
+    }
+  ]
+}

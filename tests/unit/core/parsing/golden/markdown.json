@@ -1,0 +1,75 @@
+{
+  "parser": "markdown",
+  "mime_type": "text/markdown",
+  "flags": [
+    "tables_detected"
+  ],
+  "metadata": {
+    "title": "Vendor Agreement"
+  },
+  "blocks": [
+    {
+      "kind": "heading",
+      "text": "Vendor Agreement",
+      "page": null,
+      "section": "Vendor Agreement",
+      "level": 1
+    },
+    {
+      "kind": "paragraph",
+      "text": "Intro paragraph about the agreement.",
+      "page": null,
+      "section": "Vendor Agreement",
+      "level": null
+    },
+    {
+      "kind": "heading",
+      "text": "3. Termination",
+      "page": null,
+      "section": "Vendor Agreement > 3. Termination",
+      "level": 2
+    },
+    {
+      "kind": "heading",
+      "text": "3.2 Notice",
+      "page": null,
+      "section": "Vendor Agreement > 3. Termination > 3.2 Notice",
+      "level": 3
+    },
+    {
+      "kind": "paragraph",
+      "text": "Either party may terminate with 30 days written notice.",
+      "page": null,
+      "section": "Vendor Agreement > 3. Termination > 3.2 Notice",
+      "level": null
+    },
+    {
+      "kind": "list_item",
+      "text": "first obligation",
+      "page": null,
+      "section": "Vendor Agreement > 3. Termination > 3.2 Notice",
+      "level": null
+    },
+    {
+      "kind": "list_item",
+      "text": "second obligation",
+      "page": null,
+      "section": "Vendor Agreement > 3. Termination > 3.2 Notice",
+      "level": null
+    },
+    {
+      "kind": "table",
+      "text": "Term | Days\nNotice | 30\nCure | 15",
+      "page": null,
+      "section": "Vendor Agreement > 3. Termination > 3.2 Notice",
+      "level": null
+    },
+    {
+      "kind": "code",
+      "text": "print(\"hello\")",
+      "page": null,
+      "section": "Vendor Agreement > 3. Termination > 3.2 Notice",
+      "level": null
+    }
+  ]
+}
