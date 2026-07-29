@@ -50,7 +50,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 
 - **Single-line commit messages only.** No multi-line bodies. No trailers of any kind.
 - **Absolutely NO Claude/AI attribution in commits** — no `Co-Authored-By: Claude`, no `Generated with Claude Code`, no AI signatures.
-- Feature-branch workflow. **Never commit directly to `main`** (merges to `main` happen only when the maintainer instructs).
+- **Trunk-based: all work lands on `main`.** Do NOT create feature branches (maintainer instruction, 2026-07-30). Every commit must leave `main` green — lint, types, and tests pass before it is made.
 - Commit frequently — small, coherent, revertable commits. Tag slice boundaries (`v0.x.0-sN`) during the build phase.
 
 ## Incremental shipping discipline

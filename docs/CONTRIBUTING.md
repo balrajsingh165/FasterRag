@@ -7,7 +7,7 @@ These rules are non-negotiable and enforced by review, pre-commit hooks, and CI.
 - **Single-line commit messages only.** No multi-line bodies, ever.
 - **No trailers of any kind.** Absolutely no AI attribution: no `Co-Authored-By: Claude`, no `Generated with Claude Code`, no AI signatures.
 - Write imperative, descriptive one-liners: `Add semantic cache invalidation on corpus change`.
-- **Never commit directly to `main`.** All work happens on feature branches; merges to `main` happen only at maintainer-instructed release points.
+- **Trunk-based development: all work lands on `main`.** No feature branches (maintainer instruction, 2026-07-30). Because there is no branch to hide behind, every commit must leave `main` green: lint, types, and tests pass before you commit.
 - Commit frequently — small, coherent, revertable commits; the repo must always be revertible via `git revert`.
 
 ## 2. Comment rules (code)

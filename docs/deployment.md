@@ -56,7 +56,7 @@ Rules of thumb: vector RAM ≈ `vectors × dimensions × 4 bytes` (plus index ov
 
 | What went wrong | Revert action |
 |---|---|
-| Bad code/doc change (any slice) | `git revert <sha>` or revert the slice tag range `git revert v0.x.0-sN..v0.x.0-sN+1`; feature branches + single-line commits keep every increment independently revertible. |
+| Bad code/doc change (any slice) | `git revert <sha>` or revert the slice tag range `git revert v0.x.0-sN..v0.x.0-sN+1`; small single-line commits on a linear `main` keep every increment independently revertible. |
 | Bad reindex / embedding-model change | **Alias flip back**: `fasterrag index rollback <collection>` (or `POST /v1/collections/{name}/rollback`) — instant, because the previous collection is retained for `index.reindex.rollback_retention_hours` (D2). |
 | Bad config change | Restore the previous `config.yaml` from git; `fasterrag config validate`; restart. Config is fully versioned because it contains no secrets. |
 | Retrieval-quality regression | The D7 regression gate should have blocked it; if it reached prod, alias-rollback (above) and file the gate gap as a bug in [todo.md](todo.md). |
