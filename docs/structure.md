@@ -6,20 +6,25 @@
 
 ```text
 fasterRag/
-├── CLAUDE.md                     # Always-loaded Claude Code instructions
-├── CHANGELOG.md                  # Keep a Changelog + SemVer
-├── CONTRIBUTING.md               # Contributor rules
+├── CLAUDE.md                     # Always-loaded Claude Code instructions (ONLY doc kept at root)
+├── README.md                     # Project overview + entry point into docs/
 ├── LICENSE
-├── README.md
-├── scope.md  structure.md  flow.md  architecture.md
-├── config-reference.md  api-reference.md  cli-reference.md
-├── observability.md  deployment.md  security.md
-├── testing-strategy.md  performance.md  integrations.md
-├── todo.md                       # THE one and only task file
 ├── config.yaml                   # All behavior (no secrets) — user-edited
 ├── .env.example                  # Template for secrets; real .env is git-ignored
 ├── pyproject.toml                # Project metadata, deps, tooling config
-├── docs/
+├── docs/                         # ALL documentation lives here (rule: only CLAUDE.md stays at root)
+│   ├── scope.md  structure.md  flow.md  architecture.md
+│   ├── config-reference.md  api-reference.md  cli-reference.md
+│   ├── observability.md  deployment.md  security.md
+│   ├── testing-strategy.md  performance.md  benchmarks.md  integrations.md
+│   ├── differentiators.md        # The twelve flagship capabilities (uniqueness contract)
+│   ├── reliability.md            # Reliability doctrine + resilience patterns
+│   ├── failure-modes.md          # FMEA table (component failure analysis)
+│   ├── slo.md                    # SLIs, SLO targets (TBD-until-measured), error budget
+│   ├── disaster-recovery.md      # Backups, restore drill, RPO/RTO
+│   ├── CHANGELOG.md              # Keep a Changelog + SemVer
+│   ├── CONTRIBUTING.md           # Contributor rules
+│   ├── todo.md                   # THE one and only task file
 │   └── adr/                      # Architecture Decision Records (MADR, never deleted)
 │       ├── ADR-0001-qdrant-as-reference-vector-db.md
 │       ├── ADR-0002-adapter-factory-pluggability.md
@@ -83,7 +88,7 @@ fasterRag/
 | `core/` | The RAG pipeline itself — parsing, chunking, retrieval, rerank, context assembly, generation. Pure domain logic; depends on adapter *interfaces*, never concrete vendors. |
 | `adapters/` | All vendor code (vector DBs, embedding providers, LLM providers). Each adapter implements a base interface; a factory instantiates the concrete one from config. Vendor types never leak past this boundary. |
 | `workers/` | Parallel execution: CPU pool for parse/chunk, stateful embedding pool, bounded queues, batch indexer. Owns backpressure and retry policy. |
-| `config/` | Pydantic schema + pydantic-settings loader (YAML config, `.env` secrets). Validates on startup and fails fast with a clear error. Sensitive area — see [CLAUDE.md](CLAUDE.md) folder boundaries. |
+| `config/` | Pydantic schema + pydantic-settings loader (YAML config, `.env` secrets). Validates on startup and fails fast with a clear error. Sensitive area — see [CLAUDE.md](../CLAUDE.md) folder boundaries. |
 | `cache/` | Embedding cache and semantic response cache (similarity-keyed), TTL + event-driven invalidation. |
 | `observability/` | OTel spans, metrics export, and the read-only dashboard. The dashboard renders data; it exposes zero control endpoints. |
 | `cli/` | Terminal control plane. Thin command layer calling the same services as the API. |
