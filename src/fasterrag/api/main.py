@@ -21,6 +21,8 @@ from fastapi import FastAPI
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from fasterrag import __version__
+from fasterrag.adapters.vectordb.base import VectorDBAdapter
+from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.api import health
 from fasterrag.api.problems import install_exception_handlers
 from fasterrag.config.loader import load_settings
@@ -63,6 +65,28 @@ async def _config_check() -> health.DependencyStatus:
     )
 
 
+def _vector_db_check(app: FastAPI) -> health.ReadinessCheck:
+    """Build the readiness check that actually asks the vector database."""
+
+    async def check() -> health.DependencyStatus:
+        adapter: VectorDBAdapter | None = getattr(app.state, "vector_db", None)
+        if adapter is None:
+            return health.DependencyStatus(
+                name="vector_db",
+                ready=False,
+                detail="adapter has not started yet",
+            )
+
+        status = await adapter.health()
+        return health.DependencyStatus(
+            name="vector_db",
+            ready=status.healthy,
+            detail=status.detail or f"reachable in {status.latency_ms} ms",
+        )
+
+    return check
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Start and stop process-wide resources.
@@ -80,8 +104,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "llm_provider": settings.llm.provider,
         },
     )
-    yield
-    _logger.info("api stopped")
+
+    owns_adapter = getattr(app.state, "vector_db", None) is None
+    if owns_adapter:
+        app.state.vector_db = create_vector_db_adapter(settings)
+
+    try:
+        yield
+    finally:
+        if owns_adapter:
+            adapter: VectorDBAdapter = app.state.vector_db
+            await adapter.close()
+            app.state.vector_db = None
+        _logger.info("api stopped")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -110,8 +145,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.state.settings = resolved
+    app.state.vector_db = None
     registry = health.ReadinessRegistry()
     registry.register(_config_check)
+    registry.register(_vector_db_check(app))
     app.state.readiness = registry
 
     app.add_middleware(CorrelationIdMiddleware)

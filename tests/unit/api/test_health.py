@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from fasterrag.api.health import DependencyStatus, ReadinessRegistry
 from fasterrag.api.problems import PROBLEM_MEDIA_TYPE
 from fasterrag.errors import ErrorCode
+from tests.unit.api.conftest import StubVectorDB
 
 
 async def failing_check() -> DependencyStatus:
@@ -37,6 +38,43 @@ def test_readyz_reports_every_dependency(client: TestClient) -> None:
     assert {"name": "config", "ready": True, "detail": "validated at startup"} in body[
         "dependencies"
     ]
+    assert [entry for entry in body["dependencies"] if entry["name"] == "vector_db"]
+
+
+def test_readyz_fails_when_the_vector_database_is_down(
+    app: FastAPI, vector_db: StubVectorDB
+) -> None:
+    vector_db.healthy = False
+    vector_db.detail = "connection refused"
+
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["code"] == ErrorCode.NOT_READY.value
+    assert "vector_db" in body["detail"]
+    assert {"name": "vector_db", "ready": False, "detail": "connection refused"} in body[
+        "dependencies"
+    ]
+
+
+def test_healthz_stays_up_while_the_vector_database_is_down(
+    app: FastAPI, vector_db: StubVectorDB
+) -> None:
+    vector_db.healthy = False
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+
+
+def test_an_injected_adapter_is_not_closed_by_the_application(
+    app: FastAPI, vector_db: StubVectorDB
+) -> None:
+    with TestClient(app) as client:
+        client.get("/healthz")
+
+    assert vector_db.closed is False
 
 
 def test_readyz_returns_a_problem_body_when_a_dependency_is_down(
