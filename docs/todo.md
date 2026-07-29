@@ -98,6 +98,12 @@
 - [x] TASK-0073: Implement the shared adapter contract test suite (run against Qdrant in all three modes) — ✅ 2026-07-30
 - [x] TASK-0074: Implement fasterrag doctor v1 (Docker, ports, disk, RAM/GPU, DB reachability all modes, key validity, config validity; fix-it strings; provisioning gate) — ✅ 2026-07-30
 
+### Slice S3 — ingestion core (build phase, in progress)
+
+- [x] TASK-0110: Register the vector database health check with `/readyz` — ✅ 2026-07-30
+- [x] TASK-0028: Implement parsing pipeline (PDF incl. tables/OCR, HTML, Markdown, DOCX, TXT, CSV/JSON; golden-file tests) — ✅ 2026-07-30
+- [x] TASK-0029: Implement chunking pipeline (recursive baseline first; then fixed, semantic, layout, late; Hypothesis invariants) — ✅ 2026-07-30
+
 ### Workflow
 
 - [x] TASK-0108: Land slice S1 on main — ✅ 2026-07-30
@@ -131,9 +137,9 @@ _(empty)_
 
 ### S3 — Ingestion core
 
-- [ ] TASK-0028: Implement parsing pipeline (PDF incl. tables/OCR, HTML, Markdown, DOCX, TXT, CSV/JSON; golden-file tests)
-- [ ] TASK-0029: Implement chunking pipeline (recursive baseline first; then fixed, semantic, layout, late; Hypothesis invariants)
 - [ ] TASK-0030: Implement contextual enrichment stage (~50–100-token chunk context, parent-doc prompt caching)
+- [ ] TASK-0113: Implement the pooling half of late chunking in the embedding pool (embed the document in one long-context pass, then pool token representations over each chunk's span); the boundary half and the `late_pooling` marker already ship
+- [ ] TASK-0114: Replace the estimating token counter with the embedding provider's real tokenizer once an embedding adapter is configured, so `chunking.chunk_size` counts true tokens rather than a four-characters-per-token estimate
 - [ ] TASK-0026: Implement embedding provider adapters (HuggingFace local first; OpenAI, Cohere, Ollama) + tiering router
 - [ ] TASK-0031: Implement CPU worker pool (load/parse/chunk) with bounded queue hand-off and backpressure
 - [ ] TASK-0032: Implement stateful embedding worker pool (model loaded once per worker, batched, retryable)

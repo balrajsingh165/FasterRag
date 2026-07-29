@@ -12,7 +12,10 @@ pip install "fasterrag[all]"          # every optional adapter/provider
 pip install "fasterrag[openai]"       # extras per provider: openai, anthropic, cohere, ollama
 pip install "fasterrag[milvus]"       # extras per vector DB: milvus, weaviate, pinecone, pgvector, chroma
 pip install "fasterrag[rerank]"       # cross-encoder reranker models
+pip install "fasterrag[ocr]"          # OCR for scanned PDFs (also needs the tesseract binary)
 ```
+
+Parsers for PDF, HTML, Markdown, DOCX, text, CSV, and JSON are part of the core install. Only OCR is optional, because it additionally requires the `tesseract` executable on the host; without it a scanned page is flagged `low_text_yield` rather than silently indexed as empty.
 
 - Requires **Python 3.12+**.
 - Versioned by **SemVer 2.0.0**; the public API defined in this document is the compatibility contract — breaking it requires a major version bump and a CHANGELOG entry.
