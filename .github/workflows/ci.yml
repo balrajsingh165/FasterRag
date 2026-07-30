@@ -40,7 +40,7 @@ jobs:
         run: mypy
 
       - name: Unit tests
-        run: pytest -m "not integration" --cov --cov-report=term-missing
+        run: pytest -m "not integration and not eval" --cov --cov-report=term-missing
 
   integration:
     runs-on: ubuntu-latest
@@ -59,6 +59,24 @@ jobs:
 
       - name: Adapter contract suite against real backends
         run: pytest -m integration
+
+  models:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,rerank]"
+
+      - name: Verify against real embedding and reranking models
+        run: pytest -m eval
 
   commit-messages:
     runs-on: ubuntu-latest

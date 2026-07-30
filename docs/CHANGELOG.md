@@ -37,6 +37,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The HuggingFace embedder reads a model's vector size through whichever accessor the installed sentence-transformers exposes. The name changed in 5.x, and the old one still worked while emitting a deprecation warning, so the adapter now spans both rather than pinning a version. Found by running the adapter against a real model for the first time (2026-07-30).
+
 - Qdrant provisioning now sets `QDRANT__SERVICE__GRPC_PORT`, without which Qdrant leaves its gRPC interface disabled and only port 6333 answers — the provisioner was reproducing the very failure recorded in `docs/failure-modes.md` row 15. Caught by the adapter contract suite running in gRPC mode (2026-07-30).
 - Vector-database gRPC failures are now classified by status code, so an authentication rejection over gRPC is reported as non-retryable instead of being retried as a transport blip until the circuit breaker opened (2026-07-30).
 - The Qdrant adapter now passes `https` explicitly. The Qdrant client switches to TLS on its own as soon as an API key is supplied, so every authenticated call failed with a TLS handshake error against the plain-HTTP listener a container serves by default. Added `vector_db.https` so the transport is chosen rather than inferred (2026-07-30).

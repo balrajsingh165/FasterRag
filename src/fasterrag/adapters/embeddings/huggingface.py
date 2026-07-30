@@ -46,6 +46,22 @@ def load_model(name: str) -> Any:
     return SentenceTransformer(name)
 
 
+def _embedding_dimension(model: Any) -> int | None:
+    """Return a loaded model's vector size across sentence-transformers versions.
+
+    The accessor was renamed in sentence-transformers 5.x; calling the old name still works
+    but emits a deprecation warning, and it will eventually stop working. Both names are
+    tried so the adapter spans versions rather than pinning one.
+    """
+    for accessor in ("get_embedding_dimension", "get_sentence_embedding_dimension"):
+        method = getattr(model, accessor, None)
+        if callable(method):
+            size = method()
+            if isinstance(size, int):
+                return size
+    return None
+
+
 class HuggingFaceEmbedder(EmbeddingAdapter):
     """Embeds locally with a sentence-transformers model."""
 
@@ -82,7 +98,7 @@ class HuggingFaceEmbedder(EmbeddingAdapter):
             _logger.info("loading embedding model", extra={"model": self.config.model})
             self._model = load_model(self.config.model)
             if self._dimensions is None:
-                self._dimensions = int(self._model.get_sentence_embedding_dimension())
+                self._dimensions = _embedding_dimension(self._model)
         return self._model
 
     def encode(self, texts: Sequence[str]) -> list[list[float]]:
