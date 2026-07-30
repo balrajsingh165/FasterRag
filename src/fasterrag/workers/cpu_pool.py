@@ -171,6 +171,7 @@ class CpuWorkerPool:
         job: str | None = None,
         collection: str = "default",
         resume_from: int = 0,
+        on_progress: Callable[[int], None] | None = None,
     ) -> PoolReport:
         """Parse and chunk every task, streaming chunks into ``sink``.
 
@@ -182,6 +183,9 @@ class CpuWorkerPool:
             collection: Collection the documents belong to, which scopes deduplication.
             resume_from: Document index to start at, skipping everything a checkpoint
                 already covered.
+            on_progress: Called with each document's index once it has been handled,
+                whatever the outcome. The ingestion service checkpoints through this, so
+                progress is recorded as documents complete rather than only at the end.
 
         Returns:
             Counts for the pass.
@@ -212,11 +216,15 @@ class CpuWorkerPool:
             except FasterRagError as exc:
                 dead_lettered += 1
                 self._dead_letter(job, task, exc)
+                if on_progress is not None:
+                    on_progress(task.index)
                 continue
 
             if outcome.content_hash in known:
                 deduplicated += 1
                 self._record(job, task, "deduplicated", outcome.content_hash)
+                if on_progress is not None:
+                    on_progress(task.index)
                 continue
 
             for flag in outcome.parse_flags:
@@ -229,6 +237,8 @@ class CpuWorkerPool:
             chunked += len(outcome.chunks)
             known[outcome.content_hash] = task.document_id
             self._index_document(job, collection, task, outcome)
+            if on_progress is not None:
+                on_progress(task.index)
 
         return PoolReport(
             parsed=parsed,

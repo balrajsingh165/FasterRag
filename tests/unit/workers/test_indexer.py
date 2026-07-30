@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 import pytest
@@ -202,6 +203,24 @@ async def test_vectors_stay_paired_with_their_chunks() -> None:
     for index, point in enumerate(adapter.points):
         assert list(point.vector) == [float(index)] * 3
         assert point.point_id == f"c_{index}"
+
+
+async def test_concurrent_writers_create_the_collection_once() -> None:
+    adapter = RecordingAdapter(settings())
+    indexer = Indexer(settings(), adapter)
+
+    await asyncio.gather(*(indexer.write(batch()) for _ in range(5)))
+
+    assert len(adapter.specs) == 1
+
+
+async def test_the_collection_is_created_from_the_first_batch_vectors() -> None:
+    adapter = RecordingAdapter(settings())
+    written = EmbeddedBatch(chunks=[payload()], vectors=[[0.0] * 12], model="m", model_version="v")
+
+    await Indexer(settings(), adapter).write(written)
+
+    assert adapter.specs[0].dimensions == 12
 
 
 async def test_an_empty_batch_writes_nothing() -> None:

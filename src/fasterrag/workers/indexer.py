@@ -17,6 +17,7 @@ afterwards.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fasterrag.adapters.vectordb.base import (
@@ -93,6 +94,8 @@ class Indexer:
         self.collection = collection or settings.vector_db.collection.default_name
         self.hybrid = settings.retrieval.hybrid
         self.written = 0
+        self._ready = False
+        self._creating = asyncio.Lock()
 
     async def ensure_collection(self, dimensions: int) -> None:
         """Create the target collection if it does not exist yet.
@@ -111,6 +114,7 @@ class Indexer:
                 sparse=self.hybrid,
             )
         )
+        self._ready = True
         _logger.info(
             "collection ready",
             extra={
@@ -121,9 +125,22 @@ class Indexer:
         )
 
     async def write(self, batch: EmbeddedBatch) -> None:
-        """Write one embedded batch, dense and sparse together."""
+        """Write one embedded batch, dense and sparse together.
+
+        The collection is created on the first batch, sized from the vectors themselves.
+        Creating it earlier would mean either asking the provider for a dimension it may
+        only know after loading a model, or spending an embedding call on a probe.
+        """
         if not batch.chunks:
             return
+
+        # CRITICAL: several embedding workers reach their first batch at once, so the
+        # lock is what stops them racing to create the same collection. Without it the
+        # losers of the race fail with a conflict on a collection that is perfectly fine.
+        if not self._ready:
+            async with self._creating:
+                if not self._ready:
+                    await self.ensure_collection(len(batch.vectors[0]))
 
         points = [
             Point(
