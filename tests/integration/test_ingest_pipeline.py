@@ -23,6 +23,7 @@ from fasterrag.config.schema import Settings
 from fasterrag.core.retrieval.bm25 import encode_query
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import Journal
+from fasterrag.services.querying import RetrievalService
 from tests.integration.conftest import TEST_VOLUME
 
 pytestmark = pytest.mark.integration
@@ -43,6 +44,12 @@ PAYMENT = """\
 ## 5. Payment
 
 Invoices are payable within forty five days of receipt.
+"""
+
+IDENTIFIER = """\
+# Parts
+
+The replacement unit is part number XJ-4417-B.
 """
 
 
@@ -237,3 +244,75 @@ async def test_progress_is_checkpointed_as_documents_complete(
     assert reloaded.checkpoint is not None
     assert reloaded.checkpoint.last_document_index == 1
     assert reloaded.status == "completed"
+
+
+async def retrieval_for(service: IngestionService) -> RetrievalService:
+    """Build a retrieval service sharing the ingest service's backend and embedder."""
+    return RetrievalService(service.settings, service.adapter, service.router)
+
+
+async def test_hybrid_retrieval_returns_chunks_with_both_leg_scores(
+    service: IngestionService, corpus: Path
+) -> None:
+    await service.ingest(sources(corpus))
+    retrieval = await retrieval_for(service)
+
+    results = await retrieval.retrieve("terminate the agreement with notice")
+
+    assert results
+    assert results[0].final_rank == 1
+    assert any(result.dense_rank is not None for result in results)
+    assert any(result.bm25_rank is not None for result in results)
+    assert all(result.rrf_score > 0 for result in results)
+
+
+async def test_the_keyword_leg_finds_an_exact_term_dense_search_can_miss(
+    service: IngestionService, corpus: Path
+) -> None:
+    (corpus / "identifier.md").write_text(IDENTIFIER, encoding="utf-8")
+    await service.ingest([*sources(corpus), str(corpus / "identifier.md")])
+    retrieval = await retrieval_for(service)
+
+    results = await retrieval.retrieve("XJ-4417-B")
+
+    assert results
+    assert "identifier.md" in (results[0].source or "")
+    assert results[0].bm25_rank is not None
+
+
+async def test_a_filter_restricts_both_legs(service: IngestionService, corpus: Path) -> None:
+    await service.ingest(sources(corpus), metadata={"department": "legal"})
+    retrieval = await retrieval_for(service)
+
+    matching = await retrieval.retrieve("notice", filters={"department": "legal"})
+    excluded = await retrieval.retrieve("notice", filters={"department": "finance"})
+
+    assert matching
+    assert excluded == []
+
+
+async def test_results_are_limited_to_the_requested_count(
+    service: IngestionService, corpus: Path
+) -> None:
+    await service.ingest(sources(corpus))
+    retrieval = await retrieval_for(service)
+
+    results = await retrieval.retrieve("agreement", top_k=1)
+
+    assert len(results) == 1
+    assert results[0].text
+    assert results[0].document_id
+
+
+async def test_a_retrieved_chunk_carries_everything_a_citation_needs(
+    service: IngestionService, corpus: Path
+) -> None:
+    await service.ingest(sources(corpus))
+    retrieval = await retrieval_for(service)
+
+    results = await retrieval.retrieve("termination notice")
+    top = results[0]
+
+    assert top.source
+    assert top.payload["span"]["end"] > top.payload["span"]["start"]
+    assert top.payload["embedding_model"]
