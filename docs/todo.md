@@ -116,6 +116,10 @@
 
 - [x] TASK-0034: Implement hybrid retrieval (dense + BM25 parallel legs), RRF fusion (k=60), metadata filter push-down — ✅ 2026-07-30
 
+### Slice S5 — rerank and eval harness (build phase, in progress)
+
+- [x] TASK-0047: Implement eval harness (recall@k, MRR, nDCG, faithfulness) with dataset fixtures — retrieval metrics and the golden-set format; faithfulness needs the LLM call site and lands with the generation slice — ✅ 2026-07-30
+
 ### Workflow
 
 - [x] TASK-0108: Land slice S1 on main — ✅ 2026-07-30
@@ -159,8 +163,8 @@ _(empty)_
 ### S5 — Rerank + eval harness v1
 
 - [ ] TASK-0035: Implement config-gated cross-encoder reranker stage (top 100–1000 → rerank → top_k)
-- [ ] TASK-0047: Implement eval harness (recall@k, MRR, nDCG, faithfulness) with dataset fixtures
-- [ ] TASK-0077: Implement golden-set generator + retrieval regression gate wired into CI (D7)
+- [ ] TASK-0077: Implement golden-set generator + retrieval regression gate wired into CI (D7) — the harness and golden-set format now exist; the gate needs a committed baseline to compare against
+- [ ] TASK-0120: Add the faithfulness metric to the eval harness once the generation slice provides the P3 call site; the harness reports retrieval metrics only until then
 
 ### S6 — Generation
 
