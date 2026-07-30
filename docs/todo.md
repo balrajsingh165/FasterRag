@@ -109,6 +109,7 @@
 - [x] TASK-0032: Implement stateful embedding worker pool (model loaded once per worker, batched, retryable) — ✅ 2026-07-30
 - [x] TASK-0117: Decide the sparse-retrieval design before the indexer lands — resolved as ADR-0007: BM25 lives in the vector database as sparse vectors, with term encoding in fasterRag and IDF delegated to the backend — ✅ 2026-07-30
 - [x] TASK-0033: Implement indexer (batch dense upsert + BM25 index + metadata, deterministic chunk IDs) — ✅ 2026-07-30
+- [x] TASK-0118: Wire the two pools into an ingestion service that owns the job lifecycle — create the job, run both pools concurrently against one bounded queue, checkpoint as documents complete, and mark the job completed, failed, or partial — ✅ 2026-07-30
 
 ### Workflow
 
@@ -148,7 +149,6 @@ _(empty)_
 - [ ] TASK-0114: Replace the estimating token counter with the embedding provider's real tokenizer once an embedding adapter is configured, so `chunking.chunk_size` counts true tokens rather than a four-characters-per-token estimate
 - [ ] TASK-0115: (maintainer decision) `sentence-transformers` ships as the `huggingface` extra rather than in the core install, because it pulls a multi-gigabyte deep-learning runtime that a hosted-provider deployment should not have to download. `docs/python-api.md` was updated to match. Reverting to core is a one-line change in `pyproject.toml` if the original packaging promise should stand
 - [ ] TASK-0119: Rebuilding a collection is the only way to add a keyword leg — Qdrant cannot attach a sparse vector to an existing dense-only collection, and the two layouts (unnamed dense versus named dense plus named sparse) are not interchangeable. Flipping `retrieval.hybrid` on an indexed corpus therefore needs the D2 blue/green reindex path, and until that exists the adapter refuses the mismatch rather than dropping the sparse vector silently
-- [ ] TASK-0118: Wire the two pools into an ingestion service that owns the job lifecycle — create the job, run both pools concurrently against one bounded queue, checkpoint as documents complete, and mark the job completed, failed, or partial
 - [ ] TASK-0076: Implement fasterrag estimate / POST /v1/estimate preflight cost estimator (D9)
 - [ ] TASK-0116: Expose the per-document status endpoints over REST (`GET /v1/ingest/{job_id}`, `GET /v1/ingest/{job_id}/documents?status=…`, `POST /v1/ingest/{job_id}/retry-dlq`); the journal already answers these queries
 
