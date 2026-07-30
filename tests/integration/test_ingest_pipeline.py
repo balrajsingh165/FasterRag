@@ -20,6 +20,7 @@ from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.adapters.vectordb.base import HealthStatus, SearchQuery
 from fasterrag.adapters.vectordb.qdrant import QdrantAdapter
 from fasterrag.config.schema import Settings
+from fasterrag.core.evals import GoldenRecord, evaluate
 from fasterrag.core.retrieval.bm25 import encode_query
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import Journal
@@ -316,3 +317,43 @@ async def test_a_retrieved_chunk_carries_everything_a_citation_needs(
     assert top.source
     assert top.payload["span"]["end"] > top.payload["span"]["start"]
     assert top.payload["embedding_model"]
+
+
+async def test_the_eval_harness_scores_the_real_pipeline(
+    service: IngestionService, corpus: Path
+) -> None:
+    """Prove the harness measures a live retriever.
+
+    The numbers here are a mechanism check, not a quality measurement: the embedder is a
+    deterministic stand-in, so these scores say nothing about how well fasterRag retrieves
+    and must never reach the benchmark ledger.
+    """
+    await service.ingest(sources(corpus))
+    retrieval = await retrieval_for(service)
+
+    indexed = await retrieval.retrieve("termination notice", top_k=1)
+    assert indexed
+
+    golden = [
+        GoldenRecord(
+            id="q_termination",
+            query="termination notice",
+            source="human",
+            created_at="2026-07-30",
+            relevant_chunk_ids=(indexed[0].chunk_id,),
+        ),
+        GoldenRecord(
+            id="q_unanswerable",
+            query="what is the airspeed velocity of an unladen swallow",
+            source="human",
+            created_at="2026-07-30",
+        ),
+    ]
+
+    report = await evaluate(golden, retrieval, k=5)
+
+    assert report.scored == 1
+    assert report.adversarial == 1
+    assert report.recall_at_k == 1.0
+    assert report.mrr > 0
+    assert report.misses == []
