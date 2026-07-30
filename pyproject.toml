@@ -42,6 +42,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
     "qdrant-client>=1.9",
+    "snowballstemmer>=2.2",
     "uvicorn[standard]>=0.30",
 ]
 
@@ -150,6 +151,7 @@ module = [
     "pytesseract.*",
     "reportlab.*",
     "sentence_transformers.*",
+    "snowballstemmer.*",
 ]
 ignore_missing_imports = true
 
