@@ -37,6 +37,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Qdrant provisioning now sets `QDRANT__SERVICE__GRPC_PORT`, without which Qdrant leaves its gRPC interface disabled and only port 6333 answers — the provisioner was reproducing the very failure recorded in `docs/failure-modes.md` row 15. Caught by the adapter contract suite running in gRPC mode (2026-07-30).
 - Vector-database gRPC failures are now classified by status code, so an authentication rejection over gRPC is reported as non-retryable instead of being retried as a transport blip until the circuit breaker opened (2026-07-30).
+- The Qdrant adapter now passes `https` explicitly. The Qdrant client switches to TLS on its own as soon as an API key is supplied, so every authenticated call failed with a TLS handshake error against the plain-HTTP listener a container serves by default. Added `vector_db.https` so the transport is chosen rather than inferred (2026-07-30).
+- Provisioning now confirms the backend answers an API call before reporting success. An open TCP port is not readiness: a container binds its listener before it can serve, and a transport misconfiguration connects at the socket level and only fails at the first request — so the failure surfaced in whatever ran next instead of in the provisioner (2026-07-30).
+- The default `vector_db.docker.image` moved from `qdrant/qdrant:v1.9.0` to `v1.18.1`. The pinned default predated the features the project depends on: the `/points/query` API needs server 1.10 or newer, as do the sparse vectors and native fusion of ADR-0007, and the client reported the old server as version-incompatible (2026-07-30).
 
 ### Security
 
