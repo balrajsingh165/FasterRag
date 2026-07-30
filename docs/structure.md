@@ -54,6 +54,7 @@ fasterRag/
 │       ├── services/             # Business logic / use cases (orchestration)
 │       │   ├── provisioning.py   # Config-driven auto-provisioning (Qdrant/Langfuse/Grafana)
 │       │   ├── doctor.py         # D10 preflight checks; gates provisioning
+│       │   ├── journal.py        # D3 checkpoints, content-hash dedup, dead-letter queue
 │       │   ├── ingestion.py      # Accept → enqueue → track jobs (pending)
 │       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate (pending)
 │       │   └── collections.py    # Collection lifecycle (pending)

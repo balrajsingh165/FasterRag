@@ -104,6 +104,7 @@
 - [x] TASK-0028: Implement parsing pipeline (PDF incl. tables/OCR, HTML, Markdown, DOCX, TXT, CSV/JSON; golden-file tests) — ✅ 2026-07-30
 - [x] TASK-0029: Implement chunking pipeline (recursive baseline first; then fixed, semantic, layout, late; Hypothesis invariants) — ✅ 2026-07-30
 - [x] TASK-0026: Implement embedding provider adapters (HuggingFace local first; OpenAI, Cohere, Ollama) + tiering router — ✅ 2026-07-30
+- [x] TASK-0075: Implement checkpointed journal, content-hash dedup, DLQ with reason codes, per-document status API (D3) — journal, dedup, DLQ, and the query methods; the REST endpoints land with the ingest router — ✅ 2026-07-30
 
 ### Workflow
 
@@ -145,8 +146,9 @@ _(empty)_
 - [ ] TASK-0031: Implement CPU worker pool (load/parse/chunk) with bounded queue hand-off and backpressure
 - [ ] TASK-0032: Implement stateful embedding worker pool (model loaded once per worker, batched, retryable)
 - [ ] TASK-0033: Implement indexer (batch dense upsert + BM25 index + metadata, deterministic chunk IDs)
-- [ ] TASK-0075: Implement checkpointed journal, content-hash dedup, DLQ with reason codes, per-document status API (D3)
 - [ ] TASK-0076: Implement fasterrag estimate / POST /v1/estimate preflight cost estimator (D9)
+- [ ] TASK-0116: Expose the per-document status endpoints over REST (`GET /v1/ingest/{job_id}`, `GET /v1/ingest/{job_id}/documents?status=…`, `POST /v1/ingest/{job_id}/retry-dlq`); the journal already answers these queries
+- [ ] TASK-0117: Decide the sparse-retrieval design before the indexer lands — Qdrant native sparse vectors keep both legs in one collection so metadata filters and scale apply to both for free, but adding them extends the documented `VectorDBAdapter` interface (`CollectionSpec`, `Point`, `SearchQuery`); integrations.md already implies the leg is per-backend by noting pgvector uses PostgreSQL full-text
 
 ### S4 — Retrieval
 
