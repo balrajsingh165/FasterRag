@@ -12,6 +12,8 @@ fixtures:
 * ``collection`` — the name of a freshly created, empty collection, cleaned up
   afterwards. Creating and dropping collections is vendor-specific setup, so it lives
   in the subclass and keeps this suite free of any vendor import.
+* ``hybrid_collection`` — the same, but created with a sparse index so the keyword leg
+  can be exercised.
 
 Optionally override ``misconfigured_adapter`` to return an adapter holding invalid
 credentials; the authentication case is skipped explicitly when it is not supplied,
@@ -30,6 +32,7 @@ from fasterrag.adapters.vectordb.base import (
     SearchQuery,
     VectorDBAdapter,
 )
+from fasterrag.core.retrieval.bm25 import encode_document, encode_query
 from fasterrag.errors import EmbedError, ErrorCode, FasterRagError
 
 DIMENSIONS = 4
@@ -246,6 +249,118 @@ class VectorDBContract:
             await adapter.search(
                 SearchQuery(collection="collection-that-does-not-exist", vector=VECTORS["a"])
             )
+
+    async def test_a_keyword_search_finds_the_document_containing_the_term(
+        self, adapter: VectorDBAdapter, hybrid_collection: str
+    ) -> None:
+        await adapter.upsert(
+            [
+                Point(
+                    point_id="c_notice",
+                    collection=hybrid_collection,
+                    vector=VECTORS["a"],
+                    payload={"kind": "notice"},
+                    sparse=encode_document("Either party may terminate with written notice."),
+                ),
+                Point(
+                    point_id="c_payment",
+                    collection=hybrid_collection,
+                    vector=VECTORS["b"],
+                    payload={"kind": "payment"},
+                    sparse=encode_document("Invoices are payable within thirty days."),
+                ),
+            ]
+        )
+
+        hits = await adapter.search(
+            SearchQuery(collection=hybrid_collection, sparse=encode_query("terminate"), limit=5)
+        )
+
+        assert [hit.point_id for hit in hits] == ["c_notice"]
+
+    async def test_a_keyword_search_matches_across_inflections(
+        self, adapter: VectorDBAdapter, hybrid_collection: str
+    ) -> None:
+        await adapter.upsert(
+            [
+                Point(
+                    point_id="c_notice",
+                    collection=hybrid_collection,
+                    vector=VECTORS["a"],
+                    sparse=encode_document("The agreement covers terminations and notices."),
+                )
+            ]
+        )
+
+        hits = await adapter.search(
+            SearchQuery(collection=hybrid_collection, sparse=encode_query("terminate"), limit=5)
+        )
+
+        assert [hit.point_id for hit in hits] == ["c_notice"]
+
+    async def test_both_legs_are_searchable_in_one_collection(
+        self, adapter: VectorDBAdapter, hybrid_collection: str
+    ) -> None:
+        await adapter.upsert(
+            [
+                Point(
+                    point_id="c_a",
+                    collection=hybrid_collection,
+                    vector=VECTORS["a"],
+                    sparse=encode_document("termination notice period"),
+                )
+            ]
+        )
+
+        dense = await adapter.search(
+            SearchQuery(collection=hybrid_collection, vector=VECTORS["a"], limit=5)
+        )
+        sparse = await adapter.search(
+            SearchQuery(collection=hybrid_collection, sparse=encode_query("notice"), limit=5)
+        )
+
+        assert [hit.point_id for hit in dense] == ["c_a"]
+        assert [hit.point_id for hit in sparse] == ["c_a"]
+
+    async def test_filters_are_pushed_down_on_the_keyword_leg_too(
+        self, adapter: VectorDBAdapter, hybrid_collection: str
+    ) -> None:
+        await adapter.upsert(
+            [
+                Point(
+                    point_id="c_legal",
+                    collection=hybrid_collection,
+                    vector=VECTORS["a"],
+                    payload={"department": "legal"},
+                    sparse=encode_document("termination notice"),
+                ),
+                Point(
+                    point_id="c_finance",
+                    collection=hybrid_collection,
+                    vector=VECTORS["b"],
+                    payload={"department": "finance"},
+                    sparse=encode_document("termination notice"),
+                ),
+            ]
+        )
+
+        hits = await adapter.search(
+            SearchQuery(
+                collection=hybrid_collection,
+                sparse=encode_query("termination"),
+                filters={"department": "finance"},
+                limit=5,
+            )
+        )
+
+        assert [hit.point_id for hit in hits] == ["c_finance"]
+
+    async def test_a_query_must_carry_exactly_one_leg(self) -> None:
+        with pytest.raises(FasterRagError):
+            SearchQuery(collection="any")
+
+        with pytest.raises(FasterRagError):
+            SearchQuery(collection="any", vector=VECTORS["a"], sparse=encode_query("x"))
 
     async def test_invalid_credentials_are_not_retryable(
         self, misconfigured_adapter: VectorDBAdapter | None

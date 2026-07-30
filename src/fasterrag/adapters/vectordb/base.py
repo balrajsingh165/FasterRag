@@ -36,6 +36,7 @@ __all__ = [
     "PointUpdate",
     "ScoredPoint",
     "SearchQuery",
+    "SparseVector",
     "UpsertResult",
     "VectorDBAdapter",
     "validate_filter",
@@ -52,6 +53,35 @@ _SET_OPERATORS: Final[frozenset[str]] = frozenset({"$in", "$nin"})
 
 
 @dataclass(frozen=True, slots=True)
+class SparseVector:
+    """Term indices paired with their weights, for the keyword retrieval leg.
+
+    Lives in the adapter contract rather than in ``core`` because it is a transport type:
+    core produces the values (``fasterrag.core.retrieval.bm25``) and adapters translate
+    them into whatever sparse representation a backend accepts (``docs/adr/ADR-0007``).
+    """
+
+    indices: Sequence[int]
+    values: Sequence[float]
+
+    def __post_init__(self) -> None:
+        """Reject a vector whose indices and values do not line up."""
+        if len(self.indices) != len(self.values):
+            raise ValueError(
+                f"a sparse vector has {len(self.indices)} indices but {len(self.values)} values"
+            )
+
+    def __len__(self) -> int:
+        """Return the number of terms."""
+        return len(self.indices)
+
+    @property
+    def empty(self) -> bool:
+        """Return whether the vector carries no terms."""
+        return not self.indices
+
+
+@dataclass(frozen=True, slots=True)
 class CollectionSpec:
     """The shape of a collection to create."""
 
@@ -60,6 +90,7 @@ class CollectionSpec:
     distance: Distance = "cosine"
     shard_number: int = 1
     replication_factor: int = 1
+    sparse: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +106,7 @@ class Point:
     collection: str
     vector: Sequence[float]
     payload: Mapping[str, Any] = field(default_factory=dict)
+    sparse: SparseVector | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,14 +118,29 @@ class UpsertResult:
 
 @dataclass(frozen=True, slots=True)
 class SearchQuery:
-    """A dense similarity search with optional metadata filtering."""
+    """One retrieval leg: dense similarity or sparse keyword, with optional filtering.
+
+    A query carries exactly one leg. Hybrid retrieval runs both and fuses the rankings in
+    fasterRag rather than in the backend, so ``retrieval.rrf_k`` is the constant that
+    actually applies — a backend's built-in fusion does not expose it
+    (``docs/architecture.md`` §6).
+    """
 
     collection: str
-    vector: Sequence[float]
+    vector: Sequence[float] | None = None
     limit: int = 10
     filters: Filter | None = None
     with_payload: bool = True
     with_vectors: bool = False
+    sparse: SparseVector | None = None
+
+    def __post_init__(self) -> None:
+        """Require exactly one leg, so an empty query cannot silently return nothing."""
+        if (self.vector is None) == (self.sparse is None):
+            raise FasterRagError(
+                "a search must carry exactly one of a dense vector or a sparse vector",
+                code=ErrorCode.VALIDATION_FAILED,
+            )
 
 
 @dataclass(frozen=True, slots=True)

@@ -56,6 +56,20 @@ class QdrantContract(VectorDBContract):
         await client.close()
 
     @pytest.fixture
+    async def hybrid_collection(
+        self, adapter: VectorDBAdapter, collection_name: str
+    ) -> AsyncIterator[str]:
+        name = f"{collection_name}-hybrid"
+        await adapter.create_collection(
+            CollectionSpec(name=name, dimensions=DIMENSIONS, sparse=True)
+        )
+        yield name
+
+        client = AsyncQdrantClient(host="localhost", port=6333, api_key=TEST_API_KEY, https=False)
+        await client.delete_collection(name)
+        await client.close()
+
+    @pytest.fixture
     async def misconfigured_adapter(self, qdrant: Settings) -> AsyncIterator[VectorDBAdapter]:
         wrong = QdrantAdapter(self.settings)
         wrong._api_key_env = "FASTERRAG_WRONG_KEY_VAR"

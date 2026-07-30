@@ -24,12 +24,12 @@ from __future__ import annotations
 import re
 import zlib
 from collections import Counter
-from collections.abc import Sequence
-from dataclasses import dataclass
 from functools import lru_cache
 from typing import Final
 
 import snowballstemmer
+
+from fasterrag.adapters.vectordb.base import SparseVector
 
 __all__ = [
     "AVERAGE_DOCUMENT_LENGTH",
@@ -118,34 +118,6 @@ STOPWORDS: Final[frozenset[str]] = frozenset(
 )
 
 _stemmer = snowballstemmer.stemmer("english")
-
-
-@dataclass(frozen=True, slots=True)
-class SparseVector:
-    """Term indices paired with their weights.
-
-    Vendor-neutral: an adapter translates this into whatever sparse representation its
-    backend accepts.
-    """
-
-    indices: Sequence[int]
-    values: Sequence[float]
-
-    def __post_init__(self) -> None:
-        """Reject a vector whose indices and values do not line up."""
-        if len(self.indices) != len(self.values):
-            raise ValueError(
-                f"a sparse vector has {len(self.indices)} indices but {len(self.values)} values"
-            )
-
-    def __len__(self) -> int:
-        """Return the number of terms."""
-        return len(self.indices)
-
-    @property
-    def empty(self) -> bool:
-        """Return whether the vector carries no terms."""
-        return not self.indices
 
 
 @lru_cache(maxsize=100_000)

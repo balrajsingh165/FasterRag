@@ -69,8 +69,7 @@ class FakeClient:
 
     async def get_collection(self, collection_name: str) -> Info:
         self._maybe_raise()
-        assert self.info is not None
-        return self.info
+        return self.info if self.info is not None else collection_info()
 
     async def create_collection(self, **kwargs: Any) -> None:
         self._maybe_raise()

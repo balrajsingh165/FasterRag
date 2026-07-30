@@ -53,6 +53,13 @@ __all__ = ["POINT_ID_PAYLOAD_KEY", "QdrantAdapter"]
 
 POINT_ID_PAYLOAD_KEY: Final = "point_id"
 
+# CRITICAL: a collection carrying both legs must name its dense vector, because Qdrant
+# only accepts named sparse vectors and will not mix a named sparse vector with an unnamed
+# dense one. Dense-only collections stay unnamed, so the two layouts are not interchangeable
+# and a collection cannot gain a sparse leg without being rebuilt.
+DENSE_VECTOR_NAME: Final = "dense"
+SPARSE_VECTOR_NAME: Final = "bm25"
+
 # CRITICAL: this namespace is what makes a chunk id map to the same Qdrant point id
 # forever. Changing it orphans every previously indexed vector and turns idempotent
 # upserts into silent duplicates.
@@ -148,6 +155,7 @@ class QdrantAdapter(VectorDBAdapter):
         self._timeout_seconds = max(1, round(settings.reliability.timeouts.vector_db_ms / 1000))
         self._client: AsyncQdrantClient | None = None
         self._dimensions: dict[str, int] = {}
+        self._named: dict[str, bool] = {}
 
     @property
     def client(self) -> AsyncQdrantClient:
@@ -259,24 +267,49 @@ class QdrantAdapter(VectorDBAdapter):
                 await self._require_compatible(spec)
                 return
 
+            dense = models.VectorParams(
+                size=spec.dimensions,
+                distance=_DISTANCES[spec.distance],
+            )
             await self.client.create_collection(
                 collection_name=spec.name,
-                vectors_config=models.VectorParams(
-                    size=spec.dimensions,
-                    distance=_DISTANCES[spec.distance],
+                vectors_config={DENSE_VECTOR_NAME: dense} if spec.sparse else dense,
+                sparse_vectors_config=(
+                    {
+                        # CRITICAL: IDF must be computed by the server. It is a statistic
+                        # over the whole live corpus, so a client that supplied it would be
+                        # wrong the moment anything else was ingested (docs/adr/ADR-0007).
+                        SPARSE_VECTOR_NAME: models.SparseVectorParams(modifier=models.Modifier.IDF)
+                    }
+                    if spec.sparse
+                    else None
                 ),
                 shard_number=spec.shard_number,
                 replication_factor=spec.replication_factor,
             )
         self._dimensions[spec.name] = spec.dimensions
+        self._named[spec.name] = spec.sparse
 
     async def _require_compatible(self, spec: CollectionSpec) -> None:
         """Reject an existing collection whose vectors cannot hold ``spec``."""
         info = await self.client.get_collection(spec.name)
         vectors = info.config.params.vectors
+        if isinstance(vectors, dict):
+            named = vectors.get(DENSE_VECTOR_NAME)
+            if named is None:
+                raise FasterRagError(
+                    f"collection {spec.name!r} uses named vectors fasterRag does not manage; "
+                    f"it has no {DENSE_VECTOR_NAME!r} vector",
+                    code=ErrorCode.CONFLICT,
+                )
+            vectors = named
+            self._named[spec.name] = True
+        else:
+            self._named[spec.name] = False
+
         if not isinstance(vectors, models.VectorParams):
             raise FasterRagError(
-                f"collection {spec.name!r} uses named vectors, which fasterRag does not manage",
+                f"collection {spec.name!r} has an unreadable vector configuration",
                 code=ErrorCode.CONFLICT,
             )
         if vectors.size != spec.dimensions:
@@ -303,11 +336,48 @@ class QdrantAdapter(VectorDBAdapter):
 
         info = await self.client.get_collection(collection)
         vectors = info.config.params.vectors
+        if isinstance(vectors, dict):
+            vectors = vectors.get(DENSE_VECTOR_NAME)
+            self._named[collection] = True
+        else:
+            self._named[collection] = False
+
         if not isinstance(vectors, models.VectorParams):
             return None
 
         self._dimensions[collection] = vectors.size
         return vectors.size
+
+    async def _uses_named_vectors(self, collection: str) -> bool:
+        """Return whether a collection uses the named layout that carries both legs."""
+        if collection not in self._named:
+            await self._collection_dimensions(collection)
+        return self._named.get(collection, False)
+
+    def _vector_for(self, point: Point, *, named: bool) -> Any:
+        """Build the vector payload for a point in the collection's layout.
+
+        Raises:
+            EmbedError: If a sparse vector is supplied for a dense-only collection, which
+                would otherwise be accepted and silently dropped.
+        """
+        dense = list(point.vector)
+        if not named:
+            if point.sparse is not None:
+                raise EmbedError(
+                    f"point {point.point_id!r} carries a sparse vector but collection "
+                    f"{point.collection!r} has no sparse index; recreate it with sparse "
+                    "enabled",
+                    retryable=False,
+                )
+            return dense
+
+        vectors: dict[str, Any] = {DENSE_VECTOR_NAME: dense}
+        if point.sparse is not None and not point.sparse.empty:
+            vectors[SPARSE_VECTOR_NAME] = models.SparseVector(
+                indices=list(point.sparse.indices), values=list(point.sparse.values)
+            )
+        return vectors
 
     async def upsert(self, points: list[Point]) -> UpsertResult:
         """Write points, overwriting any that already exist."""
@@ -321,12 +391,13 @@ class QdrantAdapter(VectorDBAdapter):
         async with self._mapped_errors("upsert"):
             for collection, batch in grouped.items():
                 await self._require_matching_dimensions(collection, batch)
+                named = await self._uses_named_vectors(collection)
                 await self.client.upsert(
                     collection_name=collection,
                     points=[
                         models.PointStruct(
                             id=to_point_id(point.point_id),
-                            vector=list(point.vector),
+                            vector=self._vector_for(point, named=named),
                             payload={
                                 **dict(point.payload),
                                 POINT_ID_PAYLOAD_KEY: point.point_id,
@@ -361,9 +432,20 @@ class QdrantAdapter(VectorDBAdapter):
         payload_selector: bool | list[str] = True if query.with_payload else [POINT_ID_PAYLOAD_KEY]
 
         async with self._mapped_errors("search"):
+            named = await self._uses_named_vectors(query.collection)
+            if query.sparse is not None:
+                leg: Any = models.SparseVector(
+                    indices=list(query.sparse.indices), values=list(query.sparse.values)
+                )
+                using: str | None = SPARSE_VECTOR_NAME
+            else:
+                leg = list(query.vector or [])
+                using = DENSE_VECTOR_NAME if named else None
+
             response = await self.client.query_points(
                 collection_name=query.collection,
-                query=list(query.vector),
+                query=leg,
+                using=using,
                 limit=query.limit,
                 query_filter=query_filter,
                 with_payload=payload_selector,
