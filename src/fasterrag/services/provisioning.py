@@ -209,6 +209,41 @@ async def _wait_until_ready(host: str, ports: Sequence[int]) -> None:
         )
 
 
+async def _wait_until_answering(settings: Settings) -> None:
+    """Block until the backend actually answers an API call.
+
+    An open TCP port is not readiness. A container binds its listener before it can serve,
+    and a client misconfiguration such as the wrong transport connects at the socket level
+    and fails at the first request. Provisioning must not report success until a real call
+    succeeds, or the failure lands on whatever runs next instead of here.
+    """
+    from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _READY_TIMEOUT_SECONDS
+    adapter = create_vector_db_adapter(settings)
+    detail = "the backend never answered"
+
+    try:
+        while loop.time() < deadline:
+            status = await adapter.health()
+            if status.healthy:
+                return
+            detail = status.detail or detail
+            await asyncio.sleep(_READY_POLL_SECONDS)
+    finally:
+        await adapter.close()
+
+    raise ProvisioningError(
+        f"qdrant is listening but did not answer within {_READY_TIMEOUT_SECONDS:.0f}s: {detail}",
+        fix=(
+            f"Check 'docker logs {QDRANT_CONTAINER}'. If the key or transport is wrong the "
+            "port still opens: confirm vector_db.https matches how the server is served, and "
+            "that the key in the configured environment variable matches the container's."
+        ),
+    )
+
+
 def _run_arguments(settings: Settings) -> list[str]:
     """Build the ``docker run`` arguments for the configured Qdrant container."""
     vector_db = settings.vector_db
@@ -335,6 +370,7 @@ async def provision_qdrant(settings: Settings) -> ProvisionResult:
         settings.vector_db.host,
         [settings.vector_db.port, settings.vector_db.grpc_port],
     )
+    await _wait_until_answering(settings)
 
     url = f"http://{settings.vector_db.host}:{settings.vector_db.port}"
     _logger.info("qdrant is provisioned and reachable", extra={"url": url})

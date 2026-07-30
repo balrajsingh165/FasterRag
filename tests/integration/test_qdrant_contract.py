@@ -51,7 +51,7 @@ class QdrantContract(VectorDBContract):
         await adapter.create_collection(CollectionSpec(name=collection_name, dimensions=DIMENSIONS))
         yield collection_name
 
-        client = AsyncQdrantClient(host="localhost", port=6333, api_key=TEST_API_KEY)
+        client = AsyncQdrantClient(host="localhost", port=6333, api_key=TEST_API_KEY, https=False)
         await client.delete_collection(collection_name)
         await client.close()
 

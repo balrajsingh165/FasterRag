@@ -62,7 +62,11 @@ def ready(monkeypatch: pytest.MonkeyPatch) -> None:
     async def instantly_ready(host: str, ports: Sequence[int]) -> None:
         return None
 
+    async def instantly_answering(settings: Settings) -> None:
+        return None
+
     monkeypatch.setattr(provisioning, "_wait_until_ready", instantly_ready)
+    monkeypatch.setattr(provisioning, "_wait_until_answering", instantly_answering)
 
 
 @pytest.fixture
@@ -114,7 +118,7 @@ async def test_run_publishes_both_ports_and_mounts_the_named_volume(
     assert "6333:6333" in command
     assert "6334:6334" in command
     assert "fasterrag_qdrant_storage:/qdrant/storage" in command
-    assert "qdrant/qdrant:v1.9.0" in command
+    assert "qdrant/qdrant:v1.18.1" in command
 
 
 @pytest.mark.usefixtures("gate_passes", "ready")
@@ -148,7 +152,7 @@ async def test_the_server_key_is_passed_by_name_never_on_the_command_line(
 async def test_a_stopped_container_is_started_not_recreated(
     docker: DockerRecorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    existing(monkeypatch, running=False, image="qdrant/qdrant:v1.9.0")
+    existing(monkeypatch, running=False, image="qdrant/qdrant:v1.18.1")
     monkeypatch.setenv("QDRANT_API_KEY", "secret-value")
 
     await provision_qdrant(Settings())
@@ -161,7 +165,7 @@ async def test_a_stopped_container_is_started_not_recreated(
 async def test_a_running_correct_container_is_left_alone(
     docker: DockerRecorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    existing(monkeypatch, running=True, image="qdrant/qdrant:v1.9.0")
+    existing(monkeypatch, running=True, image="qdrant/qdrant:v1.18.1")
     monkeypatch.setenv("QDRANT_API_KEY", "secret-value")
 
     result = await provision_qdrant(Settings())
@@ -262,7 +266,7 @@ async def test_a_referenced_but_unset_key_is_reported_before_anything_runs(
 async def test_stopping_preserves_the_data_volume(
     docker: DockerRecorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    existing(monkeypatch, running=True, image="qdrant/qdrant:v1.9.0")
+    existing(monkeypatch, running=True, image="qdrant/qdrant:v1.18.1")
 
     result = await stop_qdrant(Settings())
 
@@ -292,24 +296,24 @@ async def test_status_reports_an_external_instance_as_unmanaged() -> None:
 async def test_status_reports_a_running_container(
     docker: DockerRecorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    existing(monkeypatch, running=True, image="qdrant/qdrant:v1.9.0")
+    existing(monkeypatch, running=True, image="qdrant/qdrant:v1.18.1")
 
     result = await qdrant_status(Settings())
 
     assert result.status == "running"
-    assert result.detail == "image qdrant/qdrant:v1.9.0"
+    assert result.detail == "image qdrant/qdrant:v1.18.1"
 
 
 async def test_container_state_parses_docker_output(monkeypatch: pytest.MonkeyPatch) -> None:
     async def inspect(args: Sequence[str], **kwargs: Any) -> DockerResult:
-        return DockerResult(returncode=0, stdout="true\tqdrant/qdrant:v1.9.0", stderr="")
+        return DockerResult(returncode=0, stdout="true\tqdrant/qdrant:v1.18.1", stderr="")
 
     monkeypatch.setattr(provisioning, "run_docker", inspect)
     state = await provisioning.container_state()
 
     assert state.exists is True
     assert state.running is True
-    assert state.image == "qdrant/qdrant:v1.9.0"
+    assert state.image == "qdrant/qdrant:v1.18.1"
 
 
 async def test_container_state_is_absent_when_inspect_fails(

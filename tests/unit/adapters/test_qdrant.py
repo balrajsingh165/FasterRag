@@ -495,6 +495,39 @@ async def test_health_reports_failure_instead_of_raising() -> None:
     assert status.detail is not None
 
 
+def test_transport_settings_are_passed_explicitly(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def recording(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("fasterrag.adapters.vectordb.qdrant.AsyncQdrantClient", recording)
+    monkeypatch.setenv("QDRANT_API_KEY", "a-key")
+
+    assert QdrantAdapter(Settings()).client is not None
+
+    assert captured["https"] is False
+    assert captured["prefer_grpc"] is False
+    assert captured["port"] == 6333
+    assert captured["grpc_port"] == 6334
+
+
+def test_tls_is_used_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def recording(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("fasterrag.adapters.vectordb.qdrant.AsyncQdrantClient", recording)
+    settings = Settings.model_validate({"vector_db": {"https": True}})
+
+    assert QdrantAdapter(settings).client is not None
+
+    assert captured["https"] is True
+
+
 def test_both_ports_must_be_reachable() -> None:
     endpoints = build(FakeClient()).describe_endpoints()
 

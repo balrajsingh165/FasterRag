@@ -122,7 +122,7 @@ class AppSettings(Section):
 class DockerSettings(Section):
     """System-managed container settings for ``vector_db.mode: docker``."""
 
-    image: str = "qdrant/qdrant:v1.9.0"
+    image: str = "qdrant/qdrant:v1.18.1"
     volume: str = "fasterrag_qdrant_storage"
 
     @field_validator("image")
@@ -184,6 +184,7 @@ class VectorDbSettings(Section):
     port: Annotated[int, Field(ge=1, le=65535)] = 6333
     grpc_port: Annotated[int, Field(ge=1, le=65535)] = 6334
     prefer_grpc: bool = False
+    https: bool = False
     api_key_env: str | None = "QDRANT_API_KEY"
     docker: DockerSettings = DockerSettings()
     collection: CollectionSettings = CollectionSettings()

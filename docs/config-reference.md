@@ -24,9 +24,10 @@ vector_db:
   port: 6333
   grpc_port: 6334
   prefer_grpc: false
+  https: false
   api_key_env: QDRANT_API_KEY
   docker:
-    image: qdrant/qdrant:v1.9.0
+    image: qdrant/qdrant:v1.18.1
     volume: fasterrag_qdrant_storage
   collection:
     default_name: default
@@ -179,8 +180,9 @@ security:
 | `vector_db.port` | int | `6333` | 1–65535 | REST port. Qdrant client default is 6333. |
 | `vector_db.grpc_port` | int | `6334` | 1–65535; must differ from `port` | gRPC port. Qdrant client default is 6334. **Both 6333 and 6334 must be exposed/reachable** — Qdrant GitHub Discussion #2195 records connection failures when only 6333 is exposed and the client attempts gRPC. |
 | `vector_db.prefer_grpc` | bool | `false` | — | Matches the Qdrant Python client default (`prefer_grpc=False`). Set `true` for gRPC-first traffic (requires `grpc_port` reachable). |
+| `vector_db.https` | bool | `false` | — | Whether to reach the backend over TLS. **Must be set explicitly rather than inferred**: the Qdrant Python client silently switches to HTTPS whenever an `api_key` is supplied, which fails against the plain-HTTP listener a container serves by default. `false` matches the documented private-network deployment (an API key over a private link); set `true` for a TLS-terminated remote instance ([deployment.md](deployment.md) §2). |
 | `vector_db.api_key_env` | str\|null | `QDRANT_API_KEY` | valid env-var name or null | Name of the env var holding the backend API key (Qdrant: consumed as `QDRANT__SERVICE__API_KEY` on the server side). Never the key itself. Null = unauthenticated (local dev only). |
-| `vector_db.docker.image` | str | `qdrant/qdrant:v1.9.0` | non-empty image ref; pinned tag required (no `latest`) | Image used in `docker` mode. |
+| `vector_db.docker.image` | str | `qdrant/qdrant:v1.18.1` | non-empty image ref; pinned tag required (no `latest`) | Image used in `docker` mode. |
 | `vector_db.docker.volume` | str | `fasterrag_qdrant_storage` | valid Docker volume name | Storage volume for persistence. **On Windows/WSL this MUST be a named Docker volume** — bind mounts have known file-system data-loss issues per Qdrant's install docs. The loader rejects bind-mount paths on Windows/WSL. |
 | `vector_db.collection.default_name` | str | `default` | `^[a-zA-Z0-9_-]{1,64}$` | Default collection name. |
 | `vector_db.collection.distance` | str | `cosine` | one of `cosine`, `dot`, `euclid` | Distance metric for dense vectors. |

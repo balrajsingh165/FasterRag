@@ -159,6 +159,10 @@ class QdrantAdapter(VectorDBAdapter):
                 port=self._settings.port,
                 grpc_port=self._settings.grpc_port,
                 prefer_grpc=self._settings.prefer_grpc,
+                # CRITICAL: pass https explicitly. The Qdrant client switches to TLS on its
+                # own as soon as an api_key is supplied, which fails with a TLS handshake
+                # error against the plain-HTTP listener a container serves by default.
+                https=self._settings.https,
                 api_key=api_key,
                 timeout=self._timeout_seconds,
             )

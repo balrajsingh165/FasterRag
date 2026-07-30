@@ -17,9 +17,10 @@ vector_db:
   port: 6333
   grpc_port: 6334
   prefer_grpc: false
+  https: false
   api_key_env: QDRANT_API_KEY
   docker:
-    image: qdrant/qdrant:v1.9.0
+    image: qdrant/qdrant:v1.18.1
     volume: fasterrag_qdrant_storage
   collection:
     default_name: default
