@@ -7,15 +7,20 @@ fasterRag is released as an installable Python package so applications can **imp
 ## Installation
 
 ```bash
-pip install fasterrag                 # core (local HuggingFace embeddings, Qdrant adapter)
+pip install fasterrag                 # core: Qdrant adapter, all document parsers, chunking
 pip install "fasterrag[all]"          # every optional adapter/provider
+pip install "fasterrag[huggingface]"  # local sentence-transformers embeddings
 pip install "fasterrag[openai]"       # extras per provider: openai, anthropic, cohere, ollama
 pip install "fasterrag[milvus]"       # extras per vector DB: milvus, weaviate, pinecone, pgvector, chroma
 pip install "fasterrag[rerank]"       # cross-encoder reranker models
 pip install "fasterrag[ocr]"          # OCR for scanned PDFs (also needs the tesseract binary)
 ```
 
-Parsers for PDF, HTML, Markdown, DOCX, text, CSV, and JSON are part of the core install. Only OCR is optional, because it additionally requires the `tesseract` executable on the host; without it a scanned page is flagged `low_text_yield` rather than silently indexed as empty.
+Parsers for PDF, HTML, Markdown, DOCX, text, CSV, and JSON are part of the core install, as is the chunking pipeline.
+
+**Every embedding provider is an extra, including the local default.** `huggingface` is separate because sentence-transformers pulls a deep-learning runtime measured in gigabytes, and a deployment that embeds through a hosted provider should not have to install it. `fasterrag[huggingface]` is the fully-local starting point; selecting a provider whose extra is missing fails at startup with a `ConfigError` naming the exact install command, never with an import traceback.
+
+OCR is optional for a second reason: it additionally requires the `tesseract` executable on the host. Without it a scanned page is flagged `low_text_yield` rather than silently indexed as empty.
 
 - Requires **Python 3.12+**.
 - Versioned by **SemVer 2.0.0**; the public API defined in this document is the compatibility contract — breaking it requires a major version bump and a CHANGELOG entry.
