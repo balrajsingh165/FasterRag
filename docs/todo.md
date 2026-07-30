@@ -119,6 +119,7 @@
 ### Slice S5 — rerank and eval harness (build phase, in progress)
 
 - [x] TASK-0047: Implement eval harness (recall@k, MRR, nDCG, faithfulness) with dataset fixtures — retrieval metrics and the golden-set format; faithfulness needs the LLM call site and lands with the generation slice — ✅ 2026-07-30
+- [x] TASK-0035: Implement config-gated cross-encoder reranker stage (top 100–1000 → rerank → top_k) — ✅ 2026-07-30
 
 ### Workflow
 
@@ -162,8 +163,8 @@ _(empty)_
 
 ### S5 — Rerank + eval harness v1
 
-- [ ] TASK-0035: Implement config-gated cross-encoder reranker stage (top 100–1000 → rerank → top_k)
 - [ ] TASK-0077: Implement golden-set generator + retrieval regression gate wired into CI (D7) — the harness and golden-set format now exist; the gate needs a committed baseline to compare against
+- [ ] TASK-0121: Verify the reranker against a real cross-encoder model. The stage is unit-tested with a fake and has never scored a real pair; `pip install "fasterrag[rerank]"` is what closes the gap, and the same install would let the HuggingFace embedder and an honest D7 baseline be verified too
 - [ ] TASK-0120: Add the faithfulness metric to the eval harness once the generation slice provides the P3 call site; the harness reports retrieval metrics only until then
 
 ### S6 — Generation
