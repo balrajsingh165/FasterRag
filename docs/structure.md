@@ -39,7 +39,9 @@ fasterRag/
 │       ├── ADR-0002-adapter-factory-pluggability.md
 │       ├── ADR-0003-config-yaml-env-split.md
 │       ├── ADR-0004-hybrid-search-plus-reranking.md
-│       └── ADR-0005-api-cli-only-control-plane.md
+│       ├── ADR-0005-api-cli-only-control-plane.md
+│       ├── ADR-0006-python-package-surface.md
+│       └── ADR-0007-bm25-as-backend-sparse-vectors.md
 ├── src/
 │   └── fasterrag/
 │       ├── errors.py             # Typed error taxonomy + stable error-code table
@@ -55,13 +57,15 @@ fasterRag/
 │       │   ├── provisioning.py   # Config-driven auto-provisioning (Qdrant/Langfuse/Grafana)
 │       │   ├── doctor.py         # D10 preflight checks; gates provisioning
 │       │   ├── journal.py        # D3 checkpoints, content-hash dedup, dead-letter queue
-│       │   ├── ingestion.py      # Accept → enqueue → track jobs (pending)
+│       │   ├── estimation.py     # D9 preflight token counts and projected cost
+│       │   ├── ingestion.py      # Job lifecycle: run both pools, checkpoint, settle
 │       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate (pending)
 │       │   └── collections.py    # Collection lifecycle (pending)
 │       ├── core/                 # RAG pipeline (pure domain logic)
+│       │   ├── identity.py       # Deterministic document, chunk, and config hashes
 │       │   ├── parsing/          # PDF/HTML/MD/DOCX/OCR parsers, table extraction
 │       │   ├── chunking/         # fixed, recursive, semantic, layout, late, contextual
-│       │   ├── retrieval/        # dense + BM25 legs, RRF fusion, filters
+│       │   ├── retrieval/        # bm25.py sparse encoding; fusion and filters (pending)
 │       │   ├── rerank/           # cross-encoder reranking
 │       │   ├── context.py        # Context assembly, token budgeting, citations
 │       │   └── generation.py     # Prompt building + streaming generation
@@ -76,7 +80,7 @@ fasterRag/
 │       │   ├── cpu_pool.py       # load/parse/chunk workers (CPU-bound)
 │       │   ├── embed_pool.py     # stateful embedding workers (model loaded once)
 │       │   ├── queues.py         # Bounded queues, backpressure, retry policy
-│       │   └── indexer.py        # Batch upsert to vector DB + BM25
+│       │   └── indexer.py        # Batch upsert: dense vector + BM25 sparse vector + payload
 │       ├── config/               # Loaders + schema
 │       │   ├── schema.py         # Pydantic v2 models mirroring config-reference.md
 │       │   └── loader.py         # pydantic-settings YAML source + .env; fail-fast
