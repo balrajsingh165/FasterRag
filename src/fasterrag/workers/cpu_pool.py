@@ -1,0 +1,308 @@
+"""CPU worker pool: load, parse, and chunk.
+
+Loading, parsing, and chunking are CPU-bound, so they run in worker processes rather than
+on the event loop (``docs/architecture.md`` §2). Chunks stream to the embedding pool as
+each document finishes instead of after the whole corpus is parsed, which is what keeps
+expensive embedding workers from idling behind the parser.
+
+Failure is per-document by design. A corrupt file becomes a dead-letter entry with a reason
+code and the pipeline continues; a crashed worker costs only its in-flight document
+(``docs/failure-modes.md`` row 1).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from collections.abc import Callable, Iterable, Sequence
+from concurrent.futures import Executor, ProcessPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from fasterrag.config.schema import Settings
+from fasterrag.core.chunking import create_chunker
+from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
+from fasterrag.core.parsing import parse_bytes
+from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
+from fasterrag.observability.logging import current_trace_id, get_logger
+from fasterrag.services.journal import DocumentRecord, Journal
+from fasterrag.workers.queues import BoundedQueue, ChunkPayload, DocumentTask, ParseOutcome
+
+__all__ = ["CpuWorkerPool", "PoolReport", "parse_and_chunk", "resolve_pool_size"]
+
+_MEGABYTE = 1024 * 1024
+
+_logger = get_logger(__name__)
+
+
+def resolve_pool_size(configured: int) -> int:
+    """Return the worker count, expanding the documented ``0`` to the CPU count."""
+    if configured > 0:
+        return configured
+    return os.cpu_count() or 1
+
+
+@dataclass(frozen=True, slots=True)
+class PoolReport:
+    """What a pass over a job's documents produced."""
+
+    parsed: int = 0
+    chunked: int = 0
+    deduplicated: int = 0
+    dead_lettered: int = 0
+    skipped: int = 0
+    flags: dict[str, int] = field(default_factory=dict)
+
+
+def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
+    """Load, parse, and chunk one document.
+
+    Runs inside a worker process, so it takes only picklable arguments and returns only
+    picklable results. It is a module-level function for the same reason.
+
+    The bytes are read exactly once and both hashed and parsed from memory: reading twice
+    would double the I/O on the pipeline's hottest path.
+
+    Raises:
+        ParseError: If the document cannot be read or parsed.
+        IngestionError: If the document exceeds ``ingestion.max_document_mb``.
+    """
+    limit = settings.ingestion.max_document_mb * _MEGABYTE
+    data = _read(task.source, limit)
+    document = parse_bytes(data, filename=Path(task.source).name, max_bytes=limit)
+
+    chunker = create_chunker(settings)
+    chunker_hash = chunker_config_hash(settings)
+    digest = content_hash(data)
+
+    payloads = [
+        ChunkPayload(
+            chunk_id=chunk_id(task.document_id, chunk.chunk_index, chunker_hash),
+            document_id=task.document_id,
+            source=task.source,
+            content_hash=digest,
+            chunk=chunk,
+            metadata={**dict(task.metadata), **document.metadata},
+            tenant=task.tenant,
+        )
+        for chunk in chunker.split(document)
+    ]
+
+    return ParseOutcome(
+        task=task,
+        chunks=payloads,
+        content_hash=digest,
+        parser=document.parser,
+        mime_type=document.mime_type,
+        parse_flags=document.flags,
+    )
+
+
+def _read(source: str, max_bytes: int) -> bytes:
+    """Read a source's bytes, refusing an oversized file before loading it.
+
+    The size is checked from the directory entry rather than after reading, so a file far
+    larger than memory is rejected instead of ingested.
+    """
+    path = Path(source)
+    if not path.is_file():
+        raise ParseError(f"{source} is not a readable file")
+
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise IngestionError(
+            f"{source} is {size} bytes, above the configured limit of {max_bytes}",
+            code=ErrorCode.PAYLOAD_TOO_LARGE,
+            retryable=False,
+        )
+
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise ParseError(f"{source} could not be read: {exc.strerror}") from exc
+
+
+class CpuWorkerPool:
+    """Parses and chunks documents in worker processes, streaming chunks downstream."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        journal: Journal | None = None,
+        executor_factory: Callable[[int], Executor] | None = None,
+    ) -> None:
+        """Build the pool without starting any worker.
+
+        Args:
+            settings: Validated configuration; ``workers.cpu_pool_size`` sizes the pool.
+            journal: Journal recording per-document outcomes, dedup hashes, and
+                checkpoints. Omitted only in tests that do not exercise durability.
+            executor_factory: Builds the executor from a worker count. Defaults to a
+                process pool, because parsing must escape the interpreter lock; tests
+                inject a simpler executor to stay fast and deterministic.
+        """
+        self.settings = settings
+        self.journal = journal
+        self.size = resolve_pool_size(settings.workers.cpu_pool_size)
+        self._executor_factory = executor_factory or (
+            lambda workers: ProcessPoolExecutor(max_workers=workers)
+        )
+        self._executor: Executor | None = None
+
+    async def __aenter__(self) -> CpuWorkerPool:
+        """Start the worker processes."""
+        self._executor = self._executor_factory(self.size)
+        _logger.info("cpu worker pool started", extra={"workers": self.size})
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        """Shut the worker processes down."""
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+        _logger.info("cpu worker pool stopped")
+
+    async def process(
+        self,
+        tasks: Iterable[DocumentTask],
+        sink: BoundedQueue[ChunkPayload],
+        *,
+        job: str | None = None,
+        collection: str = "default",
+        resume_from: int = 0,
+    ) -> PoolReport:
+        """Parse and chunk every task, streaming chunks into ``sink``.
+
+        Args:
+            tasks: Documents to process, in job order.
+            sink: Bounded chunk queue. Enqueueing waits when it is full, which is how
+                backpressure reaches the parser.
+            job: Job id, when outcomes should be journalled.
+            collection: Collection the documents belong to, which scopes deduplication.
+            resume_from: Document index to start at, skipping everything a checkpoint
+                already covered.
+
+        Returns:
+            Counts for the pass.
+        """
+        if self._executor is None:
+            raise IngestionError(
+                "the cpu worker pool is not running; use it as an async context manager",
+                code=ErrorCode.INTERNAL,
+                retryable=False,
+            )
+
+        known: dict[str, str] = {}
+        if self.journal is not None and self.settings.ingestion.dedup:
+            known = self.journal.known_content(collection)
+        loop = asyncio.get_running_loop()
+        parsed = chunked = deduplicated = dead_lettered = skipped = 0
+        flags: dict[str, int] = {}
+
+        for task in tasks:
+            if task.index < resume_from:
+                skipped += 1
+                continue
+
+            try:
+                outcome = await loop.run_in_executor(
+                    self._executor, parse_and_chunk, task, self.settings
+                )
+            except FasterRagError as exc:
+                dead_lettered += 1
+                self._dead_letter(job, task, exc)
+                continue
+
+            if outcome.content_hash in known:
+                deduplicated += 1
+                self._record(job, task, "deduplicated", outcome.content_hash)
+                continue
+
+            for flag in outcome.parse_flags:
+                flags[flag] = flags.get(flag, 0) + 1
+
+            for payload in outcome.chunks:
+                await sink.put(payload)
+
+            parsed += 1
+            chunked += len(outcome.chunks)
+            known[outcome.content_hash] = task.document_id
+            self._index_document(job, collection, task, outcome)
+
+        return PoolReport(
+            parsed=parsed,
+            chunked=chunked,
+            deduplicated=deduplicated,
+            dead_lettered=dead_lettered,
+            skipped=skipped,
+            flags=flags,
+        )
+
+    def _dead_letter(self, job: str | None, task: DocumentTask, exc: FasterRagError) -> None:
+        """Route a failed document to the dead-letter queue."""
+        _logger.warning(
+            "document failed to parse",
+            extra={
+                "document_id": task.document_id,
+                "code": exc.code.value,
+                "trace_id": exc.trace_id,
+            },
+        )
+        if self.journal is None or job is None:
+            return
+
+        self.journal.dead_letter(
+            job,
+            document=task.document_id,
+            source=task.source,
+            reason_code=exc.code,
+            detail=exc.detail,
+            attempts=self.settings.ingestion.dlq.max_retries,
+            trace_id=exc.trace_id,
+        )
+
+    def _record(
+        self, job: str | None, task: DocumentTask, status: str, digest: str | None = None
+    ) -> None:
+        """Record a document outcome when journalling is active."""
+        if self.journal is None or job is None:
+            return
+
+        self.journal.record_document(
+            job,
+            DocumentRecord(
+                document_id=task.document_id,
+                source=task.source,
+                status=status,
+                content_hash=digest,
+                trace_id=current_trace_id(),
+            ),
+        )
+
+    def _index_document(
+        self, job: str | None, collection: str, task: DocumentTask, outcome: ParseOutcome
+    ) -> None:
+        """Record a parsed document and remember its content hash."""
+        self._record(job, task, "indexed", outcome.content_hash)
+        if self.journal is not None and self.settings.ingestion.dedup:
+            self.journal.remember_content(collection, outcome.content_hash, task.document_id)
+
+    @staticmethod
+    def tasks_for(
+        sources: Sequence[str],
+        *,
+        tenant: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> list[DocumentTask]:
+        """Build ordered document tasks with deterministic ids."""
+        return [
+            DocumentTask(
+                document_id=document_id(source, tenant),
+                source=source,
+                index=index,
+                metadata=dict(metadata or {}),
+                tenant=tenant,
+            )
+            for index, source in enumerate(sources)
+        ]
