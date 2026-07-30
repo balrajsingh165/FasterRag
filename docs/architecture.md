@@ -116,6 +116,8 @@ class VectorDBAdapter(ABC):
     async def health(self) -> HealthStatus: ...
 ```
 
+Each request type additionally carries an optional **sparse vector**, because the BM25 leg lives inside the collection rather than in a separate index ([ADR-0007](adr/ADR-0007-bm25-as-backend-sparse-vectors.md)): `CollectionSpec.sparse` creates the keyword index, `Point.sparse` writes term frequencies alongside the dense vector, and `SearchQuery.sparse` runs the keyword leg. A `SearchQuery` carries exactly one leg — hybrid retrieval runs both and fuses the rankings in fasterRag, so `retrieval.rrf_k` is the constant that actually applies rather than whatever a backend's built-in fusion hard-codes.
+
 A **factory** reads `vector_db.provider` and instantiates the concrete adapter. **Qdrant is the reference implementation**; adapters ship for **Milvus, Weaviate, Pinecone, pgvector, Chroma**. A single `vector_db.provider` change swaps backends with **no application-code changes**. Rationale in [ADR-0001](adr/ADR-0001-qdrant-as-reference-vector-db.md) and [ADR-0002](adr/ADR-0002-adapter-factory-pluggability.md).
 
 ### Qdrant specifics
