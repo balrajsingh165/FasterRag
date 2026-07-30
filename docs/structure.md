@@ -68,7 +68,8 @@ fasterRag/
 │       │   ├── vectordb/         # base.py (VectorDBAdapter), factory.py,
 │       │   │                     # qdrant.py, milvus.py, weaviate.py,
 │       │   │                     # pinecone.py, pgvector.py, chroma.py
-│       │   ├── embeddings/       # base, factory, openai, cohere, huggingface, ollama
+│       │   ├── embeddings/       # base, factory, huggingface, openai, cohere, ollama,
+│       │   │                     # tiering (metadata-routed model selection), sync bridge
 │       │   └── llm/              # base, factory, provider clients (streaming)
 │       ├── workers/              # Parallel pools
 │       │   ├── cpu_pool.py       # load/parse/chunk workers (CPU-bound)

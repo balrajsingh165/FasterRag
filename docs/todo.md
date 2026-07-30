@@ -103,6 +103,7 @@
 - [x] TASK-0110: Register the vector database health check with `/readyz` — ✅ 2026-07-30
 - [x] TASK-0028: Implement parsing pipeline (PDF incl. tables/OCR, HTML, Markdown, DOCX, TXT, CSV/JSON; golden-file tests) — ✅ 2026-07-30
 - [x] TASK-0029: Implement chunking pipeline (recursive baseline first; then fixed, semantic, layout, late; Hypothesis invariants) — ✅ 2026-07-30
+- [x] TASK-0026: Implement embedding provider adapters (HuggingFace local first; OpenAI, Cohere, Ollama) + tiering router — ✅ 2026-07-30
 
 ### Workflow
 
@@ -140,7 +141,7 @@ _(empty)_
 - [ ] TASK-0030: Implement contextual enrichment stage (~50–100-token chunk context, parent-doc prompt caching)
 - [ ] TASK-0113: Implement the pooling half of late chunking in the embedding pool (embed the document in one long-context pass, then pool token representations over each chunk's span); the boundary half and the `late_pooling` marker already ship
 - [ ] TASK-0114: Replace the estimating token counter with the embedding provider's real tokenizer once an embedding adapter is configured, so `chunking.chunk_size` counts true tokens rather than a four-characters-per-token estimate
-- [ ] TASK-0026: Implement embedding provider adapters (HuggingFace local first; OpenAI, Cohere, Ollama) + tiering router
+- [ ] TASK-0115: (maintainer decision) `sentence-transformers` ships as the `huggingface` extra rather than in the core install, because it pulls a multi-gigabyte deep-learning runtime that a hosted-provider deployment should not have to download. `docs/python-api.md` was updated to match. Reverting to core is a one-line change in `pyproject.toml` if the original packaging promise should stand
 - [ ] TASK-0031: Implement CPU worker pool (load/parse/chunk) with bounded queue hand-off and backpressure
 - [ ] TASK-0032: Implement stateful embedding worker pool (model loaded once per worker, batched, retryable)
 - [ ] TASK-0033: Implement indexer (batch dense upsert + BM25 index + metadata, deterministic chunk IDs)
