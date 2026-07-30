@@ -52,6 +52,7 @@ ocr = [
     "pytesseract>=0.3.10",
 ]
 huggingface = ["sentence-transformers>=3.0"]
+rerank = ["sentence-transformers>=3.0"]
 openai = ["openai>=1.40"]
 cohere = ["cohere>=5.5"]
 ollama = ["ollama>=0.3"]

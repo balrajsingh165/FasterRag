@@ -16,8 +16,9 @@ from fasterrag.adapters.vectordb.base import (
     VectorDBAdapter,
 )
 from fasterrag.config.schema import Settings
-from fasterrag.errors import FasterRagError
-from fasterrag.services.querying import RetrievalService
+from fasterrag.core.retrieval.models import ScoredChunk
+from fasterrag.errors import ErrorCode, FasterRagError, RetrievalError
+from fasterrag.services.querying import FULL_MODE, HYBRID_ONLY_MODE, RetrievalService
 
 
 class StubEmbedder(EmbeddingAdapter):
@@ -213,14 +214,28 @@ async def test_an_explicit_top_k_overrides_the_configured_one() -> None:
     assert len(await service.retrieve("notice", top_k=3)) == 3
 
 
-async def test_candidates_are_fetched_at_the_rerank_depth() -> None:
+async def test_candidates_widen_to_the_rerank_depth_when_reranking() -> None:
+    configured = settings(retrieval={"top_k": 5, "rerank_top_n": 50})
+    adapter = ScriptedAdapter(configured)
+    adapter.dense = [hit("c_a", 0.9)]
+    adapter.sparse = [hit("c_a", 1.0)]
+    service = RetrievalService(
+        configured, adapter, TieringRouter(StubEmbedder(configured)), ScriptedReranker()
+    )
+
+    await service.retrieve("notice")
+
+    assert all(query.limit == 50 for query in adapter.queries)
+
+
+async def test_no_reranker_means_no_wasted_candidates() -> None:
     service, adapter = build(settings(retrieval={"top_k": 5, "rerank_top_n": 50}))
     adapter.dense = [hit("c_a", 0.9)]
     adapter.sparse = [hit("c_a", 1.0)]
 
     await service.retrieve("notice")
 
-    assert all(query.limit == 50 for query in adapter.queries)
+    assert all(query.limit == 5 for query in adapter.queries)
 
 
 async def test_the_reserved_payload_key_is_not_leaked_to_callers() -> None:
@@ -274,3 +289,97 @@ async def test_weights_change_which_leg_wins() -> None:
         results = await service.retrieve("notice")
 
         assert results[0].chunk_id == expected
+
+
+class ScriptedReranker:
+    """Reverses the shortlist, or fails on demand."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[tuple[str, int]] = []
+
+    async def rerank(self, query: str, chunks: Any) -> list[ScoredChunk]:
+        self.calls.append((query, len(chunks)))
+        if self.error is not None:
+            raise self.error
+        from dataclasses import replace
+
+        return [
+            replace(chunk, rerank_score=float(position), final_rank=position)
+            for position, chunk in enumerate(reversed(list(chunks)), start=1)
+        ]
+
+
+def build_with_reranker(
+    reranker: ScriptedReranker, configured: Settings | None = None
+) -> tuple[RetrievalService, ScriptedAdapter]:
+    resolved = configured or settings()
+    adapter = ScriptedAdapter(resolved)
+    service = RetrievalService(resolved, adapter, TieringRouter(StubEmbedder(resolved)), reranker)
+    return service, adapter
+
+
+async def test_the_reranker_reorders_the_shortlist() -> None:
+    reranker = ScriptedReranker()
+    service, adapter = build_with_reranker(reranker)
+    adapter.dense = [hit("c_a", 0.9), hit("c_b", 0.8), hit("c_c", 0.7)]
+    adapter.sparse = []
+
+    results = await service.retrieve("notice")
+
+    assert [result.chunk_id for result in results] == ["c_c", "c_b", "c_a"]
+    assert results[0].rerank_score is not None
+    assert [result.final_rank for result in results] == [1, 2, 3]
+
+
+async def test_the_reranker_sees_the_whole_shortlist_not_just_top_k() -> None:
+    reranker = ScriptedReranker()
+    configured = settings(retrieval={"top_k": 2, "rerank_top_n": 20})
+    service, adapter = build_with_reranker(reranker, configured)
+    adapter.dense = [hit(f"c_{index}", 1.0 - index / 10) for index in range(6)]
+    adapter.sparse = []
+
+    results = await service.retrieve("notice")
+
+    assert reranker.calls[0][1] == 6
+    assert len(results) == 2
+
+
+async def test_a_failing_reranker_degrades_instead_of_failing_the_query() -> None:
+    reranker = ScriptedReranker(
+        RetrievalError("model would not load", code=ErrorCode.RERANK_FAILED)
+    )
+    service, adapter = build_with_reranker(reranker)
+    adapter.dense = [hit("c_a", 0.9), hit("c_b", 0.8)]
+    adapter.sparse = []
+
+    result = await service.search("notice")
+
+    assert result.mode == HYBRID_ONLY_MODE
+    assert result.degraded is True
+    assert [chunk.chunk_id for chunk in result.chunks] == ["c_a", "c_b"]
+
+
+async def test_a_successful_rerank_reports_full_mode() -> None:
+    service, adapter = build_with_reranker(ScriptedReranker())
+    adapter.dense = [hit("c_a", 0.9)]
+    adapter.sparse = []
+
+    result = await service.search("notice")
+
+    assert result.mode == FULL_MODE
+    assert result.degraded is False
+
+
+async def test_reranking_is_skipped_when_the_config_disables_it() -> None:
+    reranker = ScriptedReranker()
+    configured = settings(retrieval={"rerank": False})
+    service, adapter = build_with_reranker(reranker, configured)
+    adapter.dense = [hit("c_a", 0.9), hit("c_b", 0.8)]
+    adapter.sparse = []
+
+    result = await service.search("notice")
+
+    assert reranker.calls == []
+    assert result.mode == FULL_MODE
+    assert [chunk.chunk_id for chunk in result.chunks] == ["c_a", "c_b"]

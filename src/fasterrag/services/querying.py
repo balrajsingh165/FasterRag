@@ -14,14 +14,16 @@ Three properties the documentation asks for, and how they hold here:
 * **Fusion happens here, with the configured ``retrieval.rrf_k``**, rather than in the
   backend, because a backend's built-in fusion does not expose that constant.
 
-Reranking is not part of this stage; it consumes what this returns
-(``docs/architecture.md`` §6).
+Reranking runs last, over the fused shortlist, and truncates to ``retrieval.top_k``. A
+reranker that cannot load or score degrades the response to ``hybrid_only`` rather than
+failing the query, because unranked results beat no answer (D4).
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from fasterrag.adapters.embeddings.tiering import TieringRouter
@@ -34,14 +36,32 @@ from fasterrag.adapters.vectordb.base import (
 )
 from fasterrag.adapters.vectordb.qdrant import POINT_ID_PAYLOAD_KEY
 from fasterrag.config.schema import Settings
+from fasterrag.core.rerank import Reranker
 from fasterrag.core.retrieval.bm25 import encode_query
 from fasterrag.core.retrieval.fusion import Ranking, rrf_fuse
 from fasterrag.core.retrieval.models import DENSE_LEG, SPARSE_LEG, ScoredChunk
+from fasterrag.errors import FasterRagError
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["RetrievalService"]
+FULL_MODE = "full"
+HYBRID_ONLY_MODE = "hybrid_only"
+
+__all__ = ["FULL_MODE", "HYBRID_ONLY_MODE", "Retrieval", "RetrievalService"]
 
 _logger = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class Retrieval:
+    """Retrieved chunks and how completely the pipeline ran to produce them."""
+
+    chunks: list[ScoredChunk] = field(default_factory=list)
+    mode: str = FULL_MODE
+
+    @property
+    def degraded(self) -> bool:
+        """Return whether a stage was skipped, which callers must surface to the user."""
+        return self.mode != FULL_MODE
 
 
 class RetrievalService:
@@ -52,6 +72,7 @@ class RetrievalService:
         settings: Settings,
         adapter: VectorDBAdapter,
         router: TieringRouter,
+        reranker: Reranker | None = None,
     ) -> None:
         """Build the service.
 
@@ -61,10 +82,13 @@ class RetrievalService:
             router: Supplies the query embedding through its default adapter; queries are
                 not tier-routed, because a query has no document metadata to route on and
                 must be embedded by the same model that embedded the corpus.
+            reranker: Reorders the shortlist. Omitted when ``retrieval.rerank`` is off, and
+                a failing one degrades the response rather than failing the query.
         """
         self.settings = settings
         self.adapter = adapter
         self.router = router
+        self.reranker = reranker
 
     async def retrieve(
         self,
@@ -85,26 +109,68 @@ class RetrievalService:
         Returns:
             Chunks ordered best first, each carrying the rank and score every leg gave it.
         """
+        return (await self.search(text, collection=collection, top_k=top_k, filters=filters)).chunks
+
+    async def search(
+        self,
+        text: str,
+        *,
+        collection: str | None = None,
+        top_k: int | None = None,
+        filters: Filter | None = None,
+    ) -> Retrieval:
+        """Retrieve, and report which stages actually ran.
+
+        The detailed form. Generation needs the mode so a degraded answer can be labelled
+        as one rather than passed off as a full-quality result (D4).
+        """
         validate_filter(filters)
         retrieval = self.settings.retrieval
         target = collection or self.settings.vector_db.collection.default_name
         limit = top_k or retrieval.top_k
-        candidates = max(retrieval.rerank_top_n, limit)
+        candidates = max(retrieval.rerank_top_n, limit) if self._reranking else limit
 
         legs = await self._run_legs(text, target, candidates, filters)
         fused = self._fuse(legs)
-        results = self._assemble(fused, legs, limit)
+        shortlist = self._assemble(fused, legs, candidates)
+
+        results, mode = await self._rerank(text, shortlist, limit)
 
         _logger.info(
             "retrieved",
             extra={
                 "collection": target,
                 "hybrid": retrieval.hybrid,
+                "mode": mode,
                 "candidates": {name: len(points) for name, points in legs.items()},
                 "returned": len(results),
             },
         )
-        return results
+        return Retrieval(chunks=results, mode=mode)
+
+    @property
+    def _reranking(self) -> bool:
+        """Return whether a reranker will run, which decides how wide to retrieve."""
+        return self.settings.retrieval.rerank and self.reranker is not None
+
+    async def _rerank(
+        self, text: str, shortlist: list[ScoredChunk], limit: int
+    ) -> tuple[list[ScoredChunk], str]:
+        """Rerank the shortlist, degrading to the fused order if the reranker fails."""
+        reranker = self.reranker
+        if reranker is None or not self.settings.retrieval.rerank:
+            return shortlist[:limit], FULL_MODE
+
+        try:
+            reordered = await reranker.rerank(text, shortlist)
+        except FasterRagError as exc:
+            _logger.warning(
+                "reranking failed, serving fused results instead",
+                extra={"code": exc.code.value, "trace_id": exc.trace_id, "mode": HYBRID_ONLY_MODE},
+            )
+            return shortlist[:limit], HYBRID_ONLY_MODE
+
+        return reordered[:limit], FULL_MODE
 
     async def _run_legs(
         self,
