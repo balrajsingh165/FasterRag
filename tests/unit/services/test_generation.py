@@ -64,13 +64,34 @@ def build(
     error: Exception | None = None,
     mode: str = FULL_MODE,
     chunks: list[ScoredChunk] | None = None,
+    grounded_or_refuse: bool = False,
+    verdict: str | None = None,
+    grader_error: Exception | None = None,
+    threshold: float = 0.7,
 ) -> tuple[GenerationService, ScriptedLLM]:
-    settings = Settings()
+    settings = Settings.model_validate(
+        {
+            "generation": {
+                "grounded_or_refuse": grounded_or_refuse,
+                "faithfulness_threshold": threshold,
+            }
+        }
+    )
     llm = ScriptedLLM(settings, text=answer, error=error)
     retrieval = ScriptedRetrieval(
         chunks if chunks is not None else [chunk("c_a", "Either party may terminate.")], mode
     )
-    service = GenerationService(settings, retrieval, llm)  # type: ignore[arg-type]
+    grader = (
+        ScriptedLLM(settings, text=verdict or "", error=grader_error)
+        if grounded_or_refuse
+        else None
+    )
+    service = GenerationService(
+        settings,
+        retrieval,  # type: ignore[arg-type]
+        llm,
+        grader=grader,
+    )
     return service, llm
 
 
@@ -152,6 +173,7 @@ async def test_the_answer_serializes_to_the_documented_body() -> None:
         "timings_ms",
         "degraded",
         "mode",
+        "faithfulness",
         "trace_id",
     }
 
@@ -249,6 +271,163 @@ async def test_an_empty_corpus_still_produces_a_well_formed_stream() -> None:
     assert kinds[0] == "meta"
     assert kinds[-1] == "done"
     assert next(e for e in events if e.type == "citations").data["citations"] == []
+
+
+async def test_faithfulness_is_not_scored_while_the_flag_is_off() -> None:
+    service, _ = build()
+
+    result = await service.answer("q")
+
+    assert result.faithfulness is None
+    assert "grade" not in result.timings_ms
+    assert result.insufficient_evidence is False
+
+
+async def test_a_well_grounded_answer_passes_the_gate() -> None:
+    service, _ = build(grounded_or_refuse=True, verdict='{"score": 0.93}')
+
+    result = await service.answer("q")
+
+    assert result.answer is not None
+    assert result.faithfulness == pytest.approx(0.93)
+    assert result.insufficient_evidence is False
+    assert "grade" in result.timings_ms
+
+
+async def test_a_low_score_withholds_the_answer() -> None:
+    service, _ = build(
+        grounded_or_refuse=True,
+        verdict='{"score": 0.38, "unsupported_claims": ["signed in 2019"]}',
+    )
+
+    result = await service.answer("q")
+
+    assert result.answer is None
+    assert result.insufficient_evidence is True
+    assert result.faithfulness == pytest.approx(0.38)
+    assert result.threshold == pytest.approx(0.7)
+
+
+async def test_a_refusal_serializes_to_the_documented_body() -> None:
+    service, _ = build(grounded_or_refuse=True, verdict='{"score": 0.38}')
+
+    payload = (await service.answer("q")).as_dict()
+
+    assert payload["code"] == "INSUFFICIENT_EVIDENCE"
+    assert payload["answer"] is None
+    assert payload["threshold"] == pytest.approx(0.7)
+    assert set(payload) == {
+        "code",
+        "answer",
+        "best_candidates",
+        "faithfulness",
+        "threshold",
+        "trace_id",
+    }
+
+
+async def test_a_refusal_offers_the_candidates_it_declined_to_answer_from() -> None:
+    service, _ = build(
+        grounded_or_refuse=True,
+        verdict='{"score": 0.1}',
+        chunks=[chunk("c_a", "text a", source_uri="s3://a.pdf"), chunk("c_b", "text b")],
+    )
+
+    candidates = (await service.answer("q")).best_candidates
+
+    assert [candidate["chunk_id"] for candidate in candidates] == ["c_a", "c_b"]
+    assert candidates[0]["source"] == "s3://a.pdf"
+    assert candidates[0]["score"] == pytest.approx(0.5)
+
+
+async def test_a_grader_outage_returns_the_answer_ungated() -> None:
+    service, _ = build(grounded_or_refuse=True, grader_error=GenerationError("grader is down"))
+
+    result = await service.answer("q")
+
+    assert result.answer is not None
+    assert result.faithfulness is None
+    assert result.insufficient_evidence is False
+
+
+async def test_an_unparseable_verdict_returns_the_answer_ungated() -> None:
+    service, _ = build(grounded_or_refuse=True, verdict="I am not sure how to grade this.")
+
+    result = await service.answer("q")
+
+    assert result.answer is not None
+    assert result.faithfulness is None
+
+
+async def test_a_score_at_the_threshold_is_answered() -> None:
+    service, _ = build(grounded_or_refuse=True, verdict='{"score": 0.7}', threshold=0.7)
+
+    result = await service.answer("q")
+
+    assert result.answer is not None
+
+
+async def test_the_gate_never_fires_on_an_extractive_fallback() -> None:
+    service, _ = build(
+        grounded_or_refuse=True,
+        error=GenerationError("provider is down"),
+        verdict='{"score": 0.0}',
+    )
+
+    result = await service.answer("q")
+
+    assert result.mode == EXTRACTIVE_MODE
+    assert result.answer is not None
+    assert result.insufficient_evidence is False
+
+
+async def test_the_usage_event_reports_the_faithfulness_score() -> None:
+    service, _ = build(grounded_or_refuse=True, verdict='{"score": 0.93}')
+
+    usage = next(event for event in await collect(service) if event.type == "usage")
+
+    assert usage.data["faithfulness"] == pytest.approx(0.93)
+
+
+async def test_a_gated_stream_holds_every_token_until_the_verdict_is_in() -> None:
+    service, _ = build(grounded_or_refuse=True, verdict='{"score": 0.38}')
+
+    events = await collect(service)
+    kinds = [event.type for event in events]
+
+    assert "token" not in kinds
+    assert kinds == ["meta", "insufficient_evidence", "done"]
+
+
+async def test_a_refused_stream_still_completes() -> None:
+    service, _ = build(grounded_or_refuse=True, verdict='{"score": 0.38}')
+
+    events = await collect(service)
+
+    assert events[-1].type == "done"
+    assert events[1].data["code"] == "INSUFFICIENT_EVIDENCE"
+    assert events[1].data["best_candidates"]
+
+
+async def test_a_passing_gated_stream_delivers_the_whole_answer() -> None:
+    service, _ = build(
+        grounded_or_refuse=True, verdict='{"score": 0.93}', answer="thirty days [^c_a]"
+    )
+
+    events = await collect(service)
+    kinds = [event.type for event in events]
+    text = "".join(event.data["text"] for event in events if event.type == "token")
+
+    assert kinds == ["meta", "token", "citations", "usage", "done"]
+    assert text.strip() == "thirty days [^c_a]"
+
+
+async def test_an_ungated_stream_still_emits_tokens_incrementally() -> None:
+    service, _ = build(answer="one two three")
+
+    tokens = [event for event in await collect(service) if event.type == "token"]
+
+    assert len(tokens) == 3
 
 
 @pytest.mark.parametrize("budget", [0, 5])

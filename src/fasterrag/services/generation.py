@@ -17,12 +17,23 @@ papered over by emitting it anyway.
 When generation fails outright the degradation ladder serves an ``extractive`` answer — the
 retrieved passages themselves — rather than nothing (D4). Retrieval already succeeded at that
 point, so the user gets the material even though the model could not summarize it.
+
+Grounded-or-refuse (D5) adds a P3 grading call after generation. Below
+``generation.faithfulness_threshold`` the answer is withheld and the caller gets the
+retrieved candidates instead of a guess. An ungraded answer — grader down, unparseable
+response — is always returned: a grader outage is not evidence of hallucination.
+
+Refusal and streaming genuinely conflict, because a token cannot be unsaid once it has been
+sent. With ``grounded_or_refuse`` enabled the stream therefore generates into a buffer and
+grades before emitting any ``token`` event, trading time-to-first-token for the guarantee the
+flag exists to provide. The flag defaults to ``false``, so that trade is only ever made by an
+operator who asked for it.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -30,25 +41,30 @@ from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.chunking.models import EstimatingTokenCounter, TokenCounter
 from fasterrag.core.context import AssembledContext, Citation, assemble_context
+from fasterrag.core.faithfulness import UNGRADED, FaithfulnessVerdict, grade
 from fasterrag.core.generation import (
     P1_SYSTEM_PROMPT,
     P1_TEMPLATE_VERSION,
     build_prompt,
     resolve_citations,
 )
-from fasterrag.errors import FasterRagError
+from fasterrag.core.retrieval.models import ScoredChunk
+from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import current_trace_id, get_logger
 from fasterrag.services.querying import FULL_MODE, RetrievalService
 
 __all__ = [
     "DEFAULT_CONTEXT_BUDGET_TOKENS",
     "EXTRACTIVE_MODE",
+    "MAXIMUM_BEST_CANDIDATES",
     "Answer",
     "GenerationService",
     "QueryEvent",
 ]
 
 EXTRACTIVE_MODE: Final = "extractive"
+
+MAXIMUM_BEST_CANDIDATES: Final = 5
 
 # CRITICAL: no configuration key carries a provider's context-window size, so this is the
 # budget used when a caller supplies none. It is deliberately conservative: overflowing a
@@ -78,14 +94,38 @@ class Answer:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     timings_ms: dict[str, int] = field(default_factory=dict)
+    faithfulness: float | None = None
+    threshold: float | None = None
+    best_candidates: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def degraded(self) -> bool:
         """Return whether any stage was skipped or substituted."""
         return self.mode != FULL_MODE
 
+    @property
+    def insufficient_evidence(self) -> bool:
+        """Return whether grounded-or-refuse withheld the answer (D5)."""
+        return self.answer is None
+
     def as_dict(self) -> dict[str, Any]:
-        """Return the non-streaming response body."""
+        """Return the non-streaming response body.
+
+        A refusal is a different document from an answer: it carries the machine-readable
+        code, the score and threshold that produced it, and the candidates the caller can
+        inspect. Both shapes are HTTP 200 — declining to guess is a correct outcome, not a
+        transport error.
+        """
+        if self.insufficient_evidence:
+            return {
+                "code": ErrorCode.INSUFFICIENT_EVIDENCE.value,
+                "answer": None,
+                "best_candidates": self.best_candidates,
+                "faithfulness": self.faithfulness,
+                "threshold": self.threshold,
+                "trace_id": self.trace_id,
+            }
+
         return {
             "answer": self.answer,
             "citations": [citation.as_dict() for citation in self.citations],
@@ -96,6 +136,7 @@ class Answer:
             "timings_ms": self.timings_ms,
             "degraded": self.degraded,
             "mode": self.mode,
+            "faithfulness": self.faithfulness,
             "trace_id": self.trace_id,
         }
 
@@ -103,6 +144,36 @@ class Answer:
 def _extractive_answer(context: AssembledContext) -> str:
     """Return the retrieved passages as the answer of last resort."""
     return context.text
+
+
+def _best_candidates(chunks: Sequence[ScoredChunk]) -> list[dict[str, Any]]:
+    """Return what a refusal offers instead of an answer.
+
+    The top-ranked chunks with their sources and scores, so a caller told "not enough
+    evidence" can see what evidence there was and judge the refusal for themselves.
+    """
+    return [
+        {
+            "chunk_id": chunk.chunk_id,
+            "source": chunk.source,
+            "score": round(
+                chunk.rerank_score if chunk.rerank_score is not None else chunk.rrf_score, 6
+            ),
+        }
+        for chunk in chunks[:MAXIMUM_BEST_CANDIDATES]
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class _Prepared:
+    """Everything retrieval and assembly produced, before a model has seen it."""
+
+    context: AssembledContext
+    texts: list[str]
+    prompt: str
+    mode: str
+    chunks: list[ScoredChunk]
+    timings: dict[str, int]
 
 
 class GenerationService:
@@ -114,6 +185,7 @@ class GenerationService:
         retrieval: RetrievalService,
         llm: LLMAdapter,
         *,
+        grader: LLMAdapter | None = None,
         counter: TokenCounter | None = None,
         context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
     ) -> None:
@@ -123,6 +195,9 @@ class GenerationService:
             settings: Validated configuration.
             retrieval: Supplies the chunks an answer is built from.
             llm: The generation provider.
+            grader: The P3 faithfulness provider. Defaults to ``llm``; passing a separate
+                adapter is how a cheaper grading model is selected. It is a distinct call
+                either way, so the grader never sees P1's instructions.
             counter: Token counter used for context budgeting.
             context_budget_tokens: Tokens available for context, which the caller sizes
                 from the model's window minus room for the answer.
@@ -130,8 +205,14 @@ class GenerationService:
         self.settings = settings
         self.retrieval = retrieval
         self.llm = llm
+        self.grader = grader or llm
         self.counter = counter or EstimatingTokenCounter()
         self.context_budget_tokens = context_budget_tokens
+
+    @property
+    def grounded_or_refuse(self) -> bool:
+        """Return whether low-faithfulness answers are withheld (D5)."""
+        return self.settings.generation.grounded_or_refuse
 
     async def _prepare(
         self,
@@ -140,8 +221,8 @@ class GenerationService:
         collection: str | None,
         top_k: int | None,
         filters: Mapping[str, Any] | None,
-    ) -> tuple[AssembledContext, str, str, dict[str, int]]:
-        """Retrieve and assemble, returning the context, prompt, mode, and timings."""
+    ) -> _Prepared:
+        """Retrieve and assemble everything generation and grading both need."""
         started = time.perf_counter()
         retrieved = await self.retrieval.search(
             question, collection=collection, top_k=top_k, filters=filters
@@ -158,7 +239,54 @@ class GenerationService:
         prompt = build_prompt(question, context, texts)
         assemble_ms = int((time.perf_counter() - started) * 1000)
 
-        return context, prompt, retrieved.mode, {"retrieve": retrieve_ms, "assemble": assemble_ms}
+        return _Prepared(
+            context=context,
+            texts=texts,
+            prompt=prompt,
+            mode=retrieved.mode,
+            chunks=retrieved.chunks,
+            timings={"retrieve": retrieve_ms, "assemble": assemble_ms},
+        )
+
+    async def _grade(
+        self, question: str, answer: str, prepared: _Prepared, timings: dict[str, int]
+    ) -> FaithfulnessVerdict:
+        """Score an answer when D5 is on, recording how long it took."""
+        if not self.grounded_or_refuse:
+            return UNGRADED
+
+        started = time.perf_counter()
+        verdict = await grade(self.grader, question, answer, prepared.context, prepared.texts)
+        timings["grade"] = int((time.perf_counter() - started) * 1000)
+        return verdict
+
+    def _refusal(
+        self,
+        prepared: _Prepared,
+        verdict: FaithfulnessVerdict,
+        trace_id: str,
+        timings: dict[str, int],
+    ) -> Answer:
+        """Build the INSUFFICIENT_EVIDENCE response for a withheld answer."""
+        threshold = self.settings.generation.faithfulness_threshold
+        _logger.info(
+            "answer withheld below the faithfulness threshold",
+            extra={
+                "trace_id": trace_id,
+                "faithfulness": verdict.score,
+                "threshold": threshold,
+                "unsupported_claims": len(verdict.unsupported_claims),
+            },
+        )
+        return Answer(
+            answer=None,
+            mode=prepared.mode,
+            trace_id=trace_id,
+            timings_ms=timings,
+            faithfulness=verdict.score,
+            threshold=threshold,
+            best_candidates=_best_candidates(prepared.chunks),
+        )
 
     async def answer(
         self,
@@ -170,13 +298,14 @@ class GenerationService:
     ) -> Answer:
         """Answer a question completely, without streaming."""
         trace_id = current_trace_id()
-        context, prompt, mode, timings = await self._prepare(
+        prepared = await self._prepare(
             question, collection=collection, top_k=top_k, filters=filters
         )
+        timings = prepared.timings
 
         started = time.perf_counter()
         try:
-            completion = await self.llm.complete(prompt, system=P1_SYSTEM_PROMPT)
+            completion = await self.llm.complete(prepared.prompt, system=P1_SYSTEM_PROMPT)
         except FasterRagError as exc:
             timings["generate"] = int((time.perf_counter() - started) * 1000)
             _logger.warning(
@@ -184,22 +313,27 @@ class GenerationService:
                 extra={"code": exc.code.value, "trace_id": trace_id, "mode": EXTRACTIVE_MODE},
             )
             return Answer(
-                answer=_extractive_answer(context),
-                citations=list(context.citations),
+                answer=_extractive_answer(prepared.context),
+                citations=list(prepared.context.citations),
                 mode=EXTRACTIVE_MODE,
                 trace_id=trace_id,
                 timings_ms=timings,
             )
 
         timings["generate"] = int((time.perf_counter() - started) * 1000)
+        verdict = await self._grade(question, completion.text, prepared, timings)
+        if verdict.withholds(self.settings.generation.faithfulness_threshold):
+            return self._refusal(prepared, verdict, trace_id, timings)
+
         return Answer(
             answer=completion.text,
-            citations=resolve_citations(completion.text, context.citations),
-            mode=mode,
+            citations=resolve_citations(completion.text, prepared.context.citations),
+            mode=prepared.mode,
             trace_id=trace_id,
             prompt_tokens=completion.prompt_tokens,
             completion_tokens=completion.completion_tokens,
             timings_ms=timings,
+            faithfulness=verdict.score,
         )
 
     async def stream(
@@ -210,23 +344,37 @@ class GenerationService:
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[QueryEvent]:
-        """Answer a question as a stream of events in the documented order."""
+        """Answer a question as a stream of events in the documented order.
+
+        With ``generation.grounded_or_refuse`` enabled, no ``token`` event is emitted until
+        the whole answer has been graded, because a refusal after the text has left is not
+        a refusal. A withheld answer produces an ``insufficient_evidence`` event in place of
+        the token, citation, and usage events, then ``done`` — the query completed, so the
+        stream is not truncated.
+        """
         trace_id = current_trace_id()
-        context, prompt, mode, timings = await self._prepare(
+        prepared = await self._prepare(
             question, collection=collection, top_k=top_k, filters=filters
         )
+        timings = prepared.timings
 
         yield QueryEvent(
             type="meta",
-            data={"trace_id": trace_id, "mode": mode, "degraded": mode != FULL_MODE},
+            data={
+                "trace_id": trace_id,
+                "mode": prepared.mode,
+                "degraded": prepared.mode != FULL_MODE,
+            },
         )
 
         started = time.perf_counter()
         parts: list[str] = []
+        gated = self.grounded_or_refuse
         try:
-            async for delta in self.llm.stream(prompt, system=P1_SYSTEM_PROMPT):
+            async for delta in self.llm.stream(prepared.prompt, system=P1_SYSTEM_PROMPT):
                 parts.append(delta)
-                yield QueryEvent(type="token", data={"text": delta})
+                if not gated:
+                    yield QueryEvent(type="token", data={"text": delta})
         except FasterRagError as exc:
             _logger.warning(
                 "generation stream failed",
@@ -246,11 +394,22 @@ class GenerationService:
         answer = "".join(parts)
         timings["generate"] = int((time.perf_counter() - started) * 1000)
 
+        verdict = await self._grade(question, answer, prepared, timings)
+        if verdict.withholds(self.settings.generation.faithfulness_threshold):
+            refusal = self._refusal(prepared, verdict, trace_id, timings)
+            yield QueryEvent(type="insufficient_evidence", data=refusal.as_dict())
+            yield QueryEvent(type="done", data={})
+            return
+
+        if gated:
+            yield QueryEvent(type="token", data={"text": answer})
+
         yield QueryEvent(
             type="citations",
             data={
                 "citations": [
-                    citation.as_dict() for citation in resolve_citations(answer, context.citations)
+                    citation.as_dict()
+                    for citation in resolve_citations(answer, prepared.context.citations)
                 ]
             },
         )
@@ -258,10 +417,11 @@ class GenerationService:
             type="usage",
             data={
                 "usage": {
-                    "prompt_tokens": self.counter.count(prompt),
+                    "prompt_tokens": self.counter.count(prepared.prompt),
                     "completion_tokens": self.counter.count(answer),
                 },
                 "timings_ms": timings,
+                "faithfulness": verdict.score,
                 "template_version": P1_TEMPLATE_VERSION,
             },
         )

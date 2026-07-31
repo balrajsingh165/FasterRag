@@ -176,7 +176,8 @@ _(empty)_
 ### S6 — Generation
 
 - [x] TASK-0037: Implement generation service with SSE streaming (meta/token/citations/usage/done/error events) — ✅ 2026-07-31
-- [ ] TASK-0078: Implement grounded-or-refuse mode with faithfulness scoring and INSUFFICIENT_EVIDENCE responses (D5)
+- [x] TASK-0078: Implement grounded-or-refuse mode with faithfulness scoring and INSUFFICIENT_EVIDENCE responses (D5) — ✅ 2026-07-31
+- [ ] TASK-0123: Maintainer review — no doc specified how grounded-or-refuse behaves while streaming, and refusing after tokens have been sent is impossible. Implemented as: with `generation.grounded_or_refuse: true` the stream buffers the answer, grades it, then emits either the whole answer or one `insufficient_evidence` event followed by `done`. This trades time-to-first-token for the guarantee, only when the flag is on. Recorded in `docs/api-reference.md` §Streaming semantics; confirm or choose the alternative (stream tokens and emit a retraction event)
 
 ### S7 — Semantic cache
 

@@ -168,6 +168,16 @@ event: done       data: {}
 
 On mid-stream failure: `event: error` with a problem document, then the stream closes. Clients must treat a missing `done` as an incomplete answer.
 
+Grounded-or-refuse while streaming: a token cannot be unsaid once sent, so with `generation.grounded_or_refuse: true` no `token` event is emitted until the whole answer has been graded — time-to-first-token is traded for the guarantee the flag exists to provide, and the flag defaults to `false` so the trade is only made on request. A withheld answer replaces the `token`, `citations`, and `usage` events with one `insufficient_evidence` event carrying the same body as the non-streamed refusal, followed by `done`:
+
+```
+event: meta                   data: {"trace_id": "...", "mode": "full", "degraded": false}
+event: insufficient_evidence  data: {"code": "INSUFFICIENT_EVIDENCE", "answer": null, "best_candidates": [...], "faithfulness": 0.38, "threshold": 0.7, "trace_id": "..."}
+event: done                   data: {}
+```
+
+`done` is still sent: the query completed and declined, which is a finished response, not a truncated one.
+
 ## Collections
 
 | Method + path | Purpose | Success | Errors |
