@@ -1,4 +1,7 @@
-# Local quality gates mirroring docs/testing-strategy.md §2. Install with: pre-commit install --install-hooks -t pre-commit -t commit-msg
+# Local quality gates mirroring docs/testing-strategy.md §2.
+# Install with: pre-commit install
+# default_install_hook_types below wires both the pre-commit and commit-msg stages, so a
+# single install command covers the commit-message rule too.
 default_install_hook_types: [pre-commit, commit-msg]
 
 repos:
@@ -14,7 +17,7 @@ repos:
       - id: trailing-whitespace
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+    rev: v0.16.0
     hooks:
       - id: ruff
         args: [--fix]
@@ -29,15 +32,18 @@ repos:
         pass_filenames: false
         types: [python]
 
+      # Only the fast tests run here. Integration needs a Docker daemon and eval downloads
+      # model weights; making either a commit gate would block committing on a laptop with
+      # Docker stopped. CI runs them as separate jobs.
       - id: pytest-unit
         name: pytest (unit)
-        entry: pytest -q
+        entry: pytest -q -m "not integration and not eval"
         language: system
         pass_filenames: false
         types: [python]
 
       - id: commit-message-rule
-        name: single-line commit message, no trailers
+        name: conventional commit message, single line, no trailers
         entry: python scripts/check_commit_message.py
         language: system
         stages: [commit-msg]

@@ -1,9 +1,16 @@
 """Enforce the fasterRag commit-message rule.
 
-Commit messages must be a single line with no trailers of any kind and no AI
-attribution (``docs/CONTRIBUTING.md`` §1, CI gate 8 in ``docs/testing-strategy.md`` §2).
-Runs in two modes: against a commit-message file (the ``commit-msg`` pre-commit hook)
-or against a revision range (CI), so the same rule is enforced locally and remotely.
+Commit messages are a single Conventional Commits line with no trailers and no AI
+attribution (``docs/CONTRIBUTING.md`` §1, CI gate 8 in ``docs/testing-strategy.md`` §2):
+
+    <type>(<optional scope>)<optional !>: <description>
+
+The type prefix makes history machine-readable — release notes and SemVer bumps can be
+derived from it rather than hand-curated — while the single-line rule keeps every commit
+skimmable in a log.
+
+Runs in two modes: against a commit-message file (the ``commit-msg`` pre-commit hook) or
+against a revision range (CI), so the same rule is enforced locally and remotely.
 """
 
 from __future__ import annotations
@@ -13,8 +20,27 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Final
 
-FORBIDDEN_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+TYPES: Final[tuple[str, ...]] = (
+    "build",
+    "chore",
+    "ci",
+    "docs",
+    "feat",
+    "fix",
+    "perf",
+    "refactor",
+    "revert",
+    "style",
+    "test",
+)
+
+CONVENTIONAL: Final = re.compile(rf"^(?:{'|'.join(TYPES)})(?:\([a-z0-9][a-z0-9._\-/]*\))?!?: .+")
+
+MAXIMUM_LENGTH: Final = 100
+
+FORBIDDEN_PATTERNS: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
     (re.compile(r"co-authored-by", re.IGNORECASE), "trailer 'Co-Authored-By' is not allowed"),
     (re.compile(r"signed-off-by", re.IGNORECASE), "trailer 'Signed-off-by' is not allowed"),
     (re.compile(r"generated with", re.IGNORECASE), "AI attribution is not allowed"),
@@ -31,16 +57,30 @@ def significant_lines(message: str) -> list[str]:
 
 
 def check_message(message: str) -> list[str]:
-    """Return every rule violation in ``message``; an empty list means the message passes."""
+    """Return every rule violation in ``message``; an empty list means it passes."""
     violations: list[str] = []
     lines = significant_lines(message)
 
     if not lines:
-        violations.append("commit message is empty")
-    elif len(lines) > 1:
+        return ["commit message is empty"]
+
+    if len(lines) > 1:
         violations.append(
             f"commit message must be a single line (found {len(lines)} lines); "
             "no multi-line bodies and no trailers"
+        )
+
+    subject = lines[0]
+    if not CONVENTIONAL.match(subject):
+        violations.append(
+            f"subject must start with a Conventional Commits type: {', '.join(TYPES)}. "
+            "Write '<type>: <description>', optionally '<type>(<scope>): <description>', "
+            "and '<type>!: ' for a breaking change"
+        )
+
+    if len(subject) > MAXIMUM_LENGTH:
+        violations.append(
+            f"subject is {len(subject)} characters, above the {MAXIMUM_LENGTH}-character limit"
         )
 
     for pattern, reason in FORBIDDEN_PATTERNS:
@@ -92,8 +132,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if failed:
         sys.stderr.write(
-            "\nfasterRag requires single-line commit messages with no trailers "
-            "(docs/CONTRIBUTING.md §1).\n"
+            "\nfasterRag requires single-line Conventional Commits messages with no trailers "
+            "(docs/CONTRIBUTING.md §1). Example: feat(retrieval): add hybrid fusion\n"
         )
         return 1
     return 0
