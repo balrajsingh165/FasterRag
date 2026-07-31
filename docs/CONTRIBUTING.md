@@ -5,11 +5,14 @@ These rules are non-negotiable and enforced by review, pre-commit hooks, and CI.
 ## 0. Local setup
 
 ```bash
+python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"        # tooling: ruff, mypy, pytest, pre-commit
 pre-commit install             # installs both the pre-commit and commit-msg hooks
 ```
 
 One `install` covers both stages: `.pre-commit-config.yaml` sets `default_install_hook_types`, so the commit-message rule is wired without a second command.
+
+**Commit with the environment active.** The `mypy` and `pytest` hooks are `language: system` — they deliberately run the project's own interpreter rather than a copy pre-commit builds, because `mypy --strict` has to see the installed package and its stubs. Committing from a shell where `.venv` is not on `PATH` fails them with `Executable not found` or a wall of `ModuleNotFoundError`; activate the environment rather than reaching for `--no-verify`.
 
 The hooks run ruff, `ruff format`, `mypy --strict`, and the **fast tests only** — `pytest -m "not integration and not eval"`. Integration needs a Docker daemon and eval downloads model weights; gating every commit on either would make committing impossible on a laptop with Docker stopped. CI runs those as separate jobs ([testing-strategy.md](testing-strategy.md) §2), so a clean pre-commit run means the fast gates agree, not that the whole pyramid passed.
 
