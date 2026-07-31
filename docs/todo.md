@@ -175,7 +175,7 @@ _(empty)_
 
 ### S6 — Generation
 
-- [ ] TASK-0037: Implement generation service with SSE streaming (meta/token/citations/usage/done/error events)
+- [x] TASK-0037: Implement generation service with SSE streaming (meta/token/citations/usage/done/error events) — ✅ 2026-07-31
 - [ ] TASK-0078: Implement grounded-or-refuse mode with faithfulness scoring and INSUFFICIENT_EVIDENCE responses (D5)
 
 ### S7 — Semantic cache
