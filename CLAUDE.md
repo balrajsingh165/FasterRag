@@ -27,6 +27,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 ## Commands (documented intentions — the code does not exist yet)
 
 - Build: `pip install -e ".[dev]"`
+- Hooks: `pre-commit install` (wires both pre-commit and commit-msg stages; runs fast tests only, not integration/eval)
 - Lint: `ruff check .` and `ruff format --check .`
 - Typecheck: `mypy src/` (strict; zero errors)
 - Test: `pytest` (unit) / `pytest -m integration` (integration) / `pytest -m eval` (retrieval eval harness)
@@ -48,7 +49,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 
 ## Git standards
 
-- **Single-line commit messages only.** No multi-line bodies. No trailers of any kind.
+- **Conventional Commits, single line only.** `<type>(<optional scope>): <description>`, max 100 chars, no body, no trailers. Types: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`. Use `<type>!:` for a breaking change. Enforced by `scripts/check_commit_message.py` (commit-msg hook + CI).
 - **Absolutely NO Claude/AI attribution in commits** — no `Co-Authored-By: Claude`, no `Generated with Claude Code`, no AI signatures.
 - **Trunk-based: all work lands on `main`.** Do NOT create feature branches (maintainer instruction, 2026-07-30). Every commit must leave `main` green — lint, types, and tests pass before it is made.
 - Commit frequently — small, coherent, revertable commits. Tag slice boundaries (`v0.x.0-sN`) during the build phase.
