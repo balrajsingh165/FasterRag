@@ -126,6 +126,7 @@
 ### Slice S6 — generation (build phase, in progress)
 
 - [x] TASK-0036: Implement context assembly (token budgeter, dedup, span-level citations) — ✅ 2026-07-30
+- [x] TASK-0027: Implement LLM provider adapters (OpenAI, Anthropic, Cohere, Ollama, OpenAI-compatible; streaming) — ✅ 2026-07-30
 
 ### Workflow
 
@@ -174,7 +175,6 @@ _(empty)_
 
 ### S6 — Generation
 
-- [ ] TASK-0027: Implement LLM provider adapters (OpenAI, Anthropic, Cohere, Ollama, OpenAI-compatible; streaming)
 - [ ] TASK-0037: Implement generation service with SSE streaming (meta/token/citations/usage/done/error events)
 - [ ] TASK-0078: Implement grounded-or-refuse mode with faithfulness scoring and INSUFFICIENT_EVIDENCE responses (D5)
 
