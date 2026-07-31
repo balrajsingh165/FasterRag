@@ -80,6 +80,39 @@ class VectorDBContract:
         await adapter.create_collection(spec)
         await adapter.create_collection(spec)
 
+    async def test_a_created_collection_appears_in_the_listing(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await adapter.create_collection(CollectionSpec(name=collection, dimensions=DIMENSIONS))
+
+        listed = {info.name: info for info in await adapter.list_collections()}
+
+        assert collection in listed
+        assert listed[collection].dimensions == DIMENSIONS
+
+    async def test_the_listing_counts_what_was_written(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await adapter.create_collection(CollectionSpec(name=collection, dimensions=DIMENSIONS))
+        await self.seed(adapter, collection)
+
+        listed = {info.name: info for info in await adapter.list_collections()}
+
+        assert listed[collection].vectors == 3
+
+    async def test_dropping_a_collection_removes_it(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await adapter.create_collection(CollectionSpec(name=collection, dimensions=DIMENSIONS))
+
+        assert await adapter.drop_collection(collection) is True
+        assert collection not in {info.name for info in await adapter.list_collections()}
+
+    async def test_dropping_an_absent_collection_is_not_an_error(
+        self, adapter: VectorDBAdapter
+    ) -> None:
+        assert await adapter.drop_collection("collection-that-never-existed") is False
+
     async def test_conflicting_dimensions_are_refused(
         self, adapter: VectorDBAdapter, collection: str
     ) -> None:

@@ -25,6 +25,8 @@ from fasterrag.cli.commands.diagnostics import (
     run_status,
 )
 from fasterrag.cli.commands.infrastructure import run_estimate, run_provision
+from fasterrag.cli.commands.pipeline import run_index, run_ingest, run_query
+from fasterrag.cli.commands.processes import run_serve, run_worker
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.parser import PENDING_COMMANDS, build_parser
 from fasterrag.errors import FasterRagError, ProvisioningError
@@ -36,11 +38,18 @@ __all__ = ["main"]
 
 _HANDLERS: Final[dict[str, Handler]] = {
     "doctor": run_doctor_command,
-    "status": run_status,
-    "provision": run_provision,
     "estimate": run_estimate,
+    "ingest": run_ingest,
+    "provision": run_provision,
+    "query": run_query,
+    "serve": run_serve,
+    "status": run_status,
+    "worker": run_worker,
 }
 
+# CRITICAL: `index` dispatches on its own action rather than through this table, because its
+# three subcommands share one adapter and one config load. A `config`-style entry per action
+# would open and close a connection three times over for one command.
 _SUBCOMMAND_HANDLERS: Final[dict[tuple[str, str], Handler]] = {
     ("config", "validate"): run_config_validate,
 }
@@ -48,6 +57,9 @@ _SUBCOMMAND_HANDLERS: Final[dict[tuple[str, str], Handler]] = {
 
 def _resolve(args: argparse.Namespace) -> Handler | None:
     """Return the handler for the parsed command, or ``None`` if there is none."""
+    if args.command == "index":
+        return run_index
+
     action = getattr(args, "action", None)
     if action is not None:
         return _SUBCOMMAND_HANDLERS.get((args.command, action))

@@ -70,18 +70,41 @@ class CrossEncoderReranker:
         self._model: Any | None = None
 
     def _loaded(self) -> Any:
-        """Return the model, loading it once on first use."""
+        """Return the model, loading it once on first use.
+
+        Raises:
+            RetrievalError: If the weights cannot be loaded. A cross-encoder is a
+                multi-gigabyte download that fails for mundane environmental reasons — no
+                disk, no memory, no page file, a half-finished download — and D4 requires
+                every one of them to degrade the response to ``hybrid_only`` rather than
+                fail the query. Loading is therefore classified exactly like scoring.
+        """
         if self._model is None:
             _logger.info("loading reranker model", extra={"model": self.model_name})
-            self._model = load_cross_encoder(self.model_name)
+            try:
+                self._model = load_cross_encoder(self.model_name)
+            except ConfigError:
+                raise
+            # CRITICAL: deliberately broad. A model load traverses huggingface_hub, safetensors,
+            # transformers, and torch, each raising its own exception types, and any of them
+            # leaking untyped defeats the degradation ladder — which is the failure this
+            # rung exists to absorb. Nothing is swallowed: the cause is chained and the
+            # result is a classified error the caller degrades on.
+            except Exception as exc:
+                raise RetrievalError(
+                    f"the reranker model {self.model_name!r} could not be loaded: "
+                    f"{type(exc).__name__}: {exc}",
+                    code=ErrorCode.RERANK_FAILED,
+                    retryable=False,
+                ) from exc
         return self._model
 
     def score(self, query: str, chunks: Sequence[ScoredChunk]) -> list[float]:
         """Score every query and chunk pair together.
 
         Raises:
-            RetrievalError: If the model fails to score the batch, which the caller turns
-                into a degraded response rather than a failed query.
+            RetrievalError: If the model cannot be loaded or fails to score the batch,
+                which the caller turns into a degraded response rather than a failed query.
         """
         model = self._loaded()
         pairs = [(query, chunk.text) for chunk in chunks]

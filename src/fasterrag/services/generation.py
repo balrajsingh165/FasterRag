@@ -18,6 +18,12 @@ When generation fails outright the degradation ladder serves an ``extractive`` a
 retrieved passages themselves — rather than nothing (D4). Retrieval already succeeded at that
 point, so the user gets the material even though the model could not summarize it.
 
+Only a **retryable** failure takes that rung. Degradation absorbs a provider that is *down* —
+rate-limited, timing out, returning 5xx. A rejected credential, an unknown model name, or a
+missing provider extra is not down, it is misconfigured, and no retry will change that;
+degrading one would answer every query extractively forever while reporting nothing more
+specific than ``degraded: true``. Those surface as the typed error they already are.
+
 Grounded-or-refuse (D5) adds a P3 grading call after generation. Below
 ``generation.faithfulness_threshold`` the answer is withheld and the caller gets the
 retrieved candidates instead of a guess. An ungraded answer — grader down, unparseable
@@ -436,10 +442,26 @@ class GenerationService:
         try:
             completion = await self.llm.complete(prepared.prompt, system=P1_SYSTEM_PROMPT)
         except FasterRagError as exc:
+            # CRITICAL: only a retryable failure is a rung on the degradation ladder. A
+            # rejected key, an unknown model, or a missing provider extra will never succeed
+            # on a retry, so degrading one would answer every query extractively forever
+            # while reporting nothing more specific than `degraded: true`. The ladder
+            # absorbs a provider that is *down*, not one that is misconfigured.
+            if not exc.retryable:
+                raise
             timings["generate"] = int((time.perf_counter() - started) * 1000)
             _logger.warning(
                 "generation failed, serving the retrieved passages instead",
-                extra={"code": exc.code.value, "trace_id": trace_id, "mode": EXTRACTIVE_MODE},
+                extra={
+                    "code": exc.code.value,
+                    # CRITICAL: the detail belongs in the log. A degraded response reports
+                    # only `mode`, so without the provider's own reason here there is no
+                    # record anywhere of why the answer was extractive.
+                    "detail": exc.detail,
+                    "retryable": exc.retryable,
+                    "trace_id": trace_id,
+                    "mode": EXTRACTIVE_MODE,
+                },
             )
             return Answer(
                 answer=_extractive_answer(prepared.context),
@@ -527,9 +549,16 @@ class GenerationService:
                 if not gated:
                     yield QueryEvent(type="token", data={"text": delta})
         except FasterRagError as exc:
+            if not exc.retryable:
+                raise
             _logger.warning(
                 "generation stream failed",
-                extra={"code": exc.code.value, "trace_id": trace_id},
+                extra={
+                    "code": exc.code.value,
+                    "detail": exc.detail,
+                    "retryable": exc.retryable,
+                    "trace_id": trace_id,
+                },
             )
             yield QueryEvent(
                 type="error",

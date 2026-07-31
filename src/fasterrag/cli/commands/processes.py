@@ -1,0 +1,94 @@
+"""The commands that run a long-lived process: ``serve`` and ``worker``.
+
+Both block until interrupted, so neither returns a meaningful exit code in normal use — the
+code they do return distinguishes "refused to start" from "ran and was stopped", which is
+what a supervisor restarts on.
+
+Configuration is validated *before* either process starts. Failing at startup on a bad
+config is the fail-fast contract of ``docs/config-reference.md``: a server that boots with
+half-valid configuration fails later, under load, in a way that looks like a runtime bug.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+
+from fasterrag.cli.output import Console, ExitCode
+from fasterrag.config.loader import load_settings
+from fasterrag.errors import ConfigError, FasterRagError
+from fasterrag.services.ingestion import IngestionService
+from fasterrag.services.journal import create_journal
+
+__all__ = ["run_serve", "run_worker"]
+
+
+async def run_serve(args: argparse.Namespace, console: Console) -> ExitCode:
+    """Run the API server until interrupted."""
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return ExitCode.USAGE
+
+    import uvicorn
+
+    host = args.host or settings.app.host
+    port = args.port or settings.app.port
+    console.emit(f"serving on http://{host}:{port}")
+
+    config = uvicorn.Config(
+        "fasterrag.api.main:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        reload=args.reload,
+        log_level=settings.app.log_level,
+    )
+    await uvicorn.Server(config).serve()
+    return ExitCode.SUCCESS
+
+
+async def run_worker(args: argparse.Namespace, console: Console) -> ExitCode:
+    """Run the pipeline worker pools until interrupted.
+
+    The pools are owned by the ingestion service rather than started here, so a job runs
+    identically whether it arrived through the API, the CLI, or the library. This command
+    validates the environment, reports the pool sizes it would run, and waits.
+    """
+    try:
+        settings = load_settings(args.config)
+    except ConfigError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return ExitCode.USAGE
+
+    pools = [pool.strip() for pool in args.pools.split(",") if pool.strip()]
+    unknown = set(pools) - {"cpu", "embed", "index"}
+    if unknown:
+        console.error(f"unknown pool(s): {', '.join(sorted(unknown))}")
+        return ExitCode.USAGE
+
+    service = IngestionService(settings, journal=create_journal(settings))
+    try:
+        health = await service.adapter.health()
+        if not health.healthy:
+            console.problem(
+                "VECTOR_DB_UNAVAILABLE",
+                f"the vector database is not answering: {health.detail}",
+                "start it with 'fasterrag provision qdrant', or check vector_db.host",
+            )
+            return ExitCode.UNREACHABLE
+
+        cpu = args.cpu_workers or settings.workers.cpu_pool_size
+        embed = args.embed_workers or settings.workers.embedding_pool_size
+        console.emit(f"worker ready: pools={','.join(pools)} cpu={cpu} embed={embed}")
+        console.document({"pools": pools, "cpu": cpu, "embed": embed, "status": "ready"})
+
+        await asyncio.Event().wait()
+    except FasterRagError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
+    finally:
+        await service.close()
+
+    return ExitCode.SUCCESS

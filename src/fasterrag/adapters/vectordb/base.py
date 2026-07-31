@@ -27,6 +27,7 @@ from fasterrag.errors import ErrorCode, FasterRagError
 
 __all__ = [
     "COMPARISON_OPERATORS",
+    "CollectionInfo",
     "CollectionSpec",
     "Distance",
     "Filter",
@@ -91,6 +92,32 @@ class CollectionSpec:
     shard_number: int = 1
     replication_factor: int = 1
     sparse: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionInfo:
+    """What a collection contains, in vendor-neutral terms.
+
+    Deliberately not the backend's own description object: exposing that would leak a
+    vendor type past the adapter boundary, and every field here has a meaning that survives
+    a change of backend.
+    """
+
+    name: str
+    vectors: int
+    dimensions: int | None = None
+    distance: Distance | None = None
+    sparse: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the form ``fasterrag index list --json`` prints."""
+        return {
+            "name": self.name,
+            "vectors": self.vectors,
+            "dimensions": self.dimensions,
+            "distance": self.distance,
+            "sparse": self.sparse,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +289,24 @@ class VectorDBAdapter(ABC):
         Raises:
             FasterRagError: With ``CONFLICT`` if a collection of that name exists with
                 incompatible dimensions or distance.
+        """
+
+    @abstractmethod
+    async def list_collections(self) -> list[CollectionInfo]:
+        """Return every collection the backend holds.
+
+        Part of the contract rather than a Qdrant convenience: ``fasterrag index list``
+        needs it, and the only alternative would be the CLI reaching into a vendor client
+        directly, which is exactly what this boundary exists to prevent.
+        """
+
+    @abstractmethod
+    async def drop_collection(self, name: str) -> bool:
+        """Delete a collection and everything in it.
+
+        Returns:
+            Whether a collection was actually removed. A name that does not exist is not
+            an error — dropping something already gone achieved the requested state.
         """
 
     @abstractmethod

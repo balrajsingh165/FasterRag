@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 
 from fasterrag.adapters.vectordb.base import (
+    CollectionInfo,
     CollectionSpec,
     HealthStatus,
     Point,
@@ -30,6 +31,13 @@ class RecordingAdapter(VectorDBAdapter):
 
     async def create_collection(self, spec: CollectionSpec) -> None:
         self.specs.append(spec)
+
+    async def list_collections(self) -> list[CollectionInfo]:
+        return [CollectionInfo(name=spec.name, vectors=len(self.points)) for spec in self.specs]
+
+    async def drop_collection(self, name: str) -> bool:
+        self.specs = [spec for spec in self.specs if spec.name != name]
+        return True
 
     async def upsert(self, points: list[Point]) -> UpsertResult:
         self.points.extend(points)

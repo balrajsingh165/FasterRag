@@ -1,0 +1,284 @@
+"""The commands that move data: ``ingest``, ``query``, and ``index``.
+
+Each is a thin front for the service the REST API calls, so ``fasterrag query`` and
+``POST /v1/query`` cannot diverge — the CLI parses flags and renders results, and nothing
+else. Any retrieval or generation logic that appeared here would be a second implementation
+to keep in step with the first.
+
+``--dry-run`` on ``ingest`` is the exception that proves the rule: it calls the estimator
+rather than the ingestion service, because reporting what *would* be indexed without
+embedding anything is exactly what the estimator already does.
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections.abc import Sequence
+
+from fasterrag.adapters.embeddings.base import EmbeddingAdapter
+from fasterrag.adapters.embeddings.tiering import create_embedding_router
+from fasterrag.adapters.llm.factory import create_llm_adapter
+from fasterrag.adapters.vectordb.base import CollectionSpec, Distance, VectorDBAdapter
+from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
+from fasterrag.cli.output import Console, ExitCode
+from fasterrag.config.loader import load_settings
+from fasterrag.config.schema import Settings
+from fasterrag.core.cache import create_semantic_store
+from fasterrag.core.cache.semantic import SemanticCache
+from fasterrag.core.rerank import CrossEncoderReranker
+from fasterrag.errors import ConfigError, FasterRagError
+from fasterrag.services.estimation import estimate_sources
+from fasterrag.services.generation import GenerationService
+from fasterrag.services.ingestion import IngestionService
+from fasterrag.services.journal import create_journal
+from fasterrag.services.querying import RetrievalService
+
+__all__ = ["run_index", "run_ingest", "run_query"]
+
+_DISTANCES: frozenset[str] = frozenset({"cosine", "dot", "euclid"})
+
+
+def _settings_or_none(args: argparse.Namespace, console: Console) -> Settings | None:
+    """Load configuration, reporting an invalid file rather than raising."""
+    try:
+        return load_settings(args.config)
+    except ConfigError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return None
+
+
+def _pairs(values: Sequence[str], console: Console) -> dict[str, str] | None:
+    """Parse repeated ``KEY=VALUE`` flags, or report the one that is malformed."""
+    parsed: dict[str, str] = {}
+    for value in values:
+        key, separator, rest = value.partition("=")
+        if not separator or not key:
+            console.error(f"expected KEY=VALUE, got {value!r}")
+            return None
+        parsed[key] = rest
+    return parsed
+
+
+async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
+    """Ingest sources, or report what ingesting them would involve under ``--dry-run``."""
+    settings = _settings_or_none(args, console)
+    if settings is None:
+        return ExitCode.USAGE
+
+    metadata = _pairs(args.metadata, console)
+    if metadata is None:
+        return ExitCode.USAGE
+
+    if args.dry_run:
+        estimate = estimate_sources(args.sources, settings)
+        console.emit(f"would index {estimate.chunks} chunks from {estimate.documents} documents")
+        console.emit(f"tokens          {estimate.tokens}")
+        console.emit(f"unreadable      {estimate.unreadable}")
+        console.document({"dry_run": True, **estimate.as_dict()})
+        return ExitCode.SUCCESS
+
+    service = IngestionService(settings, journal=create_journal(settings))
+    try:
+        record = await service.ingest(
+            args.sources,
+            collection=args.collection,
+            metadata=metadata or None,
+        )
+    except FasterRagError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
+    finally:
+        await service.close()
+
+    counts = record.counts
+    console.emit(f"job             {record.job_id}")
+    console.emit(f"status          {record.status}")
+    console.emit(f"indexed         {counts.get('indexed', 0)} chunks")
+    console.emit(f"dead-lettered   {counts.get('dead_lettered', 0)}")
+    console.document({"job_id": record.job_id, "status": record.status, "counts": dict(counts)})
+
+    return ExitCode.SUCCESS if record.status != "failed" else ExitCode.FAILURE
+
+
+def _build_generation(settings: Settings, adapter: VectorDBAdapter) -> GenerationService:
+    """Assemble the query path exactly as the API assembles it."""
+    router = create_embedding_router(settings)
+    reranker = CrossEncoderReranker(settings) if settings.retrieval.rerank else None
+    retrieval = RetrievalService(settings, adapter, router, reranker)
+    cache = SemanticCache(settings, create_semantic_store(settings))
+    return GenerationService(
+        settings,
+        retrieval,
+        create_llm_adapter(settings),
+        cache=cache,
+        embedder=router.default,
+    )
+
+
+async def run_query(args: argparse.Namespace, console: Console) -> ExitCode:
+    """Answer a question, streaming tokens unless ``--no-stream`` was given."""
+    settings = _settings_or_none(args, console)
+    if settings is None:
+        return ExitCode.USAGE
+
+    filters = _pairs(args.filter, console)
+    if filters is None:
+        return ExitCode.USAGE
+
+    adapter = create_vector_db_adapter(settings)
+    service = _build_generation(settings, adapter)
+
+    try:
+        answer = await service.answer(
+            args.question,
+            collection=args.collection,
+            top_k=args.top_k,
+            filters=filters or None,
+        )
+    except FasterRagError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
+    finally:
+        await service.close()
+        await adapter.close()
+
+    if answer.insufficient_evidence:
+        console.emit("INSUFFICIENT EVIDENCE — the answer was withheld (D5)")
+        console.emit(f"  faithfulness {answer.faithfulness} < threshold {answer.threshold}")
+        for candidate in answer.best_candidates:
+            console.emit(f"  candidate {candidate['chunk_id']} ({candidate['source']})")
+        console.document(answer.as_dict())
+        return ExitCode.SUCCESS
+
+    console.emit(answer.answer or "")
+    if answer.citations:
+        console.emit("")
+        for citation in answer.citations:
+            page = f", page {citation.page}" if citation.page is not None else ""
+            console.emit(f"  [^{citation.chunk_id}] {citation.source or 'unknown source'}{page}")
+
+    if answer.degraded:
+        console.emit(f"\ndegraded: mode={answer.mode}")
+    if args.show_timings:
+        console.emit(
+            "\ntimings: "
+            + ", ".join(f"{stage}={value}ms" for stage, value in answer.timings_ms.items())
+        )
+
+    console.document(answer.as_dict())
+    return ExitCode.SUCCESS
+
+
+async def _index_list(adapter: VectorDBAdapter, console: Console) -> ExitCode:
+    """Print every collection the backend holds."""
+    collections = await adapter.list_collections()
+    if not collections:
+        console.emit("no collections")
+
+    for info in collections:
+        console.emit(
+            f"{info.name:<30} {info.vectors:>10} vectors  "
+            f"dim={info.dimensions}  distance={info.distance}  "
+            f"sparse={'yes' if info.sparse else 'no'}"
+        )
+
+    console.document({"collections": [info.as_dict() for info in collections]})
+    return ExitCode.SUCCESS
+
+
+def _distance_for(
+    args: argparse.Namespace, settings: Settings, console: Console
+) -> Distance | None:
+    """Return the distance to create with, or ``None`` if the flag is invalid."""
+    if args.distance is None:
+        return settings.vector_db.collection.distance
+    if args.distance not in _DISTANCES:
+        console.error(f"--distance must be one of {', '.join(sorted(_DISTANCES))}")
+        return None
+    return args.distance  # type: ignore[no-any-return]
+
+
+async def _dimensions_of(embedder: EmbeddingAdapter) -> int | None:
+    """Return the model's vector size, embedding a probe if it is not known yet.
+
+    A local model reports no dimension until its weights are loaded, and creating a
+    collection is precisely the moment that number has to be right. One throwaway embedding
+    is cheaper than a collection created at the wrong width, which cannot be widened later
+    and forces a full re-embed to correct.
+    """
+    if embedder.dimensions is not None:
+        return embedder.dimensions
+
+    return len(await embedder.embed_query("dimension probe")) or None
+
+
+async def _index_create(
+    args: argparse.Namespace, settings: Settings, adapter: VectorDBAdapter, console: Console
+) -> ExitCode:
+    """Create a collection sized from the configured embedding model."""
+    distance = _distance_for(args, settings, console)
+    if distance is None:
+        return ExitCode.USAGE
+
+    router = create_embedding_router(settings)
+    try:
+        dimensions = await _dimensions_of(router.default)
+        if dimensions is None:
+            console.error(
+                "the configured embedding model did not report a vector size; "
+                "ingest one document instead, which creates the collection automatically"
+            )
+            return ExitCode.FAILURE
+
+        collection = settings.vector_db.collection
+        await adapter.create_collection(
+            CollectionSpec(
+                name=args.name,
+                dimensions=dimensions,
+                distance=distance,
+                shard_number=args.shards or collection.shard_number,
+                replication_factor=args.replicas or collection.replication_factor,
+                sparse=settings.retrieval.hybrid,
+            )
+        )
+    finally:
+        await router.close()
+
+    console.emit(f"created {args.name} ({dimensions} dimensions, {distance})")
+    console.document({"name": args.name, "dimensions": dimensions, "distance": distance})
+    return ExitCode.SUCCESS
+
+
+async def _index_delete(
+    args: argparse.Namespace, adapter: VectorDBAdapter, console: Console
+) -> ExitCode:
+    """Drop a collection, requiring ``--force`` because the data does not come back."""
+    if not args.force:
+        console.error(f"deleting {args.name!r} destroys its vectors; pass --force to confirm")
+        return ExitCode.USAGE
+
+    dropped = await adapter.drop_collection(args.name)
+    console.emit(f"{'deleted' if dropped else 'no such collection:'} {args.name}")
+    console.document({"name": args.name, "deleted": dropped})
+    return ExitCode.SUCCESS
+
+
+async def run_index(args: argparse.Namespace, console: Console) -> ExitCode:
+    """Dispatch an ``index`` subcommand."""
+    settings = _settings_or_none(args, console)
+    if settings is None:
+        return ExitCode.USAGE
+
+    adapter = create_vector_db_adapter(settings)
+    try:
+        if args.action == "list":
+            return await _index_list(adapter, console)
+        if args.action == "create":
+            return await _index_create(args, settings, adapter, console)
+        return await _index_delete(args, adapter, console)
+    except FasterRagError as exc:
+        console.problem(exc.code.value, exc.detail)
+        console.document({"error": exc.code.value, "detail": exc.detail})
+        return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
+    finally:
+        await adapter.close()

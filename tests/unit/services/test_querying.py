@@ -5,6 +5,7 @@ import pytest
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.adapters.vectordb.base import (
+    CollectionInfo,
     CollectionSpec,
     HealthStatus,
     Point,
@@ -64,6 +65,12 @@ class ScriptedAdapter(VectorDBAdapter):
 
     async def create_collection(self, spec: CollectionSpec) -> None:
         return None
+
+    async def list_collections(self) -> list[CollectionInfo]:
+        return []
+
+    async def drop_collection(self, name: str) -> bool:
+        return False
 
     async def upsert(self, points: list[Point]) -> UpsertResult:
         return UpsertResult(upserted=len(points))

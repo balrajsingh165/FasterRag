@@ -32,6 +32,7 @@ from qdrant_client import AsyncQdrantClient, models
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from fasterrag.adapters.vectordb.base import (
+    CollectionInfo,
     CollectionSpec,
     Distance,
     Filter,
@@ -69,6 +70,10 @@ _DISTANCES: Final[dict[Distance, models.Distance]] = {
     "cosine": models.Distance.COSINE,
     "dot": models.Distance.DOT,
     "euclid": models.Distance.EUCLID,
+}
+
+_NEUTRAL_DISTANCES: Final[dict[models.Distance, Distance]] = {
+    value: key for key, value in _DISTANCES.items()
 }
 
 _RANGE_OPERATORS: Final[frozenset[str]] = frozenset({"$gt", "$gte", "$lt", "$lte"})
@@ -289,6 +294,49 @@ class QdrantAdapter(VectorDBAdapter):
             )
         self._dimensions[spec.name] = spec.dimensions
         self._named[spec.name] = spec.sparse
+
+    def _describe(self, name: str, info: Any) -> CollectionInfo:
+        """Translate one Qdrant collection description into the neutral form."""
+        vectors = info.config.params.vectors
+        sparse = bool(info.config.params.sparse_vectors)
+        if isinstance(vectors, dict):
+            vectors = vectors.get(DENSE_VECTOR_NAME)
+
+        dimensions = vectors.size if isinstance(vectors, models.VectorParams) else None
+        distance = (
+            _NEUTRAL_DISTANCES.get(vectors.distance)
+            if isinstance(vectors, models.VectorParams)
+            else None
+        )
+        return CollectionInfo(
+            name=name,
+            vectors=info.points_count or 0,
+            dimensions=dimensions,
+            distance=distance,
+            sparse=sparse,
+        )
+
+    async def list_collections(self) -> list[CollectionInfo]:
+        """Return every collection, with its size and vector configuration."""
+        async with self._mapped_errors("list_collections"):
+            listing = await self.client.get_collections()
+            described: list[CollectionInfo] = []
+            for entry in listing.collections:
+                described.append(
+                    self._describe(entry.name, await self.client.get_collection(entry.name))
+                )
+            return described
+
+    async def drop_collection(self, name: str) -> bool:
+        """Delete a collection, reporting whether one was there to delete."""
+        async with self._mapped_errors("drop_collection"):
+            if not await self.client.collection_exists(name):
+                return False
+            await self.client.delete_collection(name)
+
+        self._dimensions.pop(name, None)
+        self._named.pop(name, None)
+        return True
 
     async def _require_compatible(self, spec: CollectionSpec) -> None:
         """Reject an existing collection whose vectors cannot hold ``spec``."""

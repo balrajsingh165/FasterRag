@@ -10,7 +10,7 @@ from fasterrag.config.schema import Settings
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.cache.store import MemoryStore
 from fasterrag.core.retrieval.models import ScoredChunk
-from fasterrag.errors import EmbedError, GenerationError
+from fasterrag.errors import ConfigError, EmbedError, GenerationError
 from fasterrag.services.generation import EXTRACTIVE_MODE, GenerationService, QueryEvent
 from fasterrag.services.querying import FULL_MODE, HYBRID_ONLY_MODE, Retrieval
 
@@ -145,7 +145,7 @@ async def test_a_degraded_retrieval_mode_reaches_the_answer() -> None:
 
 
 async def test_a_generation_failure_serves_the_retrieved_passages() -> None:
-    service, _ = build(error=GenerationError("provider is down"))
+    service, _ = build(error=GenerationError("provider is down", retryable=True))
 
     result = await service.answer("q")
 
@@ -154,6 +154,38 @@ async def test_a_generation_failure_serves_the_retrieved_passages() -> None:
     assert result.answer is not None
     assert "Either party may terminate." in result.answer
     assert [citation.chunk_id for citation in result.citations] == ["c_a"]
+
+
+async def test_a_missing_provider_extra_is_never_hidden_behind_a_degraded_answer() -> None:
+    service, _ = build(error=ConfigError("llm.provider needs 'pip install fasterrag[openai]'"))
+
+    with pytest.raises(ConfigError, match="fasterrag\\[openai\\]"):
+        await service.answer("q")
+
+
+async def test_a_rejected_credential_surfaces_rather_than_degrading() -> None:
+    service, _ = build(
+        error=GenerationError("the provider rejected the credentials", retryable=False)
+    )
+
+    with pytest.raises(GenerationError, match="rejected the credentials"):
+        await service.answer("q")
+
+
+async def test_a_misconfigured_provider_fails_the_stream_rather_than_degrading_it() -> None:
+    service, _ = build(error=ConfigError("llm.api_key_env names an unset variable"))
+
+    with pytest.raises(ConfigError):
+        await collect(service)
+
+
+async def test_a_retryable_stream_failure_still_emits_an_error_event() -> None:
+    service, _ = build(error=GenerationError("provider is rate limited", retryable=True))
+
+    kinds = [event.type for event in await collect(service)]
+
+    assert kinds[-1] == "error"
+    assert "done" not in kinds
 
 
 async def test_an_invented_citation_never_reaches_the_response() -> None:

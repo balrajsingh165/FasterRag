@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
+from fasterrag.config.schema import Settings
 from fasterrag.core.identity import job_id as new_job_id
 from fasterrag.core.identity import text_hash
 from fasterrag.errors import ErrorCode, IngestionError
@@ -41,6 +42,7 @@ __all__ = [
     "JobRecord",
     "JobStatus",
     "Journal",
+    "create_journal",
 ]
 
 DEFAULT_JOURNAL_ROOT: Final = Path(".fasterrag") / "journal"
@@ -408,3 +410,14 @@ class Journal:
             tally[record.status] = tally.get(record.status, 0) + 1
         tally["total"] = sum(count for status, count in tally.items() if status != "total")
         return tally
+
+
+def create_journal(settings: Settings, root: str | Path = DEFAULT_JOURNAL_ROOT) -> Journal:
+    """Build a journal from validated configuration.
+
+    One place translates ``ingestion.journal.*`` into constructor arguments, so the CLI, the
+    API, and the library cannot disagree about the checkpoint interval a deployment runs
+    with — a journal built two ways is a journal that resumes two ways.
+    """
+    journal = settings.ingestion.journal
+    return Journal(root, checkpoint_every=journal.checkpoint_every, enabled=journal.enabled)
