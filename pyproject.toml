@@ -81,6 +81,9 @@ dev = [
     "types-pyyaml>=6.0",
 ]
 
+[project.scripts]
+fasterrag = "fasterrag.cli.main:main"
+
 [project.urls]
 Homepage = "https://github.com/balrajsingh165/FasterRag"
 Documentation = "https://github.com/balrajsingh165/FasterRag/tree/main/docs"
@@ -126,6 +129,7 @@ ignore = ["D203", "D213"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG001", "ARG002", "ARG005", "D100", "D101", "D102", "D103", "D104", "D107"]
 "src/fasterrag/config/schema.py" = ["ARG003"]
+"src/fasterrag/cli/parser.py" = ["ARG002"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
