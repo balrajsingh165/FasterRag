@@ -184,9 +184,13 @@ _(empty)_
 - [x] TASK-0038: Implement embedding cache + semantic response cache (cosine threshold, TTL + corpus-change invalidation, hit/miss metrics) — ✅ 2026-07-31
 - [ ] TASK-0124: Implement the `redis` cache backend behind a `.[redis]` extra. `embeddings.cache.backend` and `cache.backend` both accept `redis` per config-reference.md, but only `memory` and `disk` are implemented; selecting `redis` raises a `ConfigError` naming the alternatives rather than silently falling back. Needs a Docker Redis for the integration test
 
+- [ ] TASK-0125: The error-code table has no code for "the vector database rejected our credentials". The Qdrant adapter currently reports `EMBED_PROVIDER_ERROR`, documented as "Embedding provider timeout / hard failure", so a vector-DB auth failure surfaces under an embedding label — misleading when grepping logs. `AUTH_INVALID` is reserved for fasterRag's own API auth and `RETRIEVAL_FAILED` is documented retryable, which this is not. Add a `VECTOR_DB_AUTH` code to `errors.py` and `api-reference.md`, then use it in `_auth_error`. Found by running `fasterrag index list` against a key-protected Qdrant, 2026-07-31
+
 ### S8 — CLI complete
 
-- [ ] TASK-0040: Implement CLI (serve, worker, ingest, query, index, provision, status, doctor, estimate, replay, benchmark, config validate)
+- [x] TASK-0040: Implement CLI (serve, worker, ingest, query, index, provision, status, doctor, estimate, config validate) — `replay`, `benchmark`, `export`, `import`, and `autopilot` are registered but report the slice that ships them, since their services do not exist yet — ✅ 2026-07-31
+- [ ] TASK-0126: Maintainer review — `VectorDBAdapter` gained `list_collections()` and `drop_collection()` under TASK-0040, with a vendor-neutral `CollectionInfo` result. `adapters/` is a folder-boundary-sensitive package; the addition is judged to strengthen the boundary rather than weaken it, because the documented `fasterrag index list` and `index delete` are otherwise unimplementable without the CLI reaching into a vendor client directly. Both are covered by the shared contract suite. Confirm or revert
+- [ ] TASK-0127: The semantic cache is unusable from the CLI: `cache.backend` accepts only `memory` and `redis`, and a memory cache dies with each short-lived CLI process, so no two `fasterrag query` invocations can ever share one. Verified in-process instead (16.7s cold vs 69ms on a hit against a real corpus). TASK-0124's redis backend resolves it; until then consider documenting in cookbook.md that the semantic cache benefits `fasterrag serve` and the library, not one-shot CLI calls
 - [ ] TASK-0079: Implement export/import portability archives + vector-copy and re-embed migration paths (D11)
 - [ ] TASK-0046: Implement security layer (API-key auth with scopes, rate limiting, multi-tenancy isolation, tenant-scoped caches)
 

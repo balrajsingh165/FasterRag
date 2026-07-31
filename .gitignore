@@ -34,3 +34,7 @@ autopilot-suggestion.yaml
 Thumbs.db
 .idea/
 .vscode/
+
+# Runtime state written by a running deployment, never source
+# (ingestion journal, dead letters, dedup hashes, and the disk embedding cache)
+.fasterrag/
