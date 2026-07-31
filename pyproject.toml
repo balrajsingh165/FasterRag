@@ -54,9 +54,11 @@ ocr = [
 huggingface = ["sentence-transformers>=3.0"]
 rerank = ["sentence-transformers>=3.0"]
 openai = ["openai>=1.40"]
+anthropic = ["anthropic>=0.40"]
 cohere = ["cohere>=5.5"]
 ollama = ["ollama>=0.3"]
 all = [
+    "anthropic>=0.40",
     "cohere>=5.5",
     "ollama>=0.3",
     "openai>=1.40",
@@ -146,6 +148,7 @@ disallow_any_unimported = true
 
 [[tool.mypy.overrides]]
 module = [
+    "anthropic.*",
     "cohere.*",
     "ollama.*",
     "openai.*",
