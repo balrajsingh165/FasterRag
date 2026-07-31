@@ -123,6 +123,10 @@
 - [x] TASK-0121: Verify the embedder and reranker against real downloaded models — `tests/eval/test_real_models.py`, marked `eval`, wired into CI as its own job; it found and fixed a sentence-transformers 5.x accessor deprecation — ✅ 2026-07-30
 - [x] TASK-0122: Implement the retrieval regression gate (D7) — tolerance comparison against a committed baseline, refusing a baseline recorded under a different embedding model or retrieval configuration, and blocking rather than passing when none exists — ✅ 2026-07-30
 
+### Slice S6 — generation (build phase, in progress)
+
+- [x] TASK-0036: Implement context assembly (token budgeter, dedup, span-level citations) — ✅ 2026-07-30
+
 ### Workflow
 
 - [x] TASK-0108: Land slice S1 on main — ✅ 2026-07-30
@@ -171,7 +175,6 @@ _(empty)_
 ### S6 — Generation
 
 - [ ] TASK-0027: Implement LLM provider adapters (OpenAI, Anthropic, Cohere, Ollama, OpenAI-compatible; streaming)
-- [ ] TASK-0036: Implement context assembly (token budgeter, dedup, span-level citations)
 - [ ] TASK-0037: Implement generation service with SSE streaming (meta/token/citations/usage/done/error events)
 - [ ] TASK-0078: Implement grounded-or-refuse mode with faithfulness scoring and INSUFFICIENT_EVIDENCE responses (D5)
 
