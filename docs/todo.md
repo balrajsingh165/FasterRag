@@ -121,6 +121,7 @@
 - [x] TASK-0047: Implement eval harness (recall@k, MRR, nDCG, faithfulness) with dataset fixtures — retrieval metrics and the golden-set format; faithfulness needs the LLM call site and lands with the generation slice — ✅ 2026-07-30
 - [x] TASK-0035: Implement config-gated cross-encoder reranker stage (top 100–1000 → rerank → top_k) — ✅ 2026-07-30
 - [x] TASK-0121: Verify the embedder and reranker against real downloaded models — `tests/eval/test_real_models.py`, marked `eval`, wired into CI as its own job; it found and fixed a sentence-transformers 5.x accessor deprecation — ✅ 2026-07-30
+- [x] TASK-0122: Implement the retrieval regression gate (D7) — tolerance comparison against a committed baseline, refusing a baseline recorded under a different embedding model or retrieval configuration, and blocking rather than passing when none exists — ✅ 2026-07-30
 
 ### Workflow
 
@@ -164,7 +165,7 @@ _(empty)_
 
 ### S5 — Rerank + eval harness v1
 
-- [ ] TASK-0077: Implement golden-set generator + retrieval regression gate wired into CI (D7) — the harness and golden-set format now exist; the gate needs a committed baseline to compare against
+- [ ] TASK-0077: Implement the golden-set generator, and commit a baseline measured over a real corpus so the regression gate has something to compare against. The gate mechanism itself has shipped; generating golden Q&A from a corpus is shared machinery with Autopilot (D6) and belongs with it
 - [ ] TASK-0120: Add the faithfulness metric to the eval harness once the generation slice provides the P3 call site; the harness reports retrieval metrics only until then
 
 ### S6 — Generation
