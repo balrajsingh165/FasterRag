@@ -37,10 +37,12 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+from fasterrag.adapters.embeddings.base import EmbeddingAdapter
 from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.config.schema import Settings
+from fasterrag.core.cache.semantic import MISS, CacheHit, SemanticCache
 from fasterrag.core.chunking.models import EstimatingTokenCounter, TokenCounter
-from fasterrag.core.context import AssembledContext, Citation, assemble_context
+from fasterrag.core.context import AssembledContext, Citation, Span, assemble_context
 from fasterrag.core.faithfulness import UNGRADED, FaithfulnessVerdict, grade
 from fasterrag.core.generation import (
     P1_SYSTEM_PROMPT,
@@ -97,6 +99,7 @@ class Answer:
     faithfulness: float | None = None
     threshold: float | None = None
     best_candidates: list[dict[str, Any]] = field(default_factory=list)
+    cache: dict[str, Any] = field(default_factory=lambda: dict(MISS))
 
     @property
     def degraded(self) -> bool:
@@ -137,6 +140,7 @@ class Answer:
             "degraded": self.degraded,
             "mode": self.mode,
             "faithfulness": self.faithfulness,
+            "cache": self.cache,
             "trace_id": self.trace_id,
         }
 
@@ -144,6 +148,82 @@ class Answer:
 def _extractive_answer(context: AssembledContext) -> str:
     """Return the retrieved passages as the answer of last resort."""
     return context.text
+
+
+def _citation_from(payload: Mapping[str, Any]) -> Citation:
+    """Rebuild a citation from its serialized form in a cached response."""
+    span = payload.get("span")
+    return Citation(
+        chunk_id=str(payload.get("chunk_id", "")),
+        source=payload.get("source"),
+        page=payload.get("page"),
+        span=Span(start=int(span["start"]), end=int(span["end"]))
+        if isinstance(span, Mapping)
+        else None,
+        score=payload.get("score"),
+    )
+
+
+def _cached_answer(hit: CacheHit, trace_id: str, elapsed_ms: int) -> Answer:
+    """Rebuild an ``Answer`` from a cached response body.
+
+    The stored body is replayed as-is apart from three fields: the trace id becomes this
+    query's, the timings become what this query actually spent, and ``cache`` records the hit
+    and its similarity. Replaying the original trace id would attribute this request to a
+    different one, and replaying the original timings would report a latency nobody paid.
+    """
+    stored = hit.response
+    usage = stored.get("usage") or {}
+    citations = stored.get("citations") or []
+    return Answer(
+        answer=stored.get("answer"),
+        citations=[_citation_from(payload) for payload in citations],
+        mode=str(stored.get("mode", FULL_MODE)),
+        trace_id=trace_id,
+        prompt_tokens=int(usage.get("prompt_tokens", 0)),
+        completion_tokens=int(usage.get("completion_tokens", 0)),
+        timings_ms={"cache": elapsed_ms},
+        faithfulness=stored.get("faithfulness"),
+        cache=hit.as_dict(),
+    )
+
+
+def _cached_events(answer: Answer) -> list[QueryEvent]:
+    """Return the event sequence a cache hit replays.
+
+    The same shape as a generated response — the whole answer simply arrives as one
+    ``token`` event, since there is nothing left to stream incrementally. ``meta`` carries
+    the cache member so a client learns it is being served from cache before the text.
+    """
+    return [
+        QueryEvent(
+            type="meta",
+            data={
+                "trace_id": answer.trace_id,
+                "mode": answer.mode,
+                "degraded": answer.degraded,
+                "cache": answer.cache,
+            },
+        ),
+        QueryEvent(type="token", data={"text": answer.answer or ""}),
+        QueryEvent(
+            type="citations",
+            data={"citations": [citation.as_dict() for citation in answer.citations]},
+        ),
+        QueryEvent(
+            type="usage",
+            data={
+                "usage": {
+                    "prompt_tokens": answer.prompt_tokens,
+                    "completion_tokens": answer.completion_tokens,
+                },
+                "timings_ms": answer.timings_ms,
+                "faithfulness": answer.faithfulness,
+                "template_version": P1_TEMPLATE_VERSION,
+            },
+        ),
+        QueryEvent(type="done", data={}),
+    ]
 
 
 def _best_candidates(chunks: Sequence[ScoredChunk]) -> list[dict[str, Any]]:
@@ -186,6 +266,8 @@ class GenerationService:
         llm: LLMAdapter,
         *,
         grader: LLMAdapter | None = None,
+        cache: SemanticCache | None = None,
+        embedder: EmbeddingAdapter | None = None,
         counter: TokenCounter | None = None,
         context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
     ) -> None:
@@ -198,6 +280,11 @@ class GenerationService:
             grader: The P3 faithfulness provider. Defaults to ``llm``; passing a separate
                 adapter is how a cheaper grading model is selected. It is a distinct call
                 either way, so the grader never sees P1's instructions.
+            cache: The semantic response cache. Consulted only when ``embedder`` is also
+                supplied, since a similarity cache cannot be keyed without a vector.
+            embedder: Embeds the question for the cache lookup. The same query is embedded
+                again inside retrieval, which costs nothing extra: the embedding cache is on
+                by default and the second call is a hit on the first.
             counter: Token counter used for context budgeting.
             context_budget_tokens: Tokens available for context, which the caller sizes
                 from the model's window minus room for the answer.
@@ -206,6 +293,8 @@ class GenerationService:
         self.retrieval = retrieval
         self.llm = llm
         self.grader = grader or llm
+        self.cache = cache
+        self.embedder = embedder
         self.counter = counter or EstimatingTokenCounter()
         self.context_budget_tokens = context_budget_tokens
 
@@ -213,6 +302,30 @@ class GenerationService:
     def grounded_or_refuse(self) -> bool:
         """Return whether low-faithfulness answers are withheld (D5)."""
         return self.settings.generation.grounded_or_refuse
+
+    @property
+    def caching(self) -> bool:
+        """Return whether a semantic cache lookup is possible at all."""
+        return self.cache is not None and self.cache.enabled and self.embedder is not None
+
+    async def _cache_vector(self, question: str) -> list[float] | None:
+        """Return the question's vector for cache use, or ``None`` if caching is off.
+
+        An embedding failure here yields ``None`` rather than propagating: the cache is an
+        optimization, and refusing to answer because the *cache key* could not be computed
+        would be the cache taking down the pipeline it exists to accelerate.
+        """
+        if not self.caching or self.embedder is None:
+            return None
+
+        try:
+            return await self.embedder.embed_query(question)
+        except FasterRagError as exc:
+            _logger.warning(
+                "could not embed the question for the semantic cache; skipping the lookup",
+                extra={"code": exc.code.value, "trace_id": exc.trace_id},
+            )
+            return None
 
     async def _prepare(
         self,
@@ -296,12 +409,28 @@ class GenerationService:
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
     ) -> Answer:
-        """Answer a question completely, without streaming."""
+        """Answer a question completely, without streaming.
+
+        A semantic cache hit short-circuits everything below it — retrieval, assembly,
+        generation, and grading — and returns the stored answer with ``cache.semantic_hit``
+        set, so a caller can always tell a fresh answer from a reused one.
+        """
         trace_id = current_trace_id()
+        started = time.perf_counter()
+        vector = await self._cache_vector(question)
+        cache_ms = int((time.perf_counter() - started) * 1000)
+
+        if vector is not None and self.cache is not None:
+            hit = await self.cache.lookup(vector)
+            if hit is not None:
+                return _cached_answer(hit, trace_id, cache_ms)
+
         prepared = await self._prepare(
             question, collection=collection, top_k=top_k, filters=filters
         )
         timings = prepared.timings
+        if vector is not None:
+            timings["cache"] = cache_ms
 
         started = time.perf_counter()
         try:
@@ -325,7 +454,7 @@ class GenerationService:
         if verdict.withholds(self.settings.generation.faithfulness_threshold):
             return self._refusal(prepared, verdict, trace_id, timings)
 
-        return Answer(
+        answer = Answer(
             answer=completion.text,
             citations=resolve_citations(completion.text, prepared.context.citations),
             mode=prepared.mode,
@@ -335,6 +464,11 @@ class GenerationService:
             timings_ms=timings,
             faithfulness=verdict.score,
         )
+
+        if vector is not None and self.cache is not None and prepared.mode == FULL_MODE:
+            await self.cache.store_response(question, vector, answer.as_dict())
+
+        return answer
 
     async def stream(
         self,
@@ -351,12 +485,29 @@ class GenerationService:
         a refusal. A withheld answer produces an ``insufficient_evidence`` event in place of
         the token, citation, and usage events, then ``done`` — the query completed, so the
         stream is not truncated.
+
+        A semantic cache hit still streams. The whole answer is already known, so it arrives
+        as a single ``token`` event after ``meta`` — the event contract holds and a client
+        needs no separate code path for a cached response.
         """
         trace_id = current_trace_id()
+        started = time.perf_counter()
+        vector = await self._cache_vector(question)
+        cache_ms = int((time.perf_counter() - started) * 1000)
+
+        if vector is not None and self.cache is not None:
+            hit = await self.cache.lookup(vector)
+            if hit is not None:
+                for event in _cached_events(_cached_answer(hit, trace_id, cache_ms)):
+                    yield event
+                return
+
         prepared = await self._prepare(
             question, collection=collection, top_k=top_k, filters=filters
         )
         timings = prepared.timings
+        if vector is not None:
+            timings["cache"] = cache_ms
 
         yield QueryEvent(
             type="meta",
@@ -404,22 +555,20 @@ class GenerationService:
         if gated:
             yield QueryEvent(type="token", data={"text": answer})
 
+        citations = resolve_citations(answer, prepared.context.citations)
+        usage = {
+            "prompt_tokens": self.counter.count(prepared.prompt),
+            "completion_tokens": self.counter.count(answer),
+        }
+
         yield QueryEvent(
             type="citations",
-            data={
-                "citations": [
-                    citation.as_dict()
-                    for citation in resolve_citations(answer, prepared.context.citations)
-                ]
-            },
+            data={"citations": [citation.as_dict() for citation in citations]},
         )
         yield QueryEvent(
             type="usage",
             data={
-                "usage": {
-                    "prompt_tokens": self.counter.count(prepared.prompt),
-                    "completion_tokens": self.counter.count(answer),
-                },
+                "usage": usage,
                 "timings_ms": timings,
                 "faithfulness": verdict.score,
                 "template_version": P1_TEMPLATE_VERSION,
@@ -427,6 +576,24 @@ class GenerationService:
         )
         yield QueryEvent(type="done", data={})
 
+        if vector is not None and self.cache is not None and prepared.mode == FULL_MODE:
+            await self.cache.store_response(
+                question,
+                vector,
+                Answer(
+                    answer=answer,
+                    citations=citations,
+                    mode=prepared.mode,
+                    trace_id=trace_id,
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                    timings_ms=timings,
+                    faithfulness=verdict.score,
+                ).as_dict(),
+            )
+
     async def close(self) -> None:
-        """Release the generation provider."""
+        """Release the generation provider and the semantic cache."""
         await self.llm.close()
+        if self.cache is not None:
+            await self.cache.close()

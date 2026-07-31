@@ -181,7 +181,8 @@ _(empty)_
 
 ### S7 — Semantic cache
 
-- [ ] TASK-0038: Implement embedding cache + semantic response cache (cosine threshold, TTL + corpus-change invalidation, hit/miss metrics)
+- [x] TASK-0038: Implement embedding cache + semantic response cache (cosine threshold, TTL + corpus-change invalidation, hit/miss metrics) — ✅ 2026-07-31
+- [ ] TASK-0124: Implement the `redis` cache backend behind a `.[redis]` extra. `embeddings.cache.backend` and `cache.backend` both accept `redis` per config-reference.md, but only `memory` and `disk` are implemented; selecting `redis` raises a `ConfigError` naming the alternatives rather than silently falling back. Needs a Docker Redis for the integration test
 
 ### S8 — CLI complete
 

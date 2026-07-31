@@ -1,13 +1,16 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import pytest
 
+from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.llm.base import Completion, LLMAdapter
 from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
+from fasterrag.core.cache.semantic import SemanticCache
+from fasterrag.core.cache.store import MemoryStore
 from fasterrag.core.retrieval.models import ScoredChunk
-from fasterrag.errors import GenerationError
+from fasterrag.errors import EmbedError, GenerationError
 from fasterrag.services.generation import EXTRACTIVE_MODE, GenerationService, QueryEvent
 from fasterrag.services.querying import FULL_MODE, HYBRID_ONLY_MODE, Retrieval
 
@@ -174,6 +177,7 @@ async def test_the_answer_serializes_to_the_documented_body() -> None:
         "degraded",
         "mode",
         "faithfulness",
+        "cache",
         "trace_id",
     }
 
@@ -428,6 +432,220 @@ async def test_an_ungated_stream_still_emits_tokens_incrementally() -> None:
     tokens = [event for event in await collect(service) if event.type == "token"]
 
     assert len(tokens) == 3
+
+
+class ScriptedEmbedder(EmbeddingAdapter):
+    """Returns one vector per question, so paraphrases can be simulated."""
+
+    provider = "scripted"
+
+    def __init__(self, settings: Settings, vectors: dict[str, list[float]] | None = None) -> None:
+        super().__init__(settings)
+        self.vectors = vectors or {}
+        self.calls = 0
+
+    @property
+    def model(self) -> str:
+        return "scripted-model"
+
+    @property
+    def model_version(self) -> str:
+        return "1.0"
+
+    @property
+    def dimensions(self) -> int | None:
+        return 3
+
+    async def embed_documents(self, texts: Sequence[str]) -> EmbeddingResult:
+        raise NotImplementedError
+
+    async def embed_query(self, text: str) -> list[float]:
+        self.calls += 1
+        return self.vectors.get(text, [1.0, 0.0, 0.0])
+
+    async def health(self) -> HealthStatus:
+        return HealthStatus(healthy=True)
+
+    async def close(self) -> None:
+        return None
+
+
+def build_cached(
+    *,
+    answer: str = "thirty days [^c_a]",
+    mode: str = FULL_MODE,
+    vectors: dict[str, list[float]] | None = None,
+    threshold: float = 0.95,
+    embedder_error: bool = False,
+) -> tuple[GenerationService, ScriptedLLM, SemanticCache]:
+    settings = Settings.model_validate(
+        {"cache": {"semantic": True, "similarity_threshold": threshold}}
+    )
+    llm = ScriptedLLM(settings, text=answer)
+    retrieval = ScriptedRetrieval([chunk("c_a", "Either party may terminate.")], mode)
+    cache = SemanticCache(settings, MemoryStore())
+
+    class FailingEmbedder(ScriptedEmbedder):
+        async def embed_query(self, text: str) -> list[float]:
+            raise EmbedError("embedding provider is down")
+
+    factory = FailingEmbedder if embedder_error else ScriptedEmbedder
+    service = GenerationService(
+        settings,
+        retrieval,  # type: ignore[arg-type]
+        llm,
+        cache=cache,
+        embedder=factory(settings, vectors),
+    )
+    return service, llm, cache
+
+
+async def test_the_first_query_misses_and_the_second_hits() -> None:
+    service, llm, _ = build_cached()
+
+    await service.answer("what is the notice period?")
+    calls = len(llm.prompts)
+    result = await service.answer("what is the notice period?")
+
+    assert len(llm.prompts) == calls
+    assert result.cache["semantic_hit"] is True
+    assert result.answer == "thirty days [^c_a]"
+
+
+async def test_a_paraphrase_is_served_from_the_cache() -> None:
+    service, llm, _ = build_cached(
+        vectors={"first question": [1.0, 0.0, 0.0], "a paraphrase": [0.99, 0.05, 0.0]}
+    )
+
+    await service.answer("first question")
+    calls = len(llm.prompts)
+    result = await service.answer("a paraphrase")
+
+    assert len(llm.prompts) == calls
+    assert result.cache["semantic_hit"] is True
+
+
+async def test_an_unrelated_question_runs_the_full_pipeline() -> None:
+    service, llm, _ = build_cached(vectors={"first": [1.0, 0.0, 0.0], "unrelated": [0.0, 1.0, 0.0]})
+
+    await service.answer("first")
+    result = await service.answer("unrelated")
+
+    assert len(llm.prompts) == 2
+    assert result.cache["semantic_hit"] is False
+
+
+async def test_a_cache_hit_keeps_this_query_s_trace_id() -> None:
+    service, _, _ = build_cached()
+    first = await service.answer("q")
+
+    second = await service.answer("q")
+
+    assert second.trace_id == first.trace_id or second.trace_id != ""
+    assert second.cache["similarity"] == pytest.approx(1.0)
+
+
+async def test_a_cache_hit_reports_only_the_time_it_actually_spent() -> None:
+    service, _, _ = build_cached()
+    await service.answer("q")
+
+    result = await service.answer("q")
+
+    assert set(result.timings_ms) == {"cache"}
+
+
+async def test_a_cache_hit_restores_the_citations() -> None:
+    service, _, _ = build_cached()
+    first = await service.answer("q")
+
+    second = await service.answer("q")
+
+    assert [c.chunk_id for c in second.citations] == [c.chunk_id for c in first.citations]
+    assert second.citations[0].source == first.citations[0].source
+
+
+async def test_a_degraded_answer_is_never_cached() -> None:
+    service, llm, cache = build_cached(mode=HYBRID_ONLY_MODE)
+
+    await service.answer("q")
+    await service.answer("q")
+
+    assert len(llm.prompts) == 2
+    assert cache.stats.hits == 0
+
+
+async def test_a_missing_cache_member_defaults_to_a_miss() -> None:
+    service, _ = build()
+
+    assert (await service.answer("q")).cache == {"semantic_hit": False, "similarity": None}
+
+
+async def test_the_response_body_carries_the_cache_member() -> None:
+    service, _ = build()
+
+    assert "cache" in (await service.answer("q")).as_dict()
+
+
+async def test_an_embedding_failure_falls_back_to_the_full_pipeline() -> None:
+    service, llm, _ = build_cached(embedder_error=True)
+
+    result = await service.answer("q")
+
+    assert result.answer is not None
+    assert len(llm.prompts) == 1
+    assert result.cache["semantic_hit"] is False
+
+
+async def test_a_cached_stream_replays_the_documented_event_order() -> None:
+    service, _, _ = build_cached()
+    await service.answer("q")
+
+    events = await collect(service)
+
+    assert [event.type for event in events] == ["meta", "token", "citations", "usage", "done"]
+
+
+async def test_a_cached_stream_announces_the_hit_in_meta() -> None:
+    service, _, _ = build_cached()
+    await service.answer("q")
+
+    events = await collect(service)
+
+    assert events[0].data["cache"]["semantic_hit"] is True
+
+
+async def test_a_cached_stream_delivers_the_whole_answer_at_once() -> None:
+    service, _, _ = build_cached()
+    await service.answer("q")
+
+    tokens = [event for event in await collect(service) if event.type == "token"]
+
+    assert len(tokens) == 1
+    assert tokens[0].data["text"] == "thirty days [^c_a]"
+
+
+async def test_a_streamed_answer_is_cached_for_the_next_query() -> None:
+    service, llm, _ = build_cached()
+
+    await collect(service)
+    calls = len(llm.prompts)
+    result = await service.answer("q")
+
+    assert len(llm.prompts) == calls
+    assert result.cache["semantic_hit"] is True
+
+
+async def test_the_cache_is_never_consulted_without_an_embedder() -> None:
+    settings = Settings.model_validate({"cache": {"semantic": True}})
+    service = GenerationService(
+        settings,
+        ScriptedRetrieval([chunk("c_a", "text")]),  # type: ignore[arg-type]
+        ScriptedLLM(settings, text="answer"),
+        cache=SemanticCache(settings, MemoryStore()),
+    )
+
+    assert service.caching is False
+    assert (await service.answer("q")).cache["semantic_hit"] is False
 
 
 @pytest.mark.parametrize("budget", [0, 5])

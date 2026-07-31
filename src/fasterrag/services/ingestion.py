@@ -27,6 +27,7 @@ from fasterrag.adapters.embeddings.tiering import TieringRouter, create_embeddin
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.config.schema import Settings
+from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.errors import ErrorCode
 from fasterrag.observability.logging import get_logger, use_trace_id
 from fasterrag.services.journal import JobRecord, Journal
@@ -50,6 +51,7 @@ class IngestionService:
         journal: Journal,
         adapter: VectorDBAdapter | None = None,
         router: TieringRouter | None = None,
+        cache: SemanticCache | None = None,
         executor_factory: Callable[[int], Executor] | None = None,
     ) -> None:
         """Build the service.
@@ -59,12 +61,16 @@ class IngestionService:
             journal: Durable job, dedup, and dead-letter state.
             adapter: Vector database to index into; built from configuration when omitted.
             router: Embedding router; built from configuration when omitted.
+            cache: Semantic response cache, invalidated when a job changes the corpus. A
+                cached answer describes the corpus as it was, and this is the event that
+                makes that description potentially wrong.
             executor_factory: Passed to the CPU pool, so tests can avoid process spawning.
         """
         self.settings = settings
         self.journal = journal
         self.adapter = adapter or create_vector_db_adapter(settings)
         self.router = router or create_embedding_router(settings)
+        self.cache = cache
         self._executor_factory = executor_factory
 
     async def accept(
@@ -169,6 +175,9 @@ class IngestionService:
             finished_at=_finished_at(),
         )
         self.journal.save_job(settled)
+
+        if self.cache is not None and indexer.written:
+            await self.cache.invalidate(f"ingest job {record.job_id} indexed {indexer.written}")
 
         _logger.info("ingest finished", extra={"job_id": record.job_id, **counts})
         return settled

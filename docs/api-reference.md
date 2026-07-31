@@ -159,7 +159,7 @@ Grounded-or-refuse (D5): when faithfulness < threshold, `200` with:
 `stream: true` → `Content-Type: text/event-stream`. Event order:
 
 ```
-event: meta       data: {"trace_id": "...", "mode": "full", "degraded": false}
+event: meta       data: {"trace_id": "...", "mode": "full", "degraded": false, "cache": {...}}
 event: token      data: {"text": "The"}          (repeated; first token ASAP = TTFT)
 event: citations  data: {"citations": [...]}      (once, after retrieval concludes)
 event: usage      data: {"usage": {...}, "timings_ms": {...}, "faithfulness": 0.93}
@@ -177,6 +177,8 @@ event: done                   data: {}
 ```
 
 `done` is still sent: the query completed and declined, which is a finished response, not a truncated one.
+
+A semantic cache hit streams too. The whole answer is already known, so it arrives as a single `token` event after `meta`, and `meta` carries the `cache` member so a client learns it is being served from cache before the text. The event sequence is otherwise identical, so no client needs a separate code path for a cached response.
 
 ## Collections
 
