@@ -38,3 +38,6 @@ Thumbs.db
 # Runtime state written by a running deployment, never source
 # (ingestion journal, dead letters, dedup hashes, and the disk embedding cache)
 .fasterrag/
+
+# Local agent/editor permission state, accumulated per session rather than authored
+.claude/

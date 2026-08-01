@@ -622,7 +622,11 @@ class GenerationService:
             )
 
     async def close(self) -> None:
-        """Release the generation provider and the semantic cache."""
+        """Release the generation provider.
+
+        # CRITICAL: the cache is deliberately not closed here. It is shared across queries
+        # and outlives any one of them — a per-query service closing it would tear down a
+        # backend connection other in-flight queries are still using. Whoever constructed
+        # the cache closes it.
+        """
         await self.llm.close()
-        if self.cache is not None:
-            await self.cache.close()

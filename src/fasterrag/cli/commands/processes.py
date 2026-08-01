@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
+from typing import Any
 
+from fasterrag.api.main import CONFIG_PATH_VAR, create_app
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.config.loader import load_settings
 from fasterrag.errors import ConfigError, FasterRagError
@@ -35,11 +38,21 @@ async def run_serve(args: argparse.Namespace, console: Console) -> ExitCode:
 
     host = args.host or settings.app.host
     port = args.port or settings.app.port
-    console.emit(f"serving on http://{host}:{port}")
+    console.emit(f"serving on http://{host}:{port} (config: {args.config})")
+
+    if args.reload:
+        # CRITICAL: reload runs the application in a child process, which cannot receive an
+        # in-memory Settings object. The path is handed over through the environment instead,
+        # because the alternative — an import string with no configuration attached — would
+        # silently serve ./config.yaml no matter what --config said.
+        os.environ[CONFIG_PATH_VAR] = str(args.config)
+        target: Any = "fasterrag.api.main:create_app"
+    else:
+        target = create_app(settings)
 
     config = uvicorn.Config(
-        "fasterrag.api.main:create_app",
-        factory=True,
+        target,
+        factory=args.reload,
         host=host,
         port=port,
         reload=args.reload,
