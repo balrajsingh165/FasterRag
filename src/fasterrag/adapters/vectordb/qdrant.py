@@ -327,6 +327,46 @@ class QdrantAdapter(VectorDBAdapter):
                 )
             return described
 
+    async def set_alias(self, alias: str, collection: str) -> None:
+        """Point an alias at a collection in one atomic operation.
+
+        Qdrant applies a list of alias operations as a single unit, so the delete and the
+        create land together — there is no instant at which the alias resolves to nothing.
+        """
+        async with self._mapped_errors("set_alias"):
+            operations: list[models.AliasOperations] = []
+            if await self.alias_target(alias) is not None:
+                operations.append(
+                    models.DeleteAliasOperation(delete_alias=models.DeleteAlias(alias_name=alias))
+                )
+            operations.append(
+                models.CreateAliasOperation(
+                    create_alias=models.CreateAlias(collection_name=collection, alias_name=alias)
+                )
+            )
+            await self.client.update_collection_aliases(change_aliases_operations=operations)
+
+    async def alias_target(self, alias: str) -> str | None:
+        """Return the collection an alias resolves to."""
+        async with self._mapped_errors("alias_target"):
+            listing = await self.client.get_aliases()
+            for entry in listing.aliases:
+                if entry.alias_name == alias:
+                    return str(entry.collection_name)
+            return None
+
+    async def delete_alias(self, alias: str) -> bool:
+        """Remove an alias, leaving the collection it pointed at in place."""
+        async with self._mapped_errors("delete_alias"):
+            if await self.alias_target(alias) is None:
+                return False
+            await self.client.update_collection_aliases(
+                change_aliases_operations=[
+                    models.DeleteAliasOperation(delete_alias=models.DeleteAlias(alias_name=alias))
+                ]
+            )
+            return True
+
     async def drop_collection(self, name: str) -> bool:
         """Delete a collection, reporting whether one was there to delete."""
         async with self._mapped_errors("drop_collection"):

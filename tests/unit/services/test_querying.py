@@ -62,6 +62,7 @@ class ScriptedAdapter(VectorDBAdapter):
         self.dense: list[ScoredPoint] = []
         self.sparse: list[ScoredPoint] = []
         self.queries: list[SearchQuery] = []
+        self.aliases: dict[str, str] = {}
 
     async def create_collection(self, spec: CollectionSpec) -> None:
         return None
@@ -71,6 +72,15 @@ class ScriptedAdapter(VectorDBAdapter):
 
     async def drop_collection(self, name: str) -> bool:
         return False
+
+    async def set_alias(self, alias: str, collection: str) -> None:
+        self.aliases[alias] = collection
+
+    async def alias_target(self, alias: str) -> str | None:
+        return self.aliases.get(alias)
+
+    async def delete_alias(self, alias: str) -> bool:
+        return self.aliases.pop(alias, None) is not None
 
     async def upsert(self, points: list[Point]) -> UpsertResult:
         return UpsertResult(upserted=len(points))

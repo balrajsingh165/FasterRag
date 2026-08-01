@@ -149,6 +149,18 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     delete.add_argument("name", help="collection name")
     delete.add_argument("--force", action="store_true", help="required if an alias target")
 
+    reembed = actions.add_parser("reembed", help="blue/green re-embed with an eval gate (D2)")
+    _add_global_flags(reembed)
+    reembed.add_argument("name", help="the served alias to rebuild behind")
+    reembed.add_argument("sources", nargs="+", help="paths to ingest into the new build")
+    reembed.add_argument("--no-eval-gate", action="store_true", help="swap without the gate (dev)")
+    reembed.add_argument("--watch", action="store_true", help="print progress until completion")
+
+    rollback = actions.add_parser("rollback", help="flip the alias back to a retained build (D2)")
+    _add_global_flags(rollback)
+    rollback.add_argument("name", help="the served alias")
+    rollback.add_argument("--to", default=None, help="a specific retained build to restore")
+
     lock = actions.add_parser("lock", help="index lockfile operations (D1)")
     _add_global_flags(lock)
     lock_actions = lock.add_subparsers(dest="lock_action", required=True)

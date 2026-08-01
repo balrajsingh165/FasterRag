@@ -207,7 +207,9 @@ _(empty)_
 
 ### S10 — Zero-downtime reindex + lockfile
 
-- [ ] TASK-0081: Implement blue/green reindexing with eval-gated atomic alias swap and rollback retention (D2)
+- [x] TASK-0081: Implement blue/green reindexing with eval-gated atomic alias swap and rollback retention (D2) — the alias swap, retention, and rollback are complete and verified against a real Qdrant; the eval gate reports that it *could not run* rather than passing, because scoring a green build needs TASK-0077's golden-set harness — ✅ 2026-08-01
+- [ ] TASK-0133: Maintainer review — `VectorDBAdapter` gained `set_alias`, `alias_target`, and `delete_alias` under TASK-0081. Aliases are the primitive zero-downtime reindexing is built on and cannot be emulated above the adapter, so the contract is the only place they can live; all three are covered by the shared contract suite, including that a swap is atomic and an alias is searchable as if it were the collection. Same boundary question as TASK-0126; confirm or revert
+- [ ] TASK-0134: Wire the eval gate into `index reembed` once TASK-0077 ships the golden-set harness. Today the swap records `gate_ran: false` and prints that it proceeded ungated — deliberately not a pass, since a gate that did not run has established nothing
 - [x] TASK-0082: Implement index.lock writing + drift detection + `index lock verify` (D1) — ✅ 2026-08-01
 
 ### S11 — Chaos, load, soak; baselines

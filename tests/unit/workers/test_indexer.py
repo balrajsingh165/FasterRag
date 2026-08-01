@@ -28,6 +28,7 @@ class RecordingAdapter(VectorDBAdapter):
         super().__init__(settings)
         self.specs: list[CollectionSpec] = []
         self.points: list[Point] = []
+        self.aliases: dict[str, str] = {}
 
     async def create_collection(self, spec: CollectionSpec) -> None:
         self.specs.append(spec)
@@ -38,6 +39,15 @@ class RecordingAdapter(VectorDBAdapter):
     async def drop_collection(self, name: str) -> bool:
         self.specs = [spec for spec in self.specs if spec.name != name]
         return True
+
+    async def set_alias(self, alias: str, collection: str) -> None:
+        self.aliases[alias] = collection
+
+    async def alias_target(self, alias: str) -> str | None:
+        return self.aliases.get(alias)
+
+    async def delete_alias(self, alias: str) -> bool:
+        return self.aliases.pop(alias, None) is not None
 
     async def upsert(self, points: list[Point]) -> UpsertResult:
         self.points.extend(points)

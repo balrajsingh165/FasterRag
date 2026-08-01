@@ -23,6 +23,7 @@ class StubVectorDB:
         self.created: list[CollectionSpec] = []
         self.dropped: list[str] = []
         self.error: Exception | None = None
+        self.aliases: dict[str, str] = {}
 
     async def health(self) -> HealthStatus:
         return HealthStatus(healthy=self.healthy, detail=self.detail, latency_ms=1.0)
@@ -45,6 +46,15 @@ class StubVectorDB:
                 sparse=spec.sparse,
             )
         )
+
+    async def set_alias(self, alias: str, collection: str) -> None:
+        self.aliases[alias] = collection
+
+    async def alias_target(self, alias: str) -> str | None:
+        return self.aliases.get(alias)
+
+    async def delete_alias(self, alias: str) -> bool:
+        return self.aliases.pop(alias, None) is not None
 
     async def drop_collection(self, name: str) -> bool:
         self.dropped.append(name)

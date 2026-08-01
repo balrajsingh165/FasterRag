@@ -113,6 +113,62 @@ class VectorDBContract:
     ) -> None:
         assert await adapter.drop_collection("collection-that-never-existed") is False
 
+    async def test_an_alias_resolves_to_its_collection(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await adapter.create_collection(CollectionSpec(name=collection, dimensions=DIMENSIONS))
+        alias = f"{collection}-alias"
+
+        await adapter.set_alias(alias, collection)
+
+        assert await adapter.alias_target(alias) == collection
+        await adapter.delete_alias(alias)
+
+    async def test_an_unset_alias_resolves_to_nothing(self, adapter: VectorDBAdapter) -> None:
+        assert await adapter.alias_target("alias-that-never-existed") is None
+
+    async def test_repointing_an_alias_replaces_its_target(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        second = f"{collection}-green"
+        await adapter.create_collection(CollectionSpec(name=collection, dimensions=DIMENSIONS))
+        await adapter.create_collection(CollectionSpec(name=second, dimensions=DIMENSIONS))
+        alias = f"{collection}-alias"
+
+        await adapter.set_alias(alias, collection)
+        await adapter.set_alias(alias, second)
+
+        assert await adapter.alias_target(alias) == second
+        await adapter.delete_alias(alias)
+        await adapter.drop_collection(second)
+
+    async def test_deleting_an_alias_leaves_the_collection(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await adapter.create_collection(CollectionSpec(name=collection, dimensions=DIMENSIONS))
+        alias = f"{collection}-alias"
+        await adapter.set_alias(alias, collection)
+
+        assert await adapter.delete_alias(alias) is True
+        assert await adapter.alias_target(alias) is None
+        assert collection in {info.name for info in await adapter.list_collections()}
+
+    async def test_deleting_an_absent_alias_is_not_an_error(self, adapter: VectorDBAdapter) -> None:
+        assert await adapter.delete_alias("alias-that-never-existed") is False
+
+    async def test_an_alias_is_searchable_as_if_it_were_the_collection(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        await adapter.create_collection(CollectionSpec(name=collection, dimensions=DIMENSIONS))
+        await self.seed(adapter, collection)
+        alias = f"{collection}-alias"
+        await adapter.set_alias(alias, collection)
+
+        hits = await adapter.search(SearchQuery(collection=alias, vector=VECTORS["a"], limit=3))
+
+        assert hits
+        await adapter.delete_alias(alias)
+
     async def test_conflicting_dimensions_are_refused(
         self, adapter: VectorDBAdapter, collection: str
     ) -> None:

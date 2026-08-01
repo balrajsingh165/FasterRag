@@ -34,6 +34,8 @@ from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import create_journal
 from fasterrag.services.lockfile import create_lock_store, detect_drift
 from fasterrag.services.querying import RetrievalService
+from fasterrag.services.regression import GateResult
+from fasterrag.services.reindex import plan_reindex, retire, rollback, swap
 from fasterrag.services.traces import create_trace_store
 
 __all__ = ["run_index", "run_ingest", "run_query"]
@@ -336,6 +338,10 @@ async def run_index(args: argparse.Namespace, console: Console) -> ExitCode:
             return await _index_list(settings, adapter, console)
         if args.action == "lock":
             return await _index_lock_verify(args, settings, console)
+        if args.action == "reembed":
+            return await _index_reembed(args, settings, adapter, console)
+        if args.action == "rollback":
+            return await _index_rollback(args, adapter, console)
         if args.action == "create":
             return await _index_create(args, settings, adapter, console)
         return await _index_delete(args, adapter, console)
@@ -345,3 +351,80 @@ async def run_index(args: argparse.Namespace, console: Console) -> ExitCode:
         return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
     finally:
         await adapter.close()
+
+
+async def _index_reembed(
+    args: argparse.Namespace, settings: Settings, adapter: VectorDBAdapter, console: Console
+) -> ExitCode:
+    """Rebuild an index behind its alias, swapping only if the gate allows it (D2)."""
+    plan = await plan_reindex(args.name, settings, adapter)
+    console.emit(f"building        {plan.green}")
+    console.emit(f"replacing       {plan.blue or '(first build)'}")
+
+    service = IngestionService(
+        settings,
+        journal=create_journal(settings),
+        adapter=adapter,
+        locks=create_lock_store(settings),
+    )
+    try:
+        record = await service.ingest(args.sources, collection=plan.green)
+    except FasterRagError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
+    finally:
+        await service.close()
+
+    if record.status == "failed":
+        console.error(f"the build failed; {plan.blue or 'nothing'} is still live")
+        console.document({**plan.as_dict(), "swapped": False, "reason": "the build failed"})
+        return ExitCode.FAILURE
+
+    gate = _run_eval_gate(console) if not args.no_eval_gate else None
+    result = await swap(
+        plan,
+        adapter,
+        eval_passed=gate.passed if gate else None,
+        eval_report=gate.as_dict() if gate else {},
+    )
+
+    if not result.swapped:
+        # CRITICAL: exit 5, the documented regression-gate code. A blocked swap is the gate
+        # working, and a pipeline needs to distinguish it from a build that crashed.
+        console.error(result.reason)
+        console.document(result.as_dict())
+        return ExitCode.REGRESSION
+
+    console.emit(f"swapped         {plan.alias} -> {plan.green} in {result.swap_ms} ms")
+    retired = await retire(plan.alias, adapter, settings, locks=create_lock_store(settings))
+    for name in retired:
+        console.emit(f"retired         {name}")
+
+    console.document({**result.as_dict(), "retired": retired})
+    return ExitCode.SUCCESS
+
+
+def _run_eval_gate(console: Console) -> GateResult | None:
+    """Return the eval gate's verdict, or ``None`` when it cannot run.
+
+    # TODO: scoring a green build needs the golden-set harness of TASK-0077. Until that
+    # ships the gate reports that it could not judge, which the swap records as ungated —
+    # deliberately not as a pass, because a gate that did not run has established nothing.
+    """
+    console.emit(
+        "eval gate       could not run: scoring a green build needs the golden-set "
+        "harness (TASK-0077); the swap will be recorded as ungated"
+    )
+    return None
+
+
+async def _index_rollback(
+    args: argparse.Namespace, adapter: VectorDBAdapter, console: Console
+) -> ExitCode:
+    """Flip the alias back to a retained build (D2)."""
+    result = await rollback(args.name, adapter, to=args.to)
+
+    console.emit(f"restored        {result.alias} -> {result.restored}")
+    console.emit(f"replaced        {result.replaced or '(nothing)'}")
+    console.document(result.as_dict())
+    return ExitCode.SUCCESS

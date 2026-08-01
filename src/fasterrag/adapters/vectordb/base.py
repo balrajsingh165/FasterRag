@@ -310,6 +310,24 @@ class VectorDBAdapter(ABC):
         """
 
     @abstractmethod
+    async def set_alias(self, alias: str, collection: str) -> None:
+        """Point ``alias`` at ``collection``, atomically replacing any previous target.
+
+        The primitive zero-downtime reindexing is built on (D2). It must be atomic: a swap
+        implemented as delete-then-create leaves a window in which the alias resolves to
+        nothing, and every query arriving in that window fails — which is precisely the
+        downtime the feature exists to remove.
+        """
+
+    @abstractmethod
+    async def alias_target(self, alias: str) -> str | None:
+        """Return the collection ``alias`` resolves to, or ``None`` if it is not an alias."""
+
+    @abstractmethod
+    async def delete_alias(self, alias: str) -> bool:
+        """Remove an alias, reporting whether one existed. The collection is untouched."""
+
+    @abstractmethod
     async def upsert(self, points: list[Point]) -> UpsertResult:
         """Write points, overwriting any that already exist.
 
