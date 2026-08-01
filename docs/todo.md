@@ -216,7 +216,7 @@ _(empty)_
 
 - [ ] TASK-0083: Implement the scripted chaos suite (kill-worker, stop-Qdrant, corrupt-doc, slow-LLM, disk-full) and degradation ladder verification (D4/D12)
 - [x] TASK-0048: Implement benchmark suite per performance.md (p50/p95, throughput, cache hit rate, cost/query; --ledger output) — ingest and query suites; the eval suite needs TASK-0077's golden set — ✅ 2026-08-01
-- [ ] TASK-0084: Run load + soak + chaos on documented reference hardware; record first benchmark-ledger entries; replace every TBD-until-measured in slo.md
+- [ ] TASK-0084: Run load + soak + chaos on documented reference hardware; record first benchmark-ledger entries; replace every TBD-until-measured in slo.md — BLOCKED on isolated hardware. BENCH-0001 and BENCH-0002 are committed but explicitly marked not citable: they were taken on a developer laptop with Docker, an IDE, and other co-tenant load, failing ledger rule 5's isolation requirement. Run-to-run variance exceeded the effect being measured (p50 5.5 s vs 8.7 s across two invocations of the same commit), and cold start came out *faster* than the warmed median — both symptoms of the missing isolation. slo.md's TBDs stay TBD until superseding entries come from a quiet machine
 - [ ] TASK-0085: Execute the disaster-recovery restore drill for real; record RPO/RTO from measurements
 
 ### S12 — Autopilot v1
