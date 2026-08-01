@@ -13,8 +13,10 @@ schema is still published for client generation.
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import cast
 
 from fastapi import FastAPI
@@ -23,15 +25,27 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from fasterrag import __version__
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
-from fasterrag.api import health
+from fasterrag.api import admin, collections, health, ingest, query
 from fasterrag.api.problems import install_exception_handlers
-from fasterrag.config.loader import load_settings
+from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
 from fasterrag.config.schema import Settings
 from fasterrag.observability.logging import configure_logging, get_logger, use_trace_id
 
-__all__ = ["CorrelationIdMiddleware", "create_app"]
+__all__ = ["CONFIG_PATH_VAR", "CorrelationIdMiddleware", "create_app"]
+
+# CRITICAL: the only way `fasterrag serve --reload --config other.yaml` can reach the
+# application. Reload builds it in a child process from an import string, which carries no
+# arguments, so without this the child would load ./config.yaml and silently ignore --config.
+CONFIG_PATH_VAR = "FASTERRAG_CONFIG"
 
 _logger = get_logger(__name__)
+
+
+def _configured_path() -> Path:
+    """Return the config file to load when no settings were passed in."""
+    return Path(os.environ.get(CONFIG_PATH_VAR) or DEFAULT_CONFIG_PATH)
+
+
 _default_app: FastAPI | None = None
 
 
@@ -112,6 +126,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # CRITICAL: the embedding router and the semantic cache are process-scoped, built
+        # lazily on first use and released only here. Closing either from a request handler
+        # would unload a model or drop a backend connection that concurrent requests are
+        # still using.
+        embeddings = getattr(app.state, "embeddings", None)
+        if embeddings is not None:
+            await embeddings.close()
+            app.state.embeddings = None
+
+        cache = getattr(app.state, "cache", None)
+        if cache is not None:
+            await cache.close()
+            app.state.cache = None
+
         if owns_adapter:
             adapter: VectorDBAdapter = app.state.vector_db
             await adapter.close()
@@ -123,8 +151,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Build the API application.
 
     Args:
-        settings: Pre-validated settings. When omitted, ``config.yaml`` is loaded and
-            validated, which fails fast if any key or referenced secret is missing.
+        settings: Pre-validated settings. When omitted, the file named by
+            ``FASTERRAG_CONFIG`` is loaded, falling back to ``config.yaml``; either way it
+            is validated, which fails fast if any key or referenced secret is missing.
 
     Returns:
         The configured application.
@@ -132,7 +161,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     Raises:
         ConfigError: If configuration is absent or invalid and none was supplied.
     """
-    resolved = settings if settings is not None else load_settings()
+    resolved = settings if settings is not None else load_settings(_configured_path())
     configure_logging(resolved.app.log_level)
 
     app = FastAPI(
@@ -154,6 +183,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(CorrelationIdMiddleware)
     install_exception_handlers(app)
     app.include_router(health.router)
+    app.include_router(ingest.router)
+    app.include_router(query.router)
+    app.include_router(collections.router)
+    app.include_router(admin.router)
 
     return app
 
