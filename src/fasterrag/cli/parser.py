@@ -149,6 +149,13 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     delete.add_argument("name", help="collection name")
     delete.add_argument("--force", action="store_true", help="required if an alias target")
 
+    lock = actions.add_parser("lock", help="index lockfile operations (D1)")
+    _add_global_flags(lock)
+    lock_actions = lock.add_subparsers(dest="lock_action", required=True)
+    verify = lock_actions.add_parser("verify", help="verify a collection against its lockfile")
+    _add_global_flags(verify)
+    verify.add_argument("name", nargs="?", default=None, help="collection; defaults to configured")
+
 
 def _add_provision(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Register ``provision``."""

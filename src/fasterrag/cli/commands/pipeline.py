@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from typing import Any
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
 from fasterrag.adapters.embeddings.tiering import create_embedding_router
@@ -31,6 +32,7 @@ from fasterrag.services.estimation import estimate_sources
 from fasterrag.services.generation import GenerationService
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import create_journal
+from fasterrag.services.lockfile import create_lock_store, detect_drift
 from fasterrag.services.querying import RetrievalService
 from fasterrag.services.traces import create_trace_store
 
@@ -78,7 +80,9 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
         console.document({"dry_run": True, **estimate.as_dict()})
         return ExitCode.SUCCESS
 
-    service = IngestionService(settings, journal=create_journal(settings))
+    service = IngestionService(
+        settings, journal=create_journal(settings), locks=create_lock_store(settings)
+    )
     try:
         record = await service.ingest(
             args.sources,
@@ -171,21 +175,76 @@ async def run_query(args: argparse.Namespace, console: Console) -> ExitCode:
     return ExitCode.SUCCESS
 
 
-async def _index_list(adapter: VectorDBAdapter, console: Console) -> ExitCode:
-    """Print every collection the backend holds."""
+async def _index_list(settings: Settings, adapter: VectorDBAdapter, console: Console) -> ExitCode:
+    """Print every collection the backend holds, with its drift status (D1)."""
     collections = await adapter.list_collections()
     if not collections:
         console.emit("no collections")
 
-    for info in collections:
-        console.emit(
-            f"{info.name:<30} {info.vectors:>10} vectors  "
-            f"dim={info.dimensions}  distance={info.distance}  "
-            f"sparse={'yes' if info.sparse else 'no'}"
-        )
+    locks = create_lock_store(settings)
+    journal = create_journal(settings)
+    payload: list[dict[str, Any]] = []
 
-    console.document({"collections": [info.as_dict() for info in collections]})
+    for info in collections:
+        lock = locks.read(info.name)
+        drift = detect_drift(
+            lock,
+            settings,
+            collection=info.name,
+            document_hashes=journal.document_hashes(info.name) or None,
+        )
+        status = "no lockfile" if drift.missing_lock else ("DRIFT" if drift.detected else "ok")
+        console.emit(
+            f"{info.name:<24} {info.vectors:>10} vectors  "
+            f"dim={info.dimensions}  distance={info.distance}  "
+            f"sparse={'yes' if info.sparse else 'no'}  {status}"
+        )
+        payload.append({**info.as_dict(), "drift": drift.as_dict()})
+
+    console.document({"collections": payload})
     return ExitCode.SUCCESS
+
+
+async def _index_lock_verify(
+    args: argparse.Namespace, settings: Settings, console: Console
+) -> ExitCode:
+    """Verify a collection against its lockfile, exiting non-zero on drift (D1)."""
+    collection = args.name or args.collection or settings.vector_db.collection.default_name
+    lock = create_lock_store(settings).read(collection)
+    drift = detect_drift(
+        lock,
+        settings,
+        collection=collection,
+        document_hashes=create_journal(settings).document_hashes(collection) or None,
+    )
+
+    console.document(drift.as_dict())
+
+    if drift.missing_lock:
+        console.error(
+            f"no lockfile for {collection!r}; ingest into it, or set index.lockfile to false"
+        )
+        return ExitCode.FAILURE
+
+    if not drift.detected:
+        console.emit(f"{collection}: no drift; the index matches its lockfile")
+        return ExitCode.SUCCESS
+
+    console.error(f"{collection}: index drift detected")
+    for detail in drift.details:
+        console.error(
+            f"  {detail['field']}: locked {detail['locked']!r} -> live {detail['live']!r}"
+        )
+    for document in drift.documents_added:
+        console.error(f"  document added since the lock: {document}")
+    for document in drift.documents_removed:
+        console.error(f"  document removed since the lock: {document}")
+    for document in drift.documents_changed:
+        console.error(f"  document content changed since the lock: {document}")
+
+    # CRITICAL: exit 1, not 0. Verify exists to be a gate in a pipeline, and a drift check
+    # that succeeds while reporting drift is a check nothing can branch on.
+    return ExitCode.FAILURE
 
 
 def _distance_for(
@@ -274,7 +333,9 @@ async def run_index(args: argparse.Namespace, console: Console) -> ExitCode:
     adapter = create_vector_db_adapter(settings)
     try:
         if args.action == "list":
-            return await _index_list(adapter, console)
+            return await _index_list(settings, adapter, console)
+        if args.action == "lock":
+            return await _index_lock_verify(args, settings, console)
         if args.action == "create":
             return await _index_create(args, settings, adapter, console)
         return await _index_delete(args, adapter, console)

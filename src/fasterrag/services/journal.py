@@ -399,6 +399,15 @@ class Journal:
                 known[payload["content_hash"]] = payload["document_id"]
         return known
 
+    def document_hashes(self, collection: str) -> dict[str, str]:
+        """Return the collection's ``document_id → content_hash`` map.
+
+        The direction the index lockfile records (D1). The dedup index is stored the other
+        way round because its own question is "have I seen this content", and inverting it
+        is lossless: a content hash maps to exactly one document by construction.
+        """
+        return {document: digest for digest, document in self.known_content(collection).items()}
+
     def is_duplicate(self, collection: str, content: str) -> bool:
         """Return whether a collection already holds this exact content."""
         return content in self.known_content(collection)

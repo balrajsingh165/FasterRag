@@ -25,6 +25,7 @@ from fasterrag.core.rerank import CrossEncoderReranker
 from fasterrag.services.generation import GenerationService
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import Journal, create_journal
+from fasterrag.services.lockfile import create_lock_store
 from fasterrag.services.querying import RetrievalService
 from fasterrag.services.traces import TraceStore
 
@@ -153,4 +154,11 @@ def build_ingestion(
     The adapter is passed in rather than built, so a background job shares the connection
     pool the request that started it was using instead of opening a second one.
     """
-    return IngestionService(settings, journal=journal, adapter=adapter, router=router, cache=cache)
+    return IngestionService(
+        settings,
+        journal=journal,
+        adapter=adapter,
+        router=router,
+        cache=cache,
+        locks=create_lock_store(settings),
+    )

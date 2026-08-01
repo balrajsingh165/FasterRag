@@ -155,13 +155,29 @@ async def test_index_list_reports_json(
     )
     payload = json.loads(capsys.readouterr().out)
 
-    assert payload["collections"][0] == {
+    listed = payload["collections"][0]
+
+    assert {
         "name": "docs",
         "vectors": 7,
         "dimensions": 384,
         "distance": None,
         "sparse": False,
-    }
+    }.items() <= listed.items()
+
+
+async def test_index_list_reports_drift_status_per_collection(
+    config: str, adapter: FakeAdapter, capsys: pytest.CaptureFixture[str]
+) -> None:
+    adapter.collections = [CollectionInfo(name="docs", vectors=7)]
+
+    await pipeline.run_index(
+        namespace(config=config, action="list", as_json=True), Console(as_json=True)
+    )
+    drift = json.loads(capsys.readouterr().out)["collections"][0]["drift"]
+
+    assert drift["missing_lock"] is True
+    assert drift["detected"] is False
 
 
 async def test_an_unreachable_backend_exits_with_the_unreachable_code(

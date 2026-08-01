@@ -31,6 +31,7 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.errors import ErrorCode
 from fasterrag.observability.logging import get_logger, use_trace_id
 from fasterrag.services.journal import JobRecord, Journal
+from fasterrag.services.lockfile import LockStore, build_lock
 from fasterrag.workers.cpu_pool import CpuWorkerPool
 from fasterrag.workers.embed_pool import EmbeddingWorkerPool
 from fasterrag.workers.indexer import Indexer
@@ -52,6 +53,7 @@ class IngestionService:
         adapter: VectorDBAdapter | None = None,
         router: TieringRouter | None = None,
         cache: SemanticCache | None = None,
+        locks: LockStore | None = None,
         executor_factory: Callable[[int], Executor] | None = None,
     ) -> None:
         """Build the service.
@@ -61,6 +63,7 @@ class IngestionService:
             journal: Durable job, dedup, and dead-letter state.
             adapter: Vector database to index into; built from configuration when omitted.
             router: Embedding router; built from configuration when omitted.
+            locks: Records what produced the index, so drift is detectable (D1).
             cache: Semantic response cache, invalidated when a job changes the corpus. A
                 cached answer describes the corpus as it was, and this is the event that
                 makes that description potentially wrong.
@@ -71,6 +74,7 @@ class IngestionService:
         self.adapter = adapter or create_vector_db_adapter(settings)
         self.router = router or create_embedding_router(settings)
         self.cache = cache
+        self.locks = locks
         self._executor_factory = executor_factory
 
     async def accept(
@@ -176,11 +180,35 @@ class IngestionService:
         )
         self.journal.save_job(settled)
 
+        if indexer.written:
+            self._write_lockfile(record.collection)
+
         if self.cache is not None and indexer.written:
             await self.cache.invalidate(f"ingest job {record.job_id} indexed {indexer.written}")
 
         _logger.info("ingest finished", extra={"job_id": record.job_id, **counts})
         return settled
+
+    def _write_lockfile(self, collection: str) -> None:
+        """Record what produced this index, so drift against it is detectable (D1).
+
+        Written after the job settles rather than before it runs: a lockfile describing an
+        index that failed halfway would claim a corpus the collection does not hold.
+        """
+        if self.locks is None or not self.locks.enabled:
+            return
+
+        embedder = self.router.default
+        self.locks.write(
+            build_lock(
+                collection,
+                self.settings,
+                embedding_model=embedder.model,
+                embedding_model_version=embedder.model_version,
+                dimensions=embedder.dimensions,
+                document_hashes=self.journal.document_hashes(collection),
+            )
+        )
 
     async def ingest(
         self,

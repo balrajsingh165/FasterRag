@@ -208,7 +208,7 @@ _(empty)_
 ### S10 — Zero-downtime reindex + lockfile
 
 - [ ] TASK-0081: Implement blue/green reindexing with eval-gated atomic alias swap and rollback retention (D2)
-- [ ] TASK-0082: Implement index.lock writing + drift detection + `index lock verify` (D1)
+- [x] TASK-0082: Implement index.lock writing + drift detection + `index lock verify` (D1) — ✅ 2026-08-01
 
 ### S11 — Chaos, load, soak; baselines
 
