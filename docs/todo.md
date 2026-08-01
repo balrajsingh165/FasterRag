@@ -214,7 +214,10 @@ _(empty)_
 
 ### S11 — Chaos, load, soak; baselines
 
-- [ ] TASK-0083: Implement the scripted chaos suite (kill-worker, stop-Qdrant, corrupt-doc, slow-LLM, disk-full) and degradation ladder verification (D4/D12)
+- [x] TASK-0083: Implement the scripted chaos suite (kill-worker, stop-Qdrant, corrupt-doc, slow-LLM, disk-full) and degradation ladder verification (D4/D12) — all five scenarios scripted and passing; observed behavior recorded in failure-modes.md — ✅ 2026-08-01
+- [ ] TASK-0135: The chaos suite injects the stop-Qdrant and disk-full faults at the adapter and filesystem seams rather than by stopping a real container or filling a real disk. That verifies fasterRag's response but not the operating system's reporting of those conditions; add container-stop and disk-quota variants under the `integration` marker
+- [ ] TASK-0136: Recovery time per chaos scenario is not measured — D12's proof metric asks for it, and it needs the isolated hardware TASK-0084 is blocked on
+- [ ] TASK-0137: The error-code table has no timeout code for generation. Embeddings distinguish `EMBED_PROVIDER_TIMEOUT` from `EMBED_PROVIDER_ERROR`, but a generation timeout can only be reported as `GENERATION_FAILED`, so `reliability.timeouts.llm_ms` firing is indistinguishable from any other provider failure in logs and metrics. Consider `LLM_TIMEOUT`, alongside TASK-0125
 - [x] TASK-0048: Implement benchmark suite per performance.md (p50/p95, throughput, cache hit rate, cost/query; --ledger output) — ingest and query suites; the eval suite needs TASK-0077's golden set — ✅ 2026-08-01
 - [ ] TASK-0084: Run load + soak + chaos on documented reference hardware; record first benchmark-ledger entries; replace every TBD-until-measured in slo.md — BLOCKED on isolated hardware. BENCH-0001 and BENCH-0002 are committed but explicitly marked not citable: they were taken on a developer laptop with Docker, an IDE, and other co-tenant load, failing ledger rule 5's isolation requirement. Run-to-run variance exceeded the effect being measured (p50 5.5 s vs 8.7 s across two invocations of the same commit), and cold start came out *faster* than the warmed median — both symptoms of the missing isolation. slo.md's TBDs stay TBD until superseding entries come from a quiet machine
 - [ ] TASK-0085: Execute the disaster-recovery restore drill for real; record RPO/RTO from measurements

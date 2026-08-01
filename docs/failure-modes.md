@@ -43,3 +43,24 @@ Every anticipated failure, its detection signal, automatic mitigation, recovery 
 | 37 | Dashboard | Attempted state mutation via dashboard | No such route exists; 404/405 by construction | Read-only by design (no control endpoints compiled in) | n/a | Unit: route-table assertion (zero mutating routes) |
 
 Coverage cross-check: parser (1–3), chunker (4–5), embedding pool (6–9), job queue (10–11), vector DB managed-Docker (12–13) / external (14) / remote-IP (15–16) / any (17), reranker (18–19), LLM provider (20–22), semantic cache (23–25), config loader (26), secrets loader (27), auto-provisioner (28–30), ingestion journal (31–32), disk (33–34), network (35), dashboard (36–37).
+
+## Observed behavior — chaos suite run
+
+D12 requires that the injected faults and their observed behavior are recorded, not merely
+asserted in a test file. The suite is `tests/chaos/test_chaos.py`, run with `pytest -m chaos`.
+
+| Scenario (testing-strategy.md §1.9) | Observed | Date |
+|---|---|---|
+| Kill an embedding worker mid-batch | Re-writing the same batch produced 6 upsert calls carrying only 3 distinct point ids — the deterministic id makes the second write a replace, so no duplicate vectors reach the index | 2026-08-01 |
+| Stop the Qdrant container | `health()` reports unhealthy; every operation raises `RETRIEVAL_FAILED` classified `retryable=True`, which is what lets the breaker act on it rather than treating it as a permanent fault; the adapter serves again as soon as the backend answers | 2026-08-01 |
+| Feed a corrupt/malformed document | Recorded in the DLQ with `reason_code: PARSE_FAILED` and its attempt count; a sibling document in the same job still reached `indexed`, so one bad file did not stop the pipeline | 2026-08-01 |
+| Slow LLM (latency injection) | Degraded to `extractive` with `degraded: true`, serving the retrieved passages and their citations rather than returning nothing | 2026-08-01 |
+| Disk-full during ingest | The journal raises rather than corrupting state; the trace store, which writes *after* a query has been answered, swallows the failure and loses the record instead of failing the request; a checkpointed job resumes from index 499 at 500 | 2026-08-01 |
+
+**Scope of this run.** Every scenario injects its fault at the closest honest seam — an
+adapter raising what the real failure raises, or a directory that genuinely cannot be
+written. Simulating a *symptom* is legitimate; simulating the *handling* would prove nothing.
+The stop-Qdrant and disk-full rows are injected rather than achieved by stopping a real
+container or filling a real disk, so they verify fasterRag's response to those conditions and
+not the operating system's reporting of them. Recovery *times* per scenario are not yet
+recorded; that needs the isolated hardware TASK-0084 is blocked on.
