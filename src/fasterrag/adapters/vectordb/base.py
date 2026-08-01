@@ -310,6 +310,31 @@ class VectorDBAdapter(ABC):
         """
 
     @abstractmethod
+    async def snapshot(self, collection: str) -> str:
+        """Take a backend-native snapshot of a collection and return its name.
+
+        Backend-native rather than a re-export of points: a snapshot restores the collection
+        configuration and index structure too, and rebuilding those from exported vectors is
+        a different operation with a different result (``docs/disaster-recovery.md`` §1).
+
+        Returns:
+            The snapshot's identifier, as the backend names it.
+        """
+
+    @abstractmethod
+    async def list_snapshots(self, collection: str) -> list[str]:
+        """Return the snapshots the backend holds for a collection, newest last."""
+
+    @abstractmethod
+    async def restore_snapshot(self, collection: str, snapshot: str) -> None:
+        """Restore a collection from one of its snapshots.
+
+        Restoring over a live collection replaces its contents. The caller decides whether
+        that is wanted; the adapter does not second-guess a restore, because refusing one
+        during an actual incident would be the worst possible moment to be cautious.
+        """
+
+    @abstractmethod
     async def set_alias(self, alias: str, collection: str) -> None:
         """Point ``alias`` at ``collection``, atomically replacing any previous target.
 

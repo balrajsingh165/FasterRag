@@ -29,6 +29,16 @@ The drill restores a complete deployment onto a clean machine from backups only.
 8. **Record `T1`** (queries serving) and `T2` (full verification done). RTO = `T1 − T0`; verify data loss window vs snapshot timestamps = achieved RPO.
 9. **Record results**: ledger entry (timings, hardware) + tick the drill task in [todo.md](todo.md) with the date. File a bug for every step that needed improvisation — improvisation in a drill is a documentation defect.
 
+### Drill execution log
+
+| Date | Steps executed | Result |
+|---|---|---|
+| 2026-08-01 | 4 (restore vector DB, verify counts), 5 (control files), 7 (behavior verification) | **Passed, partial scope.** A live `apitest` collection was snapshotted, deleted outright, and restored from the backup. The restore reported matching vector counts, and the same query returned the identical answer citing the identical chunk id `c_ca8722f2b113fc1d` — the collection configuration (384 dimensions, cosine, sparse leg) survived because the snapshot is backend-native rather than a re-export of points. Restore wall clock: 4,311 ms for a 2-vector collection, including process startup. |
+
+**What this drill did *not* execute.** Steps 1–3 (clean host, `.env` recreation, `fasterrag doctor`) and step 6's `index lock verify` were not performed: the restore was onto the *same* running host, which makes this the single-collection shortcut of §4 rather than the full clean-host procedure of §2. Step 6 additionally reported `no lockfile` for the restored collection — correctly, since that collection was ingested before lockfile writing was wired in, so there was nothing to back up and nothing to verify against.
+
+**RPO and RTO remain TBD-until-measured.** The 4,311 ms above is a restore *duration* for one tiny collection on a laptop, not an RTO: RTO is `T1 − T0` from a clean host, and no clean host was used. Publishing it as RTO would be exactly the substitution the provable-claims policy exists to prevent.
+
 ## 3. Recovery objectives
 
 | Objective | Definition | Value |

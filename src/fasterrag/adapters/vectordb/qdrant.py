@@ -327,6 +327,42 @@ class QdrantAdapter(VectorDBAdapter):
                 )
             return described
 
+    async def snapshot(self, collection: str) -> str:
+        """Take a Qdrant snapshot of a collection and return its name.
+
+        Raises:
+            FasterRagError: With ``INTERNAL`` if the server accepted the request but
+                described no snapshot, which would otherwise leave a backup routine
+                believing it had a restore point it does not have.
+        """
+        async with self._mapped_errors("snapshot"):
+            description = await self.client.create_snapshot(collection_name=collection)
+
+        if description is None or not description.name:
+            raise FasterRagError(
+                f"qdrant reported no snapshot for {collection!r}; treat this as a failed "
+                "backup rather than a silent one",
+                code=ErrorCode.INTERNAL,
+                retryable=True,
+            )
+        return str(description.name)
+
+    async def list_snapshots(self, collection: str) -> list[str]:
+        """Return the snapshots Qdrant holds for a collection, oldest first."""
+        async with self._mapped_errors("list_snapshots"):
+            described = await self.client.list_snapshots(collection_name=collection)
+            return sorted(str(entry.name) for entry in described if entry.name)
+
+    async def restore_snapshot(self, collection: str, snapshot: str) -> None:
+        """Restore a collection from a snapshot the server already holds."""
+        async with self._mapped_errors("restore_snapshot"):
+            await self.client.recover_snapshot(
+                collection_name=collection,
+                location=f"file:///qdrant/snapshots/{collection}/{snapshot}",
+            )
+        self._dimensions.pop(collection, None)
+        self._named.pop(collection, None)
+
     async def set_alias(self, alias: str, collection: str) -> None:
         """Point an alias at a collection in one atomic operation.
 

@@ -215,6 +215,20 @@ def _add_traces(subparsers: argparse._SubParsersAction[argparse.ArgumentParser])
     show.add_argument("trace_id", help="the trace id")
 
 
+def _add_backup(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register ``backup`` and ``restore``."""
+    backup = subparsers.add_parser("backup", help="capture a full deployment backup")
+    _add_global_flags(backup)
+    backup.add_argument("destination", help="directory to write the backup into")
+    backup.add_argument("--collections", nargs="*", default=[], help="limit to these")
+
+    restore = subparsers.add_parser("restore", help="restore a deployment from a backup")
+    _add_global_flags(restore)
+    restore.add_argument("source", help="a backup directory holding a manifest")
+    restore.add_argument("--collections", nargs="*", default=[], help="limit to these")
+    restore.add_argument("--collections-only", action="store_true", help="skip the control files")
+
+
 def _add_benchmark(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Register ``benchmark``."""
     parser = subparsers.add_parser("benchmark", help="run the benchmark suites")
@@ -262,6 +276,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--fix", action="store_true", help="apply safe automatic fixes")
 
     _add_estimate(subparsers)
+    _add_backup(subparsers)
     _add_benchmark(subparsers)
     _add_replay(subparsers)
     _add_traces(subparsers)

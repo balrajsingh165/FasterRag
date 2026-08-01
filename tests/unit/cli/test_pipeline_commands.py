@@ -45,6 +45,8 @@ class FakeAdapter(VectorDBAdapter):
         self.dropped: list[str] = []
         self.error: Exception | None = None
         self.aliases: dict[str, str] = {}
+        self.snapshots: dict[str, list[str]] = {}
+        self.restored: list[tuple[str, str]] = []
 
     async def create_collection(self, spec: CollectionSpec) -> None:
         if self.error is not None:
@@ -59,6 +61,16 @@ class FakeAdapter(VectorDBAdapter):
     async def drop_collection(self, name: str) -> bool:
         self.dropped.append(name)
         return any(info.name == name for info in self.collections)
+
+    async def snapshot(self, collection: str) -> str:
+        self.snapshots.setdefault(collection, []).append(f"{collection}-snap")
+        return f"{collection}-snap"
+
+    async def list_snapshots(self, collection: str) -> list[str]:
+        return list(self.snapshots.get(collection, []))
+
+    async def restore_snapshot(self, collection: str, snapshot: str) -> None:
+        self.restored.append((collection, snapshot))
 
     async def set_alias(self, alias: str, collection: str) -> None:
         self.aliases[alias] = collection
