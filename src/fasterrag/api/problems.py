@@ -21,6 +21,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
 from fasterrag.errors import ErrorCode, FasterRagError, ProvisioningError, problem_spec
+from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger
 
 __all__ = [
@@ -122,8 +123,33 @@ def problem_response(
     )
 
 
-def _log_problem(document: ProblemDocument, exc: BaseException | None = None) -> None:
-    """Log a problem at a severity matching its status, always with the trace id."""
+def route_template(request: Request) -> str:
+    """Return the route pattern a request matched, never its concrete path.
+
+    # CRITICAL: metric labels must be the template. RFC 9457's ``instance`` identifies the
+    # one occurrence, so the problem body rightly carries the concrete path — but putting
+    # that same value in a label would mint a new time series per job id or collection name,
+    # which is the textbook way to bring down a Prometheus server.
+    """
+    route = request.scope.get("route")
+    return str(getattr(route, "path", None) or request.url.path)
+
+
+def _log_problem(
+    document: ProblemDocument, exc: BaseException | None = None, endpoint: str | None = None
+) -> None:
+    """Log a problem at a severity matching its status, always with the trace id.
+
+    Also the single place errors are counted. Every problem document is built here, whatever
+    raised it, so counting at this funnel cannot miss a path the way per-handler counting
+    would the first time a new handler is added.
+    """
+    metrics.ERRORS.increment(
+        endpoint=endpoint or "unknown",
+        code=document.code.value,
+        tenant="none",
+    )
+
     level = "error" if document.status >= _SERVER_ERROR_THRESHOLD else "warning"
     getattr(_logger, level)(
         "request failed",
@@ -143,7 +169,7 @@ async def fasterrag_error_handler(request: Request, exc: Exception) -> Response:
         raise exc
 
     response = problem_response(exc, instance=request.url.path)
-    _log_problem(build_problem(exc, instance=request.url.path), exc)
+    _log_problem(build_problem(exc, instance=request.url.path), exc, route_template(request))
     return response
 
 
@@ -164,7 +190,7 @@ async def validation_error_handler(request: Request, exc: Exception) -> Response
         code=ErrorCode.VALIDATION_FAILED,
     )
     document = build_problem(error, instance=request.url.path, extensions={"errors": fields})
-    _log_problem(document)
+    _log_problem(document, endpoint=route_template(request))
     return JSONResponse(
         status_code=document.status,
         content=document.model_dump(mode="json", exclude_none=True),
@@ -181,7 +207,7 @@ async def http_exception_handler(request: Request, exc: Exception) -> Response:
     detail = str(exc.detail) if exc.detail else problem_spec(code).title
     error = FasterRagError(detail, code=code)
     document = build_problem(error, instance=request.url.path, status=exc.status_code)
-    _log_problem(document)
+    _log_problem(document, endpoint=route_template(request))
     return JSONResponse(
         status_code=document.status,
         content=document.model_dump(mode="json", exclude_none=True),
@@ -198,7 +224,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> Respo
     """
     error = FasterRagError("an unexpected error occurred", code=ErrorCode.INTERNAL)
     document = build_problem(error, instance=request.url.path)
-    _log_problem(document, exc)
+    _log_problem(document, exc, route_template(request))
     return JSONResponse(
         status_code=document.status,
         content=document.model_dump(mode="json", exclude_none=True),

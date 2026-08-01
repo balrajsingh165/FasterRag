@@ -25,7 +25,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from fasterrag import __version__
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
-from fasterrag.api import admin, collections, health, ingest, query
+from fasterrag.api import admin, collections, health, ingest, metrics, query
 from fasterrag.api.problems import install_exception_handlers
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
 from fasterrag.config.schema import Settings
@@ -180,6 +180,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     registry.register(_vector_db_check(app))
     app.state.readiness = registry
 
+    app.add_middleware(metrics.MetricsMiddleware)
     app.add_middleware(CorrelationIdMiddleware)
     install_exception_handlers(app)
     app.include_router(health.router)
@@ -187,6 +188,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(query.router)
     app.include_router(collections.router)
     app.include_router(admin.router)
+    app.include_router(metrics.router)
 
     return app
 

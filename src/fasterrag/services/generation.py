@@ -58,6 +58,7 @@ from fasterrag.core.generation import (
 )
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.observability import metrics
 from fasterrag.observability.logging import current_trace_id, get_logger
 from fasterrag.services.querying import FULL_MODE, RetrievalService
 
@@ -358,6 +359,9 @@ class GenerationService:
         prompt = build_prompt(question, context, texts)
         assemble_ms = int((time.perf_counter() - started) * 1000)
 
+        metrics.STAGE_DURATION.observe(retrieve_ms / 1000, stage="retrieve")
+        metrics.STAGE_DURATION.observe(assemble_ms / 1000, stage="assemble")
+
         return _Prepared(
             context=context,
             texts=texts,
@@ -366,6 +370,17 @@ class GenerationService:
             chunks=retrieved.chunks,
             timings={"retrieve": retrieve_ms, "assemble": assemble_ms},
         )
+
+    def _record_generation(self, elapsed_ms: int, prompt: int, completion: int) -> None:
+        """Record what one generation call cost, in time and in tokens."""
+        provider = self.llm.provider
+        metrics.STAGE_DURATION.observe(elapsed_ms / 1000, stage="generate")
+        if prompt:
+            metrics.TOKENS.increment(float(prompt), kind="prompt", provider=provider, tenant="none")
+        if completion:
+            metrics.TOKENS.increment(
+                float(completion), kind="completion", provider=provider, tenant="none"
+            )
 
     async def _grade(
         self, question: str, answer: str, prepared: _Prepared, timings: dict[str, int]
@@ -377,6 +392,8 @@ class GenerationService:
         started = time.perf_counter()
         verdict = await grade(self.grader, question, answer, prepared.context, prepared.texts)
         timings["grade"] = int((time.perf_counter() - started) * 1000)
+        if verdict.score is not None:
+            metrics.FAITHFULNESS.observe(verdict.score)
         return verdict
 
     def _refusal(
@@ -463,6 +480,7 @@ class GenerationService:
                     "mode": EXTRACTIVE_MODE,
                 },
             )
+            metrics.DEGRADED_RESPONSES.increment(mode=EXTRACTIVE_MODE)
             return Answer(
                 answer=_extractive_answer(prepared.context),
                 citations=list(prepared.context.citations),
@@ -471,7 +489,10 @@ class GenerationService:
                 timings_ms=timings,
             )
 
-        timings["generate"] = int((time.perf_counter() - started) * 1000)
+        generate_ms = int((time.perf_counter() - started) * 1000)
+        timings["generate"] = generate_ms
+        self._record_generation(generate_ms, completion.prompt_tokens, completion.completion_tokens)
+
         verdict = await self._grade(question, completion.text, prepared, timings)
         if verdict.withholds(self.settings.generation.faithfulness_threshold):
             return self._refusal(prepared, verdict, trace_id, timings)
@@ -545,6 +566,15 @@ class GenerationService:
         gated = self.grounded_or_refuse
         try:
             async for delta in self.llm.stream(prepared.prompt, system=P1_SYSTEM_PROMPT):
+                if not parts:
+                    # CRITICAL: time to first token is measured from the request arriving,
+                    # not from the provider call. What a user perceives includes retrieval
+                    # and assembly, and a TTFT that excluded them would flatter every change
+                    # that made retrieval slower.
+                    metrics.TTFT.observe(
+                        (timings.get("retrieve", 0) + timings.get("assemble", 0)) / 1000
+                        + (time.perf_counter() - started)
+                    )
                 parts.append(delta)
                 if not gated:
                     yield QueryEvent(type="token", data={"text": delta})
@@ -572,7 +602,11 @@ class GenerationService:
             return
 
         answer = "".join(parts)
-        timings["generate"] = int((time.perf_counter() - started) * 1000)
+        generate_ms = int((time.perf_counter() - started) * 1000)
+        timings["generate"] = generate_ms
+        self._record_generation(
+            generate_ms, self.counter.count(prepared.prompt), self.counter.count(answer)
+        )
 
         verdict = await self._grade(question, answer, prepared, timings)
         if verdict.withholds(self.settings.generation.faithfulness_threshold):

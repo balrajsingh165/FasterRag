@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from fasterrag.observability import metrics
+
 __all__ = ["CacheStats"]
 
 
@@ -40,14 +42,18 @@ class CacheStats:
     def record_hit(self) -> None:
         """Count a lookup that was served from the cache."""
         self.hits += 1
+        metrics.CACHE_EVENTS.increment(cache=self.name, result="hit")
 
     def record_miss(self) -> None:
         """Count a lookup that had to run the real work."""
         self.misses += 1
+        metrics.CACHE_EVENTS.increment(cache=self.name, result="miss")
 
     def record_invalidation(self, count: int = 1) -> None:
         """Count entries dropped by a corpus change rather than by expiry."""
         self.invalidations += count
+        if count:
+            metrics.CACHE_EVENTS.increment(float(count), cache=self.name, result="invalidated")
 
     def record_error(self) -> None:
         """Count a backend failure the caller proceeded past uncached."""
