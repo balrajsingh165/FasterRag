@@ -215,7 +215,7 @@ _(empty)_
 ### S11 — Chaos, load, soak; baselines
 
 - [ ] TASK-0083: Implement the scripted chaos suite (kill-worker, stop-Qdrant, corrupt-doc, slow-LLM, disk-full) and degradation ladder verification (D4/D12)
-- [ ] TASK-0048: Implement benchmark suite per performance.md (p50/p95, throughput, cache hit rate, cost/query; --ledger output)
+- [x] TASK-0048: Implement benchmark suite per performance.md (p50/p95, throughput, cache hit rate, cost/query; --ledger output) — ingest and query suites; the eval suite needs TASK-0077's golden set — ✅ 2026-08-01
 - [ ] TASK-0084: Run load + soak + chaos on documented reference hardware; record first benchmark-ledger entries; replace every TBD-until-measured in slo.md
 - [ ] TASK-0085: Execute the disaster-recovery restore drill for real; record RPO/RTO from measurements
 

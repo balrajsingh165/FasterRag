@@ -19,6 +19,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from typing import Final
 
+from fasterrag.cli.commands.benchmark import run_benchmark
 from fasterrag.cli.commands.diagnostics import (
     run_config_validate,
     run_doctor_command,
@@ -39,6 +40,7 @@ Handler = Callable[[argparse.Namespace, Console], Awaitable[ExitCode]]
 __all__ = ["main"]
 
 _HANDLERS: Final[dict[str, Handler]] = {
+    "benchmark": run_benchmark,
     "doctor": run_doctor_command,
     "estimate": run_estimate,
     "ingest": run_ingest,

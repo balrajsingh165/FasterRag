@@ -50,7 +50,6 @@ class _StoreTrueNoDefault(argparse.Action):
 # TODO: each entry ships with the task named. Listed here so `fasterrag <name>` explains
 # which slice implements it rather than printing a bare "invalid choice".
 PENDING_COMMANDS: Final[dict[str, str]] = {
-    "benchmark": "TASK-0048 (benchmark suite)",
     "export": "TASK-0079 (portability archives, D11)",
     "import": "TASK-0079 (portability archives, D11)",
     "autopilot": "TASK-0086 (eval-driven auto-tuning, D6)",
@@ -216,6 +215,20 @@ def _add_traces(subparsers: argparse._SubParsersAction[argparse.ArgumentParser])
     show.add_argument("trace_id", help="the trace id")
 
 
+def _add_benchmark(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register ``benchmark``."""
+    parser = subparsers.add_parser("benchmark", help="run the benchmark suites")
+    _add_global_flags(parser)
+    parser.add_argument(
+        "--suite", choices=["ingest", "query", "eval", "all"], default="all", help="which suite"
+    )
+    parser.add_argument("--dataset", default=None, help="dataset name recorded in the ledger")
+    parser.add_argument("--sources", nargs="*", default=[], help="corpus for the ingest suite")
+    parser.add_argument("--query", default=None, help="question for the query suite")
+    parser.add_argument("--iterations", type=int, default=20, help="calls per repetition")
+    parser.add_argument("--ledger", action="store_true", help="emit ledger-formatted entries")
+
+
 def _add_config(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Register ``config validate``."""
     parser = subparsers.add_parser("config", help="configuration tools")
@@ -249,6 +262,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--fix", action="store_true", help="apply safe automatic fixes")
 
     _add_estimate(subparsers)
+    _add_benchmark(subparsers)
     _add_replay(subparsers)
     _add_traces(subparsers)
     _add_config(subparsers)
