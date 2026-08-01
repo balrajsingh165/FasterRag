@@ -50,7 +50,6 @@ class _StoreTrueNoDefault(argparse.Action):
 # TODO: each entry ships with the task named. Listed here so `fasterrag <name>` explains
 # which slice implements it rather than printing a bare "invalid choice".
 PENDING_COMMANDS: Final[dict[str, str]] = {
-    "replay": "TASK-0080 (trace store + replay, D8)",
     "benchmark": "TASK-0048 (benchmark suite)",
     "export": "TASK-0079 (portability archives, D11)",
     "import": "TASK-0079 (portability archives, D11)",
@@ -169,6 +168,35 @@ def _add_estimate(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser.add_argument("--all-providers", action="store_true", help="price every known provider")
 
 
+def _add_replay(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register ``replay``."""
+    parser = subparsers.add_parser("replay", help="re-execute a past query (D8)")
+    _add_global_flags(parser)
+    parser.add_argument("--trace", required=True, help="the stored trace id to replay")
+    parser.add_argument(
+        "--candidate",
+        default=None,
+        metavar="PATH",
+        help="candidate config to replay under; defaults to the current one",
+    )
+    parser.add_argument("--diff-only", action="store_true", help="omit the full answer text")
+
+
+def _add_traces(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register ``traces``."""
+    parser = subparsers.add_parser("traces", help="inspect stored query traces")
+    _add_global_flags(parser)
+    actions = parser.add_subparsers(dest="action", required=True)
+
+    listing = actions.add_parser("list", help="recent trace ids, newest first")
+    _add_global_flags(listing)
+    listing.add_argument("--limit", type=int, default=20, help="how many to list")
+
+    show = actions.add_parser("show", help="print one stored trace")
+    _add_global_flags(show)
+    show.add_argument("trace_id", help="the trace id")
+
+
 def _add_config(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Register ``config validate``."""
     parser = subparsers.add_parser("config", help="configuration tools")
@@ -202,6 +230,8 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--fix", action="store_true", help="apply safe automatic fixes")
 
     _add_estimate(subparsers)
+    _add_replay(subparsers)
+    _add_traces(subparsers)
     _add_config(subparsers)
 
     for name, task in PENDING_COMMANDS.items():

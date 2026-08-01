@@ -72,7 +72,15 @@ def _read_yaml(config_path: Path) -> dict[str, Any]:
         )
 
     try:
-        raw = YamlConfigSettingsSource(Settings, yaml_file=config_path)()
+        raw = YamlConfigSettingsSource(
+            Settings,
+            yaml_file=config_path,
+            # CRITICAL: utf-8-sig, not utf-8. Windows editors and PowerShell write a UTF-8
+            # BOM by default, and under plain utf-8 it becomes part of the first key — so a
+            # file whose first line reads `app:` is rejected for an unknown key named
+            # `﻿app`, which is invisible in every editor that wrote it.
+            yaml_file_encoding="utf-8-sig",
+        )()
     except YAMLError as exc:
         raise ConfigError(f"{config_path} is not valid YAML: {exc}") from exc
     except ValueError as exc:

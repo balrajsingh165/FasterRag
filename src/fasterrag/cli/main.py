@@ -27,6 +27,8 @@ from fasterrag.cli.commands.diagnostics import (
 from fasterrag.cli.commands.infrastructure import run_estimate, run_provision
 from fasterrag.cli.commands.pipeline import run_index, run_ingest, run_query
 from fasterrag.cli.commands.processes import run_serve, run_worker
+from fasterrag.cli.commands.replay import run_replay
+from fasterrag.cli.commands.traces import run_traces
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.parser import PENDING_COMMANDS, build_parser
 from fasterrag.errors import FasterRagError, ProvisioningError
@@ -42,6 +44,7 @@ _HANDLERS: Final[dict[str, Handler]] = {
     "ingest": run_ingest,
     "provision": run_provision,
     "query": run_query,
+    "replay": run_replay,
     "serve": run_serve,
     "status": run_status,
     "worker": run_worker,
@@ -59,6 +62,8 @@ def _resolve(args: argparse.Namespace) -> Handler | None:
     """Return the handler for the parsed command, or ``None`` if there is none."""
     if args.command == "index":
         return run_index
+    if args.command == "traces":
+        return run_traces
 
     action = getattr(args, "action", None)
     if action is not None:

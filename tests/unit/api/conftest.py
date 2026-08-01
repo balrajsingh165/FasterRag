@@ -9,6 +9,7 @@ from fasterrag.adapters.vectordb.base import CollectionInfo, CollectionSpec, Hea
 from fasterrag.api.main import create_app
 from fasterrag.config.schema import Settings
 from fasterrag.services.journal import Journal
+from fasterrag.services.traces import TraceStore
 
 
 class StubVectorDB:
@@ -71,6 +72,7 @@ def app(vector_db: StubVectorDB, tmp_path: Path) -> FastAPI:
     application = create_app(Settings())
     application.state.vector_db = vector_db
     application.state.journal = Journal(tmp_path / "journal")
+    application.state.traces = TraceStore(tmp_path / "traces")
     return application
 
 

@@ -32,6 +32,7 @@ from fasterrag.services.generation import GenerationService
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import create_journal
 from fasterrag.services.querying import RetrievalService
+from fasterrag.services.traces import create_trace_store
 
 __all__ = ["run_index", "run_ingest", "run_query"]
 
@@ -111,6 +112,7 @@ def _build_generation(settings: Settings, adapter: VectorDBAdapter) -> Generatio
         retrieval,
         create_llm_adapter(settings),
         cache=cache,
+        traces=create_trace_store(settings),
         embedder=router.default,
     )
 

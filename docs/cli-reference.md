@@ -100,14 +100,25 @@ D9 preflight cost estimator — BEFORE ingestion: document/token counts, project
 | `--provider NAME` | Compare against a specific provider instead of the configured one. |
 | `--all-providers` | Cost table across all configured/known providers. |
 
+## `fasterrag traces <subcommand>`
+
+D8 trace inspection. A trace id is a 32-character hex string nobody retains between the query and the investigation, so listing is what makes stored traces reachable at all.
+
+| Subcommand | Description |
+|---|---|
+| `list` | Recent trace ids, newest first (`--limit N`). |
+| `show <trace_id>` | One trace in full: query, collection, candidate count, and each span with its duration and attributes. |
+
 ## `fasterrag replay --trace <id>`
 
 D8 time-travel replay: re-execute a past query under a candidate config and show a side-by-side diff of retrieval sets and answers.
 
 | Flag | Description |
 |---|---|
-| `--config candidate.yaml` | Candidate config to replay under (required). |
-| `--diff-only` | Only show what changed (added/removed/reordered chunks, answer diff). |
+| `--candidate candidate.yaml` | Candidate config to replay under. Defaults to the current config, which is the determinism check: an unchanged config must reproduce the retrieval set exactly. |
+| `--diff-only` | Only show what changed (added/removed/reordered chunks, answer diff) — omits the full answer text. |
+
+Replay never writes: it stores no trace of its own and never populates the semantic cache, so investigating an incident cannot alter the evidence. The retrieval set is what replay guarantees is reproducible; answer *wording* is not, because a provider at non-zero temperature is not deterministic — which is why the diff reports citations alongside the text.
 
 ## `fasterrag benchmark`
 

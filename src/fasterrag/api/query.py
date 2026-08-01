@@ -21,7 +21,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from fasterrag.api.dependencies import (
@@ -33,6 +33,7 @@ from fasterrag.api.dependencies import (
     build_retrieval,
 )
 from fasterrag.api.schemas import QueryRequest
+from fasterrag.api.traces import get_trace_store
 from fasterrag.errors import FasterRagError, problem_spec
 from fasterrag.observability.logging import current_trace_id, get_logger
 from fasterrag.services.generation import GenerationService, QueryEvent
@@ -98,9 +99,10 @@ async def run_query(
     adapter: CurrentVectorDB,
     embeddings: CurrentEmbeddings,
     cache: CurrentCache,
+    request: Request,
 ) -> Any:
     """Answer a question, as one JSON body or as a stream of SSE events."""
-    service = build_generation(settings, adapter, embeddings, cache)
+    service = build_generation(settings, adapter, embeddings, cache, get_trace_store(request))
 
     streaming = settings.llm.streaming if body.stream is None else body.stream
     if streaming:

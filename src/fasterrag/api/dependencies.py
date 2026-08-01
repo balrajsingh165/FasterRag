@@ -26,6 +26,7 @@ from fasterrag.services.generation import GenerationService
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import Journal, create_journal
 from fasterrag.services.querying import RetrievalService
+from fasterrag.services.traces import TraceStore
 
 __all__ = [
     "CurrentCache",
@@ -121,15 +122,20 @@ def build_generation(
     adapter: VectorDBAdapter,
     router: TieringRouter,
     cache: SemanticCache | None = None,
+    traces: TraceStore | None = None,
 ) -> GenerationService:
-    """Assemble the query path the CLI also assembles, so the two cannot diverge."""
+    """Assemble the query path the CLI also assembles, so the two cannot diverge.
+
+    ``cache`` and ``traces`` are used exactly as given, including ``None``. Replay depends
+    on that: it must run with neither, and a helper that quietly substituted a default would
+    have it populating the cache and writing traces while investigating one.
+    """
     return GenerationService(
         settings,
         build_retrieval(settings, adapter, router),
         create_llm_adapter(settings),
-        cache=cache
-        if cache is not None
-        else SemanticCache(settings, create_semantic_store(settings)),
+        cache=cache,
+        traces=traces,
         embedder=router.default,
     )
 

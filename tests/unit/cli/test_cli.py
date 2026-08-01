@@ -103,10 +103,10 @@ def test_an_unknown_command_is_a_usage_error() -> None:
 def test_a_pending_command_explains_which_slice_ships_it(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code = run(["replay"])
+    code = run(["benchmark"])
 
     assert code == ExitCode.USAGE
-    assert "TASK-0080" in capsys.readouterr().err
+    assert "TASK-0048" in capsys.readouterr().err
 
 
 def test_valid_config_validates(config: str, capsys: pytest.CaptureFixture[str]) -> None:

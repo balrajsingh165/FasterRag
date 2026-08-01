@@ -22,6 +22,7 @@ __all__ = [
     "EstimateRequest",
     "IngestRequest",
     "QueryRequest",
+    "ReplayRequest",
     "Source",
 ]
 
@@ -82,3 +83,11 @@ class EstimateRequest(Strict):
 
     sources: Annotated[list[str], Field(min_length=1)]
     all_providers: bool = False
+
+
+class ReplayRequest(Strict):
+    """Body of ``POST /v1/replay``."""
+
+    trace_id: Annotated[str, Field(min_length=1)]
+    config_overrides: dict[str, Any] | None = None
+    diff_only: bool = False

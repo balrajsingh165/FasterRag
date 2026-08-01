@@ -57,10 +57,12 @@ from fasterrag.core.generation import (
     resolve_citations,
 )
 from fasterrag.core.retrieval.models import ScoredChunk
+from fasterrag.core.tracing import SpanRecorder, Trace, config_snapshot, record_chunk
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import current_trace_id, get_logger
 from fasterrag.services.querying import FULL_MODE, RetrievalService
+from fasterrag.services.traces import TraceStore, now
 
 __all__ = [
     "DEFAULT_CONTEXT_BUDGET_TOKENS",
@@ -261,6 +263,7 @@ class _Prepared:
     mode: str
     chunks: list[ScoredChunk]
     timings: dict[str, int]
+    spans: SpanRecorder | None = None
 
 
 class GenerationService:
@@ -275,6 +278,7 @@ class GenerationService:
         grader: LLMAdapter | None = None,
         cache: SemanticCache | None = None,
         embedder: EmbeddingAdapter | None = None,
+        traces: TraceStore | None = None,
         counter: TokenCounter | None = None,
         context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
     ) -> None:
@@ -292,6 +296,8 @@ class GenerationService:
             embedder: Embeds the question for the cache lookup. The same query is embedded
                 again inside retrieval, which costs nothing extra: the embedding cache is on
                 by default and the second call is a hit on the first.
+            traces: Persists each query's full trace for replay (D8). Omitted means no
+                trace is kept, which is what ``traces.store: false`` selects.
             counter: Token counter used for context budgeting.
             context_budget_tokens: Tokens available for context, which the caller sizes
                 from the model's window minus room for the answer.
@@ -302,8 +308,10 @@ class GenerationService:
         self.grader = grader or llm
         self.cache = cache
         self.embedder = embedder
+        self.traces = traces
         self.counter = counter or EstimatingTokenCounter()
         self.context_budget_tokens = context_budget_tokens
+        self._last_candidates: list[ScoredChunk] = []
 
     @property
     def grounded_or_refuse(self) -> bool:
@@ -341,14 +349,37 @@ class GenerationService:
         collection: str | None,
         top_k: int | None,
         filters: Mapping[str, Any] | None,
+        recorder: SpanRecorder | None = None,
     ) -> _Prepared:
         """Retrieve and assemble everything generation and grading both need."""
+        spans = recorder or SpanRecorder()
+
+        retrieval_started = spans.elapsed_ms
         started = time.perf_counter()
         retrieved = await self.retrieval.search(
             question, collection=collection, top_k=top_k, filters=filters
         )
         retrieve_ms = int((time.perf_counter() - started) * 1000)
+        spans.record(
+            "retrieval",
+            retrieval_started,
+            candidates=len(retrieved.chunks),
+            mode=retrieved.mode,
+            hybrid=self.settings.retrieval.hybrid,
+        )
 
+        # CRITICAL: reranking is reported as its own span only when it actually ran. A
+        # zero-duration span for a skipped stage is indistinguishable from a stage that ran
+        # instantly, and D4's whole point is telling those apart.
+        if self.settings.retrieval.rerank and retrieved.mode == FULL_MODE:
+            spans.record(
+                "reranker",
+                retrieval_started,
+                model=self.settings.retrieval.reranker_model,
+                reranked=sum(1 for chunk in retrieved.chunks if chunk.rerank_score is not None),
+            )
+
+        assemble_started = spans.elapsed_ms
         started = time.perf_counter()
         context = assemble_context(
             retrieved.chunks,
@@ -358,9 +389,19 @@ class GenerationService:
         texts = [chunk.text for chunk in retrieved.chunks[: context.used]]
         prompt = build_prompt(question, context, texts)
         assemble_ms = int((time.perf_counter() - started) * 1000)
+        spans.record(
+            "context-assembly",
+            assemble_started,
+            packed=context.used,
+            tokens=context.tokens,
+            dropped_duplicate=context.dropped_duplicate,
+            dropped_budget=context.dropped_budget,
+        )
 
         metrics.STAGE_DURATION.observe(retrieve_ms / 1000, stage="retrieve")
         metrics.STAGE_DURATION.observe(assemble_ms / 1000, stage="assemble")
+
+        self._last_candidates = list(retrieved.chunks)
 
         return _Prepared(
             context=context,
@@ -369,6 +410,40 @@ class GenerationService:
             mode=retrieved.mode,
             chunks=retrieved.chunks,
             timings={"retrieve": retrieve_ms, "assemble": assemble_ms},
+            spans=spans,
+        )
+
+    def _store_trace(
+        self,
+        question: str,
+        collection: str | None,
+        filters: Mapping[str, Any] | None,
+        prepared: _Prepared,
+        response: str,
+        answer: Answer,
+    ) -> None:
+        """Persist everything this query did, for later inspection and replay (D8).
+
+        Records the *full* candidate set rather than the packed subset: replay explains why
+        an ordering changed, and a chunk that lost its place is exactly the evidence needed.
+        """
+        if self.traces is None or not self.traces.enabled:
+            return
+
+        self.traces.store(
+            Trace(
+                trace_id=answer.trace_id,
+                query=question,
+                collection=collection,
+                filters=dict(filters) if filters else None,
+                config_snapshot=config_snapshot(self.settings),
+                retrieved=[record_chunk(chunk) for chunk in prepared.chunks],
+                prompt=prepared.prompt,
+                response=response,
+                result=answer.as_dict(),
+                spans=prepared.spans.spans if prepared.spans else [],
+                created_at=now(),
+            )
         )
 
     def _record_generation(self, elapsed_ms: int, prompt: int, completion: int) -> None:
@@ -423,6 +498,24 @@ class GenerationService:
             threshold=threshold,
             best_candidates=_best_candidates(prepared.chunks),
         )
+
+    async def answer_with_candidates(
+        self,
+        question: str,
+        *,
+        collection: str | None = None,
+        top_k: int | None = None,
+        filters: Mapping[str, Any] | None = None,
+    ) -> tuple[Answer, list[ScoredChunk]]:
+        """Answer a question and return the full candidate set it retrieved.
+
+        The shape replay needs: diffing retrieval against a second, separate search would
+        compare two different executions, so any nondeterminism would surface as a config
+        difference that never happened.
+        """
+        self._last_candidates = []
+        answer = await self.answer(question, collection=collection, top_k=top_k, filters=filters)
+        return answer, self._last_candidates
 
     async def answer(
         self,
@@ -492,10 +585,20 @@ class GenerationService:
         generate_ms = int((time.perf_counter() - started) * 1000)
         timings["generate"] = generate_ms
         self._record_generation(generate_ms, completion.prompt_tokens, completion.completion_tokens)
+        if prepared.spans is not None:
+            prepared.spans.record(
+                "generation",
+                prepared.spans.elapsed_ms - generate_ms,
+                model=completion.model,
+                prompt_tokens=completion.prompt_tokens,
+                completion_tokens=completion.completion_tokens,
+            )
 
         verdict = await self._grade(question, completion.text, prepared, timings)
         if verdict.withholds(self.settings.generation.faithfulness_threshold):
-            return self._refusal(prepared, verdict, trace_id, timings)
+            refusal = self._refusal(prepared, verdict, trace_id, timings)
+            self._store_trace(question, collection, filters, prepared, completion.text, refusal)
+            return refusal
 
         answer = Answer(
             answer=completion.text,
@@ -511,6 +614,7 @@ class GenerationService:
         if vector is not None and self.cache is not None and prepared.mode == FULL_MODE:
             await self.cache.store_response(question, vector, answer.as_dict())
 
+        self._store_trace(question, collection, filters, prepared, completion.text, answer)
         return answer
 
     async def stream(

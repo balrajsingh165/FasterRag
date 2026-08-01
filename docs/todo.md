@@ -199,9 +199,11 @@ _(empty)_
 
 ### S9 — Trace store + replay
 
-- [ ] TASK-0041: Implement OTel instrumentation (retrieval/reranker/context-assembly/generation trace types, trace-id correlation)
+- [x] TASK-0041: Implement OTel instrumentation (retrieval/reranker/context-assembly/generation trace types, trace-id correlation) — the four span types are recorded against one clock origin and correlated by trace id; OTLP export itself is TASK-0132 — ✅ 2026-08-01
 - [x] TASK-0042: Implement metrics catalogue export (RED, per-stage latency, tokens, cost/query, cache ratio, queue/DLQ depth, breaker state) — every documented metric declared and served at `GET /metrics`; the gauges fed by the worker pools and circuit breaker are declared but only populated once those slices report into them — ✅ 2026-08-01
-- [ ] TASK-0080: Implement local trace store + fasterrag replay with side-by-side retrieval/answer diff (D8)
+- [x] TASK-0080: Implement local trace store + fasterrag replay with side-by-side retrieval/answer diff (D8) — ✅ 2026-08-01
+- [ ] TASK-0131: `fasterrag traces list|show` was added beyond `docs/cli-reference.md`, because a 32-hex trace id is unreachable without a way to list recent ones. Documented in cli-reference.md; confirm the addition
+- [ ] TASK-0132: OTel export is not wired. The four RAG spans are recorded and persisted by the trace store, which is what replay and the dashboard read, but `observability.otel: true` does not yet emit them over OTLP to `observability.otel_endpoint`. Needs the opentelemetry SDK dependency and an exporter
 
 ### S10 — Zero-downtime reindex + lockfile
 
