@@ -1,17 +1,17 @@
 # integrations.md — Supported Providers & How Config Enables Them
 
-Everything is selected purely through `config.yaml`; secrets by env-var name only; **every integration toggle defaults to `false`**. The set below is the **tested beta matrix** — the extension contract ([python-api.md](python-api.md) entry points + the adapter contract suite) is how the matrix grows toward supporting everything in the ecosystem without forking. Conformance means passing the shared adapter contract suite ([testing-strategy.md](testing-strategy.md) §1.5).
+Everything is selected purely through `config.yaml`; secrets by env-var name only; **every integration toggle defaults to `false`**. Each row below carries a **Status**: *shipped* means implemented and tested in this repo today; *specified* means the config surface and behavior are designed but the adapter has not been built (its task is in [todo.md](todo.md)) — selecting a specified provider fails fast with a `ConfigError`, never silently. Conformance for any adapter, in-repo or third-party, means passing the shared adapter contract suite ([testing-strategy.md](testing-strategy.md) §1.5). The entry-point extension contract ([python-api.md](python-api.md)) is itself not yet implemented (TASK-0163).
 
 ## 1. Vector databases (`vector_db.provider`)
 
-| Provider | Value | Modes | Secret (env var) | Notes |
-|---|---|---|---|---|
-| **Qdrant** (reference) | `qdrant` | docker (system-managed) · external local · remote host:port | `QDRANT_API_KEY` | Reference implementation. REST 6333 + gRPC 6334 (both must be reachable; `prefer_grpc` default `false`). Named Docker volume mandatory on Windows/WSL. |
-| Milvus | `milvus` | external · remote | `MILVUS_API_KEY` | gRPC 19530 (default). |
-| Weaviate | `weaviate` | external · remote | `WEAVIATE_API_KEY` | HTTP/gRPC per instance config. |
-| Pinecone | `pinecone` | remote (managed SaaS) | `PINECONE_API_KEY` | Serverless/pod indexes; region via adapter options. |
-| pgvector | `pgvector` | external · remote | `PGVECTOR_DSN_ENV` → DSN in env | Runs inside existing PostgreSQL; BM25 leg uses PG full-text. |
-| Chroma | `chroma` | external · remote | `CHROMA_API_KEY` | Lightweight; dev/small corpora. |
+| Provider | Value | Status | Modes | Secret (env var) | Notes |
+|---|---|---|---|---|---|
+| **Qdrant** (reference) | `qdrant` | **Shipped** — contract suite passes in all three modes | docker (system-managed) · external local · remote host:port | `QDRANT_API_KEY` | Reference implementation. REST 6333 + gRPC 6334 (both must be reachable; `prefer_grpc` default `false`). Named Docker volume mandatory on Windows/WSL. |
+| Milvus | `milvus` | Specified (TASK-0049) | external · remote | `MILVUS_API_KEY` | gRPC 19530 (default). |
+| Weaviate | `weaviate` | Specified (TASK-0049) | external · remote | `WEAVIATE_API_KEY` | HTTP/gRPC per instance config. |
+| Pinecone | `pinecone` | Specified (TASK-0049) | remote (managed SaaS) | `PINECONE_API_KEY` | Serverless/pod indexes; region via adapter options. |
+| pgvector | `pgvector` | Specified (TASK-0049; recommended next — proves the contract against SQL) | external · remote | `PGVECTOR_DSN_ENV` → DSN in env | Runs inside existing PostgreSQL; BM25 leg uses PG full-text. |
+| Chroma | `chroma` | Specified (TASK-0049) | external · remote | `CHROMA_API_KEY` | Lightweight; dev/small corpora. |
 
 Enable by config only:
 
@@ -46,7 +46,11 @@ embeddings:
         model: text-embedding-3-large
 ```
 
+All four embedding providers above are **shipped** (the `huggingface` local default requires the `.[huggingface]` extra; a missing extra fails fast naming the install command).
+
 ## 3. LLM providers (`llm.provider`)
+
+All five LLM providers below are **shipped**, with streaming.
 
 | Provider | Value | Secret (env var) | Streaming | Notes |
 |---|---|---|---|---|
@@ -62,15 +66,15 @@ Cross-encoder models loaded locally in the query path (e.g. `BAAI/bge-reranker-v
 
 ## 5. Observability tools (all default `false`)
 
-| Tool | Toggle | What flipping it does | Result |
-|---|---|---|---|
-| fasterRag dashboard | `observability.dashboard: true` | Starts the read-only inspection UI | `http://<host>:8080` |
-| OpenTelemetry | `observability.otel: true` | Exports spans + metrics via OTLP to `otel_endpoint` | your collector |
-| **Langfuse** | `observability.langfuse: true` | Auto-installs the self-hosted Langfuse v3 compose stack (web, worker, Postgres, ClickHouse ≥ 24.3, Redis, MinIO), generates + persists secrets, headless-bootstraps org/project/keys/user via `LANGFUSE_INIT_*`, health-checks | **`http://<host>:3000`** |
-| **Grafana** | `observability.grafana: true` | Provisioning-as-code: datasource + dashboard YAML/JSON under `/etc/grafana/provisioning/`, `editable: false`, `allowUiUpdates: false`, 30 s file reload | Grafana with fasterRag dashboards, read-only for provisioned resources |
+| Tool | Toggle | Status | What flipping it does | Result |
+|---|---|---|---|---|
+| fasterRag dashboard | `observability.dashboard: true` | Not built (S14, last by design) | Starts the read-only inspection UI | `http://<host>:8080` |
+| OpenTelemetry | `observability.otel: true` | Partial — the four RAG spans are recorded and persisted locally; OTLP export pending (TASK-0132) | Exports spans + metrics via OTLP to `otel_endpoint` | your collector |
+| **Langfuse** | `observability.langfuse: true` | **Provisioning shipped and verified end-to-end** via `fasterrag provision langfuse`; the config toggle does not yet trigger it at startup (TASK-0150), it is not yet doctor-gated (TASK-0149), and trace export into the stack is pending (TASK-0151) | Auto-installs the self-hosted Langfuse v3 compose stack (web, worker, Postgres, ClickHouse ≥ 24.3, Redis, MinIO), generates + persists secrets, headless-bootstraps org/project/keys/user via `LANGFUSE_INIT_*`, health-checks | **`http://<host>:3000`** |
+| **Grafana** | `observability.grafana: true` | **Provisioning shipped and verified end-to-end** via `fasterrag provision grafana` (real series rendered); toggle-at-startup pending (TASK-0146), doctor gate pending (TASK-0147) | Provisioning-as-code: datasource + dashboard YAML/JSON under `/etc/grafana/provisioning/`, `editable: false`, `allowUiUpdates: false`, 30 s file reload | Grafana with fasterRag dashboards, read-only for provisioned resources |
 
-Every one of these follows the same contract: config toggle → doctor-gated auto-provisioning → running URL, with **zero application-code changes at toggle time** ([observability.md](observability.md)).
+The target contract for every row is: config toggle → doctor-gated auto-provisioning → running URL, with **zero application-code changes at toggle time** ([observability.md](observability.md)). As built, provisioning runs via the CLI command; the toggle-triggered and doctor-gated halves are the open tasks named above.
 
 ## 6. Adding a provider that isn't listed
 
-Implement the adapter base class, register it via the `fasterrag.vectordb` / `fasterrag.embeddings` / `fasterrag.llm` entry point, pass the contract suite, and it becomes selectable in `config.yaml` like any built-in ([python-api.md](python-api.md) §Extending). This is the supported path for the long tail of vector DBs, embedders, and LLM gateways.
+Implement the adapter base class, register it via the `fasterrag.vectordb` / `fasterrag.embeddings` / `fasterrag.llm` entry point, pass the contract suite, and it becomes selectable in `config.yaml` like any built-in ([python-api.md](python-api.md) §Extending). This is the supported path for the long tail of vector DBs, embedders, and LLM gateways. **Status: the entry-point registration mechanism is not yet implemented (TASK-0163) — today the factories resolve built-in adapters only, so third-party providers require a fork until it lands.**

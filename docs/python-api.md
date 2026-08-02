@@ -2,7 +2,18 @@
 
 fasterRag is released as an installable Python package so applications can **import and use the framework in-process**, without running the HTTP service. The library is the third programmatic control surface alongside the [REST API](api-reference.md) and the [CLI](cli-reference.md) — all three call the identical service layer, so behavior, config, and errors are the same everywhere. **There is still no GUI control surface**; the dashboard remains observability-only.
 
-> All code below is the **documented intended public interface** for the beta — illustrative snippets, not shipped code. The build tasks live in [todo.md](todo.md).
+> **Per-surface status against the implemented package** (build tasks in [todo.md](todo.md)):
+>
+> | Surface in this document | Status |
+> |---|---|
+> | Standalone components — `fasterrag.parsing`, `.chunking`, `.retrieval`, `.rerank`, `.evals` | **Shipped** and importable today |
+> | Typed error taxonomy — `fasterrag.errors` (same `code`s as the API) | **Shipped** |
+> | `FasterRag` facade (`from_config`, `ingest`, `query`, `query_stream`, `retrieve`, `collections`, …) | **Not yet implemented** (TASK-0163) — the services it would compose all exist; the facade is the missing thin layer |
+> | `fasterrag.sync` blocking facade | **Not yet implemented** (follows the async facade) |
+> | Entry-point plugin groups (`fasterrag.vectordb` / `.embeddings` / `.llm`) | **Not yet implemented** (TASK-0163) — today the factories resolve built-ins only |
+> | PyPI wheels (`pip install fasterrag`) | **Not yet published** (TASK-0087) — install from source: `pip install -e ".[all]"` |
+>
+> Sections describing an unshipped surface are the design contract that TASK-0163 must satisfy, kept here so the facade is built to a reviewed spec rather than improvised.
 
 ## Installation
 

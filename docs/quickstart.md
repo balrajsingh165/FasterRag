@@ -1,6 +1,6 @@
 # quickstart.md — From Zero to Answered Query
 
-> **This is the specified beta contract, not a working tutorial yet.** No implementation code exists ([todo.md](todo.md) tracks the build slices). Every command below is the documented intended behavior; treat it as the acceptance criteria the build must satisfy, and expect it to work only once the corresponding slice ships.
+> **Status: most of this works today from a source checkout** (`pip install -e ".[all]"`; PyPI publication lands with the first tagged beta). Slices S1–S13 have shipped, so `config validate`, `doctor`, `provision`, `estimate`, `ingest`, `query`, `serve`, `index`, `replay`, and `benchmark` are real commands. Known gaps against this walkthrough, tracked in [todo.md](todo.md): `url` sources are rejected until the source loader lands (paths only), the semantic cache does not persist across one-shot CLI processes until the redis backend ships, contextual enrichment is pending, and the Python `FasterRag` facade shown in Path B is not yet implemented (the standalone components are).
 
 Three paths, same engine and same `config.yaml`: [CLI](#path-a--cli) · [Python](#path-b--python-package) · [REST](#path-c--rest-service). Pick one; they interoperate.
 

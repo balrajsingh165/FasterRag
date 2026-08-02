@@ -124,6 +124,8 @@ reliability:
 
 Serving many customers from one deployment.
 
+> ⚠️ **Not deployable yet.** The security slice (TASK-0046) has not shipped: every `security.*` key and both token budgets below **validate but are not enforced** — flipping `auth: true` today changes nothing, and the API serves unauthenticated. Until enforcement lands (and the fail-fast guard of TASK-0156 makes this misconfiguration impossible to miss), do not put a multi-tenant deployment on a network you don't control.
+
 ```yaml
 security:
   auth: true
