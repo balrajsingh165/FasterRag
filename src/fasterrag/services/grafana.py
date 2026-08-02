@@ -201,16 +201,42 @@ def prometheus_config(plan: GrafanaPlan) -> str:
     )
 
 
-def _panel(identifier: int, title: str, expression: str, unit: str, row: int) -> dict[str, Any]:
-    """Return one dashboard panel over a PromQL expression."""
+def _panel(
+    identifier: int,
+    title: str,
+    expression: str,
+    unit: str,
+    row: int,
+    description: str = "",
+    legend: str = "",
+) -> dict[str, Any]:
+    """Return one dashboard panel over a PromQL expression.
+
+    The description is not decoration. A panel that is legitimately empty — because the
+    thing it measures has not happened yet — looks exactly like a panel that is empty
+    because the datasource is broken, and the only place an operator can be told where it
+    stands is on the panel itself.
+
+    # CRITICAL: every target carries a legendFormat. Without one Grafana labels each series
+    # with its whole label set, so a legend reads
+    # `fasterrag_ingest_throughput{instance="host.docker.internal:8000", job="fasterrag",
+    # unit="chu...` — truncated before the only label that distinguishes the series. The
+    # scrape labels are identical on every series in a single-instance deployment and carry
+    # no information; the one varying label is what the legend has to show.
+    """
     return {
         "id": identifier,
         "title": title,
+        "description": description,
         "type": "timeseries",
         "datasource": {"type": "prometheus", "uid": DATASOURCE_UID},
         "gridPos": {"h": 8, "w": 12, "x": 0 if identifier % 2 else 12, "y": row},
         "fieldConfig": {"defaults": {"unit": unit}, "overrides": []},
-        "targets": [{"expr": expression, "refId": "A"}],
+        "options": {
+            "legend": {"displayMode": "list", "placement": "bottom", "showLegend": True},
+            "tooltip": {"mode": "multi", "sort": "desc"},
+        },
+        "targets": [{"expr": expression, "refId": "A", "legendFormat": legend or title}],
     }
 
 
@@ -235,6 +261,8 @@ def dashboard() -> dict[str, Any]:
                 "(rate(fasterrag_stage_duration_seconds_bucket[5m])))",
                 "s",
                 0,
+                "Retrieve, assemble, and generate. Empty until the first query runs.",
+                "{{stage}}",
             ),
             _panel(
                 2,
@@ -242,24 +270,49 @@ def dashboard() -> dict[str, Any]:
                 "fasterrag_ingest_throughput",
                 "short",
                 0,
+                "Published once per job, at settle. Empty until the first ingest completes.",
+                "{{unit}}",
             ),
             _panel(
                 3,
                 "Cache hit ratio",
-                "sum by (cache) (rate(fasterrag_cache_events_total{result='hit'}[5m])) / "
+                "(sum by (cache) (rate(fasterrag_cache_events_total{result='hit'}[5m])) "
+                "or vector(0)) / "
                 "clamp_min(sum by (cache) (rate(fasterrag_cache_events_total[5m])), 1)",
                 "percentunit",
                 8,
+                "Zero before the first cache lookup, which is a real ratio rather than a gap.",
+                "{{cache}}",
             ),
-            _panel(4, "Queue and DLQ depth", "fasterrag_queue_depth", "short", 8),
-            _panel(5, "Circuit-breaker state", "fasterrag_circuit_state", "short", 16),
+            _panel(
+                4,
+                "Queue and DLQ depth",
+                "fasterrag_queue_depth or fasterrag_dlq_depth",
+                "short",
+                8,
+                "Queue depth is published on every enqueue and dequeue; DLQ depth once per job.",
+                "{{queue}}{{collection}}",
+            ),
+            _panel(
+                5,
+                "Circuit-breaker state",
+                "fasterrag_circuit_state",
+                "short",
+                16,
+                "Empty by design for now: only the breaker's configuration exists, not the "
+                "breaker (TASK-0148). This panel is not evidence of a datasource problem.",
+                "{{provider}}",
+            ),
             _panel(
                 6,
                 "Cost per query",
-                "sum(rate(fasterrag_cost_usd_total[5m])) / "
+                "(sum(rate(fasterrag_cost_usd_total[5m])) or vector(0)) / "
                 "clamp_min(sum(rate(fasterrag_requests_total[5m])), 1)",
                 "currencyUSD",
                 16,
+                "A list-price estimate from dated published rates, not a measurement. A model "
+                "with no recorded rate contributes nothing rather than a fabricated number.",
+                "USD per query",
             ),
         ],
     }

@@ -61,6 +61,7 @@ from fasterrag.core.tracing import SpanRecorder, Trace, config_snapshot, record_
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import current_trace_id, get_logger
+from fasterrag.services.estimation import price_generation
 from fasterrag.services.querying import FULL_MODE, RetrievalService
 from fasterrag.services.traces import TraceStore, now
 
@@ -447,7 +448,13 @@ class GenerationService:
         )
 
     def _record_generation(self, elapsed_ms: int, prompt: int, completion: int) -> None:
-        """Record what one generation call cost, in time and in tokens."""
+        """Record what one generation call cost, in time, in tokens, and in money.
+
+        The dollar figure is a *list-price estimate*, not a measurement — it multiplies
+        token counts by the dated published rates in ``services.estimation``, and a model
+        with no recorded rate contributes nothing rather than a fabricated number. The
+        counter is named ``..._usd_total`` and documented as estimated for that reason.
+        """
         provider = self.llm.provider
         metrics.STAGE_DURATION.observe(elapsed_ms / 1000, stage="generate")
         if prompt:
@@ -456,6 +463,10 @@ class GenerationService:
             metrics.TOKENS.increment(
                 float(completion), kind="completion", provider=provider, tenant="none"
             )
+
+        estimated = price_generation(provider, self.llm.model, prompt, completion)
+        if estimated:
+            metrics.COST.increment(estimated, provider=provider, tenant="none")
 
     async def _grade(
         self, question: str, answer: str, prepared: _Prepared, timings: dict[str, int]

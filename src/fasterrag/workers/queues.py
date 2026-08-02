@@ -23,6 +23,7 @@ from typing import Any
 
 from fasterrag.core.chunking.models import TextChunk
 from fasterrag.errors import ErrorCode, IngestionError
+from fasterrag.observability import metrics
 
 __all__ = [
     "BoundedQueue",
@@ -104,15 +105,34 @@ class EmbeddedBatch:
 class BoundedQueue[Item]:
     """An asyncio queue with an explicit capacity and a reject-instead-of-grow path."""
 
-    def __init__(self, capacity: int) -> None:
-        """Build a queue holding at most ``capacity`` items."""
+    def __init__(self, capacity: int, *, name: str = "chunks") -> None:
+        """Build a queue holding at most ``capacity`` items.
+
+        Args:
+            capacity: The largest number of items the queue will hold before producers
+                block or are rejected.
+            name: The ``queue`` label its depth is published under. Named rather than
+                anonymous because a single number for "the queue depth" cannot tell an
+                operator which stage is the one falling behind.
+        """
         self.capacity = capacity
+        self.name = name
         self._queue: asyncio.Queue[Item | None] = asyncio.Queue(maxsize=capacity)
+        self._publish()
 
     @property
     def depth(self) -> int:
         """Return the current occupancy, the source of the queue-depth metric."""
         return self._queue.qsize()
+
+    def _publish(self) -> None:
+        """Publish the current depth.
+
+        Called after every mutation rather than sampled on a timer: the depth this gauge
+        exists to show is a transient backlog, and a sampler is most likely to miss exactly
+        the spike an operator went looking for.
+        """
+        metrics.QUEUE_DEPTH.set(float(self._queue.qsize()), queue=self.name)
 
     @property
     def full(self) -> bool:
@@ -122,6 +142,7 @@ class BoundedQueue[Item]:
     async def put(self, item: Item) -> None:
         """Enqueue an item, waiting while the queue is full."""
         await self._queue.put(item)
+        self._publish()
 
     def offer(self, item: Item) -> None:
         """Enqueue without waiting, rejecting the item if the queue is full.
@@ -137,10 +158,13 @@ class BoundedQueue[Item]:
                 f"the queue is at its capacity of {self.capacity} items",
                 code=ErrorCode.QUEUE_FULL,
             ) from exc
+        self._publish()
 
     async def get(self) -> Item | None:
         """Dequeue an item, or ``None`` once the queue has been closed."""
-        return await self._queue.get()
+        item = await self._queue.get()
+        self._publish()
+        return item
 
     def task_done(self) -> None:
         """Mark the most recently dequeued item as handled."""
@@ -158,6 +182,7 @@ class BoundedQueue[Item]:
         """
         for _ in range(consumers):
             await self._queue.put(None)
+        self._publish()
 
     async def drain(self) -> Sequence[Item]:
         """Remove and return everything currently queued, ignoring sentinels."""
@@ -167,4 +192,5 @@ class BoundedQueue[Item]:
             self._queue.task_done()
             if item is not None:
                 items.append(item)
+        self._publish()
         return items

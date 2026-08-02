@@ -17,6 +17,7 @@ blocks an HTTP request.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Executor
 from dataclasses import replace
@@ -29,6 +30,7 @@ from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.errors import ErrorCode
+from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger, use_trace_id
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.lockfile import LockStore, build_lock
@@ -120,6 +122,7 @@ class IngestionService:
         running = replace(record, status="running")
         self.journal.save_job(running)
         progress = _Checkpointer(self.journal, running)
+        started = time.monotonic()
 
         with use_trace_id():
             _logger.info(
@@ -179,6 +182,7 @@ class IngestionService:
             finished_at=_finished_at(),
         )
         self.journal.save_job(settled)
+        self._publish_metrics(settled, counts, elapsed=time.monotonic() - started)
 
         if indexer.written:
             self._write_lockfile(record.collection)
@@ -188,6 +192,36 @@ class IngestionService:
 
         _logger.info("ingest finished", extra={"job_id": record.job_id, **counts})
         return settled
+
+    def _publish_metrics(
+        self, record: JobRecord, counts: dict[str, int], *, elapsed: float
+    ) -> None:
+        """Publish the ingestion half of the metrics catalogue for a settled job.
+
+        Published once, at settle, rather than per document: throughput measured over a
+        whole job is the number an operator can compare between runs, while a per-document
+        rate mostly reports how large the last document happened to be.
+
+        Dead-letter depth is read back from the journal rather than taken from this job's
+        counts. The gauge describes a collection's *standing* backlog, and a job that
+        dead-lettered nothing does not mean the collection has nothing waiting.
+        """
+        indexed = counts["indexed"]
+        failed = counts["dead_lettered"]
+        succeeded = counts["total"] - failed - counts["deduplicated"]
+
+        metrics.INGEST_DOCUMENTS.increment(float(max(succeeded, 0)), status="succeeded")
+        metrics.INGEST_DOCUMENTS.increment(float(counts["deduplicated"]), status="deduplicated")
+        metrics.INGEST_DOCUMENTS.increment(float(failed), status="dead_lettered")
+
+        if elapsed > 0:
+            metrics.INGEST_THROUGHPUT.set(counts["total"] / elapsed, unit="documents_per_second")
+            metrics.INGEST_THROUGHPUT.set(indexed / elapsed, unit="chunks_per_second")
+
+        metrics.DLQ_DEPTH.set(
+            float(len(self.journal.dead_lettered(record.job_id))),
+            collection=record.collection,
+        )
 
     def _write_lockfile(self, collection: str) -> None:
         """Record what produced this index, so drift against it is detectable (D1).

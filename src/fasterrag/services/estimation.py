@@ -32,6 +32,7 @@ from fasterrag.observability.logging import get_logger
 from fasterrag.workers.cpu_pool import CpuWorkerPool, parse_and_chunk
 
 __all__ = [
+    "GENERATION_PRICES_USD_PER_MILLION_TOKENS",
     "PRICES_DATED",
     "PRICES_SOURCE",
     "PRICES_USD_PER_MILLION_TOKENS",
@@ -39,6 +40,7 @@ __all__ = [
     "ProviderEstimate",
     "estimate_sources",
     "price_for",
+    "price_generation",
 ]
 
 # Published list prices in USD per million input tokens. These are not measurements and
@@ -50,6 +52,16 @@ PRICES_USD_PER_MILLION_TOKENS: Final[dict[str, float]] = {
     "embed-english-v3.0": 0.10,
     "embed-multilingual-v3.0": 0.10,
     "embed-english-light-v3.0": 0.10,
+}
+
+# Published list prices in USD per million tokens for *generation*, as (input, output).
+# Two rates, not one: a generation model charges differently for the prompt it reads and the
+# answer it writes, so pricing a completion at the input rate understates every query. A
+# model absent from this table contributes no cost rather than a guess — which is why the
+# cost panel can read zero on a working system, and says so on the panel itself.
+GENERATION_PRICES_USD_PER_MILLION_TOKENS: Final[dict[str, tuple[float, float]]] = {
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4o": (2.50, 10.00),
 }
 
 PRICES_DATED: Final = "2026-07-30"
@@ -136,6 +148,30 @@ def price_for(provider: str, model: str, tokens: int) -> tuple[float | None, str
         tokens / _MILLION * rate,
         f"{rate} USD per million tokens, {PRICES_SOURCE} {PRICES_DATED}",
     )
+
+
+def price_generation(
+    provider: str, model: str, prompt_tokens: int, completion_tokens: int
+) -> float | None:
+    """Return the list-price estimate for one generation call, or ``None`` if unpriced.
+
+    Separate from :func:`price_for` because a generation model has two rates and an
+    embedding model has one. Calling the embedding pricer on a completion would charge the
+    answer at the prompt rate, which understates every query by the margin between them.
+
+    Returns:
+        The estimated cost in USD, ``0.0`` for a local provider, or ``None`` when no rate is
+        recorded for the model — never a fabricated figure.
+    """
+    if provider in LOCAL_PROVIDERS:
+        return 0.0
+
+    rates = GENERATION_PRICES_USD_PER_MILLION_TOKENS.get(model)
+    if rates is None:
+        return None
+
+    input_rate, output_rate = rates
+    return (prompt_tokens * input_rate + completion_tokens * output_rate) / _MILLION
 
 
 def _providers_to_price(settings: Settings, all_providers: bool) -> list[tuple[str, str]]:
