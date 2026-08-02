@@ -20,10 +20,13 @@ started only if absent, and a re-run changes nothing an operator has not changed
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
+
+import httpx
 
 from fasterrag.config.schema import Settings
 from fasterrag.observability.logging import get_logger
@@ -36,18 +39,23 @@ from fasterrag.services.provisioning import (
 )
 
 __all__ = [
+    "DASHBOARD_UID",
     "DATASOURCE_UID",
     "DEFAULT_PROVISIONING_ROOT",
     "GRAFANA_CONTAINER",
     "GRAFANA_PORT",
+    "NETWORK_NAME",
     "PROMETHEUS_CONTAINER",
-    "PROMETHEUS_PORT",
+    "PROMETHEUS_CONTAINER_PORT",
+    "PROMETHEUS_HOST_PORT",
     "SCRAPE_INTERVAL_SECONDS",
     "UPDATE_INTERVAL_SECONDS",
     "GrafanaPlan",
+    "Verification",
     "dashboard_provider",
     "datasource_manifest",
     "prometheus_config",
+    "verify_grafana",
     "write_manifests",
 ]
 
@@ -55,7 +63,22 @@ GRAFANA_CONTAINER: Final = "fasterrag-grafana"
 PROMETHEUS_CONTAINER: Final = "fasterrag-prometheus"
 
 GRAFANA_PORT: Final = 3001
-PROMETHEUS_PORT: Final = 9090
+
+# CRITICAL: these two are different numbers and must stay that way. Prometheus listens on
+# 9090 *inside* its container and that is not configurable without overriding the image's
+# command, so the datasource — which reaches it container-to-container — must use 9090. The
+# host publication moves to 9099 because the Langfuse stack this repo also provisions
+# publishes MinIO on 9090 (docs/observability.md §4), and two provisioners claiming one host
+# port would make enabling both toggles a coin flip over which came up. Collapsing these
+# into one constant publishes 9099:9099, which binds a port nothing listens on: Grafana then
+# renders every panel empty with no error anywhere.
+PROMETHEUS_CONTAINER_PORT: Final = 9090
+PROMETHEUS_HOST_PORT: Final = 9099
+
+# CRITICAL: a user-defined network, not ``--link``. Links are legacy, work only on the
+# default bridge, and are one-directional; the datasource resolves ``fasterrag-prometheus``
+# by DNS on this network instead.
+NETWORK_NAME: Final = "fasterrag"
 
 # CRITICAL: images are pinned. A floating tag makes a provisioning run non-reproducible —
 # two operators following the same instructions would get different Grafana versions, and a
@@ -69,9 +92,14 @@ DEFAULT_PROVISIONING_ROOT: Final = Path(".fasterrag") / "grafana"
 # mints a random uid per installation, and every dashboard panel — which references the
 # datasource by uid — resolves to nothing. The dashboards would render, empty, with no error.
 DATASOURCE_UID: Final = "fasterrag-prometheus"
+DASHBOARD_UID: Final = "fasterrag-overview"
 
 UPDATE_INTERVAL_SECONDS: Final = 30
 SCRAPE_INTERVAL_SECONDS: Final = 15
+
+_VERIFY_ATTEMPTS: Final = 30
+_VERIFY_INTERVAL_SECONDS: Final = 2.0
+_VERIFY_TIMEOUT_SECONDS: Final = 10.0
 
 _logger = get_logger(__name__)
 
@@ -84,7 +112,7 @@ class GrafanaPlan:
     metrics_host: str
     metrics_port: int
     grafana_port: int = GRAFANA_PORT
-    prometheus_port: int = PROMETHEUS_PORT
+    prometheus_port: int = PROMETHEUS_HOST_PORT
 
     @property
     def provisioning(self) -> Path:
@@ -108,6 +136,9 @@ def datasource_manifest() -> str:
     ``editable: false`` is what makes the repository the source of truth: a datasource
     changed in the UI would drift from the file and be reverted without explanation on the
     next provisioning run.
+
+    The URL is container-to-container, so it carries the *container* port. Using the host
+    publication here would point Grafana at a port nothing serves inside the network.
     """
     return "\n".join(
         [
@@ -118,7 +149,7 @@ def datasource_manifest() -> str:
             f"    uid: {DATASOURCE_UID}",
             "    type: prometheus",
             "    access: proxy",
-            f"    url: http://{PROMETHEUS_CONTAINER}:{PROMETHEUS_PORT}",
+            f"    url: http://{PROMETHEUS_CONTAINER}:{PROMETHEUS_CONTAINER_PORT}",
             "    isDefault: true",
             "    editable: false",
             "",
@@ -190,7 +221,7 @@ def dashboard() -> dict[str, Any]:
     render empty because it queries a series nothing emits.
     """
     return {
-        "uid": "fasterrag-overview",
+        "uid": DASHBOARD_UID,
         "title": "fasterRag — overview",
         "tags": ["fasterrag"],
         "timezone": "browser",
@@ -243,7 +274,18 @@ def write_manifests(plan: GrafanaPlan) -> list[Path]:
     """
     datasources = plan.provisioning / "datasources"
     providers = plan.provisioning / "dashboards"
-    for directory in (datasources, providers, plan.dashboards):
+
+    # CRITICAL: the empty plugins/ and alerting/ directories are deliberate. Grafana scans
+    # all four provisioning directories at boot and logs a `level=error` line for each one
+    # that is absent, so a perfectly healthy install greets its first operator with two
+    # errors in the log and no way to tell them apart from a real failure.
+    for directory in (
+        datasources,
+        providers,
+        plan.provisioning / "plugins",
+        plan.provisioning / "alerting",
+        plan.dashboards,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
 
     written: list[Path] = []
@@ -263,6 +305,77 @@ def write_manifests(plan: GrafanaPlan) -> list[Path]:
         extra={"root": str(plan.root), "files": [str(path) for path in written]},
     )
     return written
+
+
+@dataclass(frozen=True, slots=True)
+class Verification:
+    """What provisioning could confirm about the stack it just started."""
+
+    healthy: bool
+    detail: str
+
+
+async def verify_grafana(plan: GrafanaPlan) -> Verification:
+    """Ask Grafana whether the dashboard loaded and the datasource answers.
+
+    Started containers are not working containers. Provisioning that reports success because
+    ``docker run`` exited zero is how a stack ends up serving six empty panels while claiming
+    to be healthy, so this asks Grafana three questions it can only answer if the wiring is
+    right: is it up, did the dashboard provision, and does the datasource reach Prometheus.
+    """
+    base = f"http://localhost:{plan.grafana_port}"
+
+    try:
+        async with httpx.AsyncClient(timeout=_VERIFY_TIMEOUT_SECONDS) as client:
+            for _ in range(_VERIFY_ATTEMPTS):
+                try:
+                    health = await client.get(f"{base}/api/health")
+                except httpx.HTTPError:
+                    await asyncio.sleep(_VERIFY_INTERVAL_SECONDS)
+                    continue
+                if health.status_code == 200:
+                    break
+                await asyncio.sleep(_VERIFY_INTERVAL_SECONDS)
+            else:
+                return Verification(False, f"grafana did not answer on {base} — check its logs")
+
+            found = await client.get(f"{base}/api/search", params={"type": "dash-db"})
+            uids = (
+                {entry.get("uid") for entry in found.json()} if found.status_code == 200 else set()
+            )
+            if DASHBOARD_UID not in uids:
+                return Verification(
+                    False,
+                    f"grafana is up but the {DASHBOARD_UID} dashboard did not provision — "
+                    "check that the dashboards directory is mounted",
+                )
+
+            probe = await client.get(f"{base}/api/datasources/uid/{DATASOURCE_UID}/health")
+            if probe.status_code != 200:
+                return Verification(
+                    False,
+                    "the dashboard provisioned but the datasource cannot reach prometheus — "
+                    f"every panel will render empty. Grafana returned {probe.status_code}",
+                )
+    except httpx.HTTPError as exc:
+        return Verification(False, f"could not verify grafana: {exc}")
+
+    return Verification(
+        True, "dashboard and datasource verified; dashboards are read-only by design"
+    )
+
+
+async def _ensure_network() -> None:
+    """Create the shared network if it is absent.
+
+    ``docker network create`` on an existing network is an error rather than a no-op, so the
+    existence check happens first; the command's failure is not treated as fatal because a
+    concurrent run may have won the race.
+    """
+    inspect = await run_docker(["network", "inspect", NETWORK_NAME])
+    if inspect.ok:
+        return
+    await run_docker(["network", "create", NETWORK_NAME])
 
 
 async def _ensure_container(name: str, arguments: list[str]) -> str:
@@ -300,6 +413,7 @@ async def provision_grafana(settings: Settings, *, root: Path | None = None) -> 
         )
 
     write_manifests(plan)
+    await _ensure_network()
 
     prometheus = await _ensure_container(
         PROMETHEUS_CONTAINER,
@@ -308,8 +422,12 @@ async def provision_grafana(settings: Settings, *, root: Path | None = None) -> 
             "-d",
             "--name",
             PROMETHEUS_CONTAINER,
+            "--restart",
+            "unless-stopped",
+            "--network",
+            NETWORK_NAME,
             "-p",
-            f"{plan.prometheus_port}:{PROMETHEUS_PORT}",
+            f"{plan.prometheus_port}:{PROMETHEUS_CONTAINER_PORT}",
             "-v",
             f"{plan.root / 'prometheus.yml'}:/etc/prometheus/prometheus.yml:ro",
             "--add-host",
@@ -325,6 +443,10 @@ async def provision_grafana(settings: Settings, *, root: Path | None = None) -> 
             "-d",
             "--name",
             GRAFANA_CONTAINER,
+            "--restart",
+            "unless-stopped",
+            "--network",
+            NETWORK_NAME,
             "-p",
             f"{plan.grafana_port}:3000",
             "-v",
@@ -335,21 +457,26 @@ async def provision_grafana(settings: Settings, *, root: Path | None = None) -> 
             "GF_AUTH_ANONYMOUS_ENABLED=true",
             "-e",
             "GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer",
-            "--link",
-            f"{PROMETHEUS_CONTAINER}:{PROMETHEUS_CONTAINER}",
             GRAFANA_IMAGE,
         ],
     )
 
+    verification = await verify_grafana(plan)
+
     _logger.info(
         "grafana provisioning converged",
-        extra={"prometheus": prometheus, "grafana": grafana, "url": plan.url},
+        extra={
+            "prometheus": prometheus,
+            "grafana": grafana,
+            "url": plan.url,
+            "verified": verification.healthy,
+        },
     )
     return ProvisionResult(
         tool="grafana",
-        status="running",
+        status="running" if verification.healthy else "degraded",
         url=plan.url,
-        detail=f"prometheus {prometheus}, grafana {grafana}; dashboards are read-only by design",
+        detail=f"prometheus {prometheus}, grafana {grafana}; {verification.detail}",
     )
 
 

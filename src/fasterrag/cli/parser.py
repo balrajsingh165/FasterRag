@@ -172,7 +172,7 @@ def _add_provision(subparsers: argparse._SubParsersAction[argparse.ArgumentParse
     """Register ``provision``."""
     parser = subparsers.add_parser("provision", help="config-driven provisioning")
     _add_global_flags(parser)
-    parser.add_argument("tool", choices=["qdrant", "grafana"], help="tool to provision")
+    parser.add_argument("tool", choices=["qdrant", "grafana", "langfuse"], help="tool to provision")
     parser.add_argument("--status", action="store_true", help="report state instead")
     parser.add_argument("--down", action="store_true", help="stop the managed containers")
 

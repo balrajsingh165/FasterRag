@@ -5,6 +5,9 @@ from fasterrag.config.schema import Settings
 from fasterrag.observability import metrics
 from fasterrag.services.grafana import (
     DATASOURCE_UID,
+    GRAFANA_PORT,
+    PROMETHEUS_CONTAINER_PORT,
+    PROMETHEUS_HOST_PORT,
     UPDATE_INTERVAL_SECONDS,
     GrafanaPlan,
     dashboard,
@@ -13,6 +16,7 @@ from fasterrag.services.grafana import (
     prometheus_config,
     write_manifests,
 )
+from fasterrag.services.langfuse import LANGFUSE_PORTS
 
 
 def plan(tmp_path: Path) -> GrafanaPlan:
@@ -114,6 +118,30 @@ def test_manifests_carry_no_secret(tmp_path: Path) -> None:
 
 def test_the_plan_derives_its_url_from_the_port(tmp_path: Path) -> None:
     assert plan(tmp_path).url.endswith(":3001")
+
+
+def test_the_datasource_uses_the_container_port_not_the_host_publication() -> None:
+    """Grafana reaches Prometheus inside the network, where it listens on 9090.
+
+    Collapsing the two numbers into one publishes 9099:9099 and binds a port nothing serves;
+    every panel then renders empty with no error in any log.
+    """
+    assert f":{PROMETHEUS_CONTAINER_PORT}" in datasource_manifest()
+    assert f":{PROMETHEUS_HOST_PORT}" not in datasource_manifest()
+
+
+def test_the_host_publication_collides_with_nothing_langfuse_claims() -> None:
+    """Both toggles can be on at once, and Langfuse publishes MinIO on Prometheus's default."""
+    assert PROMETHEUS_HOST_PORT not in LANGFUSE_PORTS
+    assert GRAFANA_PORT not in LANGFUSE_PORTS
+
+
+def test_every_provisioning_directory_grafana_scans_exists(tmp_path: Path) -> None:
+    """Grafana logs a level=error line per absent directory, on an otherwise healthy boot."""
+    write_manifests(plan(tmp_path))
+
+    for name in ("datasources", "dashboards", "plugins", "alerting"):
+        assert (tmp_path / "provisioning" / name).is_dir(), f"{name} is missing"
 
 
 def test_the_metrics_port_follows_configuration(tmp_path: Path) -> None:
