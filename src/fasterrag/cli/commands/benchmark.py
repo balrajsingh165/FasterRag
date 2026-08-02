@@ -13,7 +13,9 @@ mock would produce numbers no operator could ever reproduce.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
+from fasterrag.adapters.embeddings.tiering import create_embedding_router
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.commands.pipeline import _build_generation, _settings_or_none
 from fasterrag.cli.output import Console, ExitCode
@@ -26,6 +28,7 @@ from fasterrag.services.benchmark import (
     measure,
 )
 from fasterrag.services.estimation import estimate_sources
+from fasterrag.services.evaluation import run_eval, summarize
 
 __all__ = ["run_benchmark"]
 
@@ -116,17 +119,55 @@ async def _ingest_suite(
     )
 
 
+async def _eval_suite(args: argparse.Namespace, console: Console) -> ExitCode:
+    """Score a collection against a committed dataset and report the gate's verdict.
+
+    Reports metrics rather than latencies, so it does not produce a ledger entry: a recall
+    figure is not a performance measurement and putting it in the performance ledger would
+    invite comparing the two.
+    """
+    settings = _settings_or_none(args, console)
+    if settings is None:
+        return ExitCode.USAGE
+
+    if not args.dataset:
+        console.error("the eval suite needs --dataset naming a directory with a golden set")
+        return ExitCode.USAGE
+
+    collection = args.collection or settings.vector_db.collection.default_name
+    adapter = create_vector_db_adapter(settings)
+    router = create_embedding_router(settings)
+
+    try:
+        report, gate = await run_eval(
+            Path(args.dataset), settings, adapter, router, collection=collection
+        )
+    except FasterRagError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
+    finally:
+        await router.close()
+        await adapter.close()
+
+    console.emit(f"collection      {collection}")
+    console.emit(f"scored          {report.scored} ({report.adversarial} adversarial)")
+    console.emit(f"recall@{report.k}        {report.recall_at_k:.4f}")
+    console.emit(f"mrr             {report.mrr:.4f}")
+    console.emit(f"ndcg@{report.k}          {report.ndcg_at_k:.4f}")
+    console.emit(f"gate            {gate.summary()}")
+    console.document({"eval": summarize(report), "gate": gate.as_dict()})
+
+    # CRITICAL: exit 5, the documented regression-gate code, so CI can tell a blocked gate
+    # from a crashed run.
+    return ExitCode.SUCCESS if gate.passed else ExitCode.REGRESSION
+
+
 async def run_benchmark(args: argparse.Namespace, console: Console) -> ExitCode:
     """Run the requested suite and report, optionally as a ledger entry."""
-    suites = ["query", "ingest"] if args.suite == "all" else [args.suite]
+    if args.suite == "eval":
+        return await _eval_suite(args, console)
 
-    if "eval" in suites:
-        # TODO: the eval suite needs the golden-set harness of TASK-0077.
-        console.error(
-            "the eval suite needs a committed golden set (TASK-0077); "
-            "use --suite query or --suite ingest"
-        )
-        return ExitCode.USAGE
+    suites = ["query", "ingest"] if args.suite == "all" else [args.suite]
 
     machine = fingerprint()
     console.emit(f"hardware        {machine.describe()}")

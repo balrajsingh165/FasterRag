@@ -27,6 +27,7 @@ from typing import Any
 from fasterrag.config.schema import Settings
 from fasterrag.core.evals.harness import EvalReport
 from fasterrag.core.identity import retrieval_config_hash
+from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
 
 __all__ = [
@@ -91,13 +92,27 @@ class GateResult:
 
 
 def load_baseline(path: str | Path) -> Baseline | None:
-    """Read a committed baseline, or return None when none exists yet."""
+    """Read a committed baseline, or return None when none exists yet.
+
+    Raises:
+        FasterRagError: With ``VALIDATION_FAILED`` when the file exists but is not a
+            baseline. A malformed one must not read as "no baseline", because a missing
+            baseline blocks the gate while a silently-ignored one would let it pass.
+    """
     source = Path(path)
     if not source.is_file():
         return None
 
-    payload = json.loads(source.read_text(encoding="utf-8"))
-    return Baseline(**payload)
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        return Baseline(**payload)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise FasterRagError(
+            f"{source} exists but is not a valid baseline: {exc}. Re-record it with a "
+            "measured run rather than editing it by hand",
+            code=ErrorCode.VALIDATION_FAILED,
+            retryable=False,
+        ) from exc
 
 
 def write_baseline(path: str | Path, report: EvalReport, settings: Settings) -> Baseline:

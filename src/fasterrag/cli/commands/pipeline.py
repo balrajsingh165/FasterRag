@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
@@ -29,6 +30,7 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.rerank import CrossEncoderReranker
 from fasterrag.errors import ConfigError, FasterRagError
 from fasterrag.services.estimation import estimate_sources
+from fasterrag.services.evaluation import run_eval
 from fasterrag.services.generation import GenerationService
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import create_journal
@@ -380,7 +382,11 @@ async def _index_reembed(
         console.document({**plan.as_dict(), "swapped": False, "reason": "the build failed"})
         return ExitCode.FAILURE
 
-    gate = _run_eval_gate(console) if not args.no_eval_gate else None
+    gate = (
+        None
+        if args.no_eval_gate
+        else await _run_eval_gate(args, settings, adapter, plan.green, console)
+    )
     result = await swap(
         plan,
         adapter,
@@ -404,18 +410,40 @@ async def _index_reembed(
     return ExitCode.SUCCESS
 
 
-def _run_eval_gate(console: Console) -> GateResult | None:
-    """Return the eval gate's verdict, or ``None`` when it cannot run.
+async def _run_eval_gate(
+    args: argparse.Namespace,
+    settings: Settings,
+    adapter: VectorDBAdapter,
+    green: str,
+    console: Console,
+) -> GateResult | None:
+    """Score the freshly built collection against a dataset, or report why it cannot be.
 
-    # TODO: scoring a green build needs the golden-set harness of TASK-0077. Until that
-    # ships the gate reports that it could not judge, which the swap records as ungated —
-    # deliberately not as a pass, because a gate that did not run has established nothing.
+    Returns ``None`` when no dataset was named, which the swap records as ungated rather
+    than as a pass — a gate that did not run has established nothing.
     """
+    if not args.dataset:
+        console.emit(
+            "eval gate       not run: pass --dataset to score the new build before swapping"
+        )
+        return None
+
+    router = create_embedding_router(settings)
+    try:
+        report, gate = await run_eval(
+            Path(args.dataset), settings, adapter, router, collection=green
+        )
+    except FasterRagError as exc:
+        console.error(f"eval gate       could not run: {exc.detail}")
+        return None
+    finally:
+        await router.close()
+
     console.emit(
-        "eval gate       could not run: scoring a green build needs the golden-set "
-        "harness (TASK-0077); the swap will be recorded as ungated"
+        f"eval gate       recall@{report.k}={report.recall_at_k:.4f} "
+        f"mrr={report.mrr:.4f} ndcg@{report.k}={report.ndcg_at_k:.4f}"
     )
-    return None
+    return gate
 
 
 async def _index_rollback(

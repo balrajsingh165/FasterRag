@@ -153,6 +153,7 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     reembed.add_argument("name", help="the served alias to rebuild behind")
     reembed.add_argument("sources", nargs="+", help="paths to ingest into the new build")
     reembed.add_argument("--no-eval-gate", action="store_true", help="swap without the gate (dev)")
+    reembed.add_argument("--dataset", default=None, help="eval dataset directory to gate on")
     reembed.add_argument("--watch", action="store_true", help="print progress until completion")
 
     rollback = actions.add_parser("rollback", help="flip the alias back to a retained build (D2)")

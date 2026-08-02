@@ -24,6 +24,8 @@ import pytest
 
 from fasterrag.core.evals import EvalReport, GoldenRecord, load_golden_set
 from fasterrag.core.identity import document_id
+from fasterrag.errors import FasterRagError
+from fasterrag.services.regression import load_baseline
 
 pytestmark = pytest.mark.eval
 
@@ -117,25 +119,41 @@ def test_ground_truth_resolves_to_pipeline_document_ids() -> None:
         assert all(identifier.startswith("d_") for identifier in record.relevant_document_ids)
 
 
-def test_the_baseline_is_committed_and_well_formed() -> None:
-    """A gate with no committed baseline blocks rather than passing, so one must exist."""
-    payload = json.loads(BASELINE.read_text(encoding="utf-8"))
+def test_the_baseline_is_committed_and_loads_through_the_gate() -> None:
+    """A gate with no committed baseline blocks rather than passing, so one must exist.
 
-    assert payload["k"] == K
-    assert 0.0 <= payload["recall_at_k"] <= 1.0
-    assert 0.0 <= payload["ndcg_at_k"] <= 1.0
-    assert 0.0 <= payload["mrr"] <= 1.0
-    assert payload["scored"] == 12
-    assert payload["adversarial"] == 3
-    assert payload["embedding_model"]
-    assert payload["notes"]
+    Loaded through ``load_baseline`` rather than parsed as JSON: the gate is the only
+    consumer that matters, and a baseline it cannot read is not a baseline.
+    """
+    baseline = load_baseline(BASELINE)
+
+    assert baseline is not None
+    assert baseline.k == K
+    assert 0.0 <= baseline.recall_at_k <= 1.0
+    assert 0.0 <= baseline.ndcg_at_k <= 1.0
+    assert 0.0 <= baseline.mrr <= 1.0
+    assert baseline.scored == 12
+    assert baseline.embedding_model
+    assert baseline.config_hash
 
 
-def test_the_baseline_covers_every_measurable_record() -> None:
+def test_the_baseline_covers_every_answerable_record() -> None:
     """Scored plus adversarial must account for the whole set, or coverage silently shrank."""
-    payload = json.loads(BASELINE.read_text(encoding="utf-8"))
+    baseline = load_baseline(BASELINE)
+    records = load_golden_set(GOLDEN)
+    adversarial = sum(1 for record in records if record.adversarial)
 
-    assert payload["scored"] + payload["adversarial"] == len(load_golden_set(GOLDEN))
+    assert baseline is not None
+    assert baseline.scored + adversarial == len(records)
+
+
+def test_a_hand_edited_baseline_is_refused_rather_than_ignored(tmp_path: Path) -> None:
+    """A silently-ignored baseline would let the gate pass; a missing one blocks it."""
+    broken = tmp_path / "baseline.json"
+    broken.write_text(json.dumps({"k": 5, "made_up_field": 1}), encoding="utf-8")
+
+    with pytest.raises(FasterRagError):
+        load_baseline(broken)
 
 
 def report_as_baseline(report: EvalReport, embedding_model: str, notes: str) -> dict[str, object]:
