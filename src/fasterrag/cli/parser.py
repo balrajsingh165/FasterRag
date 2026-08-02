@@ -52,7 +52,6 @@ class _StoreTrueNoDefault(argparse.Action):
 PENDING_COMMANDS: Final[dict[str, str]] = {
     "export": "TASK-0079 (portability archives, D11)",
     "import": "TASK-0079 (portability archives, D11)",
-    "autopilot": "TASK-0086 (eval-driven auto-tuning, D6)",
 }
 
 
@@ -216,6 +215,19 @@ def _add_traces(subparsers: argparse._SubParsersAction[argparse.ArgumentParser])
     show.add_argument("trace_id", help="the trace id")
 
 
+def _add_autopilot(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register ``autopilot run``."""
+    parser = subparsers.add_parser("autopilot", help="eval-driven tuning that only suggests (D6)")
+    _add_global_flags(parser)
+    actions = parser.add_subparsers(dest="action", required=True)
+
+    run = actions.add_parser("run", help="search configurations and write a suggested diff")
+    _add_global_flags(run)
+    run.add_argument("--dataset", default=None, help="eval dataset directory to tune against")
+    run.add_argument("--budget-minutes", type=float, default=5.0, help="wall-clock ceiling")
+    run.add_argument("--out", default=None, help="where to write the suggestion")
+
+
 def _add_backup(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Register ``backup`` and ``restore``."""
     backup = subparsers.add_parser("backup", help="capture a full deployment backup")
@@ -277,6 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--fix", action="store_true", help="apply safe automatic fixes")
 
     _add_estimate(subparsers)
+    _add_autopilot(subparsers)
     _add_backup(subparsers)
     _add_benchmark(subparsers)
     _add_replay(subparsers)

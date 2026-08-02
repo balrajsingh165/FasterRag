@@ -230,7 +230,9 @@ _(empty)_
 
 ### S12 — Autopilot v1
 
-- [ ] TASK-0086: Implement suggest-only eval-driven auto-tuning with measured deltas; assert zero writes to config.yaml (D6)
+- [x] TASK-0086: Implement suggest-only eval-driven auto-tuning with measured deltas; assert zero writes to config.yaml (D6) — `fasterrag autopilot run` searches query-time parameters against a golden set, writes `autopilot-suggestion.yaml`, and verifies config.yaml is byte-identical afterwards; searching index-time parameters is TASK-0145 — ✅ 2026-08-02
+- [ ] TASK-0144: D6's acceptance test — "on a fixture corpus with a known-better config, autopilot's suggestion matches or beats it" — is only verified by unit test, not against a real corpus. On the handbook fixture every candidate scores 1.0, so there is no improvement to find and Autopilot correctly suggests nothing. Demonstrating the improvement path end to end needs the harder fixture of TASK-0142
+- [ ] TASK-0145: Autopilot searches query-time parameters only. Chunk size, overlap, and the embedding model change how the index is *built*, so each candidate costs a full re-chunk and re-embed of the corpus — hours on a real one. That search needs its own budget model and a temporary collection per candidate
 
 ### S13 — Langfuse + Grafana integrations
 
