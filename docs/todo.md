@@ -173,7 +173,9 @@ _(empty)_
 
 ### S5 — Rerank + eval harness v1
 
-- [ ] TASK-0077: Implement the golden-set generator, and commit a baseline measured over a real corpus so the regression gate has something to compare against. The gate mechanism itself has shipped; generating golden Q&A from a corpus is shared machinery with Autopilot (D6) and belongs with it
+- [x] TASK-0077: Implement the golden-set generator (P4) — stratified sampling, adversarial records, `source: autopilot` provenance; verified against a real 21-chunk PDF corpus producing 10/10 records with 2 adversarial and 0 dropped — ✅ 2026-08-01
+- [ ] TASK-0139: Commit a golden set and a measured baseline for a *fixture* corpus under `tests/eval/datasets/`, so the regression gate has something to compare against in CI. The generator now exists and works on a real corpus; what is missing is a committed set plus its baseline. Until then TASK-0134 (the reindex eval gate) and `benchmark --suite eval` stay unwired
+- [ ] TASK-0140: Expose golden-set generation on the CLI (`fasterrag autopilot generate-golden-set` or similar). Today it is a library call only, so the shared machinery Autopilot (D6) depends on is reachable from Python but not from the terminal
 - [ ] TASK-0120: Add the faithfulness metric to the eval harness once the generation slice provides the P3 call site; the harness reports retrieval metrics only until then
 
 ### S6 — Generation
