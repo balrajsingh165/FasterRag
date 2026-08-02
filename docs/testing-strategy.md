@@ -97,6 +97,11 @@ Sampled on the two places where a subtle bug silently ruins quality: **chunk-bou
 7. Secret scanning clean; dependency lockfile up to date ([security.md](security.md)).
 8. Commit-message rule enforced (single line, no trailers) via pre-commit/CI check.
 9. Docs updated in the same change for any behavior change (reviewed, not automated).
+10. The always-loaded docs must not contradict the tree — `scripts/check_doc_truth.py` fails when `CLAUDE.md` or `README.md` claims a documentation-only repository while `src/fasterrag` holds an implementation. CI-only, not a commit hook.
+11. `fasterrag doctor --json` runs against the CI environment itself, after `fasterrag config init` in an empty directory — dogfooding D10 and the packaged-template path on every push.
+12. The fast suite runs on **windows-latest** as well as ubuntu. Two shipped defects were Windows-only (a path-case document id, a UTF-8 BOM the config loader rejected), and neither is reachable from an ubuntu-only matrix.
+
+**On gate 3's scope.** The threshold is applied to `core/`, `adapters/`, and `workers/` specifically, not to the repository. A tree-wide number is diluted by CLI plumbing and API wiring, so it can sit comfortably above the line while the retrieval and adapter code the gate exists to protect regresses underneath it. Measured at **87.11% branch coverage over 3525 statements** (2026-08-02); the gate is set at 85 to leave working room without letting it drift.
 
 ## 3. Test taxonomy and markers
 

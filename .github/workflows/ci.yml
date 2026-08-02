@@ -39,8 +39,68 @@ jobs:
       - name: Typecheck
         run: mypy
 
+      # The audit found CLAUDE.md and README both claiming a documentation-only repository
+      # over ~200 shipped modules. CLAUDE.md is loaded as instructions every session, so a
+      # false claim there is followed, not just read.
+      - name: Docs match the repository
+        run: python scripts/check_doc_truth.py
+
       - name: Unit tests
         run: pytest -m "not integration and not eval" --cov --cov-report=term-missing
+
+      # Scoped to the packages docs/testing-strategy.md gates, not the whole tree. A
+      # repository-wide threshold is diluted by CLI plumbing and API wiring, so it can stay
+      # green while the retrieval and adapter code it exists to protect regresses. Measured
+      # at 87% branch coverage on 2026-08-02; the gate sits at 85 to leave working room
+      # without letting it drift.
+      - name: Coverage gate (core, adapters, workers)
+        run: >
+          pytest -m "not integration and not eval" -q
+          --cov=src/fasterrag/core
+          --cov=src/fasterrag/adapters
+          --cov=src/fasterrag/workers
+          --cov-report=term
+          --cov-fail-under=85
+
+      # D10 dogfooded, and the packaged-template path with it: this is the only job that
+      # exercises `config init` the way a `pip install` user does. The placeholder keys are
+      # set so doctor gets past config validation and actually runs its environment checks —
+      # without them it would exit 4 on the first one and the smoke test would pass
+      # trivially. Exit 4 is still accepted afterwards, because CI has no Docker daemon and
+      # a check *reporting* that is doctor working, not failing. A crash still fails the job.
+      - name: Doctor smoke test
+        env:
+          FASTERRAG_API_KEY: ci-placeholder
+          QDRANT_API_KEY: ci-placeholder
+          OPENAI_API_KEY: ci-placeholder
+        run: |
+          mkdir -p /tmp/doctor && cd /tmp/doctor
+          fasterrag config init
+          test -f config.yaml && test -f .env.example
+          fasterrag doctor --json || [ $? -eq 4 ]
+
+  # The project is developed on Windows and two shipped defects were Windows-only: a
+  # path-case document id (`d:\` and `D:\` hashing differently, TASK-0141) and a UTF-8 BOM
+  # rejected by the config loader. Both are invisible to an ubuntu-only matrix. Lint,
+  # format, and typecheck are not repeated here — they are platform-independent and already
+  # gate on the quality job.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Unit tests
+        run: pytest -m "not integration and not eval"
 
   integration:
     runs-on: ubuntu-latest
