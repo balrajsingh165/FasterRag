@@ -12,7 +12,7 @@ Conventions: types in Python/Pydantic notation · `str|null` = optional · all t
 | `c_` | Chunk | **deterministic** from `document_id` + chunk index + chunker config hash — this determinism is what makes indexing idempotent and replay-safe (D3) |
 | `job_` | Ingest job | random, time-ordered |
 | `col_` | Collection | random (the human-facing key is `name`) |
-| `t_` | Trace | equals the `trace_id` propagated through logs, spans, and problem responses |
+| *(none)* | Trace | a Trace's id **is** the propagated `trace_id`: a bare 32-hex lowercase OpenTelemetry trace id, identical in logs, spans, and problem responses — deliberately unprefixed for OTel compatibility (resolved AUDIT-0006, 2026-08-02) |
 | `memver_`-style suffixes | — | not used; fasterRag entities use the prefixes above only |
 
 ## Document
@@ -160,7 +160,7 @@ Persisted for every query when `traces.store: true`; the substrate for replay (D
 
 | Field | Type | Notes |
 |---|---|---|
-| `trace_id` | str | `t_…`; identical to the value in logs, spans, and problem responses |
+| `trace_id` | str | bare 32-hex lowercase OTel trace id; identical to the value in logs, spans, and problem responses |
 | `query` | str | Original query text |
 | `filters` | object\|null | Metadata filters applied |
 | `config_snapshot` | object | The retrieval-affecting config subset at execution time — what makes replay meaningful |

@@ -16,7 +16,7 @@ fasterRag is self-hosted software in beta (no managed cloud). Three ways to run 
 | `grafana` | Grafana with provisioning-as-code mounts | `observability.grafana: true` |
 | `dashboard` | fasterRag read-only dashboard | `observability.dashboard: true` |
 
-All containers run **non-root**; images are pinned by tag (no `latest`); provisioning is doctor-gated and idempotent ([observability.md](observability.md)).
+Containers whose images **fasterRag builds itself** run non-root; third-party images fasterRag provisions (Qdrant, the Langfuse stack, Grafana) run as their upstream images ship — forcing a `--user` onto an image that expects to own its storage volume risks an unstartable container (resolved AUDIT-0007, 2026-08-02). Images are pinned by tag (no `latest`); provisioning is idempotent, with doctor-gating shipped for Qdrant and pending for Langfuse/Grafana (TASK-0147/0149 in [todo.md](todo.md)).
 
 ## 2. Vector DB deployment modes (Qdrant reference)
 

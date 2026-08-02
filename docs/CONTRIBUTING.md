@@ -37,6 +37,7 @@ Optional extras, needed only for what they name: `.[huggingface]` and `.[rerank]
 - NO inline comments and NO explanatory comments, with EXACTLY two permitted exceptions:
   - `# CRITICAL: <why this must not change>` — a super-critical requirement flagged directly in code.
   - `# TODO: <what remains>` / `# BLOCKED: <blocker + ticket/date>` — explicit pending/blocker markers.
+- A marker may open a **block**: `#` lines immediately following a `# CRITICAL:`/`# TODO:`/`# BLOCKED:` line continue that marker and count as part of it (this codifies the existing practice in `src/`).
 - Any `# type: ignore` requires an adjacent `# CRITICAL:` justification.
 
 ## 3. One-todo-file rule
