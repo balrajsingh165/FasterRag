@@ -168,3 +168,60 @@ def test_default_settings_do_not_warn(tmp_path: Path, caplog: pytest.LogCaptureF
     with caplog.at_level(logging.WARNING):
         load_settings(path, env_file=None)
     assert caplog.text == ""
+
+
+def test_enabling_auth_that_nothing_enforces_refuses_to_start(tmp_path: Path) -> None:
+    """An open API reporting itself authenticated is worse than a startup failure."""
+    path = write_config(tmp_path, "security:\n  auth: true\n")
+
+    with pytest.raises(ConfigError, match="enforced by nothing yet") as caught:
+        load_settings(path, env_file=None)
+
+    assert "security.auth" in caught.value.detail
+    assert caught.value.code is ErrorCode.CONFIG_INVALID
+
+
+def test_the_failure_names_the_slice_that_will_enforce_it(tmp_path: Path) -> None:
+    path = write_config(tmp_path, "security:\n  multi_tenancy: true\n")
+
+    with pytest.raises(ConfigError, match="TASK-0046"):
+        load_settings(path, env_file=None)
+
+
+def test_every_unenforced_setting_is_listed_at_once(tmp_path: Path) -> None:
+    """Reporting one at a time makes an operator restart four times to learn four things."""
+    path = write_config(
+        tmp_path,
+        "security:\n  auth: true\n  multi_tenancy: true\n"
+        "cost:\n  per_query_token_budget: 1000\n  per_tenant_token_budget: 5000\n",
+    )
+
+    with pytest.raises(ConfigError) as caught:
+        load_settings(path, env_file=None)
+
+    for key in (
+        "security.auth",
+        "security.multi_tenancy",
+        "cost.per_query_token_budget",
+        "cost.per_tenant_token_budget",
+    ):
+        assert key in caught.value.detail
+
+
+@pytest.mark.usefixtures("env")
+def test_a_zero_token_budget_means_unlimited_and_is_not_rejected(tmp_path: Path) -> None:
+    """Zero is the documented default for "no budget", not a budget of nothing."""
+    path = write_config(tmp_path, "cost:\n  per_query_token_budget: 0\n")
+
+    settings = load_settings(path, env_file=None)
+
+    assert settings.cost.per_query_token_budget == 0
+
+
+@pytest.mark.usefixtures("env")
+def test_the_canonical_config_does_not_trip_the_check(canonical_config: Path) -> None:
+    """The shipped defaults must start; a check that rejects them is a broken check."""
+    settings = load_settings(canonical_config, env_file=None)
+
+    assert not settings.security.auth
+    assert not settings.security.multi_tenancy

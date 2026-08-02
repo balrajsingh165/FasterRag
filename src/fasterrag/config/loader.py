@@ -58,6 +58,7 @@ def load_settings(
     config_path = Path(path)
     raw = _read_yaml(config_path)
     settings = _validate(raw, config_path)
+    _reject_unenforced_settings(settings)
     _require_referenced_env_vars(settings, env_file)
     _warn_about_risky_settings(settings)
     return settings
@@ -121,6 +122,44 @@ def _format_violations(exc: ValidationError) -> str:
         message = error["msg"].removeprefix("Value error, ")
         lines.append(f"  - {location}: {message}")
     return "\n".join(lines)
+
+
+def _reject_unenforced_settings(settings: Settings) -> None:
+    """Refuse to start under a security or budget setting that nothing enforces.
+
+    These keys validate, and the schema keeps them because ``docs/config-reference.md``
+    specifies them — but no code path consumes any of them yet. Accepting them silently is
+    the worst of the three options: an operator who sets ``security.auth: true`` reads that
+    as authentication being on, and gets an open API that reports itself configured. A
+    startup failure naming the missing slice is the only outcome that cannot be mistaken
+    for protection.
+
+    Mirrors the ``cache.backend: redis`` rejection in ``core/cache``, which fails the same
+    way for the same reason.
+
+    Raises:
+        ConfigError: If any accepted-but-unenforced setting is enabled.
+    """
+    enabled: list[str] = []
+
+    # TODO: each of these is removed from this list by the slice named beside it.
+    if settings.security.auth:
+        enabled.append("  - security.auth (enforcement ships with TASK-0046)")
+    if settings.security.multi_tenancy:
+        enabled.append("  - security.multi_tenancy (enforcement ships with TASK-0046)")
+    if settings.cost.per_query_token_budget:
+        enabled.append("  - cost.per_query_token_budget (the cost governor is not built)")
+    if settings.cost.per_tenant_token_budget:
+        enabled.append("  - cost.per_tenant_token_budget (the cost governor is not built)")
+
+    if enabled:
+        listed = "\n".join(enabled)
+        raise ConfigError(
+            "these settings are accepted by the schema but enforced by nothing yet:\n"
+            f"{listed}\n"
+            "leave them at their defaults until the slice that implements them ships — "
+            "starting with one enabled would report a protection the system does not have"
+        )
 
 
 def _require_referenced_env_vars(settings: Settings, env_file: str | Path | None) -> None:
