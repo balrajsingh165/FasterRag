@@ -67,9 +67,12 @@ def load_settings(
 def _read_yaml(config_path: Path) -> dict[str, Any]:
     """Parse the YAML document, mapping every read failure onto ``ConfigError``."""
     if not config_path.is_file():
+        # CRITICAL: this fix string must name a command, not a repository. It is the first
+        # error a `pip install` user ever sees, and telling them to copy a file from a
+        # checkout they do not have leaves them with nowhere to go.
         raise ConfigError(
-            f"configuration file not found: {config_path}; copy the canonical config.yaml "
-            "from the repository root or pass --config"
+            f"configuration file not found: {config_path}; run 'fasterrag config init' to "
+            "write the canonical one here, or pass --config to point at an existing file"
         )
 
     try:

@@ -257,10 +257,24 @@ def _add_benchmark(subparsers: argparse._SubParsersAction[argparse.ArgumentParse
 
 
 def _add_config(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register ``config validate``."""
+    """Register ``config init`` and ``config validate``."""
     parser = subparsers.add_parser("config", help="configuration tools")
     _add_global_flags(parser)
     actions = parser.add_subparsers(dest="action", required=True)
+
+    init = actions.add_parser("init", help="write the canonical config.yaml here")
+    _add_global_flags(init)
+    init.add_argument(
+        "--path",
+        default=DEFAULT_CONFIG_PATH,
+        help="where to write the file; defaults to ./config.yaml",
+    )
+    init.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing file (it is never overwritten without this)",
+    )
+
     validate = actions.add_parser("validate", help="validate config.yaml and referenced env vars")
     _add_global_flags(validate)
 

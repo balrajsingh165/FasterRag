@@ -11,17 +11,72 @@ configuration, ``4`` for a failed preflight, ``3`` for a dependency that cannot 
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Any
 
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.config.loader import load_settings
 from fasterrag.config.schema import Settings
+from fasterrag.config.template import canonical_config_text, env_template_text
 from fasterrag.errors import ConfigError, FasterRagError
 from fasterrag.services.doctor import diagnose, format_report
 from fasterrag.services.provisioning import container_state, docker_available
 
-__all__ = ["run_config_validate", "run_doctor_command", "run_status"]
+__all__ = ["run_config_init", "run_config_validate", "run_doctor_command", "run_status"]
+
+
+async def run_config_init(args: argparse.Namespace, console: Console) -> ExitCode:
+    """Write the canonical ``config.yaml`` into the current directory.
+
+    The first command a ``pip install`` user has any reason to run. Without it every other
+    command fails on a missing file whose only documented source is a repository they do not
+    have.
+
+    An existing file is never overwritten without ``--force``: a config.yaml is hand-edited
+    the moment it exists, and silently replacing one would discard exactly the work the
+    operator most wants to keep.
+    """
+    destination = Path(args.path)
+
+    if destination.exists() and not args.force:
+        console.error(
+            f"{destination} already exists; pass --force to overwrite it, or --path to write "
+            "somewhere else"
+        )
+        console.document({"written": False, "path": str(destination), "reason": "exists"})
+        return ExitCode.USAGE
+
+    try:
+        body = canonical_config_text()
+    except ConfigError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return ExitCode.FAILURE
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(body, encoding="utf-8")
+    console.emit(f"wrote {destination}")
+
+    # CRITICAL: the secrets template is written as `.env.example`, never as `.env`. The
+    # loader reads `.env`, so writing there could overwrite an operator's real credentials
+    # with placeholders — and a file full of `change-me` values that the system treats as
+    # configured is worse than no file.
+    example = destination.parent / ".env.example"
+    wrote_example = not example.exists()
+    if wrote_example:
+        example.write_text(env_template_text(), encoding="utf-8")
+        console.emit(f"wrote {example}")
+
+    console.emit(f"next: copy {example.name} to .env, fill in what config.yaml references,")
+    console.emit("      then run 'fasterrag doctor'")
+    console.document(
+        {
+            "written": True,
+            "path": str(destination),
+            "env_example": str(example) if wrote_example else None,
+        }
+    )
+    return ExitCode.SUCCESS
 
 
 async def run_config_validate(args: argparse.Namespace, console: Console) -> ExitCode:

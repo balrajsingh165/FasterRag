@@ -23,6 +23,7 @@ from fasterrag.cli.commands.autopilot import run_autopilot
 from fasterrag.cli.commands.backup import run_backup, run_restore
 from fasterrag.cli.commands.benchmark import run_benchmark
 from fasterrag.cli.commands.diagnostics import (
+    run_config_init,
     run_config_validate,
     run_doctor_command,
     run_status,
@@ -60,6 +61,7 @@ _HANDLERS: Final[dict[str, Handler]] = {
 # three subcommands share one adapter and one config load. A `config`-style entry per action
 # would open and close a connection three times over for one command.
 _SUBCOMMAND_HANDLERS: Final[dict[tuple[str, str], Handler]] = {
+    ("config", "init"): run_config_init,
     ("config", "validate"): run_config_validate,
 }
 

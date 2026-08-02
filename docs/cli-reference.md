@@ -147,9 +147,32 @@ D11: import a previously exported archive.
 | `--reembed` | Re-embed with the currently configured model instead of copying vectors. |
 | `--target-collection NAME` | Import into a specific collection. |
 
+## `fasterrag config init`
+
+Write the canonical `config.yaml` into the current directory, plus `.env.example` if absent. **This is the first command to run after `pip install fasterrag`** — every other command needs a `config.yaml`, and an installed package has no repository to copy one from.
+
+The file written is byte-identical to the repository's `config.yaml`: it is force-included into the wheel rather than duplicated, so the template cannot drift from the one [config-reference.md](config-reference.md) documents.
+
+| Flag | Description |
+|---|---|
+| `--path PATH` | Where to write; defaults to `./config.yaml`. Parent directories are created. |
+| `--force` | Overwrite an existing file. Without it an existing `config.yaml` is never touched — exit 2. |
+
+The secrets template is always written as `.env.example`, never as `.env`: the loader reads `.env`, so writing placeholders there could overwrite real credentials, and a file of `change-me` values that startup treats as configured is worse than no file. An existing `.env.example` is left alone.
+
+```
+$ fasterrag config init
+wrote config.yaml
+wrote .env.example
+next: copy .env.example to .env, fill in what config.yaml references,
+      then run 'fasterrag doctor'
+```
+
 ## `fasterrag config validate`
 
 Validate `config.yaml` + `.env` presence of referenced env vars without starting anything. Exit 0/2. Same fail-fast checks as startup ([config-reference.md](config-reference.md) cross-field rules).
+
+Startup also **refuses to run** under settings the schema accepts but nothing enforces — `security.auth`, `security.multi_tenancy`, and either `cost.*_token_budget`. Enabling one raises `CONFIG_INVALID` naming the slice that will implement it. Reporting a protection the system does not have is the one failure mode worse than an outage.
 
 ## `fasterrag autopilot run`
 

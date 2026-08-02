@@ -23,7 +23,11 @@ pip install "fasterrag[all]"          # everything
 
 ## Step 1 — Create `config.yaml` and `.env`
 
-Copy the canonical default [`config.yaml`](../config.yaml) into your project (it is the complete schema with every default; full annotation in [config-reference.md](config-reference.md)), then copy [`.env.example`](../.env.example) to `.env`.
+```bash
+fasterrag config init
+```
+
+That writes the canonical `config.yaml` — the complete schema with every default, annotated in [config-reference.md](config-reference.md) — plus `.env.example`. It works the same from a `pip install` as from a repository checkout, because the template ships inside the wheel. Then copy `.env.example` to `.env` and fill in what your `config.yaml` references.
 
 **The split is non-negotiable**: `config.yaml` holds all behavior and is safe to commit; `.env` holds only secrets and is git-ignored. Config never contains a secret value — it names the environment variable instead ([ADR-0003](adr/ADR-0003-config-yaml-env-split.md)).
 

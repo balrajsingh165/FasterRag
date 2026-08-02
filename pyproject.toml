@@ -97,6 +97,29 @@ path = "src/fasterrag/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/fasterrag"]
 
+# The canonical config.yaml is packaged rather than duplicated under src/. It is one file,
+# byte-identical for a repository checkout and a `pip install`, so `fasterrag config init`
+# cannot hand a user a template that has drifted from the documented one.
+[tool.hatch.build.targets.wheel.force-include]
+"config.yaml" = "fasterrag/data/config.yaml"
+".env.example" = "fasterrag/data/.env.example"
+
+# CRITICAL: the sdist keeps config.yaml at its root and does NOT relocate it. A wheel is
+# built by unpacking the sdist and running the wheel target inside it, so relocating the
+# file here removes it from where the wheel's force-include looks — the sdist builds, and
+# then the wheel build fails with "Forced include not found".
+[tool.hatch.build.targets.sdist]
+include = [
+    "src",
+    "config.yaml",
+    ".env.example",
+    "README.md",
+    "docs",
+    "scripts",
+    "tests",
+    "pyproject.toml",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

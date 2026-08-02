@@ -254,7 +254,8 @@ _(empty)_
 
 - [ ] TASK-0049: Implement remaining vector DB adapters (Milvus, Weaviate, Pinecone, pgvector, Chroma) passing the contract suite — pgvector first: it proves the contract against a genuinely different (SQL) paradigm and is the cheapest to CI
 - [ ] TASK-0050: Ship Docker deployment artifacts per deployment.md (compose profiles, sizing presets)
-- [ ] TASK-0087: Publish the fasterrag package to PyPI (wheel, extras, hash-locked deps, SBOM) at the first tagged beta
+- [ ] TASK-0087: Publish the fasterrag package to PyPI (wheel, extras, hash-locked deps, SBOM) at the first tagged beta. Distribution mechanics are now verified: `python -m build` produces both artifacts, `twine check` passes on both, and the wheel installs into a clean venv and runs. **Remaining blockers before a first publish** — TASK-0164 (license decision; the only irreversible one, since a PyPI version number can never be reused), TASK-0020 (beta version stamp), TASK-0158 (lockfile, SBOM, secret scan)
+- [x] TASK-0170: `pip install fasterrag` was unusable out of the box — every command needs a `config.yaml`, and the missing-config error told the user to "copy the canonical config.yaml from the repository root", which an installed package does not have. Added `fasterrag config init`: it writes the canonical config plus `.env.example`, force-includes both into the wheel so the template cannot drift from the documented one, refuses to overwrite without `--force`, and never writes `.env` itself. Verified against a built wheel in a clean venv from an empty directory: `doctor` → names the command → `config init` → `config validate` passes — ✅ 2026-08-02
 
 ### Audit follow-ups (first formal audit, 2026-08-02)
 
