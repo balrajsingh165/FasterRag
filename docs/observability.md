@@ -93,6 +93,14 @@ The generated project public/secret keys are what fasterRag's tracing exporter u
 
 `langfuse: true` → doctor preflight (ports 3000/3030/5432/6379/8123/9000/9090/9091 free, Docker running, disk) → generate compose + `.env` secrets (once) → `docker compose up -d` → health-check until ready → **return `http://<host>:3000`** → export traces. Re-running converges (no reinstall, secrets untouched). **Zero application-code changes.**
 
+Three implementation details are load-bearing, each learned from a failure that presents as something else:
+
+- **The generated compose file is always run with `--env-file` pointing at the project-root `.env`.** Compose looks for a `.env` beside the compose file, which lives under `.fasterrag/langfuse/`. Without the flag every `${...}` interpolates to the empty string, the stack starts with blank passwords, and the web container fails with a Postgres *authentication* error that reads like a credentials bug rather than a wiring one.
+- **`CLICKHOUSE_CLUSTER_ENABLED: "false"`** on both web and worker. This stack runs one ClickHouse node; left at its default the migration issues `CREATE TABLE ... ON CLUSTER default` with `ReplicatedMergeTree`, which a single node rejects for having no Zookeeper — *after* the Postgres migrations have already succeeded.
+- **MinIO creates the `langfuse` bucket before its server starts.** MinIO does not create one on demand, and event uploads fail against a missing bucket long after the stack has reported itself healthy.
+
+Only Langfuse's own variables are handed to the Compose subprocess. `.env` also holds LLM provider credentials, which the stack has no business seeing.
+
 ## 5. Grafana auto-provisioning (`observability.grafana: true`) — provisioning-as-code
 
 No manual clicks; everything is version-controlled config:
@@ -103,8 +111,13 @@ No manual clicks; everything is version-controlled config:
 - fasterRag ships dashboard JSON for: query latency (p50/p95 per stage), ingestion throughput, cache hit ratio, queue/DLQ depth, circuit-breaker state, cost per query.
 - **A Prometheus instance is provisioned alongside Grafana**, scraping fasterRag's `/metrics` endpoint; the Grafana datasource points at *that*. Grafana's Prometheus datasource speaks PromQL to a Prometheus server, so pointing it straight at the exposition endpoint would yield a datasource that never returns a series — the hop is not optional.
 - The datasource **uid is pinned** (`fasterrag-prometheus`). Left unset, Grafana mints a random uid per installation and every dashboard panel — which references the datasource by uid — resolves to nothing, rendering empty with no error.
+- Prometheus is published on the host at **9099**, not its own default of 9090, because the Langfuse stack publishes MinIO there (§4) and both toggles must be able to be on at once. Inside the container it still listens on **9090**, and the datasource — which reaches it container-to-container over the `fasterrag` network — uses that. The two numbers are deliberately different; collapsing them binds a port nothing serves.
+- Every panel carries a **`legendFormat`** naming the one label that varies (`{{stage}}`, `{{unit}}`, `{{cache}}`). Without it Grafana labels each series with its whole label set, and the identical `instance`/`job` scrape labels push the distinguishing one past the end of the line.
+- Every panel also carries a **description** stating when it is legitimately empty. A panel with nothing to show yet looks exactly like a panel whose datasource is broken, and the panel itself is the only place that distinction can be made.
 
 As with Langfuse: doctor-gated, idempotent, and **no application-code changes at toggle time**.
+
+**A declared metric is not an emitted metric.** A panel over an instrument that no code path ever writes exports zero series and renders "No data" forever, with nothing in any log to say why. `fasterrag_circuit_state` is currently the one such metric — its configuration exists but the breaker does not (TASK-0148) — and the test suite pins it as the only permitted exemption.
 
 ## 6. Reliability observability (summary; doctrine in [reliability.md](reliability.md))
 
