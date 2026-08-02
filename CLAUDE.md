@@ -6,7 +6,7 @@ Always-loaded instructions for Claude Code working in the fasterRag repository. 
 
 fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generation (RAG) solution engineered for very, very large datasets. This repository ships the first beta of an all-in-one RAG system whose goal is to be the fastest, most efficient, and most optimized RAG project available (a goal — see the provable-claims policy below). Speed comes from multi-worker parallel processing across ingestion, chunking, embedding, and indexing; maximum chunking quality via a configurable chunking pipeline; and aggressive caching, batching, streaming, and async I/O. Everything is pluggable — any vector database, any embedding model, any LLM provider — selected purely through configuration. The system is operated ONLY through a REST API and a terminal/CLI; a separate, optional, self-hosted observability dashboard exists purely for inspection (Langfuse-like), never for control.
 
-**Current repository state: documentation only.** No implementation code exists and none may be written until a Gate C task in [docs/todo.md](docs/todo.md) is explicitly authorized by the maintainer. Documentation work only.
+**Current repository state: build phase (Gate C authorized 2026-07-29).** Slices S1–S13 have landed on `main` (~20k LOC under `src/`, ~14k LOC of tests); S14 (dashboard), the security slice, D11 export/import, the `FasterRag` facade, and the remaining vector-DB adapters are open — [docs/todo.md](docs/todo.md) is the authoritative slice ledger. Code ships only with its tests and doc updates in the same commit series, and a new slice starts only on explicit maintainer authorization.
 
 ## Tech stack (approved)
 
@@ -24,7 +24,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 - No secrets in YAML — `config.yaml` never contains credentials; secrets live in `.env` only, referenced by env-var name.
 - No ORM-style coupling to a single vector DB — all vendor access goes through the `VectorDBAdapter` interface and factory.
 
-## Commands (documented intentions — the code does not exist yet)
+## Commands
 
 - Build: `pip install -e ".[dev]"`
 - Hooks: `pre-commit install` (wires both pre-commit and commit-msg stages; runs fast tests only, not integration/eval)
@@ -39,6 +39,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 - **Docstrings only.** NO inline comments and NO explanatory comments in code. Comments are permitted in EXACTLY two cases:
   - Super-critical flag: `# CRITICAL: <why this must not change>`
   - Blocker/pending marker: `# TODO: <what remains>` or `# BLOCKED: <blocker + ticket/date>`
+  - A marker may open a block: `#` lines immediately following a `# CRITICAL:`/`# TODO:`/`# BLOCKED:` line continue that marker and are part of it.
 - Every module, class, and public function gets a docstring. Docstrings explain what and why; code explains how.
 - Full type hints everywhere; `mypy --strict` must pass. Any `# type: ignore` requires an adjacent `# CRITICAL:` justification.
 - **Typed error taxonomy is mandatory.** No bare `except`, no silently swallowed exceptions, anywhere, ever. Every caught exception is either handled with a logged correlation/trace id or rethrown. Hierarchy in [docs/reliability.md](docs/reliability.md).
@@ -114,7 +115,8 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 
 ## DO NOT
 
-- Do NOT write implementation code (documentation phase; Gate C requires explicit authorization).
+- Do NOT start a new build slice without explicit maintainer authorization; within an authorized slice, ship code only together with its tests and doc updates.
+- Do NOT document a capability as shipped before its code lands — specified-but-unbuilt behavior must carry an explicit status note and an open task.
 - Do NOT create more than one todo file.
 - Do NOT add Claude/AI attribution or trailers to commits.
 - Do NOT use multi-line commit messages.
