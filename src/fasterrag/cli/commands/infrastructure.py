@@ -16,6 +16,7 @@ from fasterrag.cli.output import Console, ExitCode
 from fasterrag.config.loader import load_settings
 from fasterrag.errors import ConfigError, FasterRagError, ProvisioningError
 from fasterrag.services.estimation import estimate_sources
+from fasterrag.services.grafana import grafana_status, provision_grafana, stop_grafana
 from fasterrag.services.provisioning import provision_qdrant, qdrant_status, stop_qdrant
 
 __all__ = ["run_estimate", "run_provision"]
@@ -39,7 +40,15 @@ async def run_provision(args: argparse.Namespace, console: Console) -> ExitCode:
         return ExitCode.USAGE
 
     try:
-        if args.status:
+        if args.tool == "grafana":
+            result = (
+                await grafana_status()
+                if args.status
+                else await stop_grafana()
+                if args.down
+                else await provision_grafana(settings)
+            )
+        elif args.status:
             result = await qdrant_status(settings)
         elif args.down:
             result = await stop_qdrant(settings)

@@ -101,7 +101,8 @@ No manual clicks; everything is version-controlled config:
 - Datasource manifests set **`editable: false`**; dashboard providers set **`allowUiUpdates: false`** — the UI becomes read-only for provisioned resources, enforcing GitOps (the files in the repo are the source of truth).
 - Dashboards are **JSON** files; the provider polls/reloads them on an interval (e.g. **`updateIntervalSeconds: 30`**) so file changes apply **without restart**.
 - fasterRag ships dashboard JSON for: query latency (p50/p95 per stage), ingestion throughput, cache hit ratio, queue/DLQ depth, circuit-breaker state, cost per query.
-- The provisioned datasource points at fasterRag's metrics endpoint (Prometheus format).
+- **A Prometheus instance is provisioned alongside Grafana**, scraping fasterRag's `/metrics` endpoint; the Grafana datasource points at *that*. Grafana's Prometheus datasource speaks PromQL to a Prometheus server, so pointing it straight at the exposition endpoint would yield a datasource that never returns a series — the hop is not optional.
+- The datasource **uid is pinned** (`fasterrag-prometheus`). Left unset, Grafana mints a random uid per installation and every dashboard panel — which references the datasource by uid — resolves to nothing, rendering empty with no error.
 
 As with Langfuse: doctor-gated, idempotent, and **no application-code changes at toggle time**.
 

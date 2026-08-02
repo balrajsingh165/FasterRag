@@ -237,7 +237,9 @@ _(empty)_
 ### S13 — Langfuse + Grafana integrations
 
 - [ ] TASK-0043: Implement Langfuse auto-provisioning (compose stack, secrets generated once and preserved, LANGFUSE_INIT_* headless bootstrap without double quotes, doctor-gated, return http://host:3000, zero code changes at toggle time)
-- [ ] TASK-0044: Implement Grafana auto-provisioning (provisioning-as-code datasources/dashboards, editable:false, allowUiUpdates:false, 30 s reload)
+- [x] TASK-0044: Implement Grafana auto-provisioning (provisioning-as-code datasources/dashboards, editable:false, allowUiUpdates:false, 30 s reload) — verified end to end: fasterRag → Prometheus → Grafana's provisioned datasource returned real series — ✅ 2026-08-02
+- [ ] TASK-0146: `observability.grafana: true` does not yet trigger provisioning at startup — `fasterrag provision grafana` does. The doc frames the toggle as the trigger, and the config-driven path should call the same provisioner so flipping the flag is genuinely all it takes
+- [ ] TASK-0147: Grafana provisioning is not doctor-gated. The Qdrant provisioner checks `fasterrag doctor` before mutating anything; the Grafana one should use the same gate so a port conflict is reported with a fix rather than as a container that fails to start
 
 ### S14 — Observability dashboard (last; after Langfuse proves the trace pipeline)
 
