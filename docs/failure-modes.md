@@ -44,6 +44,8 @@ Every anticipated failure, its detection signal, automatic mitigation, recovery 
 
 Coverage cross-check: parser (1–3), chunker (4–5), embedding pool (6–9), job queue (10–11), vector DB managed-Docker (12–13) / external (14) / remote-IP (15–16) / any (17), reranker (18–19), LLM provider (20–22), semantic cache (23–25), config loader (26), secrets loader (27), auto-provisioner (28–30), ingestion journal (31–32), disk (33–34), network (35), dashboard (36–37).
 
+> **As-built note.** Rows whose automatic mitigation names the circuit breaker or `cache_only` mode (12, 14, 16, 20, 35) describe the **specified** design; neither is implemented yet (TASK-0148/0159/0165 in [todo.md](todo.md)). The chaos log below records what the shipped system actually does today — typed retryable failures and, for LLM loss, the `extractive` rung — and is authoritative over the table until those rows' mitigations land.
+
 ## Observed behavior — chaos suite run
 
 D12 requires that the injected faults and their observed behavior are recorded, not merely

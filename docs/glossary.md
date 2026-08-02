@@ -21,7 +21,7 @@ Pinned definitions for every loaded term in this repository. Documentation, code
 | **Contextual enrichment** | Prepending a short (~50–100 token) LLM-generated document-level context to each chunk before embedding and BM25 indexing (Anthropic's Contextual Retrieval; see [references.md](references.md)). |
 | **Control plane** | The surfaces that can change system state: REST API, CLI, and the Python package. Never a GUI ([ADR-0005](adr/ADR-0005-api-cli-only-control-plane.md)). |
 | **Degradation ladder** | D4: the tested fallback table — reranker down → `hybrid_only`; vector DB down → `cache_only`; LLM down → `extractive`. Every degraded response carries `degraded: true` + `mode`. |
-| **Degraded modes** | `full` (normal), `hybrid_only` (fusion results unreranked), `cache_only` (semantic-cache answers only), `extractive` (retrieval-only answers, no generation). |
+| **Degraded modes** | `full` (normal), `hybrid_only` (fusion results unreranked), `cache_only` (semantic-cache answers only), `extractive` (retrieval-only answers, no generation). As built, `cache_only` is specified but not yet served (TASK-0159). |
 | **DLQ (dead-letter queue)** | Where documents land after exhausting `ingestion.dlq.max_retries`, each with a machine-readable reason code (e.g. `PARSE_FAILED`); inspectable per document and re-runnable. |
 | **Doctor** | D10: `fasterrag doctor` preflight diagnostics; every failed check prints a concrete fix-it instruction. Must pass before any auto-provisioning runs. |
 | **Drift** | Any divergence between the serving index and its `index.lock` (embedding model/version, config hash, corpus content hashes). Detected and reported, never silent (D1). |

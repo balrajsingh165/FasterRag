@@ -31,13 +31,13 @@ Rules:
 
 | Pattern | Rule | Config |
 |---|---|---|
-| **Timeouts** | Explicit, configured timeout on every network/provider call — no unbounded await exists in the codebase. | `reliability.timeouts.*` |
+| **Timeouts** | Explicit, configured timeout on every network/provider call — no unbounded await exists in the codebase. **Status: wired into every adapter, but one observed violation is open — a query against an unreachable LLM provider hung past the configured bound (TASK-0153); until it is fixed this rule is a requirement, not a guarantee.** | `reliability.timeouts.*` |
 | **Retries** | Exponential backoff + jitter, only on errors flagged `retryable`; attempts bounded. | `reliability.retries.*` |
-| **Circuit breakers** | Per provider (LLM, embeddings, vector DB); open after `failure_threshold` consecutive failures; half-open probes after `reset_timeout_ms`; **state exported as the `fasterrag_circuit_state` metric**. | `reliability.circuit_breaker.*` |
+| **Circuit breakers** | Per provider (LLM, embeddings, vector DB); open after `failure_threshold` consecutive failures; half-open probes after `reset_timeout_ms`; **state exported as the `fasterrag_circuit_state` metric**. **Status: specified, not yet implemented** — only the configuration exists; `fasterrag_circuit_state` is declared and intentionally written by nothing (TASK-0148 in [todo.md](todo.md), decision pending as TASK-0165). | `reliability.circuit_breaker.*` |
 | **Bulkheads** | Ingestion and query paths use separate worker pools and bounded queues, so an ingestion storm can never starve live queries. Structural — not configurable off. | pool sizes under `workers.*` |
-| **Idempotency keys** | All mutating API endpoints accept `Idempotency-Key`; replays return the original result and perform no duplicate work. | — |
+| **Idempotency keys** | All mutating API endpoints accept `Idempotency-Key`; replays return the original result and perform no duplicate work. **Status: specified, not yet implemented on the shipped routers.** | — |
 | **Backpressure** | Bounded queues everywhere; overflow returns `429` with `Retry-After` instead of accepting unbounded work. | `workers.queue_depth` |
-| **Degradation ladder** | Component loss maps to an explicit degraded mode, never a silent quality drop (D4). | `reliability.degradation_ladder` |
+| **Degradation ladder** | Component loss maps to an explicit degraded mode, never a silent quality drop (D4). **Status: `hybrid_only` (reranker loss) and `extractive` (LLM loss) are implemented and chaos-verified; the `cache_only` rung (vector-DB loss) is not built yet (TASK-0159) — today that failure surfaces as a retryable `RETRIEVAL_FAILED` problem, exactly as the chaos log in [failure-modes.md](failure-modes.md) records.** | `reliability.degradation_ladder` |
 
 ## 3. Data safety
 
