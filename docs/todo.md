@@ -134,6 +134,10 @@
 - [x] TASK-0109: Land slice S2 on main — ✅ 2026-07-30
 - [x] TASK-0112: Adopt trunk-based development on main and update CLAUDE.md, CONTRIBUTING.md, and the revert playbook (maintainer instruction) — ✅ 2026-07-30
 
+### First formal audit (2026-08-02)
+
+- [x] TASK-0169: Execute the first formal production-grade audit — gates re-run green (ruff, format, mypy strict over 216 files, 1224 unit tests, 87% branch coverage on the gated packages); progress scored 68/100 and implementation-vs-requirements 71/100; findings filed as TASK-0155–TASK-0168 plus two maintainer-decision items (TASK-0164/0165); stale-state corrections applied across CLAUDE.md, README, reliability, api-reference, glossary, failure-modes, quickstart, cookbook, python-api, integrations, data-model, deployment, and CONTRIBUTING; AUDIT-0006/0007 resolved; ledger hygiene repaired (duplicate S2 block removed, duplicated TASK-0110 renumbered to TASK-0155) — ✅ 2026-08-02
+
 ## In Progress
 
 _(empty)_
@@ -143,21 +147,15 @@ _(empty)_
 - [ ] TASK-0020: Decide beta version number and stamp CHANGELOG Unreleased → 0.1.0-beta.1 on first release
 - [ ] TASK-0098: (maintainer action, GitHub settings) Enable branch protection on main — require PRs, block direct pushes
 - [ ] TASK-0111: (maintainer action) Tag the landed slice boundaries `v0.1.0-s1` and `v0.2.0-s2` on main
-- [ ] TASK-0110: Register the vector database health check with `/readyz` when the API first uses the adapter (S3/S4); the readiness registry exists and the adapter's `health()` is ready, but nothing wires them together yet
-- [ ] AUDIT-0007: deployment.md states every provisioned container runs non-root, but the Qdrant provisioner does not pass `--user` — the official image expects to own its storage volume and forcing a uid risks an unstartable container. Decide whether to verify a working non-root uid for the pinned image or to narrow the documented claim to the containers fasterRag builds itself
-- [ ] AUDIT-0006: `trace_id` format conflict — data-model.md gives Trace ids a `t_` prefix and states the id equals the value propagated through logs, spans, and problem responses, while api-reference.md's example and the "matches OTel trace" requirement imply a bare 32-hex OpenTelemetry trace id. S1 implements 32-hex lowercase for OTel compatibility; reconcile the two documents (either drop the `t_` prefix from the Trace row, or distinguish the Trace entity id from the propagated correlation id)
+- [ ] TASK-0155: Register the vector database health check with `/readyz` when the API first uses the adapter; the readiness registry exists and the adapter's `health()` is ready, but nothing wires them together yet (renumbered 2026-08-02 from a duplicated TASK-0110 — that id was already ticked in Done — to restore id uniqueness)
+- [x] AUDIT-0007: deployment.md states every provisioned container runs non-root, but the Qdrant provisioner does not pass `--user` — the official image expects to own its storage volume and forcing a uid risks an unstartable container. Decide whether to verify a working non-root uid for the pinned image or to narrow the documented claim to the containers fasterRag builds itself — resolved by narrowing the claim in deployment.md — ✅ 2026-08-02
+- [x] AUDIT-0006: `trace_id` format conflict — data-model.md gives Trace ids a `t_` prefix and states the id equals the value propagated through logs, spans, and problem responses, while api-reference.md's example and the "matches OTel trace" requirement imply a bare 32-hex OpenTelemetry trace id. S1 implements 32-hex lowercase for OTel compatibility; reconcile the two documents — resolved by dropping the `t_` prefix from data-model.md, matching the implementation — ✅ 2026-08-02
+- [ ] TASK-0164: (maintainer decision) Write an ADR making the license choice explicit — GPL-3.0-or-later (current) vs a permissive license, given the adoption thesis is embedding fasterRag inside other products; either answer is fine, undocumented default is not
+- [ ] TASK-0165: (maintainer decision) ADR-0008 on degradation-ladder scope — implement the circuit breaker (TASK-0148) and `cache_only` rung (TASK-0159) as specified, or formally narrow D4 to the two shipped rungs; reliability.md, api-reference.md, glossary.md, and failure-modes.md carry specified-not-built annotations until this is decided
 
 ## Todo
 
-> **Gate C authorized (2026-07-29).** The maintainer opened the build phase; slice S1 has shipped (see Done). The slices below remain fully specified and strictly ordered, and work on each one begins only on explicit maintainer authorization. Every slice ships on its own feature branch, meets the per-slice Definition of Done ([testing-strategy.md](testing-strategy.md) §4), and ends with a tag `v0.x.0-sN`.
-
-### S2 — Qdrant adapter + doctor v1
-
-- [ ] TASK-0023: Implement VectorDBAdapter base interface + factory (create_collection, upsert, search, update, delete, health)
-- [ ] TASK-0024: Implement Qdrant reference adapter (docker | external | remote modes, 6333/6334 both handled, prefer_grpc, API key)
-- [ ] TASK-0025: Implement Qdrant system-managed Docker provisioning (named volume enforced on Windows/WSL, both ports exposed)
-- [ ] TASK-0073: Implement the shared adapter contract test suite (run against Qdrant in all three modes)
-- [ ] TASK-0074: Implement fasterrag doctor v1 (Docker, ports, disk, RAM/GPU, DB reachability all modes, key validity, config validity; fix-it strings; provisioning gate)
+> **Gate C authorized (2026-07-29).** The maintainer opened the build phase; slices S1–S13 have landed (see Done and the ticked entries below). Remaining work is fully specified and strictly ordered, and a new slice begins only on explicit maintainer authorization. Work lands directly on `main` (trunk-based, maintainer instruction 2026-07-30) — every commit leaves `main` green, meets the per-slice Definition of Done ([testing-strategy.md](testing-strategy.md) §4), and slice boundaries are tagged `v0.x.0-sN`. *(The duplicate unticked S2 block that previously sat here was removed 2026-08-02 — those five tasks were already ticked in Done under their same ids.)*
 
 ### S3 — Ingestion core
 
@@ -254,9 +252,23 @@ _(empty)_
 
 ### Cross-slice (scheduled opportunistically after their dependencies)
 
-- [ ] TASK-0049: Implement remaining vector DB adapters (Milvus, Weaviate, Pinecone, pgvector, Chroma) passing the contract suite
+- [ ] TASK-0049: Implement remaining vector DB adapters (Milvus, Weaviate, Pinecone, pgvector, Chroma) passing the contract suite — pgvector first: it proves the contract against a genuinely different (SQL) paradigm and is the cheapest to CI
 - [ ] TASK-0050: Ship Docker deployment artifacts per deployment.md (compose profiles, sizing presets)
 - [ ] TASK-0087: Publish the fasterrag package to PyPI (wheel, extras, hash-locked deps, SBOM) at the first tagged beta
+
+### Audit follow-ups (first formal audit, 2026-08-02)
+
+- [ ] TASK-0156: Fail fast on accepted-but-unenforced config — `security.auth`, `security.multi_tenancy`, and both `cost.*_token_budget` keys validate today and are consumed by nothing; enabling any of them must raise `ConfigError` naming the missing slice (mirror the implemented `cache.backend: redis` pattern) until enforcement lands with TASK-0046
+- [ ] TASK-0157: Enforce the coverage gate in CI — `--cov-fail-under=85` scoped to `core/`, `adapters/`, `workers/`; the 87% measured today is met by discipline, not by a gate
+- [ ] TASK-0158: Supply chain per security.md §6 — adopt a uv lockfile with `uv sync --locked` in CI, add a gitleaks secret-scan job and a pip-audit job (SBOM remains with TASK-0087)
+- [ ] TASK-0159: Implement the `cache_only` degradation rung — consult the semantic cache when retrieval raises, serving `degraded: true, mode: cache_only` instead of a bare `RETRIEVAL_FAILED`; pairs with the breaker (TASK-0148) and the scope decision (TASK-0165)
+- [ ] TASK-0160: Add a Windows CI leg running the fast suite — the project is developed on Windows and TASK-0141's path-case defect is exactly the class ubuntu-only CI cannot catch
+- [ ] TASK-0161: Add a nightly scheduled CI job running the eval and benchmark suites with ledger-format artifacts, so the provable-claims policy is infrastructure rather than habit
+- [ ] TASK-0162: Add a CI check diffing the FastAPI-generated OpenAPI schema against api-reference.md's endpoint table, catching endpoint drift automatically (the `traces list` drift was caught by hand)
+- [ ] TASK-0163: Implement the `FasterRag` facade and the entry-point plugin groups per the python-api.md status table (the services the facade composes all exist; the sync facade follows the async one)
+- [ ] TASK-0166: Add a CI self-truth check that fails when CLAUDE.md or README claims a documentation-only state while `src/` exists — the audit found exactly that inversion
+- [ ] TASK-0167: Run `fasterrag doctor --json` as a CI smoke job against the CI environment itself (dogfoods D10 on every push)
+- [ ] TASK-0168: Turn the generation price table into dated data with an unpriced-traffic counter metric so the cost panel can say "some traffic unpriced" instead of silently understating (extends TASK-0152)
 
 ## Future
 

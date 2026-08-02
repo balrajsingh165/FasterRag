@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- First formal audit corrections (2026-08-02): CLAUDE.md and README no longer claim a documentation-only repository — both now state the build-phase status with shipped/partial/pending marked per surface; reliability.md, api-reference.md, glossary.md, and failure-modes.md annotate the circuit breaker, `cache_only` degradation rung, and idempotency keys as specified-not-built with their task ids; quickstart.md, cookbook.md (R5 multi-tenant warning: `security.*` validates but is **not enforced**), python-api.md (per-surface status table), and integrations.md (per-provider status; entry-point registration pending) are annotated against the implemented system; data-model.md trace ids aligned to the implemented bare 32-hex OTel form (AUDIT-0006); deployment.md non-root claim narrowed to images fasterRag builds itself (AUDIT-0007); CONTRIBUTING.md codifies multi-line `# CRITICAL:`/`# TODO:`/`# BLOCKED:` comment blocks; todo.md ledger hygiene repaired (duplicate unticked S2 block removed, duplicated TASK-0110 renumbered to TASK-0155) and audit follow-ups filed as TASK-0156–TASK-0168 with two maintainer decisions (TASK-0164 license ADR, TASK-0165 ladder-scope ADR).
+
 ### Added
 
 - Complete beta documentation set under `docs/` (2026-07-29): scope, structure, flow, architecture, config reference, API reference (RFC 9457 error model), CLI reference, Python package surface (`python-api.md`), observability (Langfuse/Grafana auto-provisioning), deployment (incl. revert playbook), security (incl. supply chain), testing strategy (full pyramid incl. chaos suite), performance methodology, benchmark ledger, integrations matrix.
