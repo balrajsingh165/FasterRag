@@ -45,6 +45,12 @@ jobs:
       - name: Docs match the repository
         run: python scripts/check_doc_truth.py
 
+      # Endpoint drift is silent both ways: an undocumented route ships a surface clients
+      # find by accident, and a documented-but-absent one promises a 404. Neither shows up
+      # in a test suite, because each half is individually correct.
+      - name: API matches its reference
+        run: python scripts/check_openapi_drift.py
+
       - name: Unit tests
         run: pytest -m "not integration and not eval" --cov --cov-report=term-missing
 
@@ -101,6 +107,41 @@ jobs:
 
       - name: Unit tests
         run: pytest -m "not integration and not eval"
+
+  # security.md §6. Split from the quality job so a dependency advisory published overnight
+  # does not read as "the tests broke".
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Scans full history, not the diff. A secret committed and later removed is still in
+      # the history, and still compromised — checking only the tip would call it clean.
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # Advisory-only for now: pip-audit fails on any known CVE in the resolved tree,
+      # including ones with no fixed version available, which would block every push on
+      # something nobody can act on. It becomes blocking with the lockfile (TASK-0158).
+      - name: Dependency audit
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit --strict --desc
 
   integration:
     runs-on: ubuntu-latest

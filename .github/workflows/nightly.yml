@@ -1,0 +1,59 @@
+# Nightly measurement runs. These exist to make the provable-claims policy infrastructure
+# rather than habit: every "fastest", "most reliable", or SLO target in the docs must trace
+# to a benchmark-ledger entry (docs/benchmarks.md), and a ledger nobody regenerates goes
+# stale silently.
+#
+# Deliberately not part of `ci`. Both suites download model weights and run for minutes, so
+# gating every push on them would trade a fast feedback loop for numbers that only matter
+# once a day.
+#
+# The numbers produced here are NOT citable as benchmark-ledger entries on their own: a
+# shared GitHub runner has neighbours, and docs/performance.md requires an isolated,
+# documented machine. They are a regression signal — a large night-over-night move means
+# something changed — and TASK-0084 remains the entry that needs real hardware.
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,rerank,huggingface]"
+
+      - name: Retrieval eval harness
+        run: pytest -m eval -q
+
+      # Continues past a failure so the artifact still uploads. A benchmark run that fails
+      # halfway is itself a result worth keeping, and losing it means re-running to find out
+      # what happened.
+      - name: Benchmark suite
+        continue-on-error: true
+        env:
+          FASTERRAG_API_KEY: ci-placeholder
+          QDRANT_API_KEY: ci-placeholder
+          OPENAI_API_KEY: ci-placeholder
+        run: |
+          mkdir -p artifacts
+          fasterrag config init --path artifacts/config.yaml
+          fasterrag --config artifacts/config.yaml benchmark --json > artifacts/benchmark.json || true
+
+      - name: Upload ledger-format artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-measurements
+          path: artifacts/
+          retention-days: 30

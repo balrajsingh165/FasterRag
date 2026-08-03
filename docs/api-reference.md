@@ -182,6 +182,16 @@ event: done                   data: {}
 
 A semantic cache hit streams too. The whole answer is already known, so it arrives as a single `token` event after `meta`, and `meta` carries the `cache` member so a client learns it is being served from cache before the text. The event sequence is otherwise identical, so no client needs a separate code path for a cached response.
 
+### `POST /v1/retrieve`
+
+Retrieval without generation, for callers bringing their own LLM step. Same request body as `/v1/query` minus the generation controls; returns the ranked chunks with the rank and score every retrieval leg gave each one, so a client can see *why* a chunk placed where it did.
+
+```json
+{"query": "...", "collection": "docs", "top_k": 10, "filters": {"source": "handbook"}}
+```
+
+Responds `200` with `{"chunks": [...], "trace_id": "..."}`. No generation happens, so no LLM cost is incurred and `INSUFFICIENT_EVIDENCE` cannot apply.
+
 ## Collections
 
 | Method + path | Purpose | Success | Errors |
@@ -189,10 +199,10 @@ A semantic cache hit streams too. The whole answer is already known, so it arriv
 | `GET /v1/collections` | List collections (name, vectors count, embedding model+version, created_at, alias target). | 200 | — |
 | `POST /v1/collections` | Create: `{"name", "distance", "shard_number", "replication_factor"}`. | 201 | 409 `CONFLICT`, 422 |
 | `GET /v1/collections/{name}` | Detail incl. `index.lock` summary and drift status (D1). | 200 | 404 |
-| `PATCH /v1/collections/{name}` | Mutable settings only (metadata schema, description). | 200 | 404, 422 |
+| `PATCH /v1/collections/{name}` | **Not yet implemented.** Mutable settings only (metadata schema, description). | 200 | 404, 422 |
 | `DELETE /v1/collections/{name}` | Drop collection (requires `admin` scope; refuses while it is an active alias target unless `?force=true`). | 204 | 404, 409 |
-| `POST /v1/collections/{name}/reindex` | D2 zero-downtime reindex: blue/green build → eval gate → alias swap. Returns a job id. | 202 | 404, 409 |
-| `POST /v1/collections/{name}/rollback` | Alias flip back to the retained previous collection (within retention window). | 200 | 404, 409 |
+| `POST /v1/collections/{name}/reindex` | **Not yet implemented over REST** — shipped on the CLI as `fasterrag index reindex`. D2 zero-downtime reindex: blue/green build → eval gate → alias swap. Returns a job id. | 202 | 404, 409 |
+| `POST /v1/collections/{name}/rollback` | **Not yet implemented over REST** — shipped on the CLI as `fasterrag index rollback`. Alias flip back to the retained previous collection (within retention window). | 200 | 404, 409 |
 
 ## Health & readiness
 
@@ -211,13 +221,14 @@ All require the `admin` scope.
 | `GET /v1/admin/provision/{tool}/status` | Provisioning/health state of the tool. | 200 |
 | `GET /v1/admin/doctor` | Machine-readable doctor report (D10): every check with `pass|fail` and a concrete `fix` string. | 200 |
 | `POST /v1/estimate` | D9 preflight: `{"sources": [...]}` → token counts, projected embedding cost and time per configured provider, BEFORE ingestion. | 200 |
-| `POST /v1/admin/export` | D11: export documents, chunks, metadata, and the index manifest to a portable archive. Returns a job id. | 202 |
-| `POST /v1/admin/import` | D11: import a previously exported archive (optionally re-embed for a different target). | 202 |
+| `POST /v1/admin/export` | **Not yet implemented** (TASK-0079). D11: export documents, chunks, metadata, and the index manifest to a portable archive. Returns a job id. | 202 |
+| `POST /v1/admin/import` | **Not yet implemented** (TASK-0079). D11: import a previously exported archive (optionally re-embed for a different target). | 202 |
 
 ## Traces & replay
 
 | Method + path | Purpose | Success |
 |---|---|---|
+| `GET /v1/traces` | D8: recent trace ids, newest first. A 32-hex trace id is unreachable without a way to list them, so listing is what makes stored traces usable at all. | 200 |
 | `GET /v1/traces/{trace_id}` | D8: full persisted trace of a past query — retrieved chunks, leg scores, fused/reranked ranks, prompt, response, timings. | 200 / 404 |
 | `POST /v1/replay` | `{"trace_id", "config_overrides": {...}}` → re-executes the past query under the candidate config; returns side-by-side diff of retrieval sets and answers. | 200 / 404 |
 
