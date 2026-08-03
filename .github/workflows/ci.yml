@@ -51,6 +51,11 @@ jobs:
       - name: API matches its reference
         run: python scripts/check_openapi_drift.py
 
+      # blockers.md is a view over todo.md, and a drifted view is worse than none: it either
+      # hides a live blocker or presents a resolved one, and a reader cannot tell which.
+      - name: Blockers view matches the ledger
+        run: python scripts/check_blockers.py
+
       - name: Unit tests
         run: pytest -m "not integration and not eval" --cov --cov-report=term-missing
 

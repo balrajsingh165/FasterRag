@@ -70,6 +70,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 ## Task tracking
 
 - [docs/todo.md](docs/todo.md) is the ONLY task file. Never create any other todo/task/tracking file. When completing a task, tick it and append `— ✅ YYYY-MM-DD`; ticked entries are append-only and frozen.
+- [docs/blockers.md](docs/blockers.md) is a **read-only view** of the blocked subset, added on maintainer instruction (2026-08-03) because a blocker buried mid-ledger is a blocker nobody sees. It creates no tasks and tracks nothing: every entry cites a `TASK-` id that already exists in todo.md. Never add an entry there without one, and delete the entry when the blocker clears.
 
 ## Folder boundaries (sensitive — change only with explicit task authorization)
 
@@ -105,6 +106,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 - [testing-strategy.md](docs/testing-strategy.md) — testing pyramid, eval harness, CI gates
 - [performance.md](docs/performance.md) — performance goals and measurement methodology
 - [benchmarks.md](docs/benchmarks.md) — the benchmark ledger (backs every claim)
+- [blockers.md](docs/blockers.md) — what is waiting on a human decision, a review, or hardware
 - [integrations.md](docs/integrations.md) — supported providers and how config enables them
 - [glossary.md](docs/glossary.md) — canonical terminology; use these meanings exactly
 - [references.md](docs/references.md) — external evidence sources backing every sourced claim
@@ -117,7 +119,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 
 - Do NOT start a new build slice without explicit maintainer authorization; within an authorized slice, ship code only together with its tests and doc updates.
 - Do NOT document a capability as shipped before its code lands — specified-but-unbuilt behavior must carry an explicit status note and an open task.
-- Do NOT create more than one todo file.
+- Do NOT create more than one todo file. `docs/blockers.md` is a view over todo.md, not a second one — it may never hold a task that todo.md does not.
 - Do NOT add Claude/AI attribution or trailers to commits.
 - Do NOT use multi-line commit messages.
 - Do NOT add inline/explanatory comments except the two allowed cases (`# CRITICAL:`; `# TODO:` / `# BLOCKED:`).

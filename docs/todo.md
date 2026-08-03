@@ -7,6 +7,7 @@
 > - Completed task: `- [x] TASK-0001: <description> — ✅ YYYY-MM-DD`
 > - **Append-only rule:** when a task is completed, tick the checkbox and append the completion date in `YYYY-MM-DD` format. After ticking, that entry is append-only and must NOT be edited further.
 > - Task IDs (`TASK-`/`AUDIT-`) are sequential and never reused. Audit-gap tasks use the `AUDIT-` prefix.
+> - [blockers.md](blockers.md) is a **read-only view** of the entries below that are waiting on a human — it holds no task of its own and every line there cites an id from this file. It is not an exception to the rule above; it is a table of contents for one slice of it.
 
 ## Done
 
