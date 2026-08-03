@@ -29,6 +29,11 @@ TODO: Final = REPOSITORY_ROOT / "docs" / "todo.md"
 BLOCKERS: Final = REPOSITORY_ROOT / "docs" / "blockers.md"
 
 _ID = re.compile(r"\b(TASK-\d{4}|AUDIT-\d{4})\b")
+_ROOT = re.compile(r"^##\s+(B\d+)\b")
+# CRITICAL: anchored to the start of a table row. A child is *defined* in the first cell of
+# its root's table; the same label appearing in prose ("feeds **B1.1**") is a cross-reference
+# and must not be read as a second, misplaced definition.
+_CHILD = re.compile(r"^\|\s*\*\*(B\d+)\.(\d+)\*\*\s*\|")
 
 
 def _ledger_state(todo: Path) -> tuple[set[str], set[str]]:
@@ -49,6 +54,40 @@ def _ledger_state(todo: Path) -> tuple[set[str], set[str]]:
     return open_ids, done_ids
 
 
+def _numbering_problems(body: str) -> list[str]:
+    """Return one message per broken entry in the ``B<root>.<child>`` hierarchy.
+
+    The numbering is the file's whole argument: a root is one decision that unblocks
+    several pieces of work, and grouping them says so in a way a flat list cannot. An
+    orphaned child breaks that — ``B7.2`` under no ``B7`` heading tells a reader there is a
+    root to resolve and then gives them nothing to resolve.
+    """
+    roots: set[str] = set()
+    children: list[tuple[str, str, str]] = []
+    current = ""
+
+    for line in body.splitlines():
+        heading = _ROOT.match(line)
+        if heading:
+            current = heading.group(1)
+            roots.add(current)
+        defined = _CHILD.match(line.strip())
+        if defined:
+            children.append((defined.group(1), defined.group(2), current))
+
+    problems = [
+        f"{root}.{index} appears under no '{root}' heading"
+        for root, index, _ in children
+        if root not in roots
+    ]
+    problems += [
+        f"{root}.{index} is written under the {section} section; a child belongs to its root"
+        for root, index, section in children
+        if root in roots and section and root != section
+    ]
+    return problems
+
+
 def check(todo: Path = TODO, blockers: Path = BLOCKERS) -> list[str]:
     """Return one message per drifting citation, empty when the view is faithful."""
     if not blockers.is_file():
@@ -60,8 +99,9 @@ def check(todo: Path = TODO, blockers: Path = BLOCKERS) -> list[str]:
     # decides whether it should exist" is exactly the history a reader needs. It is marked
     # with the same ✅ the ledger uses, so the claim is visible to a human rather than a
     # silent exemption in this script.
+    body = blockers.read_text(encoding="utf-8")
     cited: set[str] = set()
-    for line in blockers.read_text(encoding="utf-8").splitlines():
+    for line in body.splitlines():
         if "✅" in line:
             continue
         cited.update(_ID.findall(line))
@@ -75,6 +115,7 @@ def check(todo: Path = TODO, blockers: Path = BLOCKERS) -> list[str]:
             f"{identifier} is listed as blocking but is already ticked in todo.md"
             for identifier in sorted(cited & done_ids - open_ids)
         ),
+        *_numbering_problems(body),
     ]
 
 

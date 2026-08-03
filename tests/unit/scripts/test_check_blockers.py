@@ -57,3 +57,47 @@ def test_a_missing_view_is_not_a_failure(tmp_path: Path) -> None:
     todo.write_text("- [ ] TASK-0001: a thing\n", encoding="utf-8")
 
     assert check(todo, tmp_path / "absent.md") == []
+
+
+def test_an_orphaned_child_is_reported(tmp_path: Path) -> None:
+    """B7.2 under no B7 heading promises a root to resolve and gives none."""
+    todo, blockers = build(
+        tmp_path,
+        "- [ ] TASK-0001: a thing\n",
+        "## B1 — root\n\n| | Task |\n|---|---|\n| **B7.2** | TASK-0001 |\n",
+    )
+
+    assert any("under no 'B7' heading" in entry for entry in check(todo, blockers))
+
+
+def test_a_child_under_the_wrong_root_is_reported(tmp_path: Path) -> None:
+    todo, blockers = build(
+        tmp_path,
+        "- [ ] TASK-0001: a thing\n- [ ] TASK-0002: another\n",
+        "## B1 — root\n\n| | Task |\n|---|---|\n| **B1.1** | TASK-0001 |\n\n"
+        "## B2 — other\n\n| | Task |\n|---|---|\n| **B1.2** | TASK-0002 |\n",
+    )
+
+    assert any("belongs to its root" in entry for entry in check(todo, blockers))
+
+
+def test_a_cross_reference_in_prose_is_not_a_definition(tmp_path: Path) -> None:
+    """A prose mention points at a child defined elsewhere; it does not redefine it."""
+    todo, blockers = build(
+        tmp_path,
+        "- [ ] TASK-0001: a thing\n- [ ] TASK-0002: another\n",
+        "## B1 — root\n\n| | Task |\n|---|---|\n| **B1.1** | TASK-0001 |\n\n"
+        "## B2 — other\n\nFeeds **B1.1**. TASK-0002 waits on it.\n",
+    )
+
+    assert check(todo, blockers) == []
+
+
+def test_a_correct_hierarchy_passes(tmp_path: Path) -> None:
+    todo, blockers = build(
+        tmp_path,
+        "- [ ] TASK-0001: a thing\n",
+        "## B1 — root\n\n| | Task |\n|---|---|\n| **B1.1** | TASK-0001 |\n",
+    )
+
+    assert check(todo, blockers) == []
