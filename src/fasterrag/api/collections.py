@@ -18,9 +18,15 @@ from fastapi import APIRouter, Query, Response, status
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
 from fasterrag.adapters.vectordb.base import CollectionSpec
-from fasterrag.api.dependencies import CurrentSettings, CurrentVectorDB, build_embedding_router
+from fasterrag.api.dependencies import (
+    CurrentSettings,
+    CurrentTenant,
+    CurrentVectorDB,
+    build_embedding_router,
+)
 from fasterrag.api.schemas import CollectionRequest
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.services.tenancy import scoped_name, unscoped_name, visible_to
 
 __all__ = ["router"]
 
@@ -50,9 +56,19 @@ async def _dimensions_of(embedder: EmbeddingAdapter) -> int:
 
 
 @router.get("")
-async def list_collections(adapter: CurrentVectorDB) -> dict[str, Any]:
-    """List every collection with its size and vector configuration."""
-    return {"collections": [info.as_dict() for info in await adapter.list_collections()]}
+async def list_collections(adapter: CurrentVectorDB, tenant: CurrentTenant) -> dict[str, Any]:
+    """List the caller's collections with their size and vector configuration.
+
+    A tenant sees only its own, under the names it chose — the backend prefix never reaches
+    a response, because a tenant should not learn that prefixing exists.
+    """
+    return {
+        "collections": [
+            {**info.as_dict(), "name": unscoped_name(info.name, tenant)}
+            for info in await adapter.list_collections()
+            if visible_to(info.name, tenant)
+        ]
+    }
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -60,6 +76,7 @@ async def create_collection(
     body: CollectionRequest,
     settings: CurrentSettings,
     adapter: CurrentVectorDB,
+    tenant: CurrentTenant,
 ) -> dict[str, Any]:
     """Create a collection sized from the configured embedding model."""
     configured = settings.vector_db.collection
@@ -71,7 +88,7 @@ async def create_collection(
 
     await adapter.create_collection(
         CollectionSpec(
-            name=body.name,
+            name=scoped_name(body.name, tenant),
             dimensions=dimensions,
             distance=body.distance or configured.distance,
             shard_number=body.shard_number or configured.shard_number,
@@ -89,11 +106,19 @@ async def create_collection(
 
 
 @router.get("/{name}")
-async def get_collection(name: str, adapter: CurrentVectorDB) -> dict[str, Any]:
-    """Return one collection's detail."""
+async def get_collection(
+    name: str, adapter: CurrentVectorDB, tenant: CurrentTenant
+) -> dict[str, Any]:
+    """Return one collection's detail.
+
+    Another tenant's collection is reported as *absent* rather than forbidden: a distinct
+    error would confirm the name exists, which is enough to enumerate a competitor's
+    collections one guess at a time.
+    """
+    target = scoped_name(name, tenant)
     for info in await adapter.list_collections():
-        if info.name == name:
-            return info.as_dict()
+        if info.name == target:
+            return {**info.as_dict(), "name": name}
 
     raise FasterRagError(f"no collection named {name!r}", code=ErrorCode.NOT_FOUND, retryable=False)
 
@@ -102,6 +127,7 @@ async def get_collection(name: str, adapter: CurrentVectorDB) -> dict[str, Any]:
 async def delete_collection(
     name: str,
     adapter: CurrentVectorDB,
+    tenant: CurrentTenant,
     force: Annotated[bool, Query()] = False,
 ) -> Response:
     """Drop a collection and everything in it.
@@ -116,7 +142,7 @@ async def delete_collection(
             retryable=False,
         )
 
-    if not await adapter.drop_collection(name):
+    if not await adapter.drop_collection(scoped_name(name, tenant)):
         raise FasterRagError(
             f"no collection named {name!r}", code=ErrorCode.NOT_FOUND, retryable=False
         )

@@ -440,6 +440,7 @@ class GenerationService:
                 trace_id=answer.trace_id,
                 query=question,
                 collection=collection,
+                tenant=self.tenant,
                 filters=dict(filters) if filters else None,
                 config_snapshot=config_snapshot(self.settings),
                 retrieved=[record_chunk(chunk) for chunk in prepared.chunks],

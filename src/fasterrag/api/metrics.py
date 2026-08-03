@@ -31,6 +31,17 @@ _SERVER_ERROR: Final = 500
 router = APIRouter(tags=["observability"])
 
 
+def _tenant_of(scope: Scope) -> str:
+    """Return the request's tenant label.
+
+    ``none`` covers both a single-tenant deployment and an unauthenticated request, which is
+    correct: neither belongs to a tenant, and inventing a label for them would split every
+    series in a deployment that has no tenants at all.
+    """
+    tenant = scope.get("state", {}).get("tenant")
+    return str(tenant) if tenant else _UNKNOWN_TENANT
+
+
 def _endpoint_of(scope: Scope) -> str:
     """Return the route template for a request, never the concrete path.
 
@@ -74,11 +85,14 @@ class MetricsMiddleware:
             status = status_holder["status"]
             elapsed = time.perf_counter() - started
 
+            # The tenant is read from the scope the auth middleware populated, not from the
+            # header. Auth runs first and has already decided who the caller is; re-reading
+            # the header here would let an unauthenticated request label its own series.
             metrics.REQUESTS.increment(
                 endpoint=endpoint,
                 method=str(scope.get("method", "GET")),
                 status=str(status),
-                tenant=_UNKNOWN_TENANT,
+                tenant=_tenant_of(scope),
             )
             metrics.REQUEST_DURATION.observe(elapsed, endpoint=endpoint)
 

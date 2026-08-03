@@ -56,7 +56,11 @@ Enabling auth with no usable key **refuses to start**. Starting would refuse eve
 
 **Semantic-cache isolation is the part that matters most, and it is enforced on the entry rather than the key.** Lookup compares the query vector against *every* stored entry, so a key prefix alone would not help — the scan ignores keys. Each entry carries its owning tenant and a mismatch is skipped, so a sufficiently similar question from one tenant can never return another's answer at a cache hit's latency with no error anywhere. The tenant is also part of the key, because otherwise two tenants asking the same question collide and the second write silently overwrites the first.
 
-**Not yet tenant-scoped** (TASK-0180): collection operations, the trace store, and metric labels. Queries and the semantic cache are scoped today; a deployment that needs storage-level separation should still use one collection per tenant until that lands.
+**Collections are scoped by name, not by a filter.** A vector database has no notion of our tenants, so isolation cannot be a field check — a tenant's collections carry a `<tenant>__` prefix and a tenant may only address names carrying its own. That makes isolation a property of the identifier: a missing filter fails open, a name that does not resolve fails closed. The prefix never appears in a response — a tenant that created `docs` sees `docs`. A tenant id may not itself contain the separator, or `acme__x` could address `acme`'s collection `x`; ids are validated and refused with `TENANT_FORBIDDEN`.
+
+**Traces and metrics are tagged too.** A trace records the query text and every retrieved chunk, so `GET /v1/traces/{id}` reports another tenant's trace as **absent** rather than forbidden — a distinct error would confirm the id is real, and trace ids are guessable from a caller's own listing. The same reasoning applies to `GET /v1/collections/{name}`. Metric series carry the tenant resolved by the middleware, not one re-read from the header, so an unauthenticated request cannot label its own series.
+
+**Not yet scoped:** ingestion jobs and the ingestion journal. A tenant can currently see job records for another tenant's ingest. Queries, the semantic cache, collections, traces, and metrics are scoped as of TASK-0180.
 - Semantic-cache entries are tenant-scoped — a cache hit can never leak another tenant's answer.
 - Per-tenant token budgets (D9, `cost.per_tenant_token_budget`) bound spend per tenant.
 

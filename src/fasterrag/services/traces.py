@@ -156,8 +156,14 @@ class TraceStore:
         if self.exporter is not None:
             await self.exporter.close()
 
-    def load(self, trace_id: str) -> Trace | None:
-        """Return a stored trace, or ``None`` if it is absent or unreadable."""
+    def load(self, trace_id: str, *, tenant: str | None = None) -> Trace | None:
+        """Return a stored trace, or ``None`` if it is absent or unreadable.
+
+        # CRITICAL: a trace belonging to another tenant is reported as *absent*, not as
+        # forbidden. A trace records the query text and every retrieved chunk, so telling a
+        # caller "that exists but is not yours" confirms the id is real — and trace ids are
+        # the one identifier a caller can guess at by listing their own.
+        """
         path = self._path(trace_id)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -168,13 +174,22 @@ class TraceStore:
             return None
 
         try:
-            return Trace.from_dict(payload)
+            trace = Trace.from_dict(payload)
         except (KeyError, TypeError, ValueError):
             _logger.warning("a stored trace is malformed", extra={"trace_id": trace_id})
             return None
 
-    def recent(self, limit: int = 50) -> list[str]:
-        """Return the most recently written trace ids, newest first."""
+        if tenant is not None and trace.tenant != tenant:
+            return None
+        return trace
+
+    def recent(self, limit: int = 50, *, tenant: str | None = None) -> list[str]:
+        """Return the most recently written trace ids, newest first.
+
+        Filtering happens after sorting rather than by scanning until ``limit`` is reached,
+        so a tenant's newest traces are returned even when another tenant wrote more
+        recently — the alternative silently hides a tenant behind a noisier one.
+        """
         if not self.root.exists():
             return []
 
@@ -183,7 +198,17 @@ class TraceStore:
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
-        return [path.stem for path in files[:limit]]
+        if tenant is None:
+            return [path.stem for path in files[:limit]]
+
+        owned: list[str] = []
+        for path in files:
+            if len(owned) >= limit:
+                break
+            trace = self.load(path.stem, tenant=tenant)
+            if trace is not None:
+                owned.append(path.stem)
+        return owned
 
     def prune(self) -> int:
         """Delete traces older than the retention window, returning how many went."""

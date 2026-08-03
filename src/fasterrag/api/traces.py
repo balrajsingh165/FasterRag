@@ -16,7 +16,12 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query, Request
 
 from fasterrag.adapters.embeddings.tiering import create_embedding_router
-from fasterrag.api.dependencies import CurrentSettings, CurrentVectorDB, build_generation
+from fasterrag.api.dependencies import (
+    CurrentSettings,
+    CurrentTenant,
+    CurrentVectorDB,
+    build_generation,
+)
 from fasterrag.api.schemas import ReplayRequest
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
@@ -55,14 +60,14 @@ def _require_replay(settings: Settings) -> None:
 
 
 @router.get("/traces/{trace_id}")
-async def get_trace(trace_id: str, request: Request) -> dict[str, Any]:
+async def get_trace(trace_id: str, request: Request, tenant: CurrentTenant) -> dict[str, Any]:
     """Return one stored trace in full.
 
     Raises:
         FasterRagError: With ``NOT_FOUND`` when the trace is unknown, expired past
             ``traces.retention_days``, or never stored because ``traces.store`` is false.
     """
-    trace = get_trace_store(request).load(trace_id)
+    trace = get_trace_store(request).load(trace_id, tenant=tenant)
     if trace is None:
         raise FasterRagError(
             f"no stored trace {trace_id!r}; it may have expired or tracing may be disabled",
@@ -75,10 +80,11 @@ async def get_trace(trace_id: str, request: Request) -> dict[str, Any]:
 @router.get("/traces")
 async def list_traces(
     request: Request,
+    tenant: CurrentTenant,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
 ) -> dict[str, Any]:
-    """Return the most recently stored trace ids, newest first."""
-    return {"traces": get_trace_store(request).recent(limit)}
+    """Return the most recently stored trace ids, newest first, scoped to the tenant."""
+    return {"traces": get_trace_store(request).recent(limit, tenant=tenant)}
 
 
 @router.post("/replay")

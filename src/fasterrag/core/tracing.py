@@ -133,6 +133,7 @@ class Trace:
     trace_id: str
     query: str
     collection: str | None = None
+    tenant: str | None = None
     filters: dict[str, Any] | None = None
     config_snapshot: dict[str, Any] = field(default_factory=dict)
     retrieved: list[dict[str, Any]] = field(default_factory=list)
@@ -148,6 +149,7 @@ class Trace:
             "trace_id": self.trace_id,
             "query": self.query,
             "collection": self.collection,
+            "tenant": self.tenant,
             "filters": self.filters,
             "config_snapshot": self.config_snapshot,
             "retrieved": self.retrieved,
