@@ -206,3 +206,23 @@ async def test_vectors_are_not_fetched_when_not_requested(tmp_path: Path) -> Non
     )
 
     assert adapter.asked_for_vectors is False
+
+
+async def test_the_manifest_records_the_observed_vector_width(tmp_path: Path) -> None:
+    """A deployment with no lockfile and no configured dimension recorded 0.
+
+    An archive declaring zero dimensions cannot be imported at all — the export succeeds and
+    produces something unusable, which is worse than failing.
+    """
+    archive = await write(tmp_path, [point("c_1")], include_vectors=True)
+
+    manifest = json.loads(members(archive)[MANIFEST_NAME])
+
+    assert manifest["embedding"]["dimensions"] == 2
+
+
+async def test_the_width_is_observed_even_without_exported_vectors(tmp_path: Path) -> None:
+    """The collection's width is knowable whether or not the vectors are carried."""
+    archive = await write(tmp_path, [point("c_1")])
+
+    assert json.loads(members(archive)[MANIFEST_NAME])["embedding"]["dimensions"] == 2

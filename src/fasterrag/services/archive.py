@@ -138,6 +138,7 @@ def build_manifest(
     counts: ArchiveCounts,
     includes_vectors: bool,
     tenant: str | None,
+    observed_dimensions: int | None = None,
 ) -> dict[str, Any]:
     """Return the archive's self-description.
 
@@ -161,7 +162,16 @@ def build_manifest(
             "provider": embeddings.provider,
             "model": lock.embedding_model if lock else embeddings.model,
             "model_version": lock.embedding_model_version if lock else "",
-            "dimensions": (lock.dimensions if lock else embeddings.dimensions) or 0,
+            # CRITICAL: falls back to the width actually observed in the collection. A
+            # deployment with no lockfile and no configured dimension would otherwise
+            # record 0, and an archive declaring zero dimensions cannot be imported at
+            # all — the export succeeds and produces something unusable.
+            "dimensions": (
+                (lock.dimensions if lock else None)
+                or embeddings.dimensions
+                or observed_dimensions
+                or 0
+            ),
         },
         "chunking": {
             "strategy": lock.chunker_strategy if lock else chunking.strategy,
@@ -222,6 +232,7 @@ async def export_archive(
     staging = Path(tempfile.mkdtemp(prefix="fasterrag-export-"))
     counts = ArchiveCounts()
     seen_documents: set[str] = set()
+    observed_dimensions: int | None = None
 
     try:
         with (
@@ -239,6 +250,9 @@ async def export_archive(
 
                 chunks.write(_line(chunk_record(point)))
                 counts.chunks += 1
+
+                if point.vector and observed_dimensions is None:
+                    observed_dimensions = len(point.vector)
 
                 if include_vectors and point.vector:
                     vectors.write(_line(vector_record(point)))
@@ -264,6 +278,7 @@ async def export_archive(
             counts=counts,
             includes_vectors=include_vectors,
             tenant=tenant,
+            observed_dimensions=observed_dimensions,
         )
 
         names = [DOCUMENTS_NAME, CHUNKS_NAME, LOCK_NAME]

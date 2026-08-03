@@ -364,6 +364,11 @@ async def import_archive(
             model=model, model_version=model_version, dimensions=None
         )
         dimensions = int(archived.get("dimensions", 0)) or dimensions
+        if not dimensions:
+            # Last resort: the archived vectors state their own width. An archive that
+            # carries vectors always knows its dimension even when its manifest does not.
+            first = next(iter(reader.vectors()), None)
+            dimensions = len(first["vector"]) if first else None
 
     if not dimensions:
         raise FasterRagError(

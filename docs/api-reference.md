@@ -221,8 +221,8 @@ All require the `admin` scope.
 | `GET /v1/admin/provision/{tool}/status` | Provisioning/health state of the tool. | 200 |
 | `GET /v1/admin/doctor` | Machine-readable doctor report (D10): every check with `pass|fail` and a concrete `fix` string. | 200 |
 | `POST /v1/estimate` | D9 preflight: `{"sources": [...]}` → token counts, projected embedding cost and time per configured provider, BEFORE ingestion. | 200 |
-| `POST /v1/admin/export` | **Not yet implemented** (TASK-0079). D11: export documents, chunks, metadata, and the index manifest to a portable archive. Returns a job id. | 202 |
-| `POST /v1/admin/import` | **Not yet implemented** (TASK-0079). D11: import a previously exported archive (optionally re-embed for a different target). | 202 |
+| `POST /v1/admin/export` | D11: export documents, chunks, metadata, and the index manifest to a portable archive. Body: `{"out", "collection", "include_vectors"}`. **Synchronous** — unlike ingestion it reads what is already indexed and writes a file, so there is no queue to wait behind and no partial state to poll. Returns the row counts written. | 200 |
+| `POST /v1/admin/import` | D11: import a previously exported archive. Body: `{"archive", "target_collection", "reembed"}`. Checksums, manifest counts, and referential integrity are all verified **before anything is written**, so a refused archive leaves the target untouched. A vector copy is refused with `CONFLICT` unless the archive carries vectors and its model, model version, and dimensions all match; `reembed: true` is always legal. | 200 |
 
 ## Traces & replay
 

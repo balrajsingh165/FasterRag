@@ -85,6 +85,22 @@ class EstimateRequest(Strict):
     all_providers: bool = False
 
 
+class ExportRequest(Strict):
+    """Body of ``POST /v1/admin/export``."""
+
+    out: Annotated[str, Field(min_length=1)]
+    collection: str | None = None
+    include_vectors: bool = False
+
+
+class ImportRequest(Strict):
+    """Body of ``POST /v1/admin/import``."""
+
+    archive: Annotated[str, Field(min_length=1)]
+    target_collection: str | None = None
+    reembed: bool = False
+
+
 class ReplayRequest(Strict):
     """Body of ``POST /v1/replay``."""
 
