@@ -60,7 +60,9 @@ Enabling auth with no usable key **refuses to start**. Starting would refuse eve
 
 **Traces and metrics are tagged too.** A trace records the query text and every retrieved chunk, so `GET /v1/traces/{id}` reports another tenant's trace as **absent** rather than forbidden — a distinct error would confirm the id is real, and trace ids are guessable from a caller's own listing. The same reasoning applies to `GET /v1/collections/{name}`. Metric series carry the tenant resolved by the middleware, not one re-read from the header, so an unauthenticated request cannot label its own series.
 
-**Not yet scoped:** ingestion jobs and the ingestion journal. A tenant can currently see job records for another tenant's ingest. Queries, the semantic cache, collections, traces, and metrics are scoped as of TASK-0180.
+**Ingestion jobs are scoped too.** A job record carries the source paths of the corpus it ingested, and job ids sort chronologically — so a caller holding one of their own can guess at neighbours. Another tenant's job therefore raises the same `NOT_FOUND` an unknown id does, with the same message. The tenant is recorded when the job is *created*: without that every job would be written untenanted and scoping the read path would refuse a tenant access to the job it had just started, presenting as an outage rather than as isolation.
+
+With this, every tenant-visible surface is scoped: queries, the semantic cache, collections, traces, metrics, and ingestion jobs.
 - Semantic-cache entries are tenant-scoped — a cache hit can never leak another tenant's answer.
 - Per-tenant token budgets (D9, `cost.per_tenant_token_budget`) bound spend per tenant.
 

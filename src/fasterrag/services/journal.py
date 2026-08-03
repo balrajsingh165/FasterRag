@@ -245,11 +245,17 @@ class Journal:
         """Persist a job record atomically."""
         _write_atomically(self._job_path(record.job_id), _envelope(record.as_dict()))
 
-    def load_job(self, job: str) -> JobRecord:
+    def load_job(self, job: str, *, tenant: str | None = None) -> JobRecord:
         """Load a job record, falling back to the previous good copy.
 
+        # CRITICAL: another tenant's job raises the same `NOT_FOUND` an unknown id does, and
+        # deliberately so. A job record carries the source paths of the corpus it ingested,
+        # and a distinct "forbidden" would confirm the id is real — job ids sort
+        # chronologically, so a caller who has one of their own can guess at neighbours.
+
         Raises:
-            IngestionError: If the job is unknown, or both copies are unreadable.
+            IngestionError: If the job is unknown, belongs to another tenant, or both copies
+                are unreadable.
         """
         path = self._job_path(job)
         if not path.exists():
@@ -273,7 +279,10 @@ class Journal:
                 extra={"job_id": job},
             )
 
-        return JobRecord.from_dict(payload)
+        record = JobRecord.from_dict(payload)
+        if tenant is not None and record.tenant != tenant:
+            raise IngestionError(f"unknown ingest job {job!r}", code=ErrorCode.NOT_FOUND)
+        return record
 
     def find_by_idempotency_key(self, key: str) -> JobRecord | None:
         """Return the job created with ``key``, if one exists."""

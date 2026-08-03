@@ -22,6 +22,7 @@ from fastapi import APIRouter, BackgroundTasks, Query, Request, status
 
 from fasterrag.api.dependencies import (
     CurrentSettings,
+    CurrentTenant,
     CurrentVectorDB,
     JournalDep,
     build_embedding_router,
@@ -97,6 +98,7 @@ async def start_ingest(
     settings: CurrentSettings,
     journal: JournalDep,
     adapter: CurrentVectorDB,
+    tenant: CurrentTenant,
 ) -> dict[str, Any]:
     """Accept an ingestion job and return its id immediately.
 
@@ -104,10 +106,14 @@ async def start_ingest(
     ingest of the same corpus.
     """
     service = build_ingestion(settings, adapter, journal, None)
+    # CRITICAL: the tenant is recorded at creation. Without it every job is written
+    # untenanted, and scoping the read path would then refuse a tenant access to the job it
+    # just started — the isolation would present as a total outage rather than as isolation.
     record = await service.accept(
         [{"type": source.type, "value": source.value} for source in body.sources],
         collection=body.collection,
         idempotency_key=body.idempotency_key,
+        tenant=tenant,
     )
 
     if record.status in {"queued"}:
@@ -117,15 +123,16 @@ async def start_ingest(
 
 
 @router.get("/{job_id}")
-async def job_status(job_id: str, journal: JournalDep) -> dict[str, Any]:
+async def job_status(job_id: str, journal: JournalDep, tenant: CurrentTenant) -> dict[str, Any]:
     """Return one job's status and counts."""
-    return _job_body(journal.load_job(job_id), journal)
+    return _job_body(journal.load_job(job_id, tenant=tenant), journal)
 
 
 @router.get("/{job_id}/documents")
 async def job_documents(
     job_id: str,
     journal: JournalDep,
+    tenant: CurrentTenant,
     document_status: Annotated[str | None, Query(alias="status")] = None,
 ) -> dict[str, Any]:
     """Return per-document outcomes, optionally filtered by status (D3).
@@ -133,7 +140,7 @@ async def job_documents(
     Loading the job first means an unknown id 404s here too, rather than returning an empty
     list that reads as "this job ingested nothing".
     """
-    journal.load_job(job_id)
+    journal.load_job(job_id, tenant=tenant)
     documents = [
         {
             "document_id": record.document_id,
@@ -156,13 +163,14 @@ async def retry_dead_letters(
     settings: CurrentSettings,
     journal: JournalDep,
     adapter: CurrentVectorDB,
+    tenant: CurrentTenant,
 ) -> dict[str, Any]:
     """Re-ingest a job's dead-lettered documents as a new job.
 
     A new job rather than a mutation of the old one: the original is an audit record of what
     happened, and rewriting it would destroy the evidence of the failure being retried.
     """
-    original = journal.load_job(job_id)
+    original = journal.load_job(job_id, tenant=tenant)
     failed = journal.dead_lettered(job_id)
     if not failed:
         return {"job_id": job_id, "retried": 0, "status": original.status}
