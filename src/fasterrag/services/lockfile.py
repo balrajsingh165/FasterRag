@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -329,7 +330,13 @@ class LockStore:
             temporary.write_text(json.dumps(lock.as_dict(), indent=2), encoding="utf-8")
             os.replace(temporary, path)
         except OSError as exc:
-            temporary.unlink(missing_ok=True)
+            # CRITICAL: the cleanup is itself suppressed. On Linux, when the parent is a
+            # file rather than a directory, `unlink` raises NotADirectoryError from inside
+            # this handler — replacing the error being handled with a second one that
+            # escapes, so a degradation path becomes a crash. Windows does not raise here,
+            # which is why this only ever failed on the Linux CI leg.
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
             _logger.warning(
                 "could not write the index lockfile; the index itself is unaffected",
                 extra={"collection": lock.collection, "error": str(exc)},

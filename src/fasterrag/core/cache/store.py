@@ -22,6 +22,7 @@ import struct
 import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from contextlib import suppress
 from pathlib import Path
 from typing import Final
 
@@ -220,7 +221,13 @@ class DiskStore(CacheStore):
             temporary.write_bytes(payload)
             temporary.replace(path)
         except OSError as exc:
-            temporary.unlink(missing_ok=True)
+            # CRITICAL: the cleanup is itself suppressed. On Linux, when the parent is a
+            # file rather than a directory, `unlink` raises NotADirectoryError from inside
+            # this handler — replacing the error being handled with a second one that
+            # escapes, so a degradation path becomes a crash. Windows does not raise here,
+            # which is why this only ever failed on the Linux CI leg.
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
             raise CacheError(f"could not write the cache entry at {path}: {exc}") from exc
 
         self._evict()
