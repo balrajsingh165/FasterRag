@@ -35,6 +35,7 @@ from fasterrag.services.provisioning import (
     container_state,
     docker_available,
     port_is_reachable,
+    require_provisioning_gate,
     run_docker,
 )
 
@@ -451,6 +452,9 @@ async def provision_grafana(settings: Settings, *, root: Path | None = None) -> 
     Returns:
         The result, carrying the URL an operator opens. Provisioning converges: a second run
         rewrites the manifests and leaves running containers untouched.
+
+    Raises:
+        ProvisioningError: If the doctor preflight fails, before anything is created.
     """
     plan = GrafanaPlan(
         root=(root or DEFAULT_PROVISIONING_ROOT).resolve(),
@@ -464,6 +468,11 @@ async def provision_grafana(settings: Settings, *, root: Path | None = None) -> 
             status="unavailable",
             detail="docker is not running; start it and re-run",
         )
+
+    # The same gate the Qdrant provisioner uses. A port conflict reported as a fix-it string
+    # before anything starts beats a container that exits seconds later for a reason only
+    # `docker logs` can tell you.
+    await require_provisioning_gate(settings)
 
     write_manifests(plan)
     await _ensure_network()

@@ -182,13 +182,19 @@ class QdrantAdapter(VectorDBAdapter):
         return self._client
 
     def _auth_error(self, operation: str, transport: str) -> ProviderError:
-        """Build the non-retryable error for a rejected credential."""
+        """Build the non-retryable error for a rejected credential.
+
+        Reported as ``VECTOR_DB_AUTH_FAILED``, not ``EMBED_PROVIDER_ERROR``. A rejected
+        vector-database key has nothing to do with embeddings, and sending an operator to
+        check their embedding provider over a Qdrant credential is a wrong answer with a
+        confident tone — the whole reason the taxonomy exists is to point at the right knob.
+        """
         named = self._api_key_env or "vector_db.api_key_env"
         return ProviderError(
             f"qdrant rejected the credentials during {operation} over {transport}; "
             f"check the key in the {named} environment variable and the server's "
             "QDRANT__SERVICE__API_KEY",
-            code=ErrorCode.EMBED_PROVIDER_ERROR,
+            code=ErrorCode.VECTOR_DB_AUTH_FAILED,
             retryable=False,
         )
 

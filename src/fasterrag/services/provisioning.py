@@ -35,6 +35,7 @@ __all__ = [
     "port_is_free",
     "provision_qdrant",
     "qdrant_status",
+    "require_provisioning_gate",
     "run_docker",
     "stop_qdrant",
 ]
@@ -289,7 +290,7 @@ def _server_key_environment(settings: Settings) -> dict[str, str]:
     return {QDRANT_SERVER_KEY_VAR: value}
 
 
-async def _require_provisioning_gate(settings: Settings) -> None:
+async def require_provisioning_gate(settings: Settings) -> None:
     """Refuse to provision until the environment checks pass.
 
     Only the checks that describe the environment gate provisioning. Backend
@@ -332,7 +333,7 @@ async def provision_qdrant(settings: Settings) -> ProvisionResult:
             fix="Set vector_db.mode to 'docker' to have fasterRag manage the container.",
         )
 
-    await _require_provisioning_gate(settings)
+    await require_provisioning_gate(settings)
 
     environment = _server_key_environment(settings)
     await _ensure_volume(settings.vector_db.docker.volume)

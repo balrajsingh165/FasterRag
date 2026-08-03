@@ -61,9 +61,11 @@ class ErrorCode(StrEnum):
     CHUNK_FAILED = "CHUNK_FAILED"
     EMBED_PROVIDER_TIMEOUT = "EMBED_PROVIDER_TIMEOUT"
     EMBED_PROVIDER_ERROR = "EMBED_PROVIDER_ERROR"
+    VECTOR_DB_AUTH_FAILED = "VECTOR_DB_AUTH_FAILED"
     RETRIEVAL_FAILED = "RETRIEVAL_FAILED"
     RERANK_FAILED = "RERANK_FAILED"
     GENERATION_FAILED = "GENERATION_FAILED"
+    GENERATION_TIMEOUT = "GENERATION_TIMEOUT"
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
     CIRCUIT_OPEN = "CIRCUIT_OPEN"
     PROVISIONING_FAILED = "PROVISIONING_FAILED"
@@ -114,9 +116,15 @@ PROBLEM_SPECS: Final[dict[ErrorCode, ProblemSpec]] = {
     ErrorCode.EMBED_PROVIDER_ERROR: ProblemSpec(
         503, "provider-error", "Embedding provider failed", True
     ),
+    ErrorCode.VECTOR_DB_AUTH_FAILED: ProblemSpec(
+        503, "vector-db-auth-failed", "Vector database rejected the credentials", False
+    ),
     ErrorCode.RETRIEVAL_FAILED: ProblemSpec(503, "retrieval-failed", "Retrieval failed", True),
     ErrorCode.RERANK_FAILED: ProblemSpec(503, "rerank-failed", "Reranking failed", True),
     ErrorCode.GENERATION_FAILED: ProblemSpec(503, "generation-failed", "Generation failed", True),
+    ErrorCode.GENERATION_TIMEOUT: ProblemSpec(
+        504, "generation-timeout", "Generation provider timed out", True
+    ),
     ErrorCode.INSUFFICIENT_EVIDENCE: ProblemSpec(
         200, "insufficient-evidence", "Insufficient evidence to answer", False
     ),

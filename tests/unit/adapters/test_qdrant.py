@@ -395,7 +395,7 @@ async def test_authentication_failure_is_not_retryable_and_hides_the_key(
 @pytest.mark.parametrize(
     ("status", "code", "retryable"),
     [
-        (403, ErrorCode.EMBED_PROVIDER_ERROR, False),
+        (403, ErrorCode.VECTOR_DB_AUTH_FAILED, False),
         (404, ErrorCode.NOT_FOUND, False),
         (409, ErrorCode.CONFLICT, False),
         (429, ErrorCode.EMBED_PROVIDER_ERROR, False),
@@ -428,8 +428,8 @@ class FakeRpcError(RpcError):
 @pytest.mark.parametrize(
     ("status", "code", "retryable"),
     [
-        (StatusCode.UNAUTHENTICATED, ErrorCode.EMBED_PROVIDER_ERROR, False),
-        (StatusCode.PERMISSION_DENIED, ErrorCode.EMBED_PROVIDER_ERROR, False),
+        (StatusCode.UNAUTHENTICATED, ErrorCode.VECTOR_DB_AUTH_FAILED, False),
+        (StatusCode.PERMISSION_DENIED, ErrorCode.VECTOR_DB_AUTH_FAILED, False),
         (StatusCode.INVALID_ARGUMENT, ErrorCode.EMBED_PROVIDER_ERROR, False),
         (StatusCode.NOT_FOUND, ErrorCode.NOT_FOUND, False),
         (StatusCode.ALREADY_EXISTS, ErrorCode.CONFLICT, False),

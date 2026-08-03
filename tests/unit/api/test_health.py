@@ -1,3 +1,4 @@
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -111,3 +112,28 @@ def test_readyz_reports_all_failing_dependencies(app: FastAPI, client: TestClien
 
     assert "vector_db" in body["detail"]
     assert "queue" in body["detail"]
+
+
+async def test_no_provisioning_runs_when_both_toggles_are_off() -> None:
+    """The default configuration must not reach for Docker on startup."""
+    from fasterrag.api.main import provision_enabled_observability
+    from fasterrag.config.schema import Settings
+
+    await provision_enabled_observability(Settings.model_validate({}))
+
+
+async def test_a_failed_provision_does_not_stop_the_api_serving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refusing to answer queries because a dashboard would not start inverts the dependency."""
+    from fasterrag.api import main
+    from fasterrag.config.schema import Settings
+    from fasterrag.errors import ProvisioningError
+
+    async def failing(settings: object) -> None:
+        raise ProvisioningError("port 3001 is taken")
+
+    monkeypatch.setattr("fasterrag.services.grafana.provision_grafana", failing)
+    settings = Settings.model_validate({"observability": {"grafana": True}})
+
+    await main.provision_enabled_observability(settings)

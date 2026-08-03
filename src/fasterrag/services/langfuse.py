@@ -29,11 +29,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from fasterrag.config.schema import Settings
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.provisioning import (
     ProvisionResult,
     docker_available,
     port_is_reachable,
+    require_provisioning_gate,
     run_docker,
 )
 
@@ -396,7 +398,7 @@ volumes:
 
 
 async def provision_langfuse(
-    *, root: Path | None = None, env_file: Path | None = None
+    settings: Settings, *, root: Path | None = None, env_file: Path | None = None
 ) -> ProvisionResult:
     """Generate the stack, create any missing secret, and bring it up.
 
@@ -404,6 +406,9 @@ async def provision_langfuse(
         The result carrying ``http://<host>:3000``. Re-running converges: the Compose file is
         rewritten, secrets already present are preserved untouched, and ``compose up`` leaves
         healthy containers alone.
+
+    Raises:
+        ProvisioningError: If the doctor preflight fails, before any secret is generated.
     """
     plan = LangfusePlan(
         root=(root or DEFAULT_LANGFUSE_ROOT).resolve(),
@@ -416,6 +421,11 @@ async def provision_langfuse(
             status="unavailable",
             detail="docker is not running; start it and re-run",
         )
+
+    # Gated before any secret is generated. This stack claims eight host ports — the widest
+    # surface of any toggle — and a conflict discovered mid-`compose up` leaves some
+    # containers running and some not.
+    await require_provisioning_gate(settings)
 
     _, created = ensure_secrets(plan.env_file)
 

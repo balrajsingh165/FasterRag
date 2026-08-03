@@ -19,6 +19,7 @@ far better than no answer (D4).
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any, Protocol
@@ -80,7 +81,20 @@ class CrossEncoderReranker:
                 fail the query. Loading is therefore classified exactly like scoring.
         """
         if self._model is None:
-            _logger.info("loading reranker model", extra={"model": self.model_name})
+            # CRITICAL: warning, not info. Nothing configures logging in a plain script or a
+            # notebook, so an info line is invisible and the default reranker —
+            # BAAI/bge-reranker-v2-m3, 2.2 GB — downloads and loads in total silence.
+            # Measured at over 400 s on a developer laptop, which reads as a hang rather
+            # than as work. Python's last-resort handler emits warnings without setup, so
+            # this is the only level that reaches the person waiting.
+            _logger.warning(
+                "loading the reranker model; the first run downloads the weights, which for "
+                "a large cross-encoder is several gigabytes and can take minutes. Set "
+                "retrieval.rerank to false, or choose a smaller retrieval.reranker_model, "
+                "to skip this stage",
+                extra={"model": self.model_name},
+            )
+            started = time.perf_counter()
             try:
                 self._model = load_cross_encoder(self.model_name)
             except ConfigError:
@@ -97,6 +111,14 @@ class CrossEncoderReranker:
                     code=ErrorCode.RERANK_FAILED,
                     retryable=False,
                 ) from exc
+
+            _logger.info(
+                "reranker model ready",
+                extra={
+                    "model": self.model_name,
+                    "load_seconds": round(time.perf_counter() - started, 1),
+                },
+            )
         return self._model
 
     def score(self, query: str, chunks: Sequence[ScoredChunk]) -> list[float]:

@@ -96,8 +96,16 @@ def classify_llm_failure(
             retryable=False,
         )
 
+    # A timeout gets its own code, mirroring the embedding side's split between
+    # EMBED_PROVIDER_TIMEOUT and EMBED_PROVIDER_ERROR. The two call for different actions —
+    # a timeout says raise reliability.timeouts.llm_ms or reduce the context, a hard failure
+    # says look at the provider — and one code for both cannot say which.
     if status in _TIMEOUT_STATUSES or isinstance(exc, TimeoutError):
-        return GenerationError(f"{provider} timed out during {operation}", retryable=True)
+        return GenerationError(
+            f"{provider} timed out during {operation}",
+            code=ErrorCode.GENERATION_TIMEOUT,
+            retryable=True,
+        )
 
     if status == _RATE_LIMITED or (status is not None and status >= _SERVER_ERROR_THRESHOLD):
         return GenerationError(

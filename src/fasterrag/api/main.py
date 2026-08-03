@@ -29,6 +29,7 @@ from fasterrag.api import admin, collections, health, ingest, metrics, query, tr
 from fasterrag.api.problems import install_exception_handlers
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
 from fasterrag.config.schema import Settings
+from fasterrag.errors import FasterRagError
 from fasterrag.observability.logging import configure_logging, get_logger, use_trace_id
 
 __all__ = ["CONFIG_PATH_VAR", "CorrelationIdMiddleware", "create_app"]
@@ -101,6 +102,44 @@ def _vector_db_check(app: FastAPI) -> health.ReadinessCheck:
     return check
 
 
+async def provision_enabled_observability(settings: Settings) -> None:
+    """Stand up whichever observability stacks the configuration turns on.
+
+    ``docs/observability.md`` frames the toggle itself as the trigger — "``langfuse: true``
+    → doctor preflight → ``docker compose up -d``" — so requiring an operator to also run
+    ``fasterrag provision`` would make the documentation wrong rather than incomplete. Both
+    provisioners converge, so this is a no-op once the stack is up.
+
+    A provisioning failure is logged and swallowed on purpose, and this is the one place
+    that trade is right: observability is not on the request path, and refusing to serve
+    queries because a dashboard would not start inverts the dependency. The toggle's own
+    ``fasterrag provision`` command still surfaces the error in full.
+    """
+    if not (settings.observability.grafana or settings.observability.langfuse):
+        return
+
+    from fasterrag.services.grafana import provision_grafana
+    from fasterrag.services.langfuse import provision_langfuse
+
+    for enabled, name, provision in (
+        (settings.observability.grafana, "grafana", provision_grafana),
+        (settings.observability.langfuse, "langfuse", provision_langfuse),
+    ):
+        if not enabled:
+            continue
+        try:
+            result = await provision(settings)
+            _logger.info(
+                "observability stack provisioned at startup",
+                extra={"tool": name, "status": result.status, "url": result.url},
+            )
+        except FasterRagError as exc:
+            _logger.warning(
+                "observability stack could not be provisioned; the api is serving anyway",
+                extra={"tool": name, "code": exc.code.value, "detail": exc.detail},
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Start and stop process-wide resources.
@@ -122,6 +161,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     owns_adapter = getattr(app.state, "vector_db", None) is None
     if owns_adapter:
         app.state.vector_db = create_vector_db_adapter(settings)
+
+    await provision_enabled_observability(settings)
 
     try:
         yield

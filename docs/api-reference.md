@@ -48,9 +48,11 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `PARSE_FAILED` | 422 | `ParseError` | Document unparseable; also the DLQ reason code. |
 | `CHUNK_FAILED` | 500 | `ChunkError` | Chunker invariant violated. |
 | `EMBED_PROVIDER_TIMEOUT` / `EMBED_PROVIDER_ERROR` | 503 | `EmbedError`/`ProviderError` | Embedding provider timeout / hard failure. |
+| `VECTOR_DB_AUTH_FAILED` | 503 | `ProviderError` | The vector database rejected our credentials. Distinct from `EMBED_PROVIDER_ERROR` because the knob to turn is `vector_db.api_key_env`, not the embedding provider. Never retried. |
 | `RETRIEVAL_FAILED` | 503 | `RetrievalError` | Vector DB/BM25 leg failed after retries. |
 | `RERANK_FAILED` | 503 | `RetrievalError` | Reranker failure (degradation ladder may answer instead — see below). |
 | `GENERATION_FAILED` | 503 | `GenerationError` | LLM provider failure after retries. |
+| `GENERATION_TIMEOUT` | 504 | `GenerationError` | LLM provider timed out. Split from `GENERATION_FAILED` for the same reason embeddings split theirs: a timeout says raise `reliability.timeouts.llm_ms` or shrink the context, a hard failure says look at the provider. |
 | `INSUFFICIENT_EVIDENCE` | 200 | — | Not an error transport-wise: structured grounded-or-refuse response (D5), see `/v1/query`. |
 | `CIRCUIT_OPEN` | 503 | `ProviderError` | Circuit breaker open for the named provider (`detail` names it, `Retry-After` set). |
 | `PROVISIONING_FAILED` | 500 | `ProvisioningError` | Auto-provisioning step failed; `detail` carries the doctor-style fix-it hint. |

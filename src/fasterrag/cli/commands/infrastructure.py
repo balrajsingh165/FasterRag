@@ -47,7 +47,7 @@ async def run_provision(args: argparse.Namespace, console: Console) -> ExitCode:
                 if args.status
                 else await stop_langfuse()
                 if args.down
-                else await provision_langfuse()
+                else await provision_langfuse(settings)
             )
         elif args.tool == "grafana":
             result = (
