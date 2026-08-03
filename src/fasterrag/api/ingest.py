@@ -28,7 +28,7 @@ from fasterrag.api.dependencies import (
     build_ingestion,
 )
 from fasterrag.api.schemas import IngestRequest
-from fasterrag.errors import ErrorCode, FasterRagError, IngestionError
+from fasterrag.errors import FasterRagError
 from fasterrag.observability.logging import get_logger, use_trace_id
 from fasterrag.services.journal import JobRecord, Journal
 
@@ -37,8 +37,6 @@ __all__ = ["router"]
 router = APIRouter(prefix="/v1/ingest", tags=["ingestion"])
 
 _logger = get_logger(__name__)
-
-_SUPPORTED_SOURCE_TYPES = frozenset({"path"})
 
 
 def _job_body(record: JobRecord, journal: Journal) -> dict[str, Any]:
@@ -105,21 +103,9 @@ async def start_ingest(
     Replaying an ``idempotency_key`` returns the original job rather than starting a second
     ingest of the same corpus.
     """
-    unsupported = {source.type for source in body.sources} - _SUPPORTED_SOURCE_TYPES
-    if unsupported:
-        # TODO: url and inline sources ship with the loader that fetches them; only local
-        # paths are readable today, and accepting a source type nothing can read would
-        # produce a job that dead-letters every document for no stated reason.
-        raise IngestionError(
-            f"source type(s) {', '.join(sorted(unsupported))} are not supported yet; "
-            f"supported: {', '.join(sorted(_SUPPORTED_SOURCE_TYPES))}",
-            code=ErrorCode.VALIDATION_FAILED,
-            retryable=False,
-        )
-
     service = build_ingestion(settings, adapter, journal, None)
     record = await service.accept(
-        [source.value for source in body.sources],
+        [{"type": source.type, "value": source.value} for source in body.sources],
         collection=body.collection,
         idempotency_key=body.idempotency_key,
     )

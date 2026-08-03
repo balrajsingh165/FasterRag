@@ -158,13 +158,32 @@ def test_an_unknown_source_type_is_rejected(client: TestClient) -> None:
     assert response.status_code == 422
 
 
-def test_an_unsupported_source_type_says_which_are_supported(client: TestClient) -> None:
+def test_a_url_source_is_accepted(client: TestClient) -> None:
+    """All three documented source types are accepted; nothing is fetched until the job runs."""
     response = client.post(
         "/v1/ingest", json={"sources": [{"type": "url", "value": "https://example.com/a.pdf"}]}
     )
 
+    assert response.status_code == 202
+    assert response.json()["job_id"]
+
+
+def test_an_inline_source_is_accepted(client: TestClient) -> None:
+    response = client.post(
+        "/v1/ingest",
+        json={"sources": [{"type": "inline", "value": "# Notes"}]},
+    )
+
+    assert response.status_code == 202
+
+
+def test_an_invented_source_type_is_still_rejected(client: TestClient) -> None:
+    """The schema is the gate; only the three documented types exist."""
+    response = client.post(
+        "/v1/ingest", json={"sources": [{"type": "ftp", "value": "ftp://x/a.pdf"}]}
+    )
+
     assert response.status_code == 422
-    assert "path" in response.json()["detail"]
 
 
 def test_a_misspelled_field_is_rejected(client: TestClient) -> None:

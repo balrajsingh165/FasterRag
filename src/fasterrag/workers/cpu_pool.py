@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
@@ -69,7 +69,7 @@ def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
         IngestionError: If the document exceeds ``ingestion.max_document_mb``.
     """
     limit = settings.ingestion.max_document_mb * _MEGABYTE
-    data = _read(task.source, limit)
+    data = _read(task.readable, limit)
     document = parse_bytes(data, filename=Path(task.source).name, max_bytes=limit)
 
     chunker = create_chunker(settings)
@@ -331,8 +331,19 @@ class CpuWorkerPool:
         *,
         tenant: str | None = None,
         metadata: dict[str, object] | None = None,
+        locations: Mapping[str, str] | None = None,
     ) -> list[DocumentTask]:
-        """Build ordered document tasks with deterministic ids."""
+        """Build ordered document tasks with deterministic ids.
+
+        Args:
+            sources: Canonical URIs, in job order. Ids derive from these.
+            tenant: Tenant the documents belong to.
+            metadata: Metadata merged into every chunk.
+            locations: Where a source's bytes actually live, when that differs from the
+                source itself — a staged URL or inline payload. Absent entries read from
+                the source directly.
+        """
+        resolved = locations or {}
         return [
             DocumentTask(
                 document_id=document_id(source, tenant),
@@ -340,6 +351,7 @@ class CpuWorkerPool:
                 index=index,
                 metadata=dict(metadata or {}),
                 tenant=tenant,
+                location=resolved.get(source),
             )
             for index, source in enumerate(sources)
         ]

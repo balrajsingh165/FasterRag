@@ -40,6 +40,10 @@ class DocumentTask:
 
     ``index`` is the document's position in its job, which is what a checkpoint records
     and what a resumed job counts from.
+
+    ``source`` is the canonical URI — what the document *is*, and what its id derives from.
+    ``location`` is where the bytes currently sit, which differs only for a staged URL or
+    inline payload.
     """
 
     document_id: str
@@ -47,6 +51,19 @@ class DocumentTask:
     index: int
     metadata: Mapping[str, Any] = field(default_factory=dict)
     tenant: str | None = None
+    location: str | None = None
+
+    @property
+    def readable(self) -> str:
+        """Return the path the bytes are actually read from.
+
+        # CRITICAL: identity and location are separate fields, and conflating them breaks
+        # deduplication silently. A URL or inline document is staged to a temp file whose
+        # name differs on every run, so a document id derived from that path would be new
+        # every time and the same document would be re-indexed forever. ``source`` stays the
+        # canonical URI the id is hashed from; this is only where the bytes live.
+        """
+        return self.location or self.source
 
 
 @dataclass(frozen=True, slots=True)

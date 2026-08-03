@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -34,6 +34,7 @@ from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger, use_trace_id
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.lockfile import LockStore, build_lock
+from fasterrag.services.sources import resolve_sources, typed_source
 from fasterrag.workers.cpu_pool import CpuWorkerPool
 from fasterrag.workers.embed_pool import EmbeddingWorkerPool
 from fasterrag.workers.indexer import Indexer
@@ -81,7 +82,7 @@ class IngestionService:
 
     async def accept(
         self,
-        sources: Sequence[str],
+        sources: Sequence[str] | Sequence[Mapping[str, Any]],
         *,
         collection: str | None = None,
         tenant: str | None = None,
@@ -91,10 +92,23 @@ class IngestionService:
 
         Returns immediately so the API can answer ``202 Accepted`` with a job id. Replaying
         an idempotency key returns the original job rather than starting a second ingest.
+
+        Args:
+            sources: Typed ``{"type", "value"}`` mappings, or plain strings — the CLI's and
+                the facade's shape — classified by :func:`~fasterrag.services.sources.typed_source`
+                (an explicit http(s) scheme is a URL, everything else a path). Stored as
+                given; nothing is fetched or decoded until the job runs, so accepting a job
+                stays a constant-time operation whatever it points at.
+            collection: Collection to index into; defaults to the configured one.
+            tenant: Tenant the documents belong to.
+            idempotency_key: Replaying one returns the original job.
         """
+        typed = [
+            typed_source(source) if isinstance(source, str) else dict(source) for source in sources
+        ]
         return self.journal.create_job(
             collection or self.settings.vector_db.collection.default_name,
-            [{"type": "path", "value": source} for source in sources],
+            typed,
             idempotency_key=idempotency_key,
             tenant=tenant,
         )
@@ -111,8 +125,13 @@ class IngestionService:
         than restarting. Deduplication makes any documents that were replayed anyway into
         no-ops (D3).
         """
-        sources = [source["value"] for source in record.sources]
-        tasks = CpuWorkerPool.tasks_for(sources, tenant=record.tenant, metadata=metadata)
+        resolved = await resolve_sources(record.sources, self.settings)
+        tasks = CpuWorkerPool.tasks_for(
+            resolved.sources,
+            tenant=record.tenant,
+            metadata=metadata,
+            locations=resolved.locations,
+        )
         resume_from = self.journal.resume_index(record)
 
         indexer = Indexer(self.settings, self.adapter, collection=record.collection)
@@ -190,6 +209,8 @@ class IngestionService:
         if self.cache is not None and indexer.written:
             await self.cache.invalidate(f"ingest job {record.job_id} indexed {indexer.written}")
 
+        resolved.cleanup()
+
         _logger.info("ingest finished", extra={"job_id": record.job_id, **counts})
         return settled
 
@@ -246,7 +267,7 @@ class IngestionService:
 
     async def ingest(
         self,
-        sources: Sequence[str],
+        sources: Sequence[str] | Sequence[Mapping[str, Any]],
         *,
         collection: str | None = None,
         metadata: dict[str, Any] | None = None,
