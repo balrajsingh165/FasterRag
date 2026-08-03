@@ -52,6 +52,18 @@ Optional extras, needed only for what they name: `.[huggingface]` and `.[rerank]
 - No big-bang changes: no increment may exceed a reviewable size.
 - Build-phase slices end with a git tag (`v0.x.0-sN`); the revert playbook lives in [deployment.md](deployment.md).
 
+## 4a. Verifying a suspected defect
+
+**Check the instrument before filing the bug.** Two entries in [todo.md](todo.md) were opened against fasterRag and closed as measurement errors — TASK-0153 (a "hang" that was a shell timeout summing three bounded `curl -m 120` calls) and TASK-0177 (a "parser encoding bug" that was `json.load(sys.stdin)` decoding UTF-8 with the Windows console codepage). Both cost more to investigate than the check would have.
+
+Windows traps that produce convincing false positives:
+
+- **`sys.stdin` and `sys.stdout` use the console codepage, not UTF-8.** Piping JSON into `python -c` mangles every non-ASCII byte before your code sees it. Read the bytes and `.decode("utf-8")` explicitly, or use `urllib` instead of a pipe.
+- **A terminal that cannot render a codepoint prints `?`.** That is a font and codepage artifact, not data. Compare `ord(c)` or `repr()`, never the rendered glyph.
+- **A shell timeout is not an application hang.** Time the single operation before concluding anything about the code.
+
+Narrow to the smallest layer that still reproduces — parse alone, adapter round-trip alone — before filing. A defect that survives that is real; one that does not was never in the code.
+
 ## 5. Provable-claims rule
 
 - **A claim without a measurement is a bug.** Any performance/superiority statement in docs, code, or release notes must link to a [benchmark ledger](benchmarks.md) entry (claim, method, dataset, hardware, date, numbers, commit hash) — otherwise phrase it as a goal.
