@@ -16,6 +16,7 @@ journal under ``.fasterrag/``, which is gitignored.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -23,11 +24,29 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
+from fasterrag import __version__
 from fasterrag.config.schema import Settings
 from fasterrag.core.tracing import Trace
+from fasterrag.observability.langfuse_export import LangfuseExporter
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["DEFAULT_TRACE_ROOT", "TraceStore", "create_trace_store"]
+__all__ = [
+    "DEFAULT_LANGFUSE_HOST",
+    "DEFAULT_TRACE_ROOT",
+    "LANGFUSE_HOST_VAR",
+    "LANGFUSE_PUBLIC_KEY_VAR",
+    "LANGFUSE_SECRET_KEY_VAR",
+    "TraceStore",
+    "create_langfuse_exporter",
+    "create_trace_store",
+]
+
+# Names only. The values are generated into `.env` by the provisioner and read from the
+# environment, never from config.yaml.
+LANGFUSE_PUBLIC_KEY_VAR = "LANGFUSE_PUBLIC_KEY"
+LANGFUSE_SECRET_KEY_VAR = "LANGFUSE_SECRET_KEY"
+LANGFUSE_HOST_VAR = "LANGFUSE_HOST"
+DEFAULT_LANGFUSE_HOST = "http://localhost:3000"
 
 DEFAULT_TRACE_ROOT: Final = Path(".fasterrag") / "traces"
 
@@ -50,6 +69,7 @@ class TraceStore:
         *,
         enabled: bool = True,
         retention_days: int = 30,
+        exporter: LangfuseExporter | None = None,
     ) -> None:
         """Build a store.
 
@@ -59,11 +79,16 @@ class TraceStore:
             enabled: From ``traces.store``. When false, nothing is written and every read
                 reports the trace as absent, which is the honest answer.
             retention_days: From ``traces.retention_days``.
+            exporter: Optional Langfuse exporter. Traces are written locally *and* shipped;
+                the local copy is what replay and ``GET /v1/traces/{id}`` read, so an
+                investigation never depends on the observability stack being healthy.
         """
         self.root = root or DEFAULT_TRACE_ROOT
         self.enabled = enabled
         self.retention_days = retention_days
+        self.exporter = exporter
         self._writes = 0
+        self._exports: set[asyncio.Task[bool]] = set()
 
     def _path(self, trace_id: str) -> Path:
         """Return the file holding a trace."""
@@ -96,6 +121,40 @@ class TraceStore:
         self._writes += 1
         if self._writes % _PRUNE_EVERY == 0:
             self.prune()
+
+        self._export(trace)
+
+    def _export(self, trace: Trace) -> None:
+        """Ship a trace to Langfuse without waiting for it.
+
+        Fire-and-forget on purpose: ``store`` is called on the query path after the answer is
+        ready, and awaiting a network round-trip here would add the exporter's latency to
+        every request that succeeds.
+
+        # CRITICAL: the task is kept in a set until it finishes. asyncio holds only a weak
+        # reference to a running task, so one that nothing retains can be garbage-collected
+        # mid-flight and the export vanishes with no error anywhere.
+        """
+        if self.exporter is None:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop: a CLI one-shot rather than the server. Exporting would need one
+            # started and torn down per trace, which costs more than the record is worth.
+            return
+
+        task = loop.create_task(self.exporter.export(trace))
+        self._exports.add(task)
+        task.add_done_callback(self._exports.discard)
+
+    async def drain(self) -> None:
+        """Wait for in-flight exports, so shutdown does not drop the last traces."""
+        if self._exports:
+            await asyncio.gather(*tuple(self._exports), return_exceptions=True)
+        if self.exporter is not None:
+            await self.exporter.close()
 
     def load(self, trace_id: str) -> Trace | None:
         """Return a stored trace, or ``None`` if it is absent or unreadable."""
@@ -154,10 +213,44 @@ def now() -> str:
     return datetime.now(tz=UTC).isoformat()
 
 
+def create_langfuse_exporter(settings: Settings) -> LangfuseExporter | None:
+    """Build the Langfuse exporter when the toggle is on and its keys are present.
+
+    The keys are read from the environment by *name*, exactly like every other credential —
+    they are generated into ``.env`` by ``fasterrag provision langfuse`` and never appear in
+    ``config.yaml``.
+
+    Returns:
+        The exporter, or ``None`` when the toggle is off or the keys are absent. A missing key
+        is a warning rather than a failure: the toggle also provisions the stack, and refusing
+        to serve queries because a dashboard has no credentials inverts the dependency.
+    """
+    if not settings.observability.langfuse:
+        return None
+
+    public = os.environ.get(LANGFUSE_PUBLIC_KEY_VAR, "").strip()
+    secret = os.environ.get(LANGFUSE_SECRET_KEY_VAR, "").strip()
+    if not (public and secret):
+        _logger.warning(
+            "observability.langfuse is on but its keys are unset, so no trace will be "
+            "exported; run 'fasterrag provision langfuse' to generate them",
+            extra={"expected": [LANGFUSE_PUBLIC_KEY_VAR, LANGFUSE_SECRET_KEY_VAR]},
+        )
+        return None
+
+    return LangfuseExporter(
+        os.environ.get(LANGFUSE_HOST_VAR, "").strip() or DEFAULT_LANGFUSE_HOST,
+        public,
+        secret,
+        release=__version__,
+    )
+
+
 def create_trace_store(settings: Settings, root: Path | None = None) -> TraceStore:
     """Build a trace store from validated configuration."""
     return TraceStore(
         root,
         enabled=settings.traces.store,
         retention_days=settings.traces.retention_days,
+        exporter=create_langfuse_exporter(settings),
     )

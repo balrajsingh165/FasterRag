@@ -88,7 +88,15 @@ Caveats the provisioner encodes:
 - **Do not double-quote these values in Docker Compose** (per Langfuse's headless-initialization docs / GitHub issue #3398) — quoted values are taken literally and bootstrap silently misbehaves.
 - **Dependency tree**: a project/user cannot be created without an org — `ORG_*` must be present for `PROJECT_*`/`USER_*` to take effect.
 
-The generated project public/secret keys are what fasterRag's tracing exporter uses; they land in `.env`, referenced by env-var name.
+The generated project public/secret keys are what fasterRag's tracing exporter uses; they land in `.env`, referenced by env-var name — `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`, with `LANGFUSE_HOST` defaulting to `http://localhost:3000`.
+
+**What actually gets exported.** Every query trace the store writes is also shipped to Langfuse: one `trace-create` carrying the question and the answer, then one observation per stage. The generation stage is sent as a `generation-create` rather than a `span-create`, because Langfuse derives model and token usage only from that type — sending it as a plain span leaves Langfuse's own cost view empty while the data sits in the payload. Span offsets are converted from milliseconds-since-query-start to absolute timestamps, or every trace would land on the epoch and stack on top of the others.
+
+Three properties are deliberate:
+
+- **The local trace store stays authoritative.** Replay and `GET /v1/traces/{id}` read the local copy, so investigating an incident never requires the observability stack to be healthy — precisely when it is least likely to be.
+- **Export never fails a query.** The answer has already been returned; an unreachable or rejecting Langfuse is logged and dropped.
+- **Missing keys are a warning, not a failure.** The toggle that enables export also provisions the stack, so refusing to serve because a dashboard has no credentials inverts the dependency.
 
 ### Flow summary
 
