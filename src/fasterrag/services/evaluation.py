@@ -36,6 +36,7 @@ __all__ = [
     "load_dataset",
     "run_eval",
     "score_collection",
+    "score_faithfulness",
 ]
 
 GOLDEN_NAME: Final = "golden.jsonl"
@@ -178,4 +179,62 @@ def summarize(report: EvalReport) -> dict[str, Any]:
         "recall_at_k": round(report.recall_at_k, 4),
         "mrr": round(report.mrr, 4),
         "ndcg_at_k": round(report.ndcg_at_k, 4),
+    }
+
+
+async def score_faithfulness(
+    dataset: EvalDataset,
+    settings: Settings,
+    adapter: VectorDBAdapter,
+    router: TieringRouter,
+    *,
+    collection: str,
+) -> dict[str, Any]:
+    """Answer every answerable golden query and grade each answer with P3.
+
+    Separate from :func:`score_collection` because the costs are not comparable. Retrieval
+    scoring is local and free; this generates and grades once per record, so a hundred-record
+    set is two hundred provider calls. Nothing calls it implicitly.
+
+    Adversarial records are excluded. They are deliberately unanswerable from the corpus, so
+    the correct behaviour is a refusal — grading one would score the system down for doing
+    exactly the right thing.
+
+    Returns:
+        The mean faithfulness over graded answers, how many were graded, and how many were
+        refused. Refusals are reported rather than folded into the mean: withholding an
+        answer is a correct outcome under D5, not a score of zero.
+    """
+    from fasterrag.api.dependencies import build_generation
+
+    service = build_generation(settings, adapter, router)
+    answerable = [record for record in dataset.resolved() if not record.adversarial]
+
+    scores: list[float] = []
+    refused = 0
+    ungraded = 0
+    try:
+        for record in answerable:
+            answer = await service.answer(record.query, collection=collection)
+            if answer.insufficient_evidence:
+                refused += 1
+            elif answer.faithfulness is None:
+                ungraded += 1
+            else:
+                scores.append(answer.faithfulness)
+                metrics.FAITHFULNESS.observe(answer.faithfulness)
+    finally:
+        await service.close()
+
+    mean = sum(scores) / len(scores) if scores else 0.0
+    _logger.info(
+        "scored faithfulness over a golden set",
+        extra={"graded": len(scores), "refused": refused, "ungraded": ungraded, "mean": mean},
+    )
+    return {
+        "mean_faithfulness": round(mean, 4),
+        "graded": len(scores),
+        "refused": refused,
+        "ungraded": ungraded,
+        "answerable": len(answerable),
     }

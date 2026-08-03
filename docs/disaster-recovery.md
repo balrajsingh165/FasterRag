@@ -53,5 +53,16 @@ The drill restores a complete deployment onto a clean machine from backups only.
 | One collection corrupted | Restore that collection's snapshot; alias flip if a blue/green sibling exists (D2) |
 | Index drifted / model mismatch | No restore needed: D2 zero-downtime reindex rebuilds from source documents |
 | Journal lost, index intact | Re-run ingest of the source set — dedup makes it a no-op except genuinely missing docs (D3) |
+| **Index lost, journal intact** | **Re-ingest is NOT a recovery path.** Clear the journal for that collection first, or restore its snapshot. |
 | Trace store lost | Accept loss (bounded by `traces.retention_days`); no impact on serving |
 | Langfuse stack lost | Re-provision (`observability.langfuse: true` path); traces resume; historic Langfuse data restores from its own volumes if backed up |
+
+### The re-ingest trap
+
+Dropping a collection and re-running the same ingest **does not rebuild it.** Content hashes are remembered in the journal per collection, not per index, so every document is recognised as already-ingested, the job settles `completed` with `indexed: 0`, and the collection is never recreated. Nothing errors — the counts are the only signal, and `deduplicated` is where the documents went.
+
+That is D3 behaving exactly as designed: deduplication is what makes an at-least-once pipeline produce exactly-once effects, and it cannot distinguish "this document is already indexed" from "this document was indexed into an index that no longer exists". It is still a sharp edge during recovery, when re-ingest is the instinctive thing to reach for.
+
+**Restore from a snapshot** ([§2](#2-restore-drill-write-once-execute-for-real-tick-in-todomd)) is the supported path. If you must rebuild from source instead, clear the journal entries for that collection first so the documents are seen as new.
+
+Observed on 2026-08-03 while verifying the library facade: a run whose worker pool died mid-ingest recorded its documents in the journal before failing, and the retry reported `completed` with `indexed: 0` — correct, and initially indistinguishable from a retrieval bug.
