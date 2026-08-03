@@ -323,6 +323,11 @@ COST = REGISTRY.counter(
     "Estimated cost per query, accumulated.",
     ("provider", "tenant"),
 )
+UNPRICED_TOKENS = REGISTRY.counter(
+    "fasterrag_unpriced_tokens_total",
+    "Tokens spent on a model with no recorded list price, so absent from the cost total.",
+    ("provider", "model"),
+)
 CACHE_EVENTS = REGISTRY.counter(
     "fasterrag_cache_events_total",
     "Cache hit/miss ratio source.",

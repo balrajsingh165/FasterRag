@@ -311,8 +311,10 @@ def dashboard() -> dict[str, Any]:
                 "clamp_min(sum(rate(fasterrag_requests_total[5m])), 1)",
                 "currencyUSD",
                 16,
-                "A list-price estimate from dated published rates, not a measurement. A model "
-                "with no recorded rate contributes nothing rather than a fabricated number.",
+                "A list-price estimate from dated published rates, not a measurement. Traffic "
+                "on an unpriced model is counted separately by fasterrag_unpriced_tokens_total "
+                "and is NOT in this figure — a non-zero unpriced count means this panel "
+                "understates real spend.",
                 "USD per query",
             ),
         ],

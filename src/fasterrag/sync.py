@@ -24,15 +24,18 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Self, TypeVar
 
+from fasterrag.adapters.vectordb.base import CollectionInfo
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH
 from fasterrag.config.schema import Settings
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.facade import FasterRag as AsyncFasterRag
+from fasterrag.services.doctor import DoctorReport
 from fasterrag.services.estimation import Estimate
 from fasterrag.services.generation import Answer, QueryEvent
 from fasterrag.services.journal import JobRecord
 from fasterrag.services.lockfile import IndexLock
+from fasterrag.services.replay import ReplayResult
 
 __all__ = ["FasterRag"]
 
@@ -208,6 +211,46 @@ class FasterRag:
         return self._run(
             self._inner.retrieve(text, collection=collection, top_k=top_k, filters=filters)
         )
+
+    def doctor(self) -> DoctorReport:
+        """Run the D10 preflight checks, blocking.
+
+        Uses its own short-lived loop when the facade has not been entered, because doctor
+        must work on an installation that cannot start — that is what it is for.
+        """
+        if self._loop is None:
+            return asyncio.run(self._inner.doctor())
+        return self._run(self._inner.doctor())
+
+    def collections(self) -> list[CollectionInfo]:
+        """List the collections the vector database holds."""
+        return self._run(self._inner.collections())
+
+    def create_collection(
+        self,
+        name: str,
+        *,
+        distance: str | None = None,
+        shard_number: int = 1,
+        replication_factor: int = 1,
+    ) -> None:
+        """Create a collection sized for the configured embedding model."""
+        self._run(
+            self._inner.create_collection(
+                name,
+                distance=distance,
+                shard_number=shard_number,
+                replication_factor=replication_factor,
+            )
+        )
+
+    def drop_collection(self, name: str) -> bool:
+        """Drop a collection, returning whether it existed."""
+        return self._run(self._inner.drop_collection(name))
+
+    def replay(self, trace_id: str, candidate: Settings | None = None) -> ReplayResult:
+        """Re-execute a stored query under a candidate configuration and diff it (D8)."""
+        return self._run(self._inner.replay(trace_id, candidate))
 
     def estimate(self, sources: Sequence[str], *, all_providers: bool = False) -> Estimate:
         """Report what ingesting ``sources`` would cost (D9).

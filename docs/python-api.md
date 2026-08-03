@@ -9,9 +9,10 @@ fasterRag is released as an installable Python package so applications can **imp
 > | Standalone components — `fasterrag.parsing`, `.chunking`, `.retrieval`, `.rerank`, `.evals` | **Shipped** and importable today |
 > | Typed error taxonomy — `fasterrag.errors` (same `code`s as the API) | **Shipped** |
 > | `FasterRag` facade — `from_config`, `from_settings`, `ingest`, `query`, `query_stream`, `retrieve`, `estimate`, `index_lock` | **Shipped**. Verified end to end against live Qdrant and OpenAI |
-> | `FasterRag.collections`, `.doctor`, `.replay`, `.export_archive` / `.import_archive` | **Not yet implemented** — the CLI and REST surfaces cover these today |
+> | `FasterRag.doctor`, `.collections`, `.create_collection`, `.drop_collection`, `.replay` | **Shipped** on both facades |
+> | `FasterRag.export_archive` / `.import_archive` | **Not yet implemented** (TASK-0079) — the portability archive itself is unbuilt, so there is nothing to wrap |
 > | `fasterrag.sync` blocking facade | **Shipped**. Verified end to end against live Qdrant and OpenAI |
-> | Entry-point plugin groups (`fasterrag.vectordb` / `.embeddings` / `.llm`) | **Not yet implemented** (TASK-0163) — today the factories resolve built-ins only |
+> | Entry-point plugin groups (`fasterrag.vectordb` / `.embeddings` / `.llm`) | **Shipped**. All three factories resolve registered plugins; a built-in name always wins, so an installed package cannot silently take over a configured provider |
 > | PyPI wheels (`pip install fasterrag`) | **Not yet published** (TASK-0087) — install from source: `pip install -e ".[all]"` |
 >
 > Sections describing an unshipped surface are the design contract the remaining work must satisfy, kept here so each one is built to a reviewed spec rather than improvised.

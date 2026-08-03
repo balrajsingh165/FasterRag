@@ -465,7 +465,15 @@ class GenerationService:
             )
 
         estimated = price_generation(provider, self.llm.model, prompt, completion)
-        if estimated:
+        if estimated is None:
+            # CRITICAL: an unpriced model must be *visible*, not simply absent. Silently
+            # contributing nothing to the cost total makes the dashboard understate spend
+            # while looking healthy, which is worse than reporting no cost at all — the
+            # panel cannot say "some traffic is unpriced" unless something counts it.
+            metrics.UNPRICED_TOKENS.increment(
+                float(prompt + completion), provider=provider, model=self.llm.model
+            )
+        elif estimated:
             metrics.COST.increment(estimated, provider=provider, tenant="none")
 
     async def _grade(

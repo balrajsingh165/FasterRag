@@ -26,10 +26,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Self, cast
 
 from fasterrag.adapters.embeddings.tiering import TieringRouter, create_embedding_router
-from fasterrag.adapters.vectordb.base import VectorDBAdapter
+from fasterrag.adapters.vectordb.base import CollectionInfo, VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
 from fasterrag.config.schema import Settings
@@ -38,11 +38,13 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
+from fasterrag.services.doctor import DoctorReport
 from fasterrag.services.estimation import Estimate, estimate_sources
 from fasterrag.services.generation import Answer, GenerationService, QueryEvent
 from fasterrag.services.journal import JobRecord, Journal, create_journal
 from fasterrag.services.lockfile import IndexLock, create_lock_store
 from fasterrag.services.querying import RetrievalService
+from fasterrag.services.replay import ReplayResult
 
 __all__ = ["FasterRag"]
 
@@ -321,6 +323,94 @@ class FasterRag:
         return await self._retrieval().retrieve(
             text, collection=collection, top_k=top_k, filters=filters
         )
+
+    async def doctor(self) -> DoctorReport:
+        """Run the D10 preflight checks against this instance's configuration.
+
+        Works started or unstarted: doctor exists to diagnose an environment that may not
+        be working, so requiring a healthy one first would defeat it.
+
+        Returns:
+            The report; every failed check carries a ``fix`` string.
+        """
+        from fasterrag.services.doctor import run_doctor
+
+        return await run_doctor(self.settings)
+
+    async def collections(self) -> list[CollectionInfo]:
+        """List the collections the vector database holds."""
+        self._require_started()
+        return await self.vector_db.list_collections()
+
+    async def create_collection(
+        self,
+        name: str,
+        *,
+        distance: str | None = None,
+        shard_number: int = 1,
+        replication_factor: int = 1,
+    ) -> None:
+        """Create a collection sized for the configured embedding model.
+
+        The dimension is taken from the embedding router rather than accepted as an
+        argument: a collection whose width disagrees with the model that will write into it
+        fails on the first upsert, and there is no reason to let a caller specify it wrongly.
+        """
+        from fasterrag.adapters.vectordb.base import CollectionSpec
+
+        self._require_started()
+        dimensions = self.embeddings.default.dimensions or self.settings.embeddings.dimensions
+        if not dimensions:
+            raise FasterRagError(
+                "the embedding model did not report a dimension and embeddings.dimensions is "
+                "unset, so a collection cannot be sized; set embeddings.dimensions",
+                code=ErrorCode.CONFIG_INVALID,
+            )
+
+        await self.vector_db.create_collection(
+            CollectionSpec(
+                name=name,
+                dimensions=dimensions,
+                distance=cast("Any", distance or self.settings.vector_db.collection.distance),
+                shard_number=shard_number,
+                replication_factor=replication_factor,
+                sparse=self.settings.retrieval.hybrid,
+            )
+        )
+
+    async def drop_collection(self, name: str) -> bool:
+        """Drop a collection, returning whether it existed."""
+        self._require_started()
+        return await self.vector_db.drop_collection(name)
+
+    async def replay(self, trace_id: str, candidate: Settings | None = None) -> ReplayResult:
+        """Re-execute a stored query under a candidate configuration and diff it (D8).
+
+        The replay runs with no trace store and no cache, so investigating an incident
+        cannot alter the evidence or populate a cache with a result nobody asked for.
+
+        Raises:
+            FasterRagError: With ``NOT_FOUND`` if no trace with that id is stored.
+        """
+        from fasterrag.api.dependencies import build_generation
+        from fasterrag.services.replay import replay_trace
+        from fasterrag.services.traces import create_trace_store
+
+        self._require_started()
+        trace = create_trace_store(self.settings).load(trace_id)
+        if trace is None:
+            raise FasterRagError(
+                f"no stored trace with id {trace_id!r}; list recent ones with "
+                "'fasterrag traces list'",
+                code=ErrorCode.NOT_FOUND,
+            )
+
+        settings = candidate or self.settings
+        service = build_generation(settings, self.vector_db, self.embeddings)
+        try:
+            return await replay_trace(trace, settings, service)
+        finally:
+            await service.close()
 
     def estimate(self, sources: Sequence[str], *, all_providers: bool = False) -> Estimate:
         """Report what ingesting ``sources`` would cost, before embedding any of it (D9).

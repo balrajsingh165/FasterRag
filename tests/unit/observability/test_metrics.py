@@ -16,6 +16,7 @@ CATALOGUE = {
     "fasterrag_ttft_seconds",
     "fasterrag_tokens_total",
     "fasterrag_cost_usd_total",
+    "fasterrag_unpriced_tokens_total",
     "fasterrag_cache_events_total",
     "fasterrag_retrieval_quality",
     "fasterrag_faithfulness",

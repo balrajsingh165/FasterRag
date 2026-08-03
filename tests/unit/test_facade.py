@@ -153,3 +153,25 @@ def test_the_facade_holds_no_pipeline_logic() -> None:
 
     for forbidden in ("def _rrf", "def _score", "cosine", "def _chunk"):
         assert forbidden not in source, forbidden
+
+
+def test_the_remaining_documented_surface_exists() -> None:
+    """python-api.md's table is the beta contract for these too."""
+    for member in ("doctor", "collections", "create_collection", "drop_collection", "replay"):
+        assert hasattr(FasterRag, member), member
+
+
+async def test_doctor_runs_without_starting_the_facade() -> None:
+    """Doctor diagnoses environments that may not work; needing a working one defeats it."""
+    report = await FasterRag.from_settings(settings()).doctor()
+
+    assert report.checks
+
+
+@pytest.mark.parametrize("name", ["collections", "drop_collection", "replay"])
+async def test_the_new_entry_points_check_they_were_started(name: str) -> None:
+    rag = FasterRag.from_settings(settings())
+    method = getattr(rag, name)
+
+    with pytest.raises(FasterRagError, match="not been started"):
+        await (method() if name == "collections" else method("anything"))
