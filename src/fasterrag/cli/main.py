@@ -19,7 +19,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from typing import Final
 
-from fasterrag.cli.commands.autopilot import run_autopilot
+from fasterrag.cli.commands.autopilot import run_autopilot, run_generate_golden_set
 from fasterrag.cli.commands.backup import run_backup, run_restore
 from fasterrag.cli.commands.benchmark import run_benchmark
 from fasterrag.cli.commands.diagnostics import (
@@ -73,7 +73,11 @@ def _resolve(args: argparse.Namespace) -> Handler | None:
     if args.command == "traces":
         return run_traces
     if args.command == "autopilot":
-        return run_autopilot
+        return (
+            run_generate_golden_set
+            if getattr(args, "action", None) == "generate-golden-set"
+            else run_autopilot
+        )
 
     action = getattr(args, "action", None)
     if action is not None:

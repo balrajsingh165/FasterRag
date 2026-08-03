@@ -182,3 +182,29 @@ D6 eval-driven auto-tuning (requires `autopilot.enabled: true`). Generates a gol
 |---|---|
 | `--budget-minutes N` | Search time budget. |
 | `--golden-set PATH` | Reuse an existing golden set instead of generating one. |
+
+## `fasterrag autopilot generate-golden-set <sources...>`
+
+Generate a golden Q&A set from a corpus with the P4 contract ([prompts.md](prompts.md)) and write it as JSONL. This is the prerequisite for both `autopilot run` and the eval regression gate (D7), so it exists as its own command rather than only as a step inside tuning.
+
+Sources are parsed and chunked exactly as ingestion would — no collection is needed, and none is read. A golden set is usually wanted *before* the index exists, which is the point of tuning against one.
+
+| Flag | Description |
+|---|---|
+| `--out PATH` | Where to write it; defaults to `./golden.jsonl`. An existing file is never overwritten. |
+| `--size N` | How many records to aim for (default 100). |
+| `--seed N` | Makes sampling and adversarial selection reproducible. |
+
+A fraction of the set is generated deliberately **unanswerable** from the corpus, so the harness measures whether retrieval declines to return something confident when nothing relevant exists.
+
+The output is generated text and should be reviewed before it becomes a baseline: `source` is recorded as `autopilot` rather than `human` precisely so a later reader can tell which records were curated.
+
+```
+$ fasterrag autopilot generate-golden-set ./corpus/*.md --out golden.jsonl --size 6
+wrote golden.jsonl
+records         6
+  adversarial   1
+  dropped       0
+  generated     6
+review the questions before using them as a baseline; they are generated
+```

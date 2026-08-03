@@ -216,7 +216,7 @@ def _add_traces(subparsers: argparse._SubParsersAction[argparse.ArgumentParser])
 
 
 def _add_autopilot(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register ``autopilot run``."""
+    """Register ``autopilot run`` and ``autopilot generate-golden-set``."""
     parser = subparsers.add_parser("autopilot", help="eval-driven tuning that only suggests (D6)")
     _add_global_flags(parser)
     actions = parser.add_subparsers(dest="action", required=True)
@@ -226,6 +226,15 @@ def _add_autopilot(subparsers: argparse._SubParsersAction[argparse.ArgumentParse
     run.add_argument("--dataset", default=None, help="eval dataset directory to tune against")
     run.add_argument("--budget-minutes", type=float, default=5.0, help="wall-clock ceiling")
     run.add_argument("--out", default=None, help="where to write the suggestion")
+
+    golden = actions.add_parser(
+        "generate-golden-set", help="write a golden Q&A set generated from a corpus (P4)"
+    )
+    _add_global_flags(golden)
+    golden.add_argument("sources", nargs="+", help="corpus files or directories")
+    golden.add_argument("--out", default="golden.jsonl", help="where to write the set")
+    golden.add_argument("--size", type=int, default=100, help="how many records to aim for")
+    golden.add_argument("--seed", type=int, default=0, help="makes generation reproducible")
 
 
 def _add_backup(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

@@ -22,8 +22,9 @@ from fasterrag.cli.output import Console, ExitCode
 from fasterrag.errors import FasterRagError
 from fasterrag.services.autopilot import SUGGESTION_FILE, render_suggestion, tune
 from fasterrag.services.evaluation import load_dataset
+from fasterrag.services.golden_sets import generate_from_sources
 
-__all__ = ["run_autopilot"]
+__all__ = ["run_autopilot", "run_generate_golden_set"]
 
 
 async def run_autopilot(args: argparse.Namespace, console: Console) -> ExitCode:
@@ -99,4 +100,44 @@ async def run_autopilot(args: argparse.Namespace, console: Console) -> ExitCode:
         return ExitCode.FAILURE
 
     console.document({**suggestion.as_dict(), "suggestion_file": str(output)})
+    return ExitCode.SUCCESS
+
+
+async def run_generate_golden_set(args: argparse.Namespace, console: Console) -> ExitCode:
+    """Generate a golden Q&A set from a corpus and write it to disk (P4).
+
+    The shared machinery behind both the eval harness and Autopilot's search. It was
+    reachable from Python but not from the terminal, which meant the one prerequisite for
+    running D6 had no supported way to produce it.
+    """
+    settings = _settings_or_none(args, console)
+    if settings is None:
+        return ExitCode.USAGE
+
+    destination = Path(args.out)
+    if destination.exists():
+        console.error(
+            f"{destination} already exists; a golden set is hand-curated after generation, "
+            "so it is never overwritten. Delete it or pass a different --out"
+        )
+        return ExitCode.USAGE
+
+    try:
+        records, tally = await generate_from_sources(
+            args.sources,
+            settings,
+            destination=destination,
+            size=args.size,
+            seed=args.seed,
+        )
+    except FasterRagError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return ExitCode.FAILURE
+
+    console.emit(f"wrote {destination}")
+    console.emit(f"records         {len(records)}")
+    for name, count in sorted(tally.items()):
+        console.emit(f"  {name:<14}{count}")
+    console.emit("review the questions before using them as a baseline; they are generated")
+    console.document({"path": str(destination), "records": len(records), **tally})
     return ExitCode.SUCCESS
