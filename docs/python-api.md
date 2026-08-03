@@ -10,7 +10,7 @@ fasterRag is released as an installable Python package so applications can **imp
 > | Typed error taxonomy — `fasterrag.errors` (same `code`s as the API) | **Shipped** |
 > | `FasterRag` facade — `from_config`, `from_settings`, `ingest`, `query`, `query_stream`, `retrieve`, `estimate`, `index_lock` | **Shipped**. Verified end to end against live Qdrant and OpenAI |
 > | `FasterRag.collections`, `.doctor`, `.replay`, `.export_archive` / `.import_archive` | **Not yet implemented** — the CLI and REST surfaces cover these today |
-> | `fasterrag.sync` blocking facade | **Not yet implemented** (follows the async facade) |
+> | `fasterrag.sync` blocking facade | **Shipped**. Verified end to end against live Qdrant and OpenAI |
 > | Entry-point plugin groups (`fasterrag.vectordb` / `.embeddings` / `.llm`) | **Not yet implemented** (TASK-0163) — today the factories resolve built-ins only |
 > | PyPI wheels (`pip install fasterrag`) | **Not yet published** (TASK-0087) — install from source: `pip install -e ".[all]"` |
 >
@@ -117,11 +117,21 @@ For scripts and notebooks that are not async:
 from fasterrag.sync import FasterRag
 
 with FasterRag.from_config("config.yaml") as rag:
-    rag.ingest(["./docs/"]).wait()
-    print(rag.query("...").answer)
+    rag.ingest(["./docs/handbook.md"])
+    print(rag.query("What does the spec say about retries?").answer)
+
+    for event in rag.query_stream("Summarise the handbook"):
+        if event.type == "token":
+            print(event.data["text"], end="")
 ```
 
-The sync facade wraps the async engine in a managed event loop; it is a thin adapter, not a second implementation.
+The sync facade wraps the async engine in a managed event loop; it is a thin adapter, not a second implementation. Three consequences worth knowing:
+
+- **It owns its event loop**, created on `__enter__` and closed on `__exit__`. `asyncio.run` per call would tear down the connection pools between calls, and borrowing an ambient loop would make behavior depend on what the caller happened to be running.
+- **It refuses to start inside a running event loop**, raising `CONFIG_INVALID` and naming the async facade. Blocking on a future from the thread already driving that loop deadlocks, and a deadlock reports nothing at all.
+- **`query_stream` stays incremental.** Each event is pulled individually rather than the answer being buffered and replayed — measured first token at 0.91 s against a 51-event response. Buffering would make the return type honest and the feature pointless.
+
+The same `__main__` guard requirement applies here as in the async quickstart: ingestion parses in worker processes.
 
 ## Standalone components (use the pieces without the pipeline)
 
