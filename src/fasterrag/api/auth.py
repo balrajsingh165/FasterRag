@@ -232,6 +232,8 @@ class AuthMiddleware:
         """
         self.app = app
         self.enabled = settings.security.auth
+        self.multi_tenancy = settings.security.multi_tenancy
+        self.tenant_header = settings.security.tenant_header.lower().encode("latin-1")
         self._registry: KeyRegistry | None = None
         self._limiter: RateLimiter | None = None
 
@@ -316,9 +318,18 @@ class AuthMiddleware:
             )
             return
 
+        tenant = key.tenant
+        if self.multi_tenancy:
+            declared = _header(scope, self.tenant_header)
+            refusal = _tenant_refusal(key, declared)
+            if refusal is not None:
+                await self._refuse(scope, receive, send, refusal, path)
+                return
+            tenant = declared or key.tenant
+
         # Downstream reads the authenticated identity from here rather than re-parsing the
-        # header, so exactly one place decides who the caller is.
-        scope["state"] = {**scope.get("state", {}), "api_key": key}
+        # header, so exactly one place decides who the caller is and which tenant they are.
+        scope["state"] = {**scope.get("state", {}), "api_key": key, "tenant": tenant}
         await self.app(scope, receive, send)
 
     async def _refuse(
@@ -338,6 +349,39 @@ class AuthMiddleware:
         )
         response = problem_response(error, instance=path, headers=headers)
         await response(scope, receive, send)
+
+
+def _tenant_refusal(key: ApiKey, declared: str | None) -> FasterRagError | None:
+    """Return the error for a tenant mismatch, or ``None`` when the request is in bounds.
+
+    Three rules, and the third is the one that matters: a key **bound to a tenant** may only
+    act as that tenant. A key with no tenant is an operator credential and may act as any,
+    but must still say which — an unstated tenant would otherwise silently read and write
+    the untenanted namespace while multi-tenancy is supposedly on.
+    """
+    if declared is None:
+        return FasterRagError(
+            "security.multi_tenancy is on, so every request must carry a tenant header",
+            code=ErrorCode.TENANT_FORBIDDEN,
+        )
+    if key.tenant is not None and declared != key.tenant:
+        # Deliberately does not echo the key's tenant: that would let a caller enumerate
+        # which tenants exist by trying values and reading the error.
+        return FasterRagError(
+            "this key may not act for the requested tenant",
+            code=ErrorCode.TENANT_FORBIDDEN,
+        )
+    return None
+
+
+def _header(scope: Scope, name: bytes) -> str | None:
+    """Return a request header's value, or ``None`` when absent or blank."""
+    headers: Sequence[tuple[bytes, bytes]] = scope.get("headers", ())
+    for key, value in headers:
+        if key.lower() == name:
+            decoded = value.decode("latin-1").strip()
+            return decoded or None
+    return None
 
 
 def _bearer_token(scope: Scope) -> str | None:

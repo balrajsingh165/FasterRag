@@ -93,7 +93,7 @@ def generation(monkeypatch: pytest.MonkeyPatch, app: FastAPI) -> StubGeneration:
     monkeypatch.setattr(
         query_router,
         "build_generation",
-        lambda settings, adapter, router, cache=None, traces=None: service,
+        lambda settings, adapter, router, cache=None, traces=None, tenant=None: service,
     )
     return service
 
@@ -105,7 +105,7 @@ def install_generation(
     monkeypatch.setattr(
         query_router,
         "build_generation",
-        lambda settings, adapter, router, cache=None, traces=None: service,
+        lambda settings, adapter, router, cache=None, traces=None, tenant=None: service,
     )
     return service
 

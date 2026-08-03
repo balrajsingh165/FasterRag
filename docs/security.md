@@ -47,6 +47,16 @@ Enabling auth with no usable key **refuses to start**. Starting would refuse eve
 
 - `security.multi_tenancy: true` scopes collections and API keys to tenants; the tenant id arrives via `security.tenant_header` (default `X-Tenant-ID`) and must match the key's tenant.
 - **Isolation is enforced at the service layer** (the only writer of state): every collection operation, query, cache entry, trace, and metric is tenant-tagged; cross-tenant access is `TENANT_FORBIDDEN` regardless of endpoint.
+
+**Shipped so far** (TASK-0179): the tenant is resolved once, in `AuthMiddleware`, from the key's own tenant and the request header, and placed on the request scope — one place decides who the caller is, so a second reader cannot disagree with the first. Three rules:
+
+- A key **bound to a tenant** may act only as that tenant.
+- A key with **no tenant** is an operator credential and may act as any tenant, but must still name one. An unstated tenant would silently read and write the untenanted namespace while multi-tenancy is supposedly on.
+- A refusal **never echoes the key's own tenant**, or a caller could enumerate tenants by trying values and reading the error.
+
+**Semantic-cache isolation is the part that matters most, and it is enforced on the entry rather than the key.** Lookup compares the query vector against *every* stored entry, so a key prefix alone would not help — the scan ignores keys. Each entry carries its owning tenant and a mismatch is skipped, so a sufficiently similar question from one tenant can never return another's answer at a cache hit's latency with no error anywhere. The tenant is also part of the key, because otherwise two tenants asking the same question collide and the second write silently overwrites the first.
+
+**Not yet tenant-scoped** (TASK-0180): collection operations, the trace store, and metric labels. Queries and the semantic cache are scoped today; a deployment that needs storage-level separation should still use one collection per tenant until that lands.
 - Semantic-cache entries are tenant-scoped — a cache hit can never leak another tenant's answer.
 - Per-tenant token budgets (D9, `cost.per_tenant_token_budget`) bound spend per tenant.
 

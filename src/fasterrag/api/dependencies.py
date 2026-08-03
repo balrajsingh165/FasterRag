@@ -33,8 +33,10 @@ __all__ = [
     "CurrentCache",
     "CurrentEmbeddings",
     "CurrentSettings",
+    "CurrentTenant",
     "CurrentVectorDB",
     "JournalDep",
+    "current_tenant",
     "get_journal",
     "get_settings",
     "get_vector_db",
@@ -103,6 +105,17 @@ def shared_cache(request: Request) -> SemanticCache:
     return cache
 
 
+def current_tenant(request: Request) -> str | None:
+    """Return the tenant the auth middleware resolved for this request.
+
+    Read from the request scope rather than re-parsed from the header: exactly one place
+    decides who the caller is, and a second reader could disagree with the first.
+    """
+    tenant = request.scope.get("state", {}).get("tenant")
+    return str(tenant) if tenant else None
+
+
+CurrentTenant = Annotated[str | None, Depends(current_tenant)]
 CurrentSettings = Annotated[Settings, Depends(get_settings)]
 CurrentVectorDB = Annotated[VectorDBAdapter, Depends(get_vector_db)]
 CurrentEmbeddings = Annotated[TieringRouter, Depends(shared_embedding_router)]
@@ -124,6 +137,7 @@ def build_generation(
     router: TieringRouter,
     cache: SemanticCache | None = None,
     traces: TraceStore | None = None,
+    tenant: str | None = None,
 ) -> GenerationService:
     """Assemble the query path the CLI also assembles, so the two cannot diverge.
 
@@ -137,6 +151,7 @@ def build_generation(
         create_llm_adapter(settings),
         cache=cache,
         traces=traces,
+        tenant=tenant,
         embedder=router.default,
     )
 

@@ -28,6 +28,7 @@ from fasterrag.api.dependencies import (
     CurrentCache,
     CurrentEmbeddings,
     CurrentSettings,
+    CurrentTenant,
     CurrentVectorDB,
     build_generation,
     build_retrieval,
@@ -100,9 +101,12 @@ async def run_query(
     embeddings: CurrentEmbeddings,
     cache: CurrentCache,
     request: Request,
+    tenant: CurrentTenant,
 ) -> Any:
     """Answer a question, as one JSON body or as a stream of SSE events."""
-    service = build_generation(settings, adapter, embeddings, cache, get_trace_store(request))
+    service = build_generation(
+        settings, adapter, embeddings, cache, get_trace_store(request), tenant=tenant
+    )
 
     streaming = settings.llm.streaming if body.stream is None else body.stream
     if streaming:

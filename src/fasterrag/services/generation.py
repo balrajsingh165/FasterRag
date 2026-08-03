@@ -280,6 +280,7 @@ class GenerationService:
         cache: SemanticCache | None = None,
         embedder: EmbeddingAdapter | None = None,
         traces: TraceStore | None = None,
+        tenant: str | None = None,
         counter: TokenCounter | None = None,
         context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
     ) -> None:
@@ -299,6 +300,8 @@ class GenerationService:
                 by default and the second call is a hit on the first.
             traces: Persists each query's full trace for replay (D8). Omitted means no
                 trace is kept, which is what ``traces.store: false`` selects.
+            tenant: The tenant this service answers for. Scopes every semantic-cache read
+                and write, so a hit can never return another tenant's answer.
             counter: Token counter used for context budgeting.
             context_budget_tokens: Tokens available for context, which the caller sizes
                 from the model's window minus room for the answer.
@@ -310,6 +313,7 @@ class GenerationService:
         self.cache = cache
         self.embedder = embedder
         self.traces = traces
+        self.tenant = tenant
         self.counter = counter or EstimatingTokenCounter()
         self.context_budget_tokens = context_budget_tokens
         self._last_candidates: list[ScoredChunk] = []
@@ -556,7 +560,7 @@ class GenerationService:
         cache_ms = int((time.perf_counter() - started) * 1000)
 
         if vector is not None and self.cache is not None:
-            hit = await self.cache.lookup(vector)
+            hit = await self.cache.lookup(vector, tenant=self.tenant)
             if hit is not None:
                 return _cached_answer(hit, trace_id, cache_ms)
 
@@ -631,7 +635,7 @@ class GenerationService:
         )
 
         if vector is not None and self.cache is not None and prepared.mode == FULL_MODE:
-            await self.cache.store_response(question, vector, answer.as_dict())
+            await self.cache.store_response(question, vector, answer.as_dict(), tenant=self.tenant)
 
         self._store_trace(question, collection, filters, prepared, completion.text, answer)
         return answer
@@ -662,7 +666,7 @@ class GenerationService:
         cache_ms = int((time.perf_counter() - started) * 1000)
 
         if vector is not None and self.cache is not None:
-            hit = await self.cache.lookup(vector)
+            hit = await self.cache.lookup(vector, tenant=self.tenant)
             if hit is not None:
                 for event in _cached_events(_cached_answer(hit, trace_id, cache_ms)):
                     yield event
@@ -776,6 +780,7 @@ class GenerationService:
                     timings_ms=timings,
                     faithfulness=verdict.score,
                 ).as_dict(),
+                tenant=self.tenant,
             )
 
     async def close(self) -> None:

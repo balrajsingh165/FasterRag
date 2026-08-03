@@ -72,7 +72,9 @@ class CacheHit:
 MISS: dict[str, Any] = {"semantic_hit": False, "similarity": None}
 
 
-def _encode(question: str, vector: Sequence[float], response: dict[str, Any]) -> bytes:
+def _encode(
+    question: str, vector: Sequence[float], response: dict[str, Any], tenant: str | None = None
+) -> bytes:
     """Pack an entry as a length-prefixed vector followed by JSON.
 
     The vector is packed rather than serialized into the JSON because it is the part read on
@@ -80,14 +82,16 @@ def _encode(question: str, vector: Sequence[float], response: dict[str, Any]) ->
     cache slower than the pipeline it is short-circuiting.
     """
     packed = encode_vector(vector)
-    header = json.dumps({"question": question, "vector_bytes": len(packed)}).encode("utf-8")
+    header = json.dumps(
+        {"question": question, "vector_bytes": len(packed), "tenant": tenant}
+    ).encode("utf-8")
     return b"".join(
         (len(header).to_bytes(4, "little"), header, packed, json.dumps(response).encode("utf-8"))
     )
 
 
-def _decode(raw: bytes) -> tuple[str, list[float], dict[str, Any]] | None:
-    """Return the question, vector, and response in ``raw``, or ``None`` if malformed."""
+def _decode(raw: bytes) -> tuple[str, list[float], dict[str, Any], str | None] | None:
+    """Return the question, vector, response, and tenant in ``raw``, or ``None`` if malformed."""
     try:
         if len(raw) < 4:
             return None
@@ -104,7 +108,13 @@ def _decode(raw: bytes) -> tuple[str, list[float], dict[str, Any]] | None:
 
     if not isinstance(response, dict):
         return None
-    return str(header.get("question", "")), vector, response
+    tenant = header.get("tenant")
+    return (
+        str(header.get("question", "")),
+        vector,
+        response,
+        str(tenant) if tenant is not None else None,
+    )
 
 
 class SemanticCache:
@@ -131,11 +141,19 @@ class SemanticCache:
         """Return the similarity a stored query must clear to be reused."""
         return self.config.similarity_threshold
 
-    async def lookup(self, vector: Sequence[float]) -> CacheHit | None:
+    async def lookup(
+        self, vector: Sequence[float], *, tenant: str | None = None
+    ) -> CacheHit | None:
         """Return the closest stored response above the threshold, or ``None``.
 
         A backend failure is a miss, not an error: the query runs the full pipeline and the
         caller never learns the cache was unavailable (FMEA row 23).
+
+        # CRITICAL: entries belonging to another tenant are skipped, and the check is on the
+        # entry itself rather than on the key. Lookup compares vectors across every stored
+        # entry, so without this a sufficiently similar question from one tenant returns
+        # another tenant's answer — a cross-tenant disclosure with a cache hit's latency and
+        # no error anywhere. A key prefix alone would not help, because the scan ignores keys.
         """
         if not self.enabled:
             return None
@@ -155,7 +173,9 @@ class SemanticCache:
             decoded = _decode(raw)
             if decoded is None:
                 continue
-            question, stored, response = decoded
+            question, stored, response, owner = decoded
+            if owner != tenant:
+                continue
             similarity = cosine_similarity(vector, stored)
             if similarity >= self.threshold and (best is None or similarity > best.similarity):
                 best = CacheHit(response=response, similarity=similarity, question=question)
@@ -172,7 +192,12 @@ class SemanticCache:
         return best
 
     async def store_response(
-        self, question: str, vector: Sequence[float], response: dict[str, Any]
+        self,
+        question: str,
+        vector: Sequence[float],
+        response: dict[str, Any],
+        *,
+        tenant: str | None = None,
     ) -> None:
         """Remember ``response`` as the answer to anything close to ``vector``.
 
@@ -183,8 +208,12 @@ class SemanticCache:
             return
 
         try:
+            # The tenant is in the key as well as the entry: without it two tenants asking
+            # the same question collide and the second silently overwrites the first.
             await self.store.set(
-                f"sem:{question}", _encode(question, vector, response), ttl=self.config.ttl
+                f"sem:{tenant or '-'}:{question}",
+                _encode(question, vector, response, tenant),
+                ttl=self.config.ttl,
             )
         except CacheError as exc:
             self.stats.record_error()

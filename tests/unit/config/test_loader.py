@@ -180,21 +180,21 @@ def test_auth_is_accepted_now_that_it_is_actually_enforced(tmp_path: Path) -> No
     assert settings.security.auth
 
 
-def test_multi_tenancy_still_refuses_to_start(tmp_path: Path) -> None:
-    """Still unenforced, so it must still fail rather than report a protection it lacks."""
+@pytest.mark.usefixtures("env")
+def test_multi_tenancy_is_accepted_now_that_it_is_enforced(tmp_path: Path) -> None:
+    """It left the unenforced list with TASK-0179; AuthMiddleware refuses a tenant mismatch."""
     path = write_config(tmp_path, "security:\n  multi_tenancy: true\n")
 
-    with pytest.raises(ConfigError, match="enforced by nothing yet") as caught:
-        load_settings(path, env_file=None)
+    settings = load_settings(path, env_file=None)
 
-    assert "security.multi_tenancy" in caught.value.detail
-    assert caught.value.code is ErrorCode.CONFIG_INVALID
+    assert settings.security.multi_tenancy
 
 
-def test_the_failure_names_the_slice_that_will_enforce_it(tmp_path: Path) -> None:
-    path = write_config(tmp_path, "security:\n  multi_tenancy: true\n")
+def test_the_failure_names_what_is_missing(tmp_path: Path) -> None:
+    """A refusal that does not say what is unbuilt leaves the operator nowhere to go."""
+    path = write_config(tmp_path, "cost:\n  per_query_token_budget: 100\n")
 
-    with pytest.raises(ConfigError, match="TASK-0046"):
+    with pytest.raises(ConfigError, match="cost governor"):
         load_settings(path, env_file=None)
 
 
@@ -202,18 +202,13 @@ def test_every_unenforced_setting_is_listed_at_once(tmp_path: Path) -> None:
     """Reporting one at a time makes an operator restart four times to learn four things."""
     path = write_config(
         tmp_path,
-        "security:\n  multi_tenancy: true\n"
         "cost:\n  per_query_token_budget: 1000\n  per_tenant_token_budget: 5000\n",
     )
 
     with pytest.raises(ConfigError) as caught:
         load_settings(path, env_file=None)
 
-    for key in (
-        "security.multi_tenancy",
-        "cost.per_query_token_budget",
-        "cost.per_tenant_token_budget",
-    ):
+    for key in ("cost.per_query_token_budget", "cost.per_tenant_token_budget"):
         assert key in caught.value.detail
 
 
