@@ -32,6 +32,7 @@ __all__ = [
     "content_hash",
     "document_id",
     "job_id",
+    "normalise_source",
     "retrieval_config_hash",
     "text_hash",
 ]
@@ -69,9 +70,35 @@ def text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def normalise_source(source_uri: str) -> str:
+    r"""Return the canonical form of a source URI for identity purposes.
+
+    Two spellings of one local file must produce one document id. On Windows the filesystem
+    is case-insensitive and the separator is interchangeable, so ``d:\docs\a.md``,
+    ``D:\docs\a.md``, and ``D:/docs/a.md`` all name the same bytes — and hashing the raw
+    string gave each its own id, which defeated deduplication and left a corpus quietly
+    holding three copies of one document (TASK-0141).
+
+    URLs are left exactly as given. Their paths are case-*sensitive* by specification, so
+    folding one would merge two genuinely different resources.
+    """
+    if "://" in source_uri:
+        return source_uri
+
+    normalised = source_uri.replace("\\", "/")
+    drive, separator, rest = normalised.partition(":/")
+    if separator and len(drive) == 1 and drive.isalpha():
+        # A Windows path. The whole thing is case-insensitive, not just the drive letter.
+        return f"{drive.lower()}:/{rest}".lower()
+    return normalised
+
+
 def document_id(source_uri: str, tenant: str | None = None) -> str:
-    """Return the deterministic id for a source document."""
-    return f"{_DOCUMENT_PREFIX}{_digest(source_uri, tenant or '')[:_ID_LENGTH]}"
+    """Return the deterministic id for a source document.
+
+    The source is normalised first, so the same file named two ways is one document.
+    """
+    return f"{_DOCUMENT_PREFIX}{_digest(normalise_source(source_uri), tenant or '')[:_ID_LENGTH]}"
 
 
 def chunk_id(document: str, chunk_index: int, chunker_hash: str) -> str:

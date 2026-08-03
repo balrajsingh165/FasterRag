@@ -253,7 +253,7 @@ security:
 | `cache.semantic` | bool | `false` | — | Semantic response cache keyed by query-embedding similarity. |
 | `cache.similarity_threshold` | float | `0.95` | 0.90–0.99 | Cosine similarity above which a cached response is served. Typical useful range ~0.92–0.97. |
 | `cache.ttl` | int | `3600` | ≥ 1 (seconds) | Entry lifetime. Corpus-change events invalidate affected entries immediately regardless of TTL. |
-| `cache.backend` | str | `memory` | one of `memory`, `redis` | Semantic-cache storage backend. |
+| `cache.backend` | str | `memory` | one of `memory`, `disk`, `redis` | Semantic-cache storage backend. Use `disk` from the CLI: a `memory` cache dies with each short-lived process, so every invocation would pay for a query embedding and then discard the answer. `redis` is accepted by the schema but not implemented (TASK-0124) and fails fast at startup. |
 
 ## `workers`
 

@@ -404,12 +404,19 @@ class GenerationSettings(Section):
 
 
 class CacheSettings(Section):
-    """Semantic response cache keyed by query-embedding similarity."""
+    """Semantic response cache keyed by query-embedding similarity.
+
+    ``disk`` is accepted here as well as on the embedding cache. Without it the semantic
+    cache was unusable from the CLI: ``memory`` dies with each short-lived process, so every
+    ``fasterrag query`` paid for a query embedding, stored the answer, and threw it away —
+    strictly worse than no cache — and ``redis`` is not implemented. A disk store is the only
+    backend that survives between two invocations of a command-line tool (TASK-0127).
+    """
 
     semantic: bool = False
     similarity_threshold: Annotated[float, Field(ge=0.90, le=0.99)] = 0.95
     ttl: Annotated[int, Field(ge=1)] = 3600
-    backend: Literal["memory", "redis"] = "memory"
+    backend: Literal["memory", "disk", "redis"] = "memory"
 
 
 class WorkersSettings(Section):

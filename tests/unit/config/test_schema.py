@@ -199,3 +199,10 @@ def test_unreferenced_env_vars_are_not_required() -> None:
         }
     )
     assert set(settings.referenced_env_vars()) == {"FASTERRAG_API_KEY"}
+
+
+def test_the_semantic_cache_accepts_a_disk_backend() -> None:
+    """A memory cache dies with each CLI process, so it can never hit across invocations."""
+    settings = Settings.model_validate({"cache": {"backend": "disk"}})
+
+    assert settings.cache.backend == "disk"
