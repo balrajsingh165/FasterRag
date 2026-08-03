@@ -30,6 +30,7 @@ from fasterrag.cli.commands.diagnostics import (
 )
 from fasterrag.cli.commands.infrastructure import run_estimate, run_provision
 from fasterrag.cli.commands.pipeline import run_index, run_ingest, run_query
+from fasterrag.cli.commands.portability import run_export, run_import
 from fasterrag.cli.commands.processes import run_serve, run_worker
 from fasterrag.cli.commands.replay import run_replay
 from fasterrag.cli.commands.traces import run_traces
@@ -68,6 +69,10 @@ _SUBCOMMAND_HANDLERS: Final[dict[tuple[str, str], Handler]] = {
 
 def _resolve(args: argparse.Namespace) -> Handler | None:
     """Return the handler for the parsed command, or ``None`` if there is none."""
+    if args.command == "export":
+        return run_export
+    if args.command == "import":
+        return run_import
     if args.command == "index":
         return run_index
     if args.command == "traces":

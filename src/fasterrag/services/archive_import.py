@@ -24,10 +24,14 @@ import hashlib
 import json
 import tarfile
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final
 
+from fasterrag.adapters.embeddings.tiering import TieringRouter
+from fasterrag.adapters.vectordb.base import CollectionSpec, Point, VectorDBAdapter
+from fasterrag.config.schema import Settings
+from fasterrag.core.retrieval.bm25 import encode_document
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.archive import (
@@ -42,10 +46,25 @@ from fasterrag.services.archive import (
 
 __all__ = [
     "ArchiveReader",
+    "ImportCounts",
     "VerificationError",
+    "import_archive",
     "open_archive",
     "supported_major",
 ]
+
+
+@dataclass(slots=True)
+class ImportCounts:
+    """What an import wrote."""
+
+    documents: int = 0
+    chunks: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        """Return the machine-readable form."""
+        return {"documents": self.documents, "chunks": self.chunks}
+
 
 _REQUIRED_MEMBERS: Final[frozenset[str]] = frozenset(
     {MANIFEST_NAME, CHECKSUMS_NAME, DOCUMENTS_NAME, CHUNKS_NAME, LOCK_NAME}
@@ -294,3 +313,163 @@ def _verify_references(path: Path, reader: ArchiveReader) -> None:
             raise VerificationError(
                 f"{path} has a vector for chunk {chunk_id!r}, which the archive does not contain"
             )
+
+
+async def import_archive(
+    settings: Settings,
+    adapter: VectorDBAdapter,
+    reader: ArchiveReader,
+    *,
+    collection: str,
+    reembed: bool = False,
+    router: TieringRouter | None = None,
+    batch_size: int = 64,
+) -> ImportCounts:
+    """Write a verified archive into a collection.
+
+    Args:
+        settings: Validated configuration.
+        adapter: Backend to write into.
+        reader: An archive that has already passed :func:`open_archive`.
+        collection: Target collection, created if absent.
+        reembed: Ignore the archived vectors and embed the chunk text under the current
+            configuration. Always legal; the vector-copy path is not.
+        router: Embedding router, required when ``reembed`` is set.
+        batch_size: Points per upsert.
+
+    Returns:
+        What was written.
+
+    Raises:
+        FasterRagError: With ``CONFLICT`` when a vector copy is impossible, or with
+            ``VALIDATION_FAILED`` when re-embedding was requested without a router.
+    """
+    if reembed and router is None:
+        raise FasterRagError(
+            "re-embedding needs an embedding router; none was supplied",
+            code=ErrorCode.VALIDATION_FAILED,
+            retryable=False,
+        )
+
+    dimensions = settings.embeddings.dimensions
+    if reembed:
+        assert router is not None
+        model, model_version = router.default.model, router.default.model_version
+        dimensions = router.default.dimensions or dimensions
+    else:
+        archived = reader.embedding
+        model = str(archived.get("model", ""))
+        model_version = str(archived.get("model_version", ""))
+        reader.require_vector_copy_compatible(
+            model=model, model_version=model_version, dimensions=None
+        )
+        dimensions = int(archived.get("dimensions", 0)) or dimensions
+
+    if not dimensions:
+        raise FasterRagError(
+            "the target vector size is unknown, so the collection cannot be created; set "
+            "embeddings.dimensions or import with re-embedding enabled",
+            code=ErrorCode.VALIDATION_FAILED,
+            retryable=False,
+        )
+
+    await adapter.create_collection(
+        CollectionSpec(
+            name=collection,
+            dimensions=dimensions,
+            distance=settings.vector_db.collection.distance,
+            sparse=settings.retrieval.hybrid,
+        )
+    )
+
+    vectors = {str(row["chunk_id"]): row["vector"] for row in reader.vectors()}
+    counts = ImportCounts()
+    batch: list[Point] = []
+
+    for row in reader.chunks():
+        chunk_id = str(row.get("chunk_id", ""))
+        text = str(row.get("text", ""))
+
+        if reembed:
+            vector: list[float] = []
+        else:
+            stored = vectors.get(chunk_id)
+            if stored is None:
+                raise FasterRagError(
+                    f"the archive has no vector for chunk {chunk_id!r}; import with "
+                    "re-embedding enabled",
+                    code=ErrorCode.CONFLICT,
+                    retryable=False,
+                )
+            vector = [float(value) for value in stored]
+
+        batch.append(
+            Point(
+                point_id=chunk_id,
+                collection=collection,
+                vector=vector,
+                payload=_restored_payload(row, model=model, model_version=model_version),
+                sparse=encode_document(text) if settings.retrieval.hybrid else None,
+            )
+        )
+
+        if len(batch) >= batch_size:
+            counts.chunks += await _flush(adapter, batch, router if reembed else None)
+            batch = []
+
+    if batch:
+        counts.chunks += await _flush(adapter, batch, router if reembed else None)
+
+    counts.documents = sum(1 for _ in reader.documents())
+    _logger.info(
+        "imported a portable archive",
+        extra={
+            "path": str(reader.path),
+            "collection": collection,
+            "reembed": reembed,
+            **counts.as_dict(),
+        },
+    )
+    return counts
+
+
+def _restored_payload(row: dict[str, Any], *, model: str, model_version: str) -> dict[str, Any]:
+    """Rebuild the stored payload from an archived chunk row.
+
+    The archived metadata is restored first and the named fields written over it, so a
+    metadata key that collides with a named one cannot shadow the real value.
+    """
+    payload: dict[str, Any] = dict(row.get("metadata") or {})
+    payload.update(
+        {
+            "document_id": row.get("document_id", ""),
+            "text": row.get("text", ""),
+            "span": row.get("span") or {"start": 0, "end": 0},
+            "embedding_model": model,
+            "embedding_model_version": model_version,
+        }
+    )
+    if row.get("page") is not None:
+        payload["page"] = row["page"]
+    if row.get("context_prefix") is not None:
+        payload["context_prefix"] = row["context_prefix"]
+    return payload
+
+
+async def _flush(adapter: VectorDBAdapter, batch: list[Point], router: TieringRouter | None) -> int:
+    """Embed when required, then write one batch.
+
+    Embedding happens per batch rather than per chunk: a provider call for every chunk turns
+    an import of a large corpus into a rate-limit incident.
+    """
+    if router is not None:
+        result = await router.default.embed_documents(
+            [str(point.payload["text"]) for point in batch]
+        )
+        batch = [
+            replace(point, vector=vector)
+            for point, vector in zip(batch, result.vectors, strict=True)
+        ]
+
+    written = await adapter.upsert(batch)
+    return written.upserted

@@ -96,23 +96,39 @@ TASK-0174 ✅ made the wait *visible* — the loader now warns, names the cost, 
 
 ---
 
-## B7 — Built, working, unratified
+## B7 — No running Docker on this machine (TASK-0178)
+
+Docker Desktop stopped partway through 2026-08-03 and has not come back. Everything that needs a live backend is unverifiable until it does — not blocked on a decision, just on a daemon.
+
+Nothing below is *broken*; each is **built and unit-tested but never run against the real thing**, and that distinction is the point of listing them.
+
+| | Task | What cannot be confirmed |
+|---|---|---|
+| **B7.1** | TASK-0178 | The Langfuse trace export. The wire format is verified against a local HTTP server — path, auth header, batch shape, and 207/401/unreachable handling — but no real Langfuse has accepted a batch, so field *names* are checked against the documented API rather than the server. |
+| **B7.2** | TASK-0079 | `iterate_points` has never walked a live collection, and no archive has been exported from or imported into a real Qdrant. The D11 round-trip acceptance test (Qdrant → Qdrant vector copy, Qdrant → pgvector re-embed) cannot run at all. |
+| **B7.3** | — | The Grafana and Langfuse provisioners, the `/readyz` failure path, and every end-to-end query check that was passing earlier in the session. |
+
+**What is needed:** start Docker Desktop. Everything else is scripted and ready.
+
+---
+
+## B8 — Built, working, unratified
 
 Not blocked — *unreviewed*. Each resolved an ambiguity no document covered, and each should be confirmed or corrected before it hardens into precedent by default.
 
 | | Task | What was decided unilaterally |
 |---|---|---|
-| **B7.1** | TASK-0123 | Grounded-or-refuse while streaming. A token cannot be unsaid once sent, so with the flag on, generation buffers and grades before emitting any `token` event — trading time-to-first-token for the guarantee. |
-| **B7.2** | TASK-0126 | `VectorDBAdapter` gained `list_collections()` and `drop_collection()` with a vendor-neutral `CollectionInfo`. Every future adapter must implement them. |
-| **B7.3** | TASK-0133 | `VectorDBAdapter` gained `set_alias`, `alias_target`, `delete_alias`. Aliases are the primitive blue/green reindexing rests on; not every vendor has them. |
-| **B7.4** | TASK-0131 | `fasterrag traces list\|show` was added beyond `cli-reference.md`, because a 32-hex trace id is unreachable without a way to list recent ones. Now documented; confirm the addition. |
-| **B7.5** | TASK-0115 | `sentence-transformers` ships as the `huggingface` extra rather than core, because it pulls a multi-gigabyte stack. Confirm the trade. |
+| **B8.1** | TASK-0123 | Grounded-or-refuse while streaming. A token cannot be unsaid once sent, so with the flag on, generation buffers and grades before emitting any `token` event — trading time-to-first-token for the guarantee. |
+| **B8.2** | TASK-0126 | `VectorDBAdapter` gained `list_collections()` and `drop_collection()` with a vendor-neutral `CollectionInfo`. Every future adapter must implement them. |
+| **B8.3** | TASK-0133 | `VectorDBAdapter` gained `set_alias`, `alias_target`, `delete_alias`. Aliases are the primitive blue/green reindexing rests on; not every vendor has them. |
+| **B8.4** | TASK-0131 | `fasterrag traces list\|show` was added beyond `cli-reference.md`, because a 32-hex trace id is unreachable without a way to list recent ones. Now documented; confirm the addition. |
+| **B8.5** | TASK-0115 | `sentence-transformers` ships as the `huggingface` extra rather than core, because it pulls a multi-gigabyte stack. Confirm the trade. |
 
 ---
 
-## B8 — Maintainer actions outside the repository
+## B9 — Maintainer actions outside the repository
 
 | | Task | Action |
 |---|---|---|
-| **B8.1** | TASK-0098 | Enable branch protection on `main` — require PRs, block direct pushes. |
-| **B8.2** | TASK-0111 | Tag the landed slice boundaries `v0.1.0-s1` and `v0.2.0-s2`. |
+| **B9.1** | TASK-0098 | Enable branch protection on `main` — require PRs, block direct pushes. |
+| **B9.2** | TASK-0111 | Tag the landed slice boundaries `v0.1.0-s1` and `v0.2.0-s2`. |

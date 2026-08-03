@@ -100,13 +100,16 @@ def test_an_unknown_command_is_a_usage_error() -> None:
     assert exit_info.value.code == 2
 
 
-def test_a_pending_command_explains_which_slice_ships_it(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    code = run(["export"])
+def test_nothing_is_pending_without_a_task_to_name() -> None:
+    """A pending command must say which slice ships it; an unnamed one is just missing.
 
-    assert code == ExitCode.USAGE
-    assert "TASK-0079" in capsys.readouterr().err
+    `export` and `import` left this list with TASK-0079. The mechanism stays for the next
+    command that ships behind a slice.
+    """
+    from fasterrag.cli.parser import PENDING_COMMANDS
+
+    for command, task in PENDING_COMMANDS.items():
+        assert "TASK-" in task, command
 
 
 def test_valid_config_validates(config: str, capsys: pytest.CaptureFixture[str]) -> None:

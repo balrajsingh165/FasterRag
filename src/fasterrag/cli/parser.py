@@ -49,10 +49,7 @@ class _StoreTrueNoDefault(argparse.Action):
 
 # TODO: each entry ships with the task named. Listed here so `fasterrag <name>` explains
 # which slice implements it rather than printing a bare "invalid choice".
-PENDING_COMMANDS: Final[dict[str, str]] = {
-    "export": "TASK-0079 (portability archives, D11)",
-    "import": "TASK-0079 (portability archives, D11)",
-}
+PENDING_COMMANDS: Final[dict[str, str]] = {}
 
 
 def _add_global_flags(parser: argparse.ArgumentParser, *, root: bool = False) -> None:
@@ -265,6 +262,28 @@ def _add_benchmark(subparsers: argparse._SubParsersAction[argparse.ArgumentParse
     parser.add_argument("--ledger", action="store_true", help="emit ledger-formatted entries")
 
 
+def _add_portability(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register ``export`` and ``import`` (D11)."""
+    export = subparsers.add_parser("export", help="write a collection to a portable archive")
+    _add_global_flags(export)
+    export.add_argument("--out", required=True, help="archive path; .fragx is appended")
+    export.add_argument(
+        "--include-vectors",
+        action="store_true",
+        help="carry the vectors, enabling a vector-copy import into a matching model",
+    )
+
+    importer = subparsers.add_parser("import", help="import a portable archive")
+    _add_global_flags(importer)
+    importer.add_argument("archive", help="the .fragx to import")
+    importer.add_argument(
+        "--reembed",
+        action="store_true",
+        help="ignore the archived vectors and embed under the current configuration",
+    )
+    importer.add_argument("--target-collection", default=None, help="import into this collection")
+
+
 def _add_config(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Register ``config init`` and ``config validate``."""
     parser = subparsers.add_parser("config", help="configuration tools")
@@ -317,6 +336,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_benchmark(subparsers)
     _add_replay(subparsers)
     _add_traces(subparsers)
+    _add_portability(subparsers)
     _add_config(subparsers)
 
     for name, task in PENDING_COMMANDS.items():
