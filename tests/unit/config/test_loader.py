@@ -170,14 +170,24 @@ def test_default_settings_do_not_warn(tmp_path: Path, caplog: pytest.LogCaptureF
     assert caplog.text == ""
 
 
-def test_enabling_auth_that_nothing_enforces_refuses_to_start(tmp_path: Path) -> None:
-    """An open API reporting itself authenticated is worse than a startup failure."""
+@pytest.mark.usefixtures("env")
+def test_auth_is_accepted_now_that_it_is_actually_enforced(tmp_path: Path) -> None:
+    """It left the unenforced list with TASK-0046; AuthMiddleware enforces it for real."""
     path = write_config(tmp_path, "security:\n  auth: true\n")
+
+    settings = load_settings(path, env_file=None)
+
+    assert settings.security.auth
+
+
+def test_multi_tenancy_still_refuses_to_start(tmp_path: Path) -> None:
+    """Still unenforced, so it must still fail rather than report a protection it lacks."""
+    path = write_config(tmp_path, "security:\n  multi_tenancy: true\n")
 
     with pytest.raises(ConfigError, match="enforced by nothing yet") as caught:
         load_settings(path, env_file=None)
 
-    assert "security.auth" in caught.value.detail
+    assert "security.multi_tenancy" in caught.value.detail
     assert caught.value.code is ErrorCode.CONFIG_INVALID
 
 
@@ -192,7 +202,7 @@ def test_every_unenforced_setting_is_listed_at_once(tmp_path: Path) -> None:
     """Reporting one at a time makes an operator restart four times to learn four things."""
     path = write_config(
         tmp_path,
-        "security:\n  auth: true\n  multi_tenancy: true\n"
+        "security:\n  multi_tenancy: true\n"
         "cost:\n  per_query_token_budget: 1000\n  per_tenant_token_budget: 5000\n",
     )
 
@@ -200,7 +210,6 @@ def test_every_unenforced_setting_is_listed_at_once(tmp_path: Path) -> None:
         load_settings(path, env_file=None)
 
     for key in (
-        "security.auth",
         "security.multi_tenancy",
         "cost.per_query_token_budget",
         "cost.per_tenant_token_budget",

@@ -26,6 +26,7 @@ from fasterrag import __version__
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.api import admin, collections, health, ingest, metrics, query, traces
+from fasterrag.api.auth import AuthMiddleware
 from fasterrag.api.problems import install_exception_handlers
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
 from fasterrag.config.schema import Settings
@@ -221,8 +222,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     registry.register(_vector_db_check(app))
     app.state.readiness = registry
 
+    # CRITICAL: order matters and is the reverse of the call order. Starlette wraps in
+    # reverse, so listing auth last runs it *first* — an unauthenticated request is refused
+    # before it reaches metrics or a handler, and a rejected key cannot inflate per-endpoint
+    # counters or leave a trace id in the logs of an endpoint it never reached.
     app.add_middleware(metrics.MetricsMiddleware)
     app.add_middleware(CorrelationIdMiddleware)
+    app.add_middleware(AuthMiddleware, settings=resolved)
     install_exception_handlers(app)
     app.include_router(health.router)
     app.include_router(ingest.router)

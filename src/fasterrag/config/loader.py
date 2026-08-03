@@ -146,8 +146,8 @@ def _reject_unenforced_settings(settings: Settings) -> None:
     enabled: list[str] = []
 
     # TODO: each of these is removed from this list by the slice named beside it.
-    if settings.security.auth:
-        enabled.append("  - security.auth (enforcement ships with TASK-0046)")
+    # security.auth left this list with TASK-0046: it is now enforced by AuthMiddleware,
+    # which also refuses to start without a usable key.
     if settings.security.multi_tenancy:
         enabled.append("  - security.multi_tenancy (enforcement ships with TASK-0046)")
     if settings.cost.per_query_token_budget:

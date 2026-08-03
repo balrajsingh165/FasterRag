@@ -20,8 +20,26 @@
 ## 2. API authentication
 
 - `security.auth: true` requires `Authorization: Bearer <key>` on every control-plane endpoint (API); the CLI and library read the same key from the environment when pointed at a secured server.
+
+**Key format.** Keys live in the variable named by `security.api_key_env` (default `FASTERRAG_API_KEY`), never in `config.yaml`. Keys are separated by `;` and scopes within a key by `,`:
+
+```
+FASTERRAG_API_KEY=secret-one:query,ingest:acme; secret-two:admin
+```
+
+Each entry is `<secret>[:<scopes>[:<tenant>]]`. A bare secret with no scopes gets all four — the single-operator case. The two separators differ deliberately: with a comma for both, `a:query,ingest` reads equally as one key with two scopes or as two keys, and the parser would have to guess.
+
+**Enforced as ASGI middleware, not a per-route dependency.** A dependency has to be attached to each route, so forgetting one leaves an endpoint silently public. Middleware sees every request, so a newly mounted router is protected by default and a gap must be introduced deliberately. For the same reason an **unmapped path requires `admin`** rather than defaulting to open.
+
+**`/healthz`, `/readyz`, and `/openapi.json` stay unauthenticated.** A load balancer probes them without credentials, and a health check that needs a key reports the service as down whenever the key is wrong — turning a credential mistake into an outage. Neither reveals corpus content. **`/metrics` is not public**: it exposes per-endpoint volumes and costs, so it requires `admin` like any other surface.
+
+Auth runs **before** metrics and correlation-id middleware, so a rejected request cannot inflate per-endpoint counters or leave a trace id in the logs of an endpoint it never reached.
+
+Key comparison uses `secrets.compare_digest` against every configured key with no early exit, so response timing does not reveal how much of a guess was correct.
+
+Enabling auth with no usable key **refuses to start**. Starting would refuse every request afterwards, which reads as a broken deployment rather than a configuration mistake.
 - **Keys carry scopes**: `ingest`, `query`, `collections`, `admin`. Admin endpoints (provisioning, export/import, collection delete) require `admin`.
-- **Rate limiting is on by default once auth is enabled** (`security.rate_limit_per_minute`, per key), returning `429` + `Retry-After`.
+- **Rate limiting is on by default once auth is enabled** (`security.rate_limit_per_minute`, per key), returning `429` + `Retry-After`. Keyed per API key, not per IP — a limit keyed on something the caller chooses is not a limit. It is an in-process fixed window, correct for a single server and **not claimed to hold across replicas**: a distributed limiter needs shared state this deployment does not have (TASK-0124).
 - Failed auth returns RFC 9457 problems (`AUTH_MISSING`/`AUTH_INVALID`/`AUTH_SCOPE`) with no information about whether a key exists.
 - TLS terminates at a reverse proxy in front of the API ([deployment.md](deployment.md)); plain HTTP is acceptable only on loopback/dev.
 
