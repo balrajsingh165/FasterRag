@@ -18,7 +18,7 @@ scalar (equality) or to a single-operator object:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
@@ -358,6 +358,24 @@ class VectorDBAdapter(ABC):
 
         Upserts are idempotent: the same points written twice leave the same index
         state, which is what makes queue replays and crash recovery safe.
+        """
+
+    @abstractmethod
+    def iterate_points(
+        self, collection: str, *, with_vectors: bool = False, batch_size: int = 256
+    ) -> AsyncIterator[Point]:
+        """Yield every point in a collection, in batches.
+
+        The read side of portability (D11): an archive carries chunk text and optionally the
+        vectors, and both live in the index rather than anywhere fasterRag owns.
+
+        An async *iterator* rather than a list, because a collection is exactly the thing
+        that does not fit in memory — the whole project targets corpora where materialising
+        every chunk to build an archive would be the one operation that cannot run on the
+        machine that holds the data.
+
+        Ordering is unspecified. No backend guarantees a stable scan order across
+        implementations, and an archive does not need one: every record carries its id.
         """
 
     @abstractmethod

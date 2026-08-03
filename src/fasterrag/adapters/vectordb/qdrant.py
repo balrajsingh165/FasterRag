@@ -556,6 +556,56 @@ class QdrantAdapter(VectorDBAdapter):
                     retryable=False,
                 )
 
+    async def iterate_points(
+        self, collection: str, *, with_vectors: bool = False, batch_size: int = 256
+    ) -> AsyncIterator[Point]:
+        """Yield every point in a collection using Qdrant's scroll cursor.
+
+        Scroll rather than a large search: search ranks against a query vector and caps at a
+        limit, while scroll is the only operation that walks a whole collection. The cursor
+        is followed until it comes back empty, so a collection larger than memory streams
+        rather than materialising.
+        """
+        named = await self._uses_named_vectors(collection)
+        offset: models.ExtendedPointId | None = None
+
+        while True:
+            async with self._mapped_errors("iterate_points"):
+                records, offset = await self.client.scroll(
+                    collection_name=collection,
+                    limit=batch_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=with_vectors,
+                )
+
+            for record in records:
+                yield self._to_point(record, collection, named=named)
+
+            if offset is None:
+                return
+
+    def _to_point(self, record: models.Record, collection: str, *, named: bool) -> Point:
+        """Convert a scrolled record into the vendor-neutral point type."""
+        payload = dict(record.payload or {})
+        point_id = payload.pop(POINT_ID_PAYLOAD_KEY, None)
+
+        stored: Any = record.vector
+        if named and isinstance(stored, dict):
+            stored = stored.get(DENSE_VECTOR_NAME)
+        vector: list[float] = (
+            cast("list[float]", stored)
+            if isinstance(stored, list) and all(isinstance(value, int | float) for value in stored)
+            else []
+        )
+
+        return Point(
+            point_id=str(point_id) if point_id is not None else str(record.id),
+            collection=collection,
+            vector=vector,
+            payload=payload,
+        )
+
     async def search(self, query: SearchQuery) -> list[ScoredPoint]:
         """Return the nearest points, pushing any metadata filter into Qdrant."""
         query_filter = to_qdrant_filter(query.filters)

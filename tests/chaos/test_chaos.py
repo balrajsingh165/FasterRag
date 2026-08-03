@@ -101,6 +101,14 @@ class StoppedBackend(VectorDBAdapter):
             raise self._fail()
         return UpsertResult(upserted=len(points))
 
+    async def iterate_points(
+        self, collection: str, *, with_vectors: bool = False, batch_size: int = 256
+    ) -> AsyncIterator[Point]:
+        """Yield nothing; these doubles hold no scannable state."""
+        empty: list[Point] = []
+        for point in empty:
+            yield point
+
     async def search(self, query: SearchQuery) -> list[ScoredPoint]:
         if self.stopped:
             raise self._fail()

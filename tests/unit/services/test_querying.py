@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
@@ -96,6 +97,14 @@ class ScriptedAdapter(VectorDBAdapter):
 
     async def upsert(self, points: list[Point]) -> UpsertResult:
         return UpsertResult(upserted=len(points))
+
+    async def iterate_points(
+        self, collection: str, *, with_vectors: bool = False, batch_size: int = 256
+    ) -> AsyncIterator[Point]:
+        """Yield nothing; these doubles hold no scannable state."""
+        empty: list[Point] = []
+        for point in empty:
+            yield point
 
     async def search(self, query: SearchQuery) -> list[ScoredPoint]:
         self.queries.append(query)
