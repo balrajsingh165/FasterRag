@@ -6,7 +6,7 @@
 >
 > | Shipped | Partial | Not yet |
 > |---|---|---|
-> | Config loader (fail-fast) · Qdrant adapter (docker/external/remote) + contract suite · `doctor` · parsing (PDF/OCR, HTML, MD, DOCX, tabular) · five chunkers with property-tested invariants · checkpointed ingestion with dedup + DLQ · hybrid retrieval + RRF(k=60) · cross-encoder rerank · SSE generation with span citations · grounded-or-refuse · embedding + semantic caches · CLI · REST routers · trace store + replay · index lockfile + drift · blue/green reindex + rollback · chaos suite · benchmark suite + ledger · autopilot (suggest-only) · Langfuse/Grafana provisioning | Degradation ladder (2 of 3 rungs; no circuit breaker yet) · eval harness (retrieval metrics; faithfulness pending) · cost estimator (budgets not enforced) · OTel spans recorded locally (OTLP export pending) | Security layer (auth/tenancy/rate limits — config validates but is **not enforced**) · `FasterRag` facade + plugin entry points · D11 export/import · Milvus/Weaviate/Pinecone/pgvector/Chroma adapters · observability dashboard (S14) · **citable benchmarks — the [ledger](docs/benchmarks.md) holds only non-citable entries until the isolated-hardware baseline run** |
+> | Config loader (fail-fast) · Qdrant adapter (docker/external/remote) + contract suite · `doctor` · parsing (PDF/OCR, HTML, MD, DOCX, tabular) · five chunkers with property-tested invariants · checkpointed ingestion with dedup + DLQ from `path`/`url`/`inline` sources · hybrid retrieval + RRF(k=60) · cross-encoder rerank · SSE generation with span citations · grounded-or-refuse · embedding + semantic caches · eval harness (recall/MRR/nDCG + faithfulness) · `FasterRag` facade (async + sync) + entry-point plugins · CLI · REST routers · trace store + replay · index lockfile + drift · blue/green reindex + rollback · chaos suite · benchmark suite + ledger · autopilot (suggest-only) · Langfuse/Grafana provisioning | Degradation ladder (2 of 3 rungs; no circuit breaker yet) · cost estimator (budgets not enforced) · OTel spans recorded locally (OTLP export pending) | Security layer (auth/tenancy/rate limits — config validates but is **not enforced**) · D11 export/import · Milvus/Weaviate/Pinecone/pgvector/Chroma adapters · observability dashboard (S14) · **citable benchmarks — the [ledger](docs/benchmarks.md) holds only non-citable entries until the isolated-hardware baseline run** |
 
 ---
 
@@ -16,7 +16,7 @@ fasterRag is a **framework**, not a demo: you adopt it three ways, all backed by
 
 | Surface | How | For |
 |---|---|---|
-| **Python package** *(partial — standalone components shipped; `FasterRag` facade pending)* | `pip install -e .` → `from fasterrag.chunking import RecursiveChunker`, `from fasterrag.retrieval import rrf_fuse`, … | Embedding RAG in your own application; using components standalone (chunkers, hybrid fusion, evals) |
+| **Python package** *(shipped — `FasterRag` facade async + sync, standalone components, entry-point plugins)* | `pip install -e .` → `from fasterrag import FasterRag`, or piecemeal: `from fasterrag.chunking import RecursiveChunker` | Embedding RAG in your own application; using components standalone (chunkers, hybrid fusion, evals) |
 | **CLI** *(shipped)* | `fasterrag ingest / query / doctor / estimate / benchmark / replay ...` | Operations, scripting, CI |
 | **REST API** *(shipped)* | `fasterrag serve` → `/v1/ingest`, `/v1/query` (SSE streaming) | Services and non-Python clients |
 
@@ -42,10 +42,10 @@ fasterrag ingest ./my-docs/ --watch
 fasterrag query "What does the vendor agreement say about termination?"
 ```
 
-Or in Python — the standalone components work today (`fasterrag.parsing`, `.chunking`, `.retrieval`, `.rerank`, `.evals`); the engine facade below is the documented target surface and is **not yet implemented** ([docs/python-api.md](docs/python-api.md)):
+Or in Python — the `FasterRag` facade (async here; a blocking twin lives at `fasterrag.sync`) and the standalone components (`fasterrag.parsing`, `.chunking`, `.retrieval`, `.rerank`, `.evals`) are both shipped ([docs/python-api.md](docs/python-api.md)):
 
 ```python
-from fasterrag import FasterRag  # pending — see docs/python-api.md status table
+from fasterrag import FasterRag
 
 async with FasterRag.from_config("config.yaml") as rag:
     await (await rag.ingest(["./my-docs/"])).wait()
