@@ -26,7 +26,11 @@ from typing import Any, Final
 
 from fasterrag import __version__
 from fasterrag.config.schema import Settings
-from fasterrag.core.identity import chunker_config_hash, retrieval_config_hash
+from fasterrag.core.identity import (
+    IDENTITY_VERSION,
+    chunker_config_hash,
+    retrieval_config_hash,
+)
 from fasterrag.observability.logging import get_logger
 
 __all__ = [
@@ -61,6 +65,7 @@ class IndexLock:
     chunk_size: int
     overlap: int
     contextual_enrichment: bool
+    identity_version: int = IDENTITY_VERSION
     document_hashes: dict[str, str] = field(default_factory=dict)
     built_at: str = ""
     built_by: str = ""
@@ -70,6 +75,7 @@ class IndexLock:
         """Return the persisted form."""
         return {
             "lock_version": self.lock_version,
+            "identity_version": self.identity_version,
             "collection": self.collection,
             "config_hash": self.config_hash,
             "embedding_model": self.embedding_model,
@@ -115,6 +121,11 @@ class IndexLock:
             built_at=str(payload.get("built_at", "")),
             built_by=str(payload.get("built_by", "")),
             lock_version=str(payload.get("lock_version", LOCK_VERSION)),
+            # CRITICAL: defaults to 1, not to the current version. A lockfile written before
+            # this field existed was built under the original id scheme, and defaulting to
+            # "whatever is current" would silently declare it up to date — hiding exactly the
+            # mismatch this field was added to surface.
+            identity_version=int(payload.get("identity_version", 1)),
         )
 
 
@@ -225,6 +236,10 @@ def detect_drift(
     fields: list[str] = []
     details: list[dict[str, Any]] = []
 
+    # Checked first and reported like any other drift, because an id-scheme change makes
+    # every document in the collection unaddressable at once. Without it the symptom is a
+    # recall of 0.0 that looks like a broken retriever rather than a renamed corpus.
+    _compare("identity_version", lock.identity_version, IDENTITY_VERSION, fields, details)
     _compare("config_hash", lock.config_hash, retrieval_config_hash(settings), fields, details)
     _compare("chunker_strategy", lock.chunker_strategy, settings.chunking.strategy, fields, details)
     _compare("chunk_size", lock.chunk_size, settings.chunking.chunk_size, fields, details)

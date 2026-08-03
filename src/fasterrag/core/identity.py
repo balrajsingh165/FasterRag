@@ -26,6 +26,7 @@ from typing import Any, Final
 from fasterrag.config.schema import Settings
 
 __all__ = [
+    "IDENTITY_VERSION",
     "chunk_id",
     "chunker_config_hash",
     "collection_id",
@@ -36,6 +37,17 @@ __all__ = [
     "retrieval_config_hash",
     "text_hash",
 ]
+
+# CRITICAL: bump this whenever anything changes what `document_id` returns for the same
+# source. Ids are the join between a golden set, a journal, and what is stored in the index,
+# so a silent change makes an existing collection score 0.0 — which reads as total retrieval
+# failure rather than as a renamed corpus. The index lockfile records this value so the
+# mismatch is *reported* instead of guessed at (TASK-0176).
+#
+#   1  original: the raw source string was hashed
+#   2  2026-08-03: local paths are normalised first, so two spellings of one
+#      Windows file (drive-letter case, separator) now produce a single id
+IDENTITY_VERSION: Final = 2
 
 _DOCUMENT_PREFIX: Final = "d_"
 _CHUNK_PREFIX: Final = "c_"

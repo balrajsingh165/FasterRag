@@ -1,5 +1,8 @@
 # data-model.md — Canonical Entity Schemas
 
+
+> **Document ids are versioned.** `IDENTITY_VERSION` in `core/identity.py` records which scheme minted the ids in a collection, and `index.lock` stores it. Changing what `document_id` returns for the same source renames every document at once — an existing collection then scores recall 0.0, which reads as a broken retriever rather than a renamed corpus. The lockfile comparison reports it as drift instead, naming `identity_version`. A lockfile written before the field existed defaults to scheme **1**, never to the current value: defaulting to "current" would declare a stale index up to date and hide exactly the mismatch the field exists to surface. Scheme 2 (2026-08-03) normalises local paths so two spellings of one Windows file are a single id.
+
 The single source of truth for every entity fasterRag persists or returns. The REST API ([api-reference.md](api-reference.md)), the Python package ([python-api.md](python-api.md)), and the portability archive ([archive-format.md](archive-format.md)) are all **projections of these entities** — where a field appears in more than one place, it means the same thing and carries the same type. Inventing a field that isn't here, or reusing a name with a different meaning, is a bug ([todo.md](todo.md)).
 
 Conventions: types in Python/Pydantic notation · `str|null` = optional · all timestamps ISO 8601 UTC · all hashes SHA-256 hex · IDs are opaque strings with a typed prefix.
