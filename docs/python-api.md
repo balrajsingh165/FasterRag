@@ -8,12 +8,13 @@ fasterRag is released as an installable Python package so applications can **imp
 > |---|---|
 > | Standalone components — `fasterrag.parsing`, `.chunking`, `.retrieval`, `.rerank`, `.evals` | **Shipped** and importable today |
 > | Typed error taxonomy — `fasterrag.errors` (same `code`s as the API) | **Shipped** |
-> | `FasterRag` facade (`from_config`, `ingest`, `query`, `query_stream`, `retrieve`, `collections`, …) | **Not yet implemented** (TASK-0163) — the services it would compose all exist; the facade is the missing thin layer |
+> | `FasterRag` facade — `from_config`, `from_settings`, `ingest`, `query`, `query_stream`, `retrieve`, `estimate`, `index_lock` | **Shipped**. Verified end to end against live Qdrant and OpenAI |
+> | `FasterRag.collections`, `.doctor`, `.replay`, `.export_archive` / `.import_archive` | **Not yet implemented** — the CLI and REST surfaces cover these today |
 > | `fasterrag.sync` blocking facade | **Not yet implemented** (follows the async facade) |
 > | Entry-point plugin groups (`fasterrag.vectordb` / `.embeddings` / `.llm`) | **Not yet implemented** (TASK-0163) — today the factories resolve built-ins only |
 > | PyPI wheels (`pip install fasterrag`) | **Not yet published** (TASK-0087) — install from source: `pip install -e ".[all]"` |
 >
-> Sections describing an unshipped surface are the design contract that TASK-0163 must satisfy, kept here so the facade is built to a reviewed spec rather than improvised.
+> Sections describing an unshipped surface are the design contract the remaining work must satisfy, kept here so each one is built to a reviewed spec rather than improvised.
 
 ## Installation
 
@@ -45,16 +46,24 @@ from fasterrag import FasterRag
 
 async def main() -> None:
     async with FasterRag.from_config("config.yaml") as rag:
-        job = await rag.ingest(["./docs/", "https://example.com/spec.pdf"])
-        await job.wait()
+        job = await rag.ingest(["./docs/handbook.md", "./docs/spec.md"])
+        print(job.status, job.counts["indexed"])
 
         result = await rag.query("What does the spec say about retries?")
         print(result.answer)
-        for c in result.citations:
-            print(c.source, c.page, c.span)
+        for citation in result.citations:
+            print(citation.source, citation.page, citation.span)
 
-asyncio.run(main())
+# CRITICAL: the __main__ guard is required, not stylistic. Parsing runs in a
+# ProcessPoolExecutor, and on Windows and macOS child processes are spawned rather than
+# forked — each one re-imports this module. Calling asyncio.run() at import level makes
+# every worker re-run the whole script instead of parsing, and the pool dies. Without the
+# guard fasterRag raises CHUNK_FAILED naming this exact cause.
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
+
+`ingest` awaits completion and returns the settled job, rather than returning a job id the way `POST /v1/ingest` does. A library caller already has the one thing an HTTP client lacks: somewhere to wait.
 
 The same `config.yaml` + `.env` contract applies ([config-reference.md](config-reference.md)): config drives all behavior, secrets come only from the environment, validation fails fast at `from_config()` with a `ConfigError` naming the offending key.
 

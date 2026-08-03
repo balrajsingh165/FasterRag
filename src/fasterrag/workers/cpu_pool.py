@@ -16,6 +16,7 @@ import asyncio
 import os
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Executor, ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -122,6 +123,30 @@ def _read(source: str, max_bytes: int) -> bytes:
         raise ParseError(f"{source} could not be read: {exc.strerror}") from exc
 
 
+def _unguarded_entry_point_error() -> IngestionError:
+    """Return the error for a worker pool that died before doing any work.
+
+    Parsing runs in a ``ProcessPoolExecutor``. On Windows and macOS new processes are
+    *spawned*, not forked, so each child re-imports the module that started them — and a
+    script calling ``asyncio.run(...)`` at import level runs its whole body again in every
+    child, which the pool reports only as ``BrokenProcessPool``.
+
+    That message names neither the cause nor the fix, and it is the first thing a library
+    user embedding fasterRag hits. Translating it here is worth more than the general rule
+    against catching by type, because the alternative is an opaque abort during what looks
+    like ordinary ingestion.
+    """
+    return IngestionError(
+        "the parsing worker pool died before processing anything. On Windows and macOS "
+        "child processes re-import the module that started them, so a script must guard its "
+        'entry point with: if __name__ == "__main__": asyncio.run(main()) — without the '
+        "guard every worker re-runs the script instead of parsing. This is a multiprocessing "
+        "requirement, not a fasterRag one",
+        code=ErrorCode.CHUNK_FAILED,
+        retryable=False,
+    )
+
+
 class CpuWorkerPool:
     """Parses and chunks documents in worker processes, streaming chunks downstream."""
 
@@ -213,6 +238,8 @@ class CpuWorkerPool:
                 outcome = await loop.run_in_executor(
                     self._executor, parse_and_chunk, task, self.settings
                 )
+            except BrokenProcessPool as exc:
+                raise _unguarded_entry_point_error() from exc
             except FasterRagError as exc:
                 dead_lettered += 1
                 self._dead_letter(job, task, exc)

@@ -7,6 +7,20 @@ names exported here and from documented submodules are stable under SemVer; anyt
 under ``fasterrag._internal`` or absent from ``__all__`` is private.
 """
 
-__all__ = ["__version__"]
-
 __version__ = "0.1.0.dev0"
+
+# CRITICAL: imported lazily through __getattr__, not at module import. Importing the facade
+# eagerly would pull the adapter factories, the chunking stack, and pydantic-settings into
+# every `import fasterrag` — including `fasterrag.__version__` in a packaging script, and
+# the CLI's own startup. The facade costs roughly a second to import; a version read should
+# not.
+__all__ = ["FasterRag", "__version__"]
+
+
+def __getattr__(name: str) -> object:
+    """Resolve the documented lazy exports on first access."""
+    if name == "FasterRag":
+        from fasterrag.facade import FasterRag
+
+        return FasterRag
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -254,3 +254,16 @@ async def test_the_executor_is_shut_down_on_exit(corpus: Path) -> None:
     assert len(created) == 1
     with pytest.raises(RuntimeError, match="shutdown"):
         created[0].submit(int, "1")
+
+
+def test_a_broken_pool_is_reported_as_a_missing_main_guard() -> None:
+    """A raw BrokenProcessPool names neither the cause nor the fix.
+
+    It is also the first thing a library user embedding fasterRag on Windows hits.
+    """
+    from fasterrag.workers.cpu_pool import _unguarded_entry_point_error
+
+    error = _unguarded_entry_point_error()
+
+    assert "__main__" in error.detail
+    assert not error.retryable
