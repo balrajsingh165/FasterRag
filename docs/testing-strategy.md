@@ -103,6 +103,8 @@ Sampled on the two places where a subtle bug silently ruins quality: **chunk-bou
 
 **On gate 3's scope.** The threshold is applied to `core/`, `adapters/`, and `workers/` specifically, not to the repository. A tree-wide number is diluted by CLI plumbing and API wiring, so it can sit comfortably above the line while the retrieval and adapter code the gate exists to protect regresses underneath it. Measured at **87.11% branch coverage over 3525 statements** (2026-08-02); the gate is set at 85 to leave working room without letting it drift.
 
+**`metadata` on a golden record is a retrieval *filter*, not annotation.** The harness passes it straight to `retrieve(filters=...)`, so a descriptive key that no chunk payload carries filters every candidate away and the run scores a flat `0.0` — indistinguishable from total retrieval failure. Keep it `{}` unless you are deliberately scoping the query.
+
 ## 3. Test taxonomy and markers
 
 | Marker | Runs | Needs |

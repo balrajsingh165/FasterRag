@@ -1,0 +1,10 @@
+{
+  "config_hash": "ae2c592fbd7dee55798b95f15d10f71fcba60d148ec9a2912fa25c8959a626bc",
+  "embedding_model": "BAAI/bge-small-en-v1.5",
+  "k": 5,
+  "mrr": 0.875,
+  "ndcg_at_k": 0.907732,
+  "recall_at_k": 1.0,
+  "recorded_at": "2026-08-03T07:51:18.640879+00:00",
+  "scored": 16
+}

@@ -107,45 +107,23 @@ TASK-0174 ✅ made the wait *visible* — the loader now warns, names the cost, 
 
 ---
 
-## B8 — The eval fixture cannot detect small regressions (TASK-0142)
-
-The handbook baseline catches large regressions — verified to catch an index missing four of six documents (recall 1.0 → 0.3333, gate blocked, exit 5). But at six documents and k=5 a retriever returns five of six, so a *subtle* ranking regression passes.
-
-| | Task | Blocked because |
-|---|---|---|
-| **B8.1** | TASK-0144 | D6's acceptance test — "on a fixture corpus with a known-better config, autopilot's suggestion matches or beats it" — is only verified by unit test. On the handbook corpus every candidate scores 1.0, so there is no improvement to find and Autopilot correctly suggests nothing. |
-
-**This is the one root on this page that needs no decision and no hardware.** It is ordinary work: a larger fixture with topically overlapping documents.
-
----
-
-## B9 — `url` and `inline` ingest sources (TASK-0129)
-
-`docs/api-reference.md` documents all three source types; only `path` is accepted, and the other two are rejected with `VALIDATION_FAILED` naming what is supported.
-
-**Not just plumbing.** `DocumentTask` uses one field as both the identity input and the read location, and a document id derives from it. Staging a URL to a temp file would make the id derive from that path, so re-ingesting the same URL would mint a new id every time and silently defeat deduplication.
-
-**Needed:** agreement to split `DocumentTask` into a canonical `source` (identity) and a resolved `location` (bytes), which changes a dataclass crossing the process-pool boundary.
-
----
-
-## B10 — Built, working, unratified
+## B8 — Built, working, unratified
 
 Not blocked — *unreviewed*. Each resolved an ambiguity no document covered, and each should be confirmed or corrected before it hardens into precedent by default.
 
 | | Task | What was decided unilaterally |
 |---|---|---|
-| **B10.1** | TASK-0123 | Grounded-or-refuse while streaming. A token cannot be unsaid once sent, so with the flag on, generation buffers and grades before emitting any `token` event — trading time-to-first-token for the guarantee. |
-| **B10.2** | TASK-0126 | `VectorDBAdapter` gained `list_collections()` and `drop_collection()` with a vendor-neutral `CollectionInfo`. Every future adapter must implement them. |
-| **B10.3** | TASK-0133 | `VectorDBAdapter` gained `set_alias`, `alias_target`, `delete_alias`. Aliases are the primitive blue/green reindexing rests on; not every vendor has them. |
-| **B10.4** | TASK-0131 | `fasterrag traces list\|show` was added beyond `cli-reference.md`, because a 32-hex trace id is unreachable without a way to list recent ones. Now documented; confirm the addition. |
-| **B10.5** | TASK-0115 | `sentence-transformers` ships as the `huggingface` extra rather than core, because it pulls a multi-gigabyte stack. Confirm the trade. |
+| **B8.1** | TASK-0123 | Grounded-or-refuse while streaming. A token cannot be unsaid once sent, so with the flag on, generation buffers and grades before emitting any `token` event — trading time-to-first-token for the guarantee. |
+| **B8.2** | TASK-0126 | `VectorDBAdapter` gained `list_collections()` and `drop_collection()` with a vendor-neutral `CollectionInfo`. Every future adapter must implement them. |
+| **B8.3** | TASK-0133 | `VectorDBAdapter` gained `set_alias`, `alias_target`, `delete_alias`. Aliases are the primitive blue/green reindexing rests on; not every vendor has them. |
+| **B8.4** | TASK-0131 | `fasterrag traces list\|show` was added beyond `cli-reference.md`, because a 32-hex trace id is unreachable without a way to list recent ones. Now documented; confirm the addition. |
+| **B8.5** | TASK-0115 | `sentence-transformers` ships as the `huggingface` extra rather than core, because it pulls a multi-gigabyte stack. Confirm the trade. |
 
 ---
 
-## B11 — Maintainer actions outside the repository
+## B9 — Maintainer actions outside the repository
 
 | | Task | Action |
 |---|---|---|
-| **B11.1** | TASK-0098 | Enable branch protection on `main` — require PRs, block direct pushes. |
-| **B11.2** | TASK-0111 | Tag the landed slice boundaries `v0.1.0-s1` and `v0.2.0-s2`. |
+| **B9.1** | TASK-0098 | Enable branch protection on `main` — require PRs, block direct pushes. |
+| **B9.2** | TASK-0111 | Tag the landed slice boundaries `v0.1.0-s1` and `v0.2.0-s2`. |
