@@ -46,8 +46,9 @@
 
 ## 6. Supply chain
 
-- **Pinned, hash-locked dependencies** (uv or pip-tools lockfile committed); CI installs only from the lockfile.
-- **Secret scanning in CI** (pre-commit + CI job) — a detected credential fails the build.
+- **Pinned, hash-locked dependencies** — `uv.lock` is committed: 135 packages, 1577 `sha256` hashes. CI runs `uv lock --check`, which re-resolves `pyproject.toml` and fails when the result differs, so a dependency added without relocking is caught at the gate rather than discovered when two machines install different versions.
+- **Dependency audit is blocking**, and runs against the *lockfile* rather than an installed environment — an environment is whatever resolved on that runner today, the lockfile is what everyone actually installs. Measured clean across all 135 packages on 2026-08-03.
+- **Secret scanning in CI** (gitleaks, full history — a credential committed and later removed is still compromised, so scanning only the tip would call it clean). A detected credential fails the build.
 - **Non-root containers** for every image fasterRag ships or provisions.
 - **SBOM generated at each tagged release** and attached to the release artifacts.
 - Base images and provisioned tool versions (Qdrant, Langfuse, Grafana) are pinned by tag/digest — no `latest`.

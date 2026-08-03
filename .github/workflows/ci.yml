@@ -134,19 +134,28 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
 
-      # Advisory-only for now: pip-audit fails on any known CVE in the resolved tree,
-      # including ones with no fixed version available, which would block every push on
-      # something nobody can act on. It becomes blocking with the lockfile (TASK-0158).
+      # The lockfile is the contract. `--check` resolves pyproject.toml and fails if the
+      # result differs from uv.lock, so a dependency added without relocking is caught here
+      # rather than discovered when two machines install different versions.
+      - name: Lockfile is current
+        run: uv lock --check
+
+      # Auditing the *lockfile* rather than an installed environment. Those differ: an
+      # environment is whatever resolved on this runner today, while the lockfile is what
+      # every machine will actually install. `--no-deps` is correct here precisely because
+      # the export is fully pinned — there is nothing left to resolve.
+      #
+      # Blocking, not advisory. Measured clean over all 135 locked packages on 2026-08-03,
+      # so a failure here means something genuinely changed rather than a pre-existing
+      # advisory nobody can act on.
       - name: Dependency audit
-        continue-on-error: true
         run: |
-          pip install pip-audit
-          pip-audit --strict --desc
+          uv export --format requirements-txt --all-extras --no-emit-project -o locked.txt
+          uvx --python 3.12 pip-audit -r locked.txt --no-deps --desc
 
   integration:
     runs-on: ubuntu-latest

@@ -30,7 +30,7 @@ The stated adoption thesis is people embedding fasterRag inside their own produc
 
 | | Task | Blocked because |
 |---|---|---|
-| **B1.1** | TASK-0087 | PyPI publish. Also needs **B2** and **B7**; distribution mechanics themselves are verified (build, `twine check`, clean-venv install all pass). |
+| **B1.1** | TASK-0087 | PyPI publish. Also needs **B2**; distribution mechanics themselves are verified (build, `twine check`, clean-venv install all pass). |
 
 ---
 
@@ -96,34 +96,23 @@ TASK-0174 ✅ made the wait *visible* — the loader now warns, names the cost, 
 
 ---
 
-## B7 — Supply chain has no lockfile (TASK-0158)
-
-**Partially done.** A `supply-chain` CI job runs gitleaks over full history and pip-audit as advisory-only.
-
-| | Task | Blocked because |
-|---|---|---|
-| **B7.1** | — | pip-audit stays advisory. Made blocking without a lockfile, it fails on any CVE in the resolved tree — including ones with no fixed version — so every push would break on something nobody can act on. |
-| **B7.2** | — | The SBOM, which **B1.1** needs. |
-
----
-
-## B8 — Built, working, unratified
+## B7 — Built, working, unratified
 
 Not blocked — *unreviewed*. Each resolved an ambiguity no document covered, and each should be confirmed or corrected before it hardens into precedent by default.
 
 | | Task | What was decided unilaterally |
 |---|---|---|
-| **B8.1** | TASK-0123 | Grounded-or-refuse while streaming. A token cannot be unsaid once sent, so with the flag on, generation buffers and grades before emitting any `token` event — trading time-to-first-token for the guarantee. |
-| **B8.2** | TASK-0126 | `VectorDBAdapter` gained `list_collections()` and `drop_collection()` with a vendor-neutral `CollectionInfo`. Every future adapter must implement them. |
-| **B8.3** | TASK-0133 | `VectorDBAdapter` gained `set_alias`, `alias_target`, `delete_alias`. Aliases are the primitive blue/green reindexing rests on; not every vendor has them. |
-| **B8.4** | TASK-0131 | `fasterrag traces list\|show` was added beyond `cli-reference.md`, because a 32-hex trace id is unreachable without a way to list recent ones. Now documented; confirm the addition. |
-| **B8.5** | TASK-0115 | `sentence-transformers` ships as the `huggingface` extra rather than core, because it pulls a multi-gigabyte stack. Confirm the trade. |
+| **B7.1** | TASK-0123 | Grounded-or-refuse while streaming. A token cannot be unsaid once sent, so with the flag on, generation buffers and grades before emitting any `token` event — trading time-to-first-token for the guarantee. |
+| **B7.2** | TASK-0126 | `VectorDBAdapter` gained `list_collections()` and `drop_collection()` with a vendor-neutral `CollectionInfo`. Every future adapter must implement them. |
+| **B7.3** | TASK-0133 | `VectorDBAdapter` gained `set_alias`, `alias_target`, `delete_alias`. Aliases are the primitive blue/green reindexing rests on; not every vendor has them. |
+| **B7.4** | TASK-0131 | `fasterrag traces list\|show` was added beyond `cli-reference.md`, because a 32-hex trace id is unreachable without a way to list recent ones. Now documented; confirm the addition. |
+| **B7.5** | TASK-0115 | `sentence-transformers` ships as the `huggingface` extra rather than core, because it pulls a multi-gigabyte stack. Confirm the trade. |
 
 ---
 
-## B9 — Maintainer actions outside the repository
+## B8 — Maintainer actions outside the repository
 
 | | Task | Action |
 |---|---|---|
-| **B9.1** | TASK-0098 | Enable branch protection on `main` — require PRs, block direct pushes. |
-| **B9.2** | TASK-0111 | Tag the landed slice boundaries `v0.1.0-s1` and `v0.2.0-s2`. |
+| **B8.1** | TASK-0098 | Enable branch protection on `main` — require PRs, block direct pushes. |
+| **B8.2** | TASK-0111 | Tag the landed slice boundaries `v0.1.0-s1` and `v0.2.0-s2`. |

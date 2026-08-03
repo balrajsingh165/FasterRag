@@ -8,7 +8,12 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      # uv.lock is excluded, not accommodated by raising the limit. It is ~525 KB because it
+      # pins 135 packages with 1577 hashes, and that size is the feature — it is also the one
+      # large file in the tree that must be committed. Raising the threshold instead would
+      # weaken the guard for the binaries and datasets it actually exists to stop.
       - id: check-added-large-files
+        exclude: ^uv\.lock$
       - id: check-merge-conflict
       - id: check-toml
       - id: check-yaml
