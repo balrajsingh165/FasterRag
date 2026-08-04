@@ -64,6 +64,10 @@ _SCOPE_BY_PREFIX: Final[tuple[tuple[str, str], ...]] = (
     ("/v1/retrieve", "query"),
     ("/v1/traces", "admin"),
     ("/metrics", "admin"),
+    # The dashboard's own routes. It is a separate application, but it reads the same
+    # traces and metrics, so it needs the same scope rather than a weaker one of its own.
+    ("/api/traces", "admin"),
+    ("/api/metrics", "admin"),
 )
 
 _BEARER: Final = "bearer"

@@ -131,3 +131,57 @@ def test_the_dashboard_serves_no_schema(tmp_path: Path) -> None:
 
     with TestClient(app) as client:
         assert client.get("/openapi.json").status_code == 404
+
+
+def secured(tmp_path: Path, monkeypatch, *traces: Trace, tenancy: bool = False):  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("FASTERRAG_API_KEY", "dash-key:admin:acme")
+    settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": tenancy}})
+    return TestClient(create_dashboard(settings, store(tmp_path, *traces)))
+
+
+def test_the_dashboard_is_unauthenticated_when_the_api_is(tmp_path: Path) -> None:
+    """Auth off is the single-operator deployment; the dashboard must not invent a gate."""
+    app = create_dashboard(Settings.model_validate({}), store(tmp_path, trace()))
+
+    with TestClient(app) as client:
+        assert client.get("/").status_code == 200
+
+
+def test_the_dashboard_requires_a_key_when_the_api_does(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """It shows prompts, responses, and corpus text — at least the API's protection."""
+    with secured(tmp_path, monkeypatch, trace()) as client:
+        assert client.get("/").status_code == 401
+
+
+def test_a_valid_key_reaches_the_dashboard(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    with secured(tmp_path, monkeypatch, trace()) as client:
+        response = client.get("/", headers={"Authorization": "Bearer dash-key"})
+
+    assert response.status_code == 200
+
+
+def test_a_tenant_sees_only_its_own_traces(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A trace carries the query text and the retrieved chunks."""
+    mine = trace("a" * 32, query="my own question", tenant="acme")
+    theirs = trace("b" * 32, query="a competitor secret", tenant="globex")
+
+    with secured(tmp_path, monkeypatch, mine, theirs, tenancy=True) as client:
+        body = client.get(
+            "/", headers={"Authorization": "Bearer dash-key", "X-Tenant-ID": "acme"}
+        ).text
+
+    assert "my own question" in body
+    assert "a competitor secret" not in body
+
+
+def test_the_json_view_is_scoped_too(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Scoping the page but not its JSON twin would leave the leak one URL away."""
+    mine = trace("a" * 32, query="mine", tenant="acme")
+    theirs = trace("b" * 32, query="theirs", tenant="globex")
+
+    with secured(tmp_path, monkeypatch, mine, theirs, tenancy=True) as client:
+        payload = client.get(
+            "/api/traces", headers={"Authorization": "Bearer dash-key", "X-Tenant-ID": "acme"}
+        ).json()
+
+    assert [item["query"] for item in payload["traces"]] == ["mine"]

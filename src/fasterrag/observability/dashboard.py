@@ -24,9 +24,10 @@ from collections.abc import Iterable
 from html import escape
 from typing import Any, Final
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from fasterrag.api.auth import AuthMiddleware
 from fasterrag.config.schema import Settings
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger
@@ -132,10 +133,10 @@ def create_dashboard(settings: Settings, store: TraceStore | None = None) -> Fas
     app = FastAPI(title=DASHBOARD_TITLE, docs_url=None, redoc_url=None, openapi_url=None)
     logger = get_logger(__name__)
 
-    def _recent() -> list[dict[str, Any]]:
+    def _recent(tenant: str | None) -> list[dict[str, Any]]:
         summaries: list[dict[str, Any]] = []
-        for trace_id in traces.recent(_RECENT_TRACES):
-            trace = traces.load(trace_id)
+        for trace_id in traces.recent(_RECENT_TRACES, tenant=tenant):
+            trace = traces.load(trace_id, tenant=tenant)
             if trace is None:
                 continue
             summaries.append(
@@ -149,22 +150,43 @@ def create_dashboard(settings: Settings, store: TraceStore | None = None) -> Fas
         return summaries
 
     @app.get("/", response_class=HTMLResponse)
-    async def index() -> HTMLResponse:
-        """Serve the dashboard page."""
-        return HTMLResponse(render_page(_recent()))
+    async def index(request: Request) -> HTMLResponse:
+        """Serve the dashboard page, scoped to the caller's tenant."""
+        return HTMLResponse(render_page(_recent(_tenant_of(request))))
 
     @app.get("/api/traces")
-    async def recent_traces() -> JSONResponse:
+    async def recent_traces(request: Request) -> JSONResponse:
         """Return the same trace summaries as JSON, for scripted inspection."""
-        return JSONResponse({"traces": _recent()})
+        return JSONResponse({"traces": _recent(_tenant_of(request))})
 
     @app.get("/api/metrics")
     async def metrics_text() -> JSONResponse:
         """Return the metric names the registry declares."""
         return JSONResponse({"metrics": metrics.REGISTRY.names})
 
+    # CRITICAL: the same middleware the API uses, not a second implementation. A dashboard
+    # showing prompts, responses, and corpus text needs at least the protection the API has,
+    # and a separate auth path here would be a second thing to get wrong — one of which
+    # would eventually lag the other.
+    app.add_middleware(AuthMiddleware, settings=settings)
+
     logger.info(
         "observability dashboard built",
-        extra={"port": settings.observability.dashboard_port},
+        extra={
+            "port": settings.observability.dashboard_port,
+            "authenticated": settings.security.auth,
+            "tenant_scoped": settings.security.multi_tenancy,
+        },
     )
     return app
+
+
+def _tenant_of(request: Request) -> str | None:
+    """Return the tenant the auth middleware resolved, or ``None`` when unauthenticated.
+
+    ``None`` means "show everything", which is the single-operator deployment the dashboard
+    was built for. With ``security.multi_tenancy`` on, the middleware refuses any request
+    that does not name a tenant, so this can only be ``None`` when tenancy is off.
+    """
+    tenant = request.scope.get("state", {}).get("tenant")
+    return str(tenant) if tenant else None

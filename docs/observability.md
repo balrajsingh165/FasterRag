@@ -23,7 +23,9 @@ Hard rules: toggleable via `observability.dashboard` (default `false`); binds `o
 
 Every interpolated value is HTML-escaped: a trace carries user-supplied query text and model output directly onto a page the operator trusts.
 
-**Not yet tenant-scoped** (TASK-0184): it lists every stored trace regardless of tenant. Correct for the single-operator deployment, wrong once `security.multi_tenancy` is on — deploy it behind the network boundary until that lands.
+**Authentication and tenancy come from the API's own middleware**, not a second implementation. With `security.auth: false` the dashboard is open — the single-operator deployment it was built for. With auth on it requires a key carrying the `admin` scope, the same scope `/v1/traces` and `/metrics` need, because it reads the same data. With `security.multi_tenancy` on, both the page and `/api/traces` show only the calling tenant's traces; scoping the page alone would leave the leak one URL away.
+
+It still has no transport security of its own — put it behind the same reverse proxy as the API ([deployment.md](deployment.md)).
 
 ## 2. Metrics catalogue
 

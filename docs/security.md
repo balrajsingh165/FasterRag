@@ -90,6 +90,6 @@ With this, every tenant-visible surface is scoped: queries, the semantic cache, 
 
 ## 7. Threat-model notes (beta boundaries)
 
-- The dashboard is read-only but displays prompts/responses — deploy it on internal networks and treat access to it as access to corpus content.
+- The dashboard is read-only but displays prompts/responses — deploy it on internal networks and treat access to it as access to corpus content. It enforces the same keys, scopes, and tenant matching as the API (TASK-0184), but on its own port and with no TLS of its own.
 - The trace store (D8) persists full prompts/responses locally; retention is bounded by `traces.retention_days` and the store lives inside the deployment's trust boundary.
 - fasterRag never sends corpus data anywhere except the providers the operator configured (embeddings/LLM). Local-only stacks (HuggingFace + Ollama + Qdrant) keep all data on-host.
