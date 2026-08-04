@@ -44,6 +44,7 @@ embeddings:
   cache:
     enabled: true
     backend: disk
+    max_entries: 10000
   tiering:
     enabled: false
     rules: []
@@ -63,6 +64,7 @@ chunking:
   overlap: 64
   token_counter: auto
   chars_per_token: 4
+  semantic_percentile: 0.95
   contextual_enrichment: false
   context_tokens: 75
 
@@ -72,6 +74,8 @@ retrieval:
   bm25_weight: 1.0
   dense_weight: 1.0
   rrf_k: 60
+  bm25_k1: 1.2
+  bm25_b: 0.75
   rerank: true
   reranker_model: BAAI/bge-reranker-v2-m3
   rerank_top_n: 100
@@ -86,6 +90,7 @@ cache:
   similarity_threshold: 0.95
   ttl: 3600
   backend: memory
+  max_entries: 10000
 
 workers:
   cpu_pool_size: 0
@@ -201,6 +206,7 @@ security:
 | `embeddings.batch_size` | int | `64` | 1–2048 | Texts per embedding request. Batched embedding is far cheaper than one-at-a-time calls. |
 | `embeddings.dimensions` | int\|null | `null` | ≥ 8 when set | Output dimensionality override where the provider supports it; `null` = model native. Must match the collection's vector size. |
 | `embeddings.cache.enabled` | bool | `true` | — | Embedding cache keyed by content hash + model + version. |
+| `embeddings.cache.max_entries` | int | `10000` | ≥ 1 | Entry ceiling for the embedding cache. Raise when reingesting a large corpus repeatedly, which is exactly when the cache pays for itself. |
 | `embeddings.cache.backend` | str | `disk` | one of `memory`, `disk`, `redis` | Where embedding-cache entries live. |
 | `embeddings.tiering.enabled` | bool | `false` | — | Tiered embedding: route document classes to different models (cheap models for high-volume/low-priority classes; higher-cost models where retrieval precision matters). |
 | `embeddings.tiering.rules` | list[TierRule] | `[]` | each rule: `{match: <metadata filter>, provider: <provider>, model: <model>}`; must be non-empty when tiering enabled | Ordered routing rules, first match wins. |
@@ -226,6 +232,7 @@ security:
 | `chunking.overlap` | int | `64` | 0 ≤ overlap < `chunk_size` | Token overlap between adjacent chunks. |
 | `chunking.token_counter` | str | `auto` | one of `auto`, `estimate`, `model` | How `chunk_size` and `overlap` are counted. `auto` loads the embedding model's own tokenizer when the provider ships a local one and estimates otherwise; `estimate` forces the `chars_per_token` ratio; `model` forces the real tokenizer for any provider, which requires the matching tokenizer in the local Hugging Face cache and falls back to the estimate with a logged warning when it is absent. Loading never reaches the network. |
 | `chunking.chars_per_token` | int | `4` | 1–16 | Characters per token assumed by the estimate, and by the first split pass before real counts refine it. Lower it for corpora that tokenize densely (code, CJK) when running `token_counter: estimate`. |
+| `chunking.semantic_percentile` | float | `0.95` | 0.50–0.99 | Only used by `strategy: semantic`. Distance percentile above which a gap between adjacent sentences becomes a chunk boundary. Lower splits more eagerly, giving smaller and more topically uniform chunks; higher keeps related passages together. |
 | `chunking.contextual_enrichment` | bool | `false` | — | Contextual-retrieval-style enrichment: prepend an LLM-generated document-level context to each chunk before embedding and BM25 indexing (Anthropic, Sept 2024: −49% failed retrievals; −67% with reranking). Costs LLM calls at ingest; uses provider prompt caching of the parent document. |
 | `chunking.context_tokens` | int | `75` | 25–150 | Target length of the generated per-chunk context. Recommended ~50–100 tokens. |
 
@@ -238,6 +245,8 @@ security:
 | `retrieval.bm25_weight` | float | `1.0` | 0.0–1.0 after normalization; `bm25_weight + dense_weight > 0` | Weight of the BM25 leg in weighted-fusion mode (RRF itself is rank-based; weights scale each leg's RRF contribution). |
 | `retrieval.dense_weight` | float | `1.0` | 0.0–1.0 after normalization; see above | Weight of the dense leg. |
 | `retrieval.rrf_k` | float | `60` | > 0 | Reciprocal Rank Fusion constant. Default 60 per Cormack, Clarke & Büttcher (SIGIR 2009). |
+| `retrieval.bm25_k1` | float | `1.2` | 0.0–3.0 | BM25 term-frequency saturation. Lower flattens sooner, so a repeated term counts for less. **Changing this changes the stored sparse vectors — existing collections must be reindexed** (`fasterrag index reembed`) before the new value applies to anything already ingested. |
+| `retrieval.bm25_b` | float | `0.75` | 0.0–1.0 | BM25 length normalization, `0` off to `1` full. Lower it for a corpus of uniformly sized chunks. **Requires a reindex, as `bm25_k1` does.** |
 | `retrieval.rerank` | bool | `true` | — | Cross-encoder reranking of fused candidates (~100–300 ms per query; the biggest quality lever). |
 | `retrieval.reranker_model` | str | `BAAI/bge-reranker-v2-m3` | non-empty when `rerank: true` | Cross-encoder model ID. |
 | `retrieval.rerank_top_n` | int | `100` | 10–1000; ≥ `top_k` | Candidates retrieved per leg and fed to the reranker (retrieve top 100–1000 → rerank → truncate to `top_k`). |
@@ -257,6 +266,7 @@ security:
 | `cache.semantic` | bool | `false` | — | Semantic response cache keyed by query-embedding similarity. |
 | `cache.similarity_threshold` | float | `0.95` | 0.90–0.99 | Cosine similarity above which a cached response is served. Typical useful range ~0.92–0.97. |
 | `cache.ttl` | int | `3600` | ≥ 1 (seconds) | Entry lifetime. Corpus-change events invalidate affected entries immediately regardless of TTL. |
+| `cache.max_entries` | int | `10000` | ≥ 1 | Entry ceiling for the semantic cache; the oldest are evicted past it. Raise for a high-traffic deployment with repetitive queries, lower to cap memory or disk. |
 | `cache.backend` | str | `memory` | one of `memory`, `disk`, `redis` | Semantic-cache storage backend. Use `disk` from the CLI: a `memory` cache dies with each short-lived process, so every invocation would pay for a query embedding and then discard the answer. `redis` is accepted by the schema but not implemented (TASK-0124) and fails fast at startup. |
 
 ## `workers`

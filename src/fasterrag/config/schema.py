@@ -222,6 +222,7 @@ class EmbeddingCacheSettings(Section):
 
     enabled: bool = True
     backend: Literal["memory", "disk", "redis"] = "disk"
+    max_entries: Annotated[int, Field(ge=1)] = 10_000
 
 
 class TierRule(Section):
@@ -346,6 +347,7 @@ class ChunkingSettings(Section):
     overlap: Annotated[int, Field(ge=0)] = 64
     token_counter: TokenCounterMode = "auto"
     chars_per_token: Annotated[int, Field(ge=1, le=16)] = 4
+    semantic_percentile: Annotated[float, Field(ge=0.50, le=0.99)] = 0.95
     contextual_enrichment: bool = False
     context_tokens: Annotated[int, Field(ge=25, le=150)] = 75
 
@@ -368,6 +370,8 @@ class RetrievalSettings(Section):
     bm25_weight: Annotated[float, Field(ge=0.0, le=1.0)] = 1.0
     dense_weight: Annotated[float, Field(ge=0.0, le=1.0)] = 1.0
     rrf_k: Annotated[float, Field(gt=0)] = 60
+    bm25_k1: Annotated[float, Field(ge=0.0, le=3.0)] = 1.2
+    bm25_b: Annotated[float, Field(ge=0.0, le=1.0)] = 0.75
     rerank: bool = True
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_top_n: Annotated[int, Field(ge=10, le=1000)] = 100
@@ -420,6 +424,7 @@ class CacheSettings(Section):
     similarity_threshold: Annotated[float, Field(ge=0.90, le=0.99)] = 0.95
     ttl: Annotated[int, Field(ge=1)] = 3600
     backend: Literal["memory", "disk", "redis"] = "memory"
+    max_entries: Annotated[int, Field(ge=1)] = 10_000
 
 
 class WorkersSettings(Section):

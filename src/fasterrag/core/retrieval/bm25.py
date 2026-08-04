@@ -150,26 +150,34 @@ def tokenize(text: str) -> list[str]:
     return [term for term in stemmed if term and term not in STOPWORDS]
 
 
-def encode_document(text: str) -> SparseVector:
+def encode_document(text: str, *, k1: float = K1, b: float = B) -> SparseVector:
     """Encode a passage as saturated term frequencies.
 
     Saturation is what stops a term repeated fifty times from dominating: the weight grows
     quickly for the first few occurrences and then flattens. Length normalization keeps a
     long document from outscoring a short, precise one purely by having more words.
+
+    Args:
+        text: The passage to encode.
+        k1: Saturation rate. Lower flattens sooner, so repetition counts for less.
+        b: Length-normalization strength, from ``0`` (off) to ``1`` (full).
+
+    Returns:
+        The sparse vector for the passage.
     """
     terms = tokenize(text)
     if not terms:
         return SparseVector(indices=(), values=())
 
     length = len(terms)
-    normalizer = K1 * (1 - B + B * length / AVERAGE_DOCUMENT_LENGTH)
+    normalizer = k1 * (1 - b + b * length / AVERAGE_DOCUMENT_LENGTH)
 
     counted = Counter(terms)
     indices: list[int] = []
     values: list[float] = []
     for term, frequency in sorted(counted.items()):
         indices.append(term_index(term))
-        values.append(frequency * (K1 + 1) / (frequency + normalizer))
+        values.append(frequency * (k1 + 1) / (frequency + normalizer))
 
     return SparseVector(indices=indices, values=values)
 

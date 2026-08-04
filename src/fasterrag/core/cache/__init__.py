@@ -40,17 +40,17 @@ __all__ = [
 ]
 
 
-def _create(backend: str, setting: str) -> CacheStore:
-    """Return the store ``backend`` names.
+def _create(backend: str, setting: str, maximum_entries: int = MAXIMUM_ENTRIES) -> CacheStore:
+    """Return the store ``backend`` names, holding at most ``maximum_entries`` entries.
 
     Raises:
         ConfigError: If the backend is Redis, which needs an optional install that is not
             yet shipped. Naming the setting keeps the error actionable rather than generic.
     """
     if backend == "memory":
-        return MemoryStore()
+        return MemoryStore(maximum_entries)
     if backend == "disk":
-        return DiskStore()
+        return DiskStore(maximum_entries=maximum_entries)
 
     # TODO: the redis backend ships with TASK-0124; config validation accepts the value now
     # so the schema stays faithful to docs/config-reference.md.
@@ -62,9 +62,13 @@ def _create(backend: str, setting: str) -> CacheStore:
 
 def create_embedding_store(settings: Settings) -> CacheStore:
     """Return the store backing the embedding cache, per ``embeddings.cache.backend``."""
-    return _create(settings.embeddings.cache.backend, "embeddings.cache.backend")
+    return _create(
+        settings.embeddings.cache.backend,
+        "embeddings.cache.backend",
+        settings.embeddings.cache.max_entries,
+    )
 
 
 def create_semantic_store(settings: Settings) -> CacheStore:
     """Return the store backing the semantic cache, per ``cache.backend``."""
-    return _create(settings.cache.backend, "cache.backend")
+    return _create(settings.cache.backend, "cache.backend", settings.cache.max_entries)

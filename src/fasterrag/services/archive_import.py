@@ -414,7 +414,15 @@ async def import_archive(
                 collection=collection,
                 vector=vector,
                 payload=_restored_payload(row, model=model, model_version=model_version),
-                sparse=encode_document(text) if settings.retrieval.hybrid else None,
+                sparse=(
+                    encode_document(
+                        text,
+                        k1=settings.retrieval.bm25_k1,
+                        b=settings.retrieval.bm25_b,
+                    )
+                    if settings.retrieval.hybrid
+                    else None
+                ),
             )
         )
 

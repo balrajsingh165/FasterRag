@@ -92,4 +92,10 @@ def create_chunker(
             "chunking.strategy is 'semantic', which needs an embedding model to find "
             "sentence boundaries; configure an embedding provider or choose another strategy"
         )
-    return SemanticChunker(embedder, chunk_size=size, overlap=overlap, counter=counter)
+    return SemanticChunker(
+        embedder,
+        chunk_size=size,
+        overlap=overlap,
+        counter=counter,
+        percentile=settings.chunking.semantic_percentile,
+    )

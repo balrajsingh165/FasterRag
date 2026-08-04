@@ -37,6 +37,7 @@ embeddings:
   cache:
     enabled: true
     backend: disk
+    max_entries: 10000
   tiering:
     enabled: false
     rules: []
@@ -56,6 +57,7 @@ chunking:
   overlap: 64
   token_counter: auto
   chars_per_token: 4
+  semantic_percentile: 0.95
   contextual_enrichment: false
   context_tokens: 75
 
@@ -65,6 +67,8 @@ retrieval:
   bm25_weight: 1.0
   dense_weight: 1.0
   rrf_k: 60
+  bm25_k1: 1.2
+  bm25_b: 0.75
   rerank: true
   reranker_model: BAAI/bge-reranker-v2-m3
   rerank_top_n: 100
@@ -79,6 +83,7 @@ cache:
   similarity_threshold: 0.95
   ttl: 3600
   backend: memory
+  max_entries: 10000
 
 workers:
   cpu_pool_size: 0

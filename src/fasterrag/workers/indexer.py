@@ -150,7 +150,15 @@ class Indexer:
                 payload=chunk_payload(
                     payload, model=batch.model, model_version=batch.model_version
                 ),
-                sparse=encode_document(payload.text) if self.hybrid else None,
+                sparse=(
+                    encode_document(
+                        payload.text,
+                        k1=self.settings.retrieval.bm25_k1,
+                        b=self.settings.retrieval.bm25_b,
+                    )
+                    if self.hybrid
+                    else None
+                ),
             )
             for payload, vector in zip(batch.chunks, batch.vectors, strict=True)
         ]

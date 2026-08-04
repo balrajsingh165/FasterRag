@@ -71,12 +71,16 @@ def _distance(left: Sequence[float], right: Sequence[float]) -> float:
     return 1.0 - dot / (left_norm * right_norm)
 
 
-def _threshold(distances: Sequence[float]) -> float:
-    """Return the percentile of distances above which a boundary is placed."""
+def _threshold(distances: Sequence[float], percentile: float = BREAKPOINT_PERCENTILE) -> float:
+    """Return the percentile of distances above which a boundary is placed.
+
+    Lowering the percentile places more boundaries, giving smaller and more topically
+    uniform chunks; raising it keeps related passages together.
+    """
     if not distances:
         return 1.0
     ordered = sorted(distances)
-    index = min(int(len(ordered) * BREAKPOINT_PERCENTILE), len(ordered) - 1)
+    index = min(int(len(ordered) * percentile), len(ordered) - 1)
     return ordered[index]
 
 
@@ -92,6 +96,7 @@ class SemanticChunker:
         chunk_size: int = 768,
         overlap: int = 64,
         counter: TokenCounter | None = None,
+        percentile: float = BREAKPOINT_PERCENTILE,
     ) -> None:
         """Build the chunker.
 
@@ -101,7 +106,10 @@ class SemanticChunker:
                 only while they fit inside it.
             overlap: Tokens each chunk repeats from its predecessor.
             counter: Token counter; defaults to the estimating counter.
+            percentile: Distance percentile above which a sentence gap becomes a chunk
+                boundary. Lower splits more eagerly.
         """
+        self._percentile = percentile
         self._embedder = embedder
         self._counter = counter or EstimatingTokenCounter()
         self._limit = chunk_size * self._counter.chars_per_token
@@ -144,7 +152,7 @@ class SemanticChunker:
         distances = [
             _distance(vectors[index], vectors[index + 1]) for index in range(len(vectors) - 1)
         ]
-        cutoff = _threshold(distances)
+        cutoff = _threshold(distances, self._percentile)
 
         segments: list[Segment] = [tiles[0]]
         for index in range(1, len(tiles)):
