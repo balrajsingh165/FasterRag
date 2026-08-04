@@ -8,11 +8,27 @@ Global flags (valid on every command):
 |---|---|---|
 | `--config PATH` | `./config.yaml` | Config file to load. |
 | `--collection NAME` | config default | Target collection. |
+| `--set KEY=VALUE` | — | Override any setting in [config-reference.md](config-reference.md) for this invocation. Repeatable. |
 | `--json` | off | Machine-readable JSON output (stable schemas; intended for scripts and CI). |
 | `--quiet` / `-q` | off | Errors only. |
 | `--verbose` / `-v` | off | Debug logging. |
 
 Exit codes: `0` success · `1` generic failure · `2` usage/validation error · `3` dependency unreachable · `4` doctor/preflight failure · `5` regression gate blocked.
+
+### `--set` — overriding configuration per invocation
+
+Takes a dotted key and a value, and applies it over `config.yaml` before validation. Useful for trying a setting without editing the file, and for scripting a sweep across values.
+
+```console
+$ fasterrag ingest ./docs --set chunking.chunk_size=512 --set chunking.strategy=layout
+$ fasterrag query "expense limit" --set retrieval.rerank=false
+```
+
+Values are read as YAML scalars, so `512`, `0.75`, `true`, and `null` arrive as the types the schema expects; a bare word is a string.
+
+An override is held to **exactly** the rules a file value is — range, type, unknown-key, and cross-field. `--set retrieval.top_k=200` fails the same way writing it into the file would, and `--set chunking.chunk_sise=512` is rejected as an unknown key rather than silently ignored. Overrides are merged before validation rather than assigned afterwards, which is what keeps the cross-field rules running.
+
+Run `fasterrag config show` to see every key `--set` accepts.
 
 ---
 

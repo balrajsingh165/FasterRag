@@ -72,6 +72,15 @@ def _add_global_flags(parser: argparse.ArgumentParser, *, root: bool = False) ->
         help="config file to load",
     )
     parser.add_argument("--collection", default=unset, help="target collection")
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[] if root else argparse.SUPPRESS,
+        metavar="KEY=VALUE",
+        help="override any config.yaml setting, e.g. --set chunking.chunk_size=512 "
+        "(repeatable; validated exactly as a file value is)",
+    )
     parser.add_argument("--json", dest="as_json", action=flag, help="JSON output")
     parser.add_argument("--quiet", "-q", action=flag, help="errors only")
     parser.add_argument("--verbose", "-v", action=flag, help="debug logging")

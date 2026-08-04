@@ -18,7 +18,7 @@ from typing import Any
 
 from fasterrag.api.main import CONFIG_PATH_VAR, create_app
 from fasterrag.cli.output import Console, ExitCode
-from fasterrag.config.loader import load_settings
+from fasterrag.cli.settings import settings_from
 from fasterrag.errors import ConfigError, FasterRagError
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import create_journal
@@ -29,7 +29,7 @@ __all__ = ["run_serve", "run_worker"]
 async def run_serve(args: argparse.Namespace, console: Console) -> ExitCode:
     """Run the API server until interrupted."""
     try:
-        settings = load_settings(args.config)
+        settings = settings_from(args)
     except ConfigError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE
@@ -92,7 +92,7 @@ async def run_worker(args: argparse.Namespace, console: Console) -> ExitCode:
     validates the environment, reports the pool sizes it would run, and waits.
     """
     try:
-        settings = load_settings(args.config)
+        settings = settings_from(args)
     except ConfigError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE

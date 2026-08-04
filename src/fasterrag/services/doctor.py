@@ -356,14 +356,21 @@ async def diagnose(
     config_path: str | Path = DEFAULT_CONFIG_PATH,
     *,
     env_file: str | Path | None = DEFAULT_ENV_FILE,
+    overrides: Sequence[str] | None = None,
 ) -> DoctorReport:
     """Diagnose an installation starting from its configuration file.
 
     Invalid configuration is reported as a failed check rather than an exception, so
     ``fasterrag doctor`` stays useful precisely when configuration is the problem.
+
+    Args:
+        config_path: The configuration file to diagnose.
+        env_file: Optional ``.env`` loaded before the presence check.
+        overrides: ``--set`` overrides, so doctor checks the configuration the operator is
+            about to run rather than the one on disk.
     """
     try:
-        settings = load_settings(config_path, env_file=env_file)
+        settings = load_settings(config_path, env_file=env_file, overrides=overrides)
     except ConfigError as exc:
         return DoctorReport(
             checks=[

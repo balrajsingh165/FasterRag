@@ -12,19 +12,21 @@ a named variable exists and is non-blank.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Final
 
 from dotenv import load_dotenv
 from pydantic import ValidationError
 from pydantic_settings import YamlConfigSettingsSource
-from yaml import YAMLError
+from yaml import YAMLError, safe_load
 
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ConfigError
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["DEFAULT_CONFIG_PATH", "DEFAULT_ENV_FILE", "load_settings"]
+__all__ = ["DEFAULT_CONFIG_PATH", "DEFAULT_ENV_FILE", "apply_overrides", "load_settings"]
 
 DEFAULT_CONFIG_PATH: Final = Path("config.yaml")
 DEFAULT_ENV_FILE: Final = Path(".env")
@@ -39,6 +41,7 @@ def load_settings(
     *,
     env_file: str | Path | None = DEFAULT_ENV_FILE,
     require_env: bool = True,
+    overrides: Sequence[str] | None = None,
 ) -> Settings:
     """Load and validate configuration, or fail with a ``ConfigError``.
 
@@ -48,17 +51,22 @@ def load_settings(
             presence check. Existing environment variables always win; ``None`` skips
             the file and checks the process environment as-is.
         require_env: Whether a referenced-but-absent environment variable is an error.
+        overrides: ``dotted.key=value`` strings applied over the file's contents before
+            validation, so an override is held to exactly the same schema, range, and
+            cross-field rules a file value is.
 
     Returns:
         The validated, immutable settings.
 
     Raises:
         ConfigError: If the file is missing or unreadable, the YAML is malformed, any
-            key violates the schema or a cross-field rule, or a referenced environment
-            variable is absent or blank.
+            key violates the schema or a cross-field rule, an override is malformed or
+            names an unknown key, or a referenced environment variable is absent or blank.
     """
     config_path = Path(path)
     raw = _read_yaml(config_path)
+    if overrides:
+        raw = apply_overrides(raw, overrides)
     settings = _validate(raw, config_path)
     _reject_unenforced_settings(settings)
 
@@ -72,6 +80,64 @@ def load_settings(
 
     _warn_about_risky_settings(settings)
     return settings
+
+
+def apply_overrides(raw: dict[str, Any], overrides: Sequence[str]) -> dict[str, Any]:
+    """Return ``raw`` with each ``dotted.key=value`` override merged in.
+
+    Values are parsed as YAML scalars, so ``true``, ``512``, ``0.75``, and ``null`` arrive
+    as the types the schema expects rather than as strings. A value that is genuinely a
+    string still works, because YAML reads a bare word as one.
+
+    Overrides are merged *before* validation rather than set on a built ``Settings``.
+    Settings are immutable and cross-field rules run at construction, so patching an
+    instance afterwards would either fail or skip the very rules that catch a bad
+    combination — ``--set retrieval.top_k=200`` must still be checked against
+    ``rerank_top_n``.
+
+    Args:
+        raw: The configuration mapping read from the file.
+        overrides: ``dotted.key=value`` strings, applied in order.
+
+    Returns:
+        A new mapping with the overrides applied.
+
+    Raises:
+        ConfigError: If an override has no ``=``, has an empty key, or traverses through
+            a key whose existing value is a scalar.
+    """
+    merged = deepcopy(raw)
+
+    for override in overrides:
+        key, separator, value = override.partition("=")
+        key = key.strip()
+        if not separator or not key:
+            raise ConfigError(
+                f"--set expects dotted.key=value but got {override!r}; "
+                "for example --set chunking.chunk_size=512"
+            )
+
+        try:
+            parsed = safe_load(value)
+        except YAMLError as exc:
+            raise ConfigError(f"--set {key} has an unparseable value: {exc}") from exc
+
+        target = merged
+        parts = key.split(".")
+        for part in parts[:-1]:
+            existing = target.get(part)
+            if existing is None:
+                existing = {}
+                target[part] = existing
+            elif not isinstance(existing, dict):
+                raise ConfigError(
+                    f"--set {key} cannot descend into {part!r}, which is a value rather "
+                    "than a section"
+                )
+            target = existing
+        target[parts[-1]] = parsed
+
+    return merged
 
 
 def _read_yaml(config_path: Path) -> dict[str, Any]:

@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.output import Console, ExitCode
-from fasterrag.config.loader import load_settings
+from fasterrag.cli.settings import overrides_from, settings_from
 from fasterrag.config.schema import Settings
 from fasterrag.config.template import canonical_config_text, env_template_text
 from fasterrag.errors import ConfigError, FasterRagError
@@ -95,7 +95,7 @@ async def run_config_validate(args: argparse.Namespace, console: Console) -> Exi
     file is an operator mistake, not a runtime failure, and CI branches on the difference.
     """
     try:
-        settings = load_settings(args.config)
+        settings = settings_from(args)
     except ConfigError as exc:
         console.problem(exc.code.value, exc.detail)
         console.document({"valid": False, "config": args.config, "detail": exc.detail})
@@ -158,7 +158,7 @@ async def run_config_show(args: argparse.Namespace, console: Console) -> ExitCod
     reaching for it wants to see the settings, not be told again that a key is unset.
     """
     try:
-        settings = load_settings(args.config, require_env=False)
+        settings = settings_from(args, require_env=False)
     except ConfigError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE
@@ -187,7 +187,7 @@ async def run_doctor_command(args: argparse.Namespace, console: Console) -> Exit
     Exits ``4`` when any check fails. Doctor gates provisioning, so this code is what stops
     an automated setup from proceeding into an environment that cannot host it.
     """
-    report = await diagnose(args.config)
+    report = await diagnose(args.config, overrides=overrides_from(args))
 
     console.lines(format_report(report))
     console.document(report.as_dict())
@@ -232,7 +232,7 @@ async def run_status(args: argparse.Namespace, console: Console) -> ExitCode:
     misconfigured" from "fasterRag is fine but Qdrant is down".
     """
     try:
-        settings = load_settings(args.config)
+        settings = settings_from(args)
     except ConfigError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE

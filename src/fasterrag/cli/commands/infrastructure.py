@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 
 from fasterrag.cli.output import Console, ExitCode
-from fasterrag.config.loader import load_settings
+from fasterrag.cli.settings import settings_from
 from fasterrag.errors import ConfigError, FasterRagError, ProvisioningError
 from fasterrag.services.estimation import estimate_sources
 from fasterrag.services.grafana import grafana_status, provision_grafana, stop_grafana
@@ -31,7 +31,7 @@ async def run_provision(args: argparse.Namespace, console: Console) -> ExitCode:
     guess about.
     """
     try:
-        settings = load_settings(args.config)
+        settings = settings_from(args)
     except ConfigError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE
@@ -90,7 +90,7 @@ async def run_provision(args: argparse.Namespace, console: Console) -> ExitCode:
 async def run_estimate(args: argparse.Namespace, console: Console) -> ExitCode:
     """Report what ingesting a set of sources would cost, before embedding any of it."""
     try:
-        settings = load_settings(args.config)
+        settings = settings_from(args)
     except ConfigError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE

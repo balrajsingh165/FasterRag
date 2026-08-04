@@ -13,7 +13,7 @@ from pathlib import Path
 from fasterrag.adapters.embeddings.tiering import create_embedding_router
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.output import Console, ExitCode
-from fasterrag.config.loader import load_settings
+from fasterrag.cli.settings import settings_from
 from fasterrag.errors import ConfigError, FasterRagError
 from fasterrag.services.archive import export_archive
 from fasterrag.services.archive_import import import_archive, open_archive
@@ -25,7 +25,7 @@ __all__ = ["run_export", "run_import"]
 async def run_export(args: argparse.Namespace, console: Console) -> ExitCode:
     """Write a collection to a portable archive."""
     try:
-        settings = load_settings(args.config)
+        settings = settings_from(args)
     except ConfigError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE
@@ -67,7 +67,7 @@ async def run_import(args: argparse.Namespace, console: Console) -> ExitCode:
     untouched rather than half-populated.
     """
     try:
-        settings = load_settings(args.config)
+        settings = settings_from(args)
     except ConfigError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE

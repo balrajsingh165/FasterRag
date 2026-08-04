@@ -23,7 +23,7 @@ from fasterrag.adapters.llm.factory import create_llm_adapter
 from fasterrag.adapters.vectordb.base import CollectionSpec, Distance, VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.output import Console, ExitCode
-from fasterrag.config.loader import load_settings
+from fasterrag.cli.settings import settings_from
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache import create_semantic_store
 from fasterrag.core.cache.semantic import SemanticCache
@@ -48,7 +48,7 @@ _DISTANCES: frozenset[str] = frozenset({"cosine", "dot", "euclid"})
 def _settings_or_none(args: argparse.Namespace, console: Console) -> Settings | None:
     """Load configuration, reporting an invalid file rather than raising."""
     try:
-        return load_settings(args.config)
+        return settings_from(args)
     except ConfigError as exc:
         console.problem(exc.code.value, exc.detail)
         return None
