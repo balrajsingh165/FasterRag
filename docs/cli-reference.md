@@ -58,7 +58,7 @@ Submit sources for ingestion (async job; same path as `POST /v1/ingest`).
 |---|---|
 | `--metadata KEY=VALUE` | Repeatable; merged into chunk metadata. |
 | `--priority-class NAME` | Tiered-embedding routing class (D9). |
-| `--recursive` | Recurse into directories. |
+| `--recursive` | Descend into subdirectories. Without it a directory source contributes only its immediate files. Hidden files and `.git`, `node_modules`, `__pycache__`, and virtualenv directories are skipped either way; files from a directory are ingested in sorted order so the same command produces the same job. |
 | `--watch` | Follow the job and print per-stage progress until completion. |
 | `--dry-run` | Parse + chunk only; report what would be indexed (no embedding, no writes). |
 

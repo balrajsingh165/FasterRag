@@ -24,6 +24,7 @@ from fasterrag.adapters.vectordb.base import CollectionSpec, Distance, VectorDBA
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import settings_from
+from fasterrag.cli.sources import expand_sources
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache import create_semantic_store
 from fasterrag.core.cache.semantic import SemanticCache
@@ -76,8 +77,14 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
     if metadata is None:
         return ExitCode.USAGE
 
+    sources = expand_sources(args.sources, recursive=getattr(args, "recursive", False))
+    if not sources:
+        console.error(f"no files to ingest under {', '.join(args.sources)}")
+        console.document({"sources": [], "reason": "empty"})
+        return ExitCode.USAGE
+
     if args.dry_run:
-        estimate = estimate_sources(args.sources, settings)
+        estimate = estimate_sources(sources, settings)
         console.emit(f"would index {estimate.chunks} chunks from {estimate.documents} documents")
         console.emit(f"tokens          {estimate.tokens}")
         console.emit(f"unreadable      {estimate.unreadable}")
@@ -89,7 +96,7 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
     )
     try:
         record = await service.ingest(
-            args.sources,
+            sources,
             collection=args.collection,
             metadata=metadata or None,
         )
@@ -370,7 +377,10 @@ async def _index_reembed(
         locks=create_lock_store(settings),
     )
     try:
-        record = await service.ingest(args.sources, collection=plan.green)
+        record = await service.ingest(
+            expand_sources(args.sources, recursive=getattr(args, "recursive", False)),
+            collection=plan.green,
+        )
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
