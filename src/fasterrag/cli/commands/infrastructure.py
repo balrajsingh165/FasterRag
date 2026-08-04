@@ -118,7 +118,21 @@ async def run_estimate(args: argparse.Namespace, console: Console) -> ExitCode:
         cost = f"${item.cost_usd:.4f}" if item.cost_usd is not None else "unknown"
         console.emit(f"  {item.provider}/{item.model}: {cost}")
 
+    if estimate.enrichment is not None:
+        enrichment = estimate.enrichment
+        cost = f"${enrichment.cost_usd:.4f}" if enrichment.cost_usd is not None else "unknown"
+        console.emit("")
+        console.emit(f"enrichment      {enrichment.calls} call(s) to {enrichment.model}")
+        console.emit(
+            f"  prompt        {enrichment.prompt_tokens} tokens "
+            f"(the parent document, once per chunk)"
+        )
+        console.emit(f"  completion    {enrichment.completion_tokens} tokens")
+        console.emit(f"  cost          {cost}")
+        console.emit(f"  basis         {enrichment.basis}")
+
     if estimate.projection_note:
+        console.emit("")
         console.emit(f"note            {estimate.projection_note}")
 
     console.document(estimate.as_dict())

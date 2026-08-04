@@ -71,6 +71,12 @@ LOCAL_PROVIDERS: Final[frozenset[str]] = frozenset({"huggingface", "ollama"})
 
 _MILLION: Final = 1_000_000
 
+# CRITICAL: the estimator must not load a tokenizer. It runs before ingestion to answer
+# "what will this cost", and pulling a multi-gigabyte model to answer that would make the
+# cheap preflight the expensive step. Four characters per token is the usual English
+# approximation and the basis string says the figure is an estimate.
+_CHARS_PER_TOKEN: Final = 4
+
 _logger = get_logger(__name__)
 
 
@@ -113,6 +119,7 @@ class Estimate:
     parse_seconds: float = 0.0
     projected_seconds: float | None = None
     projection_note: str = ""
+    enrichment: EnrichmentEstimate | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Return the machine-readable report, the shape `--json` and the API use."""
@@ -127,7 +134,72 @@ class Estimate:
             "projection_note": self.projection_note,
             "prices_dated": PRICES_DATED,
             "providers": [provider.as_dict() for provider in self.providers],
+            "enrichment": self.enrichment.as_dict() if self.enrichment else None,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class EnrichmentEstimate:
+    """What contextual enrichment (P2) would add to an ingest.
+
+    Reported separately from the embedding cost rather than folded into it. Enrichment is a
+    *generation* charge on a different model at different rates, and a single blended number
+    would hide which knob to turn when the total looks wrong.
+    """
+
+    calls: int
+    prompt_tokens: int
+    completion_tokens: int
+    model: str
+    cost_usd: float | None
+    basis: str
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the machine-readable form."""
+        return {
+            "calls": self.calls,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "model": self.model,
+            "cost_usd": self.cost_usd,
+            "basis": self.basis,
+        }
+
+
+def estimate_enrichment(
+    settings: Settings, *, chunks: int, document_tokens: int, chunk_tokens: int
+) -> EnrichmentEstimate:
+    """Return what enrichment would cost for a corpus of this shape.
+
+    One call per chunk, each sending the whole parent document plus the chunk. The document
+    dominates, which is why P2 sends it as a cacheable prefix.
+
+    # CRITICAL: this is the *uncached* figure and the basis says so. Prompt caching is what
+    # makes enrichment affordable, but the discount depends on the provider, the cache
+    # window, and how many chunks a document has — quoting a discounted number fasterRag
+    # cannot verify would understate a real bill. An over-estimate an operator can reason
+    # about beats an under-estimate they discover on an invoice.
+    """
+    completion_tokens = chunks * settings.chunking.context_tokens
+    prompt_tokens = document_tokens + chunk_tokens
+    model = settings.llm.model
+
+    cost = price_generation(settings.llm.provider, model, prompt_tokens, completion_tokens)
+    basis = (
+        f"{chunks} call(s) at list price for {model!r}, uncached; prompt caching reduces "
+        f"this by an amount that depends on the provider and is not estimated here"
+        if cost is not None
+        else f"no published generation price recorded for {model!r} as of {PRICES_DATED}"
+    )
+
+    return EnrichmentEstimate(
+        calls=chunks,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        model=model,
+        cost_usd=cost,
+        basis=basis,
+    )
 
 
 def price_for(provider: str, model: str, tokens: int) -> tuple[float | None, str]:
@@ -213,6 +285,8 @@ def estimate_sources(
     tokens = 0
     read = 0
     unreadable = 0
+    enrichment_prompt_tokens = 0
+    enrichment_chunk_tokens = 0
 
     for task in tasks:
         try:
@@ -226,8 +300,17 @@ def estimate_sources(
             continue
 
         chunks += len(outcome.chunks)
-        tokens += sum(payload.chunk.token_count for payload in outcome.chunks)
+        document_chunk_tokens = sum(payload.chunk.token_count for payload in outcome.chunks)
+        tokens += document_chunk_tokens
         read += Path(task.source).stat().st_size
+
+        # Enrichment sends the whole parent document once per chunk, so the prompt cost is
+        # the document's own token count multiplied by how many chunks it produced — the
+        # term that makes this expensive, and the one a per-chunk figure would hide.
+        if settings.chunking.contextual_enrichment:
+            document_tokens = len(outcome.document_text) // _CHARS_PER_TOKEN
+            enrichment_prompt_tokens += document_tokens * len(outcome.chunks)
+            enrichment_chunk_tokens += document_chunk_tokens
 
     elapsed = time.perf_counter() - started
     providers = []
@@ -252,5 +335,15 @@ def estimate_sources(
             "wall-clock time is not projected: embedding throughput has not been measured "
             "on reference hardware yet, and an unmeasured projection would be a claim "
             "without a measurement (docs/benchmarks.md)"
+        ),
+        enrichment=(
+            estimate_enrichment(
+                settings,
+                chunks=chunks,
+                document_tokens=enrichment_prompt_tokens,
+                chunk_tokens=enrichment_chunk_tokens,
+            )
+            if settings.chunking.contextual_enrichment and chunks
+            else None
         ),
     )

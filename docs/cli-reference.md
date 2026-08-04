@@ -93,7 +93,11 @@ D10 preflight diagnostics. Checks: Docker present and running · required ports 
 
 ## `fasterrag estimate <path|url> [...]`
 
-D9 preflight cost estimator — BEFORE ingestion: document/token counts, projected embedding cost per configured provider, projected wall-clock time given current worker config.
+D9 preflight cost estimator — BEFORE ingestion: document/token counts and projected embedding cost per configured provider.
+
+With `chunking.contextual_enrichment: true` the report also carries the **enrichment** cost, separately from embedding rather than blended into it — enrichment is a *generation* charge on a different model at different rates, and one combined number would hide which knob to turn. It is one call per chunk, each sending the whole parent document, so the prompt cost scales with document tokens × chunk count. That figure is quoted **uncached**: prompt caching is what makes enrichment affordable, but its discount depends on the provider and the cache window, so quoting a number fasterRag cannot verify would understate a real bill. An over-estimate an operator can reason about is the safer error.
+
+Wall-clock time is deliberately **not** projected — throughput has not been measured on reference hardware, and an unmeasured projection would be a claim without a measurement ([benchmarks.md](benchmarks.md)).
 
 | Flag | Description |
 |---|---|
