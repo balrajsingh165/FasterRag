@@ -45,6 +45,7 @@ class LayoutChunker:
         """
         self._counter = counter or EstimatingTokenCounter()
         self._limit = chunk_size * self._counter.chars_per_token
+        self._overlap_tokens = overlap
         self._overlap = overlap * self._counter.chars_per_token
 
     def split(self, document: ParsedDocument) -> list[TextChunk]:
@@ -57,6 +58,7 @@ class LayoutChunker:
                 text,
                 split_span(text, 0, len(text), self._limit),
                 overlap_chars=self._overlap,
+                overlap_tokens=self._overlap_tokens,
                 strategy=self.strategy,
                 counter=self._counter,
             )
@@ -66,6 +68,7 @@ class LayoutChunker:
             text,
             segments,
             overlap_chars=self._overlap,
+            overlap_tokens=self._overlap_tokens,
             strategy=self.strategy,
             counter=self._counter,
             page_at=document.page_at,

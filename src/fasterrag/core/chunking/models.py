@@ -125,6 +125,7 @@ def assemble(
     overlap_chars: int,
     strategy: str,
     counter: TokenCounter,
+    overlap_tokens: int | None = None,
     page_at: object = None,
     section_at: object = None,
 ) -> list[TextChunk]:
@@ -136,6 +137,9 @@ def assemble(
         overlap_chars: Characters each chunk reaches back into its predecessor.
         strategy: Name recorded on every chunk.
         counter: Token counter used for ``token_count``.
+        overlap_tokens: Ceiling on the overlap in real tokens. Omitted leaves the reach-back
+            purely character-based, which overshoots badly wherever text tokenizes denser
+            than the assumed ratio — CJK overlap runs several times the configured tokens.
         page_at: Optional callable mapping an offset to a page number.
         section_at: Optional callable mapping an offset to a heading path.
 
@@ -146,7 +150,9 @@ def assemble(
     chunks: list[TextChunk] = []
 
     for index, (start, end) in enumerate(merged):
-        reach_back = 0 if index == 0 else min(overlap_chars, start)
+        reach_back = (
+            0 if index == 0 else _reach_back(text, start, overlap_chars, overlap_tokens, counter)
+        )
         chunk_start = start - reach_back
         chunk_text = text[chunk_start:end]
 
@@ -164,6 +170,29 @@ def assemble(
         )
 
     return chunks
+
+
+def _reach_back(
+    text: str,
+    start: int,
+    overlap_chars: int,
+    overlap_tokens: int | None,
+    counter: TokenCounter,
+) -> int:
+    """Return how many characters a chunk should reach into its predecessor.
+
+    The character reach is the starting point and the token budget trims it, because the
+    two disagree by several times on anything that is not English prose. Trimming halves
+    rather than stepping, so a badly wrong starting guess costs a handful of counts.
+    """
+    reach = min(overlap_chars, start)
+    if overlap_tokens is None:
+        return reach
+
+    while reach > 0 and counter.count(text[start - reach : start]) > overlap_tokens:
+        reach //= 2
+
+    return reach
 
 
 def _merge_blank(text: str, segments: Sequence[Segment]) -> list[Segment]:

@@ -28,6 +28,11 @@ __all__ = ["SEPARATORS", "RecursiveChunker", "pack", "split_span"]
 
 SEPARATORS: Final[tuple[str, ...]] = ("\n\n", "\n", ". ", "; ", ", ", " ")
 
+# The character limit below which the budget pass stops halving. Without a floor a text the
+# counter never reports as fitting — a single glyph tokenizing to several tokens — would
+# recurse until the segments were one character wide.
+_MINIMUM_LIMIT: Final = 16
+
 
 def _split_on(text: str, start: int, end: int, separator: str) -> list[Segment]:
     """Cut a span after each separator occurrence, keeping the separator with its piece."""
@@ -102,12 +107,40 @@ class RecursiveChunker:
             counter: Token counter; defaults to the estimating counter.
         """
         self._counter = counter or EstimatingTokenCounter()
+        self._budget = chunk_size
         self._limit = chunk_size * self._counter.chars_per_token
+        self._overlap_tokens = overlap
         self._overlap = overlap * self._counter.chars_per_token
+
+    def _within_budget(self, text: str, segment: Segment, limit: int) -> list[Segment]:
+        """Split a segment further until the counter agrees it fits ``chunk_size`` tokens.
+
+        Splitting is done on characters, because a character tiling is what keeps chunk
+        offsets exact and gapless. Characters per token is only an assumption though, and a
+        wrong one for code, CJK text, and long identifiers — all of which tokenize far
+        denser than prose. This pass re-splits the segments where the assumption was wrong,
+        so the configured size means tokens rather than a guess about them.
+
+        With the estimating counter the check can never fail (the limit is derived from the
+        same ratio the count uses), so this costs one count per segment and changes nothing.
+        """
+        start, end = segment
+        if limit <= _MINIMUM_LIMIT or self._counter.count(text[start:end]) <= self._budget:
+            return [segment]
+
+        halved = max(limit // 2, _MINIMUM_LIMIT)
+        return [
+            piece
+            for finer in split_span(text, start, end, halved)
+            for piece in self._within_budget(text, finer, halved)
+        ]
 
     def segments(self, text: str) -> list[Segment]:
         """Return the tiling segments for ``text`` before overlap is applied."""
-        return pack(split_span(text, 0, len(text), self._limit), self._limit)
+        packed = pack(split_span(text, 0, len(text), self._limit), self._limit)
+        return [
+            piece for segment in packed for piece in self._within_budget(text, segment, self._limit)
+        ]
 
     def split(self, document: ParsedDocument) -> list[TextChunk]:
         """Split a parsed document recursively."""
@@ -118,6 +151,7 @@ class RecursiveChunker:
             document.text,
             self.segments(document.text),
             overlap_chars=self._overlap,
+            overlap_tokens=self._overlap_tokens,
             strategy=self.strategy,
             counter=self._counter,
             page_at=document.page_at,

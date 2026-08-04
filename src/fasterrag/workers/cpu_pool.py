@@ -23,6 +23,7 @@ from pathlib import Path
 from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.chunking import create_chunker
+from fasterrag.core.chunking.tokenizer import create_token_counter
 from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
 from fasterrag.core.parsing import parse_bytes
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
@@ -73,7 +74,10 @@ def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
     data = _read(task.readable, limit)
     document = parse_bytes(data, filename=Path(task.source).name, max_bytes=limit)
 
-    chunker = create_chunker(settings)
+    # The embedding model's own tokenizer, so `chunking.chunk_size` counts the tokens the
+    # model will actually see. Built per worker rather than shared: this runs in a process
+    # pool, and a tokenizer cannot be pickled across that boundary anyway.
+    chunker = create_chunker(settings, counter=create_token_counter(settings))
     chunker_hash = chunker_config_hash(settings)
     digest = content_hash(data)
 
