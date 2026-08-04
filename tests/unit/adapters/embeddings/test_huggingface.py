@@ -114,3 +114,46 @@ def test_the_sync_bridge_calls_a_local_model_directly(model: FakeModel) -> None:
 
     assert len(vectors) == 2
     assert model.calls == [["one", "two"]]
+
+
+@pytest.fixture
+def wide_model(monkeypatch: pytest.MonkeyPatch) -> FakeModel:
+    """A model whose width is above the schema's floor, so a mismatch can be configured."""
+    fake = FakeModel(dimensions=384)
+    monkeypatch.setattr(huggingface, "load_model", lambda name: fake)
+    return fake
+
+
+def test_a_wrong_dimension_is_refused_at_load(wide_model: FakeModel) -> None:
+    """Otherwise a collection is created at the wrong width and every upsert fails later."""
+    adapter = HuggingFaceEmbedder(local_settings(dimensions=256))
+
+    with pytest.raises(ConfigError) as caught:
+        adapter.encode(["a passage"])
+
+    assert "256" in caught.value.detail
+    assert "384" in caught.value.detail
+
+
+def test_the_refusal_names_the_setting(wide_model: FakeModel) -> None:
+    """An error that does not name the key leaves an operator guessing which one to change."""
+    adapter = HuggingFaceEmbedder(local_settings(dimensions=256))
+
+    with pytest.raises(ConfigError) as caught:
+        adapter.encode(["a passage"])
+
+    assert "embeddings.dimensions" in caught.value.detail
+
+
+def test_a_matching_dimension_loads(wide_model: FakeModel) -> None:
+    adapter = HuggingFaceEmbedder(local_settings(dimensions=384))
+
+    assert len(adapter.encode(["a passage"])[0]) == 384
+
+
+def test_an_unset_dimension_takes_the_model_s_own(wide_model: FakeModel) -> None:
+    adapter = HuggingFaceEmbedder(local_settings())
+
+    adapter.encode(["a passage"])
+
+    assert adapter.dimensions == 384

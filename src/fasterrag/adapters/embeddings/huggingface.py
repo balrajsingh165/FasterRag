@@ -62,6 +62,26 @@ def _embedding_dimension(model: Any) -> int | None:
     return None
 
 
+def _dimension_mismatch(model: str, configured: int, emitted: int) -> ConfigError:
+    """Return the error for a configured vector size the local model does not produce.
+
+    Raised at load time rather than left to the vector database, because the failure would
+    otherwise surface as a rejected upsert after a collection had already been created at
+    the wrong width — long after the setting that caused it, and with nothing naming it.
+
+    Truncating to the configured size is deliberately not offered. Shortening a vector is
+    only lossless for a model trained for it (Matryoshka representation learning), and
+    silently truncating one that was not degrades retrieval in a way no error reports.
+    """
+    return ConfigError(
+        f"embeddings.dimensions is {configured} but the local model {model!r} emits "
+        f"{emitted}-dimensional vectors. Remove embeddings.dimensions to accept the "
+        f"model's own size, or choose a model that emits {configured}. Shortening the "
+        "output is only offered by hosted providers whose models are trained for it "
+        "(for example OpenAI's text-embedding-3 family), where the API does it server-side"
+    )
+
+
 class HuggingFaceEmbedder(EmbeddingAdapter):
     """Embeds locally with a sentence-transformers model."""
 
@@ -93,12 +113,20 @@ class HuggingFaceEmbedder(EmbeddingAdapter):
         return self._dimensions
 
     def _loaded(self) -> Any:
-        """Return the model, loading it on first use."""
+        """Return the model, loading it on first use.
+
+        Raises:
+            ConfigError: If ``embeddings.dimensions`` disagrees with what the model emits.
+        """
         if self._model is None:
             _logger.info("loading embedding model", extra={"model": self.config.model})
             self._model = load_model(self.config.model)
+            emitted = _embedding_dimension(self._model)
             if self._dimensions is None:
-                self._dimensions = _embedding_dimension(self._model)
+                self._dimensions = emitted
+            elif emitted is not None and emitted != self._dimensions:
+                self._model = None
+                raise _dimension_mismatch(self.config.model, self._dimensions, emitted)
         return self._model
 
     def encode(self, texts: Sequence[str]) -> list[list[float]]:
