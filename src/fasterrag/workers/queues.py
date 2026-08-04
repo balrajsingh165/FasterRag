@@ -94,6 +94,15 @@ class ParseOutcome:
     parser: str
     mime_type: str
     parse_flags: tuple[str, ...] = ()
+    document_text: str = ""
+    """The parsed document, carried back for contextual enrichment (P2).
+
+    # CRITICAL: enrichment cannot run inside the worker. Parsing happens in a *process*
+    # pool, and an LLM adapter holds a client that cannot be pickled across that boundary —
+    # so the text comes back and the provider call happens on the async side. Carrying it
+    # costs roughly one extra copy of the document through IPC, which is the price of the
+    # feature working at all.
+    """
 
 
 @dataclass(frozen=True, slots=True)

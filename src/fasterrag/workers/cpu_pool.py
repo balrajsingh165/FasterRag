@@ -17,9 +17,10 @@ import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.chunking import create_chunker
 from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
@@ -96,6 +97,13 @@ def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
         parser=document.parser,
         mime_type=document.mime_type,
         parse_flags=document.flags,
+        # Carried only when enrichment is on: otherwise this doubles what every parsed
+        # document sends back through IPC for a field nothing will read.
+        document_text=(
+            "\n\n".join(block.text for block in document.blocks)
+            if settings.chunking.contextual_enrichment
+            else ""
+        ),
     )
 
 
@@ -156,6 +164,7 @@ class CpuWorkerPool:
         *,
         journal: Journal | None = None,
         executor_factory: Callable[[int], Executor] | None = None,
+        llm: LLMAdapter | None = None,
     ) -> None:
         """Build the pool without starting any worker.
 
@@ -166,9 +175,13 @@ class CpuWorkerPool:
             executor_factory: Builds the executor from a worker count. Defaults to a
                 process pool, because parsing must escape the interpreter lock; tests
                 inject a simpler executor to stay fast and deterministic.
+            llm: Model writing the contextual-enrichment prefixes (P2). Omitted means no
+                enrichment, whatever ``chunking.contextual_enrichment`` says — the toggle
+                cannot conjure a provider.
         """
         self.settings = settings
         self.journal = journal
+        self.llm = llm
         self.size = resolve_pool_size(settings.workers.cpu_pool_size)
         self._executor_factory = executor_factory or (
             lambda workers: ProcessPoolExecutor(max_workers=workers)
@@ -254,6 +267,8 @@ class CpuWorkerPool:
                     on_progress(task.index)
                 continue
 
+            outcome = await self._enriched(outcome)
+
             for flag in outcome.parse_flags:
                 flags[flag] = flags.get(flag, 0) + 1
 
@@ -324,6 +339,35 @@ class CpuWorkerPool:
         self._record(job, task, "indexed", outcome.content_hash)
         if self.journal is not None and self.settings.ingestion.dedup:
             self.journal.remember_content(collection, outcome.content_hash, task.document_id)
+
+    async def _enriched(self, outcome: ParseOutcome) -> ParseOutcome:
+        """Prepend a situating context to each chunk, when the toggle and a model allow it.
+
+        Runs here rather than in the worker: the pool is a *process* pool and an LLM adapter
+        cannot cross that boundary. Doing it after the executor returns keeps parsing
+        parallel and CPU-bound while the provider calls stay on the event loop, which is
+        where an I/O-bound wait belongs anyway.
+        """
+        if self.llm is None or not self.settings.chunking.contextual_enrichment:
+            return outcome
+        if not outcome.chunks or not outcome.document_text:
+            return outcome
+
+        from fasterrag.core.chunking.enrichment import enrich_chunks
+
+        enriched = await enrich_chunks(
+            [payload.chunk for payload in outcome.chunks],
+            outcome.document_text,
+            self.llm,
+            self.settings,
+        )
+        return replace(
+            outcome,
+            chunks=[
+                replace(payload, chunk=chunk)
+                for payload, chunk in zip(outcome.chunks, enriched, strict=True)
+            ],
+        )
 
     @staticmethod
     def tasks_for(

@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fasterrag.adapters.embeddings.tiering import TieringRouter, create_embedding_router
+from fasterrag.adapters.llm.factory import create_llm_adapter
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.config.schema import Settings
@@ -154,10 +155,18 @@ class IngestionService:
                 },
             )
 
+            # The enrichment model is built only when the toggle is on: constructing an LLM
+            # adapter for every ingest would open a provider client that most jobs never use.
+            enricher = (
+                create_llm_adapter(self.settings)
+                if self.settings.chunking.contextual_enrichment
+                else None
+            )
             async with CpuWorkerPool(
                 self.settings,
                 journal=self.journal,
                 executor_factory=self._executor_factory,
+                llm=enricher,
             ) as cpu:
                 consumer = asyncio.create_task(pool.run(queue))
                 try:
@@ -172,6 +181,9 @@ class IngestionService:
                 finally:
                     await queue.close(consumers=pool.size)
                 embed_report = await consumer
+
+            if enricher is not None:
+                await enricher.close()
 
         for document, code in embed_report.failures:
             self.journal.dead_letter(
