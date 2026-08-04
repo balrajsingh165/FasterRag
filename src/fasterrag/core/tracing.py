@@ -167,6 +167,11 @@ class Trace:
             trace_id=str(payload["trace_id"]),
             query=str(payload.get("query", "")),
             collection=payload.get("collection"),
+            # CRITICAL: restored, not defaulted. Without this the tenant survives `as_dict`
+            # but is lost on the way back, so every stored trace reads as untenanted — and
+            # the tenant check in `TraceStore.load` would then hide every trace from the
+            # tenant that owns it.
+            tenant=payload.get("tenant"),
             filters=payload.get("filters"),
             config_snapshot=dict(payload.get("config_snapshot") or {}),
             retrieved=list(payload.get("retrieved") or []),

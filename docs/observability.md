@@ -15,6 +15,16 @@ A read-only web GUI that lets the user inspect:
 
 Hard rules: toggleable via `observability.dashboard` (default `false`); binds `observability.dashboard_port` (default 8080); **observability-only and never controls the RAG** — it contains no button, form, or endpoint that mutates system state.
 
+**Shipped** (TASK-0045). Three properties are enforced rather than promised:
+
+- **No write route exists.** A test walks every route the application declares and asserts none carries `POST`, `PUT`, `PATCH`, or `DELETE`. "We only added read endpoints" is a promise; an application that has none is a property, and a live `POST /` returns `405`.
+- **Separate application, separate port.** It runs beside `fasterrag serve` rather than mounted into it, so the API and the dashboard can be bound to different interfaces — the dashboard displays prompts, responses, and corpus text, which usually belongs on an internal one.
+- **One source of truth for metrics.** The page reads the same registry a Prometheus scrape renders, through `Registry.series`, so the two cannot drift apart.
+
+Every interpolated value is HTML-escaped: a trace carries user-supplied query text and model output directly onto a page the operator trusts.
+
+**Not yet tenant-scoped** (TASK-0184): it lists every stored trace regardless of tenant. Correct for the single-operator deployment, wrong once `security.multi_tenancy` is on — deploy it behind the network boundary until that lands.
+
 ## 2. Metrics catalogue
 
 | Metric | Type | Labels | Description |

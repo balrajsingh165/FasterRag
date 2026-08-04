@@ -286,6 +286,23 @@ class Registry:
         """Return every registered metric name."""
         return [instrument.name for instrument in self._instruments]
 
+    def series(self, name: str) -> list[tuple[str, str]]:
+        """Return one instrument's series as ``(labels, value)`` pairs.
+
+        A public accessor so a second reader — the dashboard — sees exactly what a scrape
+        sees. Two renderers over one registry cannot disagree; two renderers each walking
+        their own copy of the state eventually do.
+        """
+        for instrument in self._instruments:
+            if instrument.name != name:
+                continue
+            return [
+                (line.split(" ", 1)[0].removeprefix(name), line.split(" ", 1)[1])
+                for line in instrument.render()
+                if not line.startswith("#") and " " in line
+            ]
+        return []
+
 
 REGISTRY = Registry()
 

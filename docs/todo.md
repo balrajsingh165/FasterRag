@@ -255,7 +255,8 @@ _(empty)_
 
 ### S14 — Observability dashboard (last; after Langfuse proves the trace pipeline)
 
-- [ ] TASK-0045: Implement read-only self-hosted dashboard (cache stats, tokens, costs, latencies, full LLM I/O history; zero mutating routes, asserted by test)
+- [x] TASK-0045: Implement read-only self-hosted dashboard — a **separate ASGI application on its own port**, never mounted into the control-plane API. Two structural reasons: it declares no write route at all, so "observability-only" is a property of the application rather than a promise about restraint; and it shows prompts, responses, and corpus text, so an operator must be able to bind it to an internal interface while the API faces callers. Reads the metrics registry through a new public `Registry.series` accessor so the page and a Prometheus scrape cannot disagree. Every interpolated value is escaped — a trace carries user text and model output straight onto an operator's page. **Verified live over a real socket**: `GET / -> 200` showing a stored query, its tenant, and a recorded metric; `POST / -> 405`. 11 tests, including the no-write-route assertion and an XSS attempt — ✅ 2026-08-04
+- [ ] TASK-0184: The dashboard is not tenant-scoped. It lists every stored trace regardless of tenant, which is correct for the single-operator deployment it currently serves but wrong the moment `security.multi_tenancy` is on — a trace carries the query text and retrieved chunks. `TraceStore.recent` and `.load` already take a tenant; the dashboard needs an identity to pass them, which means deciding how it authenticates at all (it has no auth today, and sits behind the operator's network boundary by design)
 
 ### Cross-slice (scheduled opportunistically after their dependencies)
 

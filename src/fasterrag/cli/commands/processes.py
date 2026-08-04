@@ -58,7 +58,29 @@ async def run_serve(args: argparse.Namespace, console: Console) -> ExitCode:
         reload=args.reload,
         log_level=settings.app.log_level,
     )
-    await uvicorn.Server(config).serve()
+
+    servers = [uvicorn.Server(config)]
+    if settings.observability.dashboard:
+        from fasterrag.observability.dashboard import create_dashboard
+
+        dashboard_port = settings.observability.dashboard_port
+        console.emit(f"dashboard on http://{host}:{dashboard_port} (read-only)")
+        servers.append(
+            uvicorn.Server(
+                uvicorn.Config(
+                    create_dashboard(settings),
+                    host=host,
+                    port=dashboard_port,
+                    log_level=settings.app.log_level,
+                )
+            )
+        )
+
+    # CRITICAL: the dashboard runs beside the API rather than mounted into it. Sharing a
+    # port would take away the operator's ability to bind the two differently, and the
+    # dashboard displays prompts, responses, and corpus text — content that usually belongs
+    # on an internal interface while the API faces callers.
+    await asyncio.gather(*(server.serve() for server in servers))
     return ExitCode.SUCCESS
 
 
