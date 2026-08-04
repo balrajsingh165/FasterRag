@@ -178,6 +178,22 @@ Validate `config.yaml` + `.env` presence of referenced env vars without starting
 
 Startup also **refuses to run** under settings the schema accepts but nothing enforces — `security.auth`, `security.multi_tenancy`, and either `cost.*_token_budget`. Enabling one raises `CONFIG_INVALID` naming the slice that will implement it. Reporting a protection the system does not have is the one failure mode worse than an outage.
 
+## `fasterrag config show`
+
+List every setting with its effective value and its default, walking nested sections so a new schema field appears without being registered anywhere. Answers "what can I tune?" without reading [config-reference.md](config-reference.md). Exit 0/2.
+
+Unlike `config validate`, a referenced-but-missing environment variable does **not** stop the listing — this command is most useful on the half-configured installation that `validate` refuses. Invalid configuration still exits 2, because printing values that failed validation would show settings nothing will use.
+
+| Flag | Description |
+|---|---|
+| `--changed` | List only settings that differ from their default — the fastest way to see what a deployment customised. |
+
+```console
+$ fasterrag config show --changed
+* chunking.chunk_size                              512                      default=768
+* chunking.token_counter                           'model'                  default='auto'
+```
+
 ## `fasterrag autopilot run`
 
 D6 eval-driven auto-tuning (requires `autopilot.enabled: true`). Generates a golden Q&A set from the corpus, searches chunk size / top_k / hybrid weights / rerank settings, and writes a **suggested config diff with measured deltas** (e.g. recall@10 before/after) to stdout and `autopilot-suggestion.yaml`. **Never applies changes** — a human reviews and applies the diff.

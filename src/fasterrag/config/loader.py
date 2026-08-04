@@ -38,6 +38,7 @@ def load_settings(
     path: str | Path = DEFAULT_CONFIG_PATH,
     *,
     env_file: str | Path | None = DEFAULT_ENV_FILE,
+    require_env: bool = True,
 ) -> Settings:
     """Load and validate configuration, or fail with a ``ConfigError``.
 
@@ -46,6 +47,7 @@ def load_settings(
         env_file: Optional ``.env`` file loaded into the environment before the
             presence check. Existing environment variables always win; ``None`` skips
             the file and checks the process environment as-is.
+        require_env: Whether a referenced-but-absent environment variable is an error.
 
     Returns:
         The validated, immutable settings.
@@ -59,7 +61,15 @@ def load_settings(
     raw = _read_yaml(config_path)
     settings = _validate(raw, config_path)
     _reject_unenforced_settings(settings)
-    _require_referenced_env_vars(settings, env_file)
+
+    # CRITICAL: `require_env` defaults to True and every execution path must leave it
+    # there. It exists for read-only inspection — `config show` is most useful on exactly
+    # the broken installation whose missing variables would otherwise stop it from
+    # printing anything. Passing False anywhere that goes on to serve, ingest, or query
+    # would trade a startup failure naming the variable for a runtime one that does not.
+    if require_env:
+        _require_referenced_env_vars(settings, env_file)
+
     _warn_about_risky_settings(settings)
     return settings
 

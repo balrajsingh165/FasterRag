@@ -61,6 +61,8 @@ chunking:
   strategy: recursive
   chunk_size: 768
   overlap: 64
+  token_counter: auto
+  chars_per_token: 4
   contextual_enrichment: false
   context_tokens: 75
 
@@ -222,6 +224,8 @@ security:
 | `chunking.strategy` | str | `recursive` | one of `fixed`, `recursive`, `semantic`, `layout`, `late` | Chunking strategy (see [architecture.md](architecture.md) §5). |
 | `chunking.chunk_size` | int | `768` | 64–2500; warning logged above 1024 | Target chunk size in tokens. Practical working range is ~512–1024; the ~2,500-token "context cliff" (directional ceiling from a January 2026 preprint) is the hard upper bound. |
 | `chunking.overlap` | int | `64` | 0 ≤ overlap < `chunk_size` | Token overlap between adjacent chunks. |
+| `chunking.token_counter` | str | `auto` | one of `auto`, `estimate`, `model` | How `chunk_size` and `overlap` are counted. `auto` loads the embedding model's own tokenizer when the provider ships a local one and estimates otherwise; `estimate` forces the `chars_per_token` ratio; `model` forces the real tokenizer for any provider, which requires the matching tokenizer in the local Hugging Face cache and falls back to the estimate with a logged warning when it is absent. Loading never reaches the network. |
+| `chunking.chars_per_token` | int | `4` | 1–16 | Characters per token assumed by the estimate, and by the first split pass before real counts refine it. Lower it for corpora that tokenize densely (code, CJK) when running `token_counter: estimate`. |
 | `chunking.contextual_enrichment` | bool | `false` | — | Contextual-retrieval-style enrichment: prepend an LLM-generated document-level context to each chunk before embedding and BM25 indexing (Anthropic, Sept 2024: −49% failed retrievals; −67% with reranking). Costs LLM calls at ingest; uses provider prompt caching of the parent document. |
 | `chunking.context_tokens` | int | `75` | 25–150 | Target length of the generated per-chunk context. Recommended ~50–100 tokens. |
 

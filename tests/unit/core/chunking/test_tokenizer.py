@@ -148,3 +148,115 @@ def test_the_load_never_reaches_the_network(monkeypatch: pytest.MonkeyPatch) -> 
     tokenizer_module.load_tokenizer("some/model")
 
     assert seen["local_files_only"] is True
+
+
+def test_estimate_mode_forces_the_ratio_counter() -> None:
+    """The faster choice for English prose, where the ratio is already close."""
+    counter = create_token_counter(
+        Settings.model_validate(
+            {
+                "embeddings": {"provider": "huggingface", "model": "some/model"},
+                "chunking": {"token_counter": "estimate"},
+            }
+        )
+    )
+
+    assert isinstance(counter, EstimatingTokenCounter)
+
+
+def test_model_mode_forces_the_real_tokenizer_for_a_hosted_provider() -> None:
+    """How a hosted deployment gets exact counts from a locally cached tokenizer."""
+    counter = create_token_counter(
+        Settings.model_validate(
+            {
+                "embeddings": {
+                    "provider": "openai",
+                    "model": "text-embedding-3-small",
+                    "api_key_env": "OPENAI_API_KEY",
+                },
+                "chunking": {"token_counter": "model"},
+            }
+        )
+    )
+
+    assert isinstance(counter, ModelTokenCounter)
+
+
+def test_the_configured_ratio_reaches_the_estimate() -> None:
+    """A ratio the counter ignores is a setting that silently does nothing."""
+    counter = create_token_counter(
+        Settings.model_validate({"chunking": {"token_counter": "estimate", "chars_per_token": 2}})
+    )
+
+    assert counter.chars_per_token == 2
+
+
+def test_the_configured_ratio_reaches_the_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model counter that cannot load must still honour the configured ratio."""
+    monkeypatch.setattr(tokenizer_module, "load_tokenizer", lambda model: None)
+
+    counter = ModelTokenCounter("some/model", 2)
+
+    assert counter.chars_per_token == 2
+    assert counter.count(DENSE) == EstimatingTokenCounter(2).count(DENSE)
+
+
+class DenseCounter:
+    """A counter for which every character is one token, as CJK nearly is."""
+
+    def count(self, text: str) -> int:
+        return len(text.strip())
+
+    @property
+    def chars_per_token(self) -> int:
+        return 4
+
+
+def test_a_dense_counter_keeps_chunks_inside_the_token_budget() -> None:
+    """The whole point: a "512-token" chunk that is really 2,000 gets silently truncated."""
+    from fasterrag.core.chunking.recursive import RecursiveChunker
+    from fasterrag.core.parsing import parse_bytes
+
+    body = "\u691c\u7d22\u62e1\u5f35\u751f\u6210\u306f\u5927\u898f\u6a21\u3067\u3059\u3002" * 200
+    document = parse_bytes(body.encode("utf-8"), filename="ja.md")
+    counter = DenseCounter()
+
+    chunks = RecursiveChunker(chunk_size=128, overlap=16, counter=counter).split(document)
+
+    assert max(counter.count(chunk.text) for chunk in chunks) <= 128 + 16
+
+
+def test_the_estimate_still_produces_the_same_chunks() -> None:
+    """The budget pass must be inert for the counter whose ratio the limit came from."""
+    from fasterrag.core.chunking.recursive import RecursiveChunker
+    from fasterrag.core.parsing import parse_bytes
+
+    body = "The meal allowance is forty-one pounds per day for UK travel. " * 60
+    document = parse_bytes(body.encode("utf-8"), filename="en.md")
+
+    plain = RecursiveChunker(chunk_size=128, overlap=16).split(document)
+    explicit = RecursiveChunker(chunk_size=128, overlap=16, counter=EstimatingTokenCounter()).split(
+        document
+    )
+
+    assert [chunk.text for chunk in plain] == [chunk.text for chunk in explicit]
+    assert len(plain) > 1
+
+
+def test_the_overlap_is_measured_in_tokens_too() -> None:
+    """A character overlap runs several times the configured tokens on dense text."""
+    from fasterrag.core.chunking.recursive import RecursiveChunker
+    from fasterrag.core.parsing import parse_bytes
+
+    body = "\u691c\u7d22\u62e1\u5f35\u751f\u6210\u306f\u5927\u898f\u6a21\u3067\u3059\u3002" * 200
+    document = parse_bytes(body.encode("utf-8"), filename="ja.md")
+    counter = DenseCounter()
+
+    chunks = RecursiveChunker(chunk_size=128, overlap=16, counter=counter).split(document)
+    overlaps = [
+        counter.count(document.text[chunks[i].start : chunks[i - 1].end])
+        for i in range(1, len(chunks))
+    ]
+
+    assert overlaps
+    assert max(overlaps) <= 16

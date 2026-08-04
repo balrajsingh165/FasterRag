@@ -68,13 +68,18 @@ def load_tokenizer(model: str) -> Any | None:
 class ModelTokenCounter:
     """Counts tokens with the embedding model's own tokenizer."""
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, chars_per_token: int = CHARS_PER_TOKEN) -> None:
         """Record the model without loading anything yet.
 
         Loading is deferred because a chunker is constructed for every document, and
         paying the load at construction would cost it even for a run that never chunks.
+
+        Args:
+            model: The embedding model whose tokenizer to load.
+            chars_per_token: Ratio for the fallback estimate and the first split pass.
         """
         self.model = model
+        self._estimate = EstimatingTokenCounter(chars_per_token)
 
     def count(self, text: str) -> int:
         """Return the token count, falling back to the estimate when unavailable."""
@@ -84,14 +89,14 @@ class ModelTokenCounter:
 
         tokenizer = load_tokenizer(self.model)
         if tokenizer is None:
-            return EstimatingTokenCounter().count(stripped)
+            return self._estimate.count(stripped)
 
         try:
             return len(tokenizer.encode(stripped, add_special_tokens=False))
         except Exception:
             # A tokenizer that loaded but cannot encode this particular string must not
             # abort the document; the estimate is a worse answer, not no answer.
-            return EstimatingTokenCounter().count(stripped)
+            return self._estimate.count(stripped)
 
     @property
     def chars_per_token(self) -> int:
@@ -102,18 +107,32 @@ class ModelTokenCounter:
         this ratio got wrong by counting for real. A per-model average would move the
         starting guess without making it right for any particular text, because the ratio
         varies far more between prose and CJK within one model than it does between models.
+        Tune it through ``chunking.chars_per_token`` when a corpus is uniformly dense.
         """
-        return CHARS_PER_TOKEN
+        return self._estimate.chars_per_token
 
 
 def create_token_counter(settings: Settings) -> TokenCounter:
-    """Return the best available token counter for the configured embedding model.
+    """Return the token counter selected by ``chunking.token_counter``.
+
+    ``auto`` uses the model's own tokenizer when the provider ships a local one and the
+    estimate otherwise. ``estimate`` forces the ratio-based counter, which is the faster
+    choice for a corpus of English prose where the ratio is already close. ``model`` forces
+    the real tokenizer for any provider, which is how a deployment using a hosted embedding
+    model still gets exact counts — it needs the matching tokenizer cached locally, and
+    falls back to the estimate with a warning when it is not.
 
     Returns:
-        The model's own tokenizer when the provider ships a local one, otherwise the
-        estimating counter. Never raises: a counter that could fail configuration would
-        make chunking depend on a model download.
+        The counter to chunk with. Never raises: a counter that could fail configuration
+        would make chunking depend on a model download.
     """
+    mode = settings.chunking.token_counter
+    estimate = EstimatingTokenCounter(settings.chunking.chars_per_token)
+
+    if mode == "estimate":
+        return estimate
+    if mode == "model":
+        return ModelTokenCounter(settings.embeddings.model, settings.chunking.chars_per_token)
     if settings.embeddings.provider not in _LOCAL_PROVIDERS:
-        return EstimatingTokenCounter()
-    return ModelTokenCounter(settings.embeddings.model)
+        return estimate
+    return ModelTokenCounter(settings.embeddings.model, settings.chunking.chars_per_token)

@@ -11,8 +11,11 @@ configuration, ``4`` for a failed preflight, ``3`` for a dependency that cannot 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+from pydantic import BaseModel
 
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.output import Console, ExitCode
@@ -23,7 +26,13 @@ from fasterrag.errors import ConfigError, FasterRagError
 from fasterrag.services.doctor import diagnose, format_report
 from fasterrag.services.provisioning import container_state, docker_available
 
-__all__ = ["run_config_init", "run_config_validate", "run_doctor_command", "run_status"]
+__all__ = [
+    "run_config_init",
+    "run_config_show",
+    "run_config_validate",
+    "run_doctor_command",
+    "run_status",
+]
 
 
 async def run_config_init(args: argparse.Namespace, console: Console) -> ExitCode:
@@ -103,6 +112,72 @@ async def run_config_validate(args: argparse.Namespace, console: Console) -> Exi
             "collection": settings.vector_db.collection.default_name,
         }
     )
+    return ExitCode.SUCCESS
+
+
+def _flatten(section: BaseModel, prefix: str = "") -> Iterator[tuple[str, Any, Any]]:
+    """Yield ``(dotted_name, value, default)`` for every leaf setting under ``section``.
+
+    Walks nested sections rather than listing fields by hand, so a setting added to the
+    schema shows up here without anyone remembering to register it.
+    """
+    for name, field in type(section).model_fields.items():
+        value = getattr(section, name)
+        dotted = f"{prefix}{name}"
+        if isinstance(value, BaseModel):
+            yield from _flatten(value, f"{dotted}.")
+            continue
+
+        default = field.get_default(call_default_factory=True)
+        yield dotted, value, default
+
+
+def _redacted(name: str, value: Any) -> Any:
+    """Return the value, or a placeholder when the name suggests it carries a secret.
+
+    # CRITICAL: config.yaml holds env-var *names*, never secret values, so nothing here
+    # should be sensitive. This is a second line of defence for an operator who put a key
+    # in the file anyway — printing it would then leak it into terminal scrollback,
+    # screenshots, and pasted bug reports.
+    """
+    lowered = name.lower()
+    if value and any(word in lowered for word in ("password", "secret", "token_value")):
+        return "<redacted>"
+    return value
+
+
+async def run_config_show(args: argparse.Namespace, console: Console) -> ExitCode:
+    """Print every setting with its effective value and its default.
+
+    Answers "what can I change, and what is it right now?" without reading the schema.
+    ``--changed`` narrows the listing to settings that differ from their default, which is
+    the fastest way to see what a deployment actually customised.
+
+    Missing environment variables do not stop the listing. This command is most useful on
+    the half-configured installation that ``config validate`` refuses, and an operator
+    reaching for it wants to see the settings, not be told again that a key is unset.
+    """
+    try:
+        settings = load_settings(args.config, require_env=False)
+    except ConfigError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return ExitCode.USAGE
+
+    rows = [
+        {"setting": name, "value": _redacted(name, value), "default": _redacted(name, default)}
+        for name, value, default in _flatten(settings)
+        if not args.changed or value != default
+    ]
+
+    if not rows:
+        console.emit(f"{args.config} matches every default")
+    for row in rows:
+        marker = " " if row["value"] == row["default"] else "*"
+        console.emit(
+            f"{marker} {row['setting']:<48} {row['value']!r:<24} default={row['default']!r}"
+        )
+
+    console.document({"config": args.config, "settings": rows})
     return ExitCode.SUCCESS
 
 

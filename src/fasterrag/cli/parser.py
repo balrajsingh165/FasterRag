@@ -285,7 +285,7 @@ def _add_portability(subparsers: argparse._SubParsersAction[argparse.ArgumentPar
 
 
 def _add_config(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register ``config init`` and ``config validate``."""
+    """Register ``config init``, ``config show``, and ``config validate``."""
     parser = subparsers.add_parser("config", help="configuration tools")
     _add_global_flags(parser)
     actions = parser.add_subparsers(dest="action", required=True)
@@ -305,6 +305,14 @@ def _add_config(subparsers: argparse._SubParsersAction[argparse.ArgumentParser])
 
     validate = actions.add_parser("validate", help="validate config.yaml and referenced env vars")
     _add_global_flags(validate)
+
+    show = actions.add_parser("show", help="list every setting with its value and default")
+    _add_global_flags(show)
+    show.add_argument(
+        "--changed",
+        action="store_true",
+        help="list only the settings that differ from their default",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

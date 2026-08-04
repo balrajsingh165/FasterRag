@@ -21,6 +21,7 @@ from fasterrag.core.chunking.models import (
 )
 from fasterrag.core.chunking.recursive import RecursiveChunker
 from fasterrag.core.chunking.semantic import SemanticChunker, SentenceEmbedder
+from fasterrag.core.chunking.tokenizer import ModelTokenCounter, create_token_counter
 from fasterrag.core.parsing.models import ParsedDocument
 from fasterrag.errors import ConfigError
 
@@ -30,12 +31,14 @@ __all__ = [
     "FixedChunker",
     "LateChunker",
     "LayoutChunker",
+    "ModelTokenCounter",
     "RecursiveChunker",
     "SemanticChunker",
     "SentenceEmbedder",
     "TextChunk",
     "TokenCounter",
     "create_chunker",
+    "create_token_counter",
 ]
 
 
@@ -59,8 +62,9 @@ def create_chunker(
 
     Args:
         settings: Validated configuration.
-        counter: Token counter to use; defaults to the estimating counter. The embedding
-            provider's real tokenizer is passed here once one is configured.
+        counter: Token counter to use. Defaults to whatever ``chunking.token_counter``
+            selects, so the configuration decides at every call site rather than only the
+            ones that remembered to pass it. Supplied explicitly only by tests.
         embedder: Sentence embedder, required only by the semantic strategy.
 
     Returns:
@@ -72,6 +76,7 @@ def create_chunker(
     size = settings.chunking.chunk_size
     overlap = settings.chunking.overlap
     strategy = settings.chunking.strategy
+    counter = counter or create_token_counter(settings)
 
     if strategy == "fixed":
         return FixedChunker(chunk_size=size, overlap=overlap, counter=counter)

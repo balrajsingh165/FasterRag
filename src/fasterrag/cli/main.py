@@ -24,6 +24,7 @@ from fasterrag.cli.commands.backup import run_backup, run_restore
 from fasterrag.cli.commands.benchmark import run_benchmark
 from fasterrag.cli.commands.diagnostics import (
     run_config_init,
+    run_config_show,
     run_config_validate,
     run_doctor_command,
     run_status,
@@ -63,6 +64,7 @@ _HANDLERS: Final[dict[str, Handler]] = {
 # would open and close a connection three times over for one command.
 _SUBCOMMAND_HANDLERS: Final[dict[tuple[str, str], Handler]] = {
     ("config", "init"): run_config_init,
+    ("config", "show"): run_config_show,
     ("config", "validate"): run_config_validate,
 }
 

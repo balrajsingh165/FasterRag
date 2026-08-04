@@ -56,6 +56,7 @@ VectorDbProvider = Literal["qdrant", "milvus", "weaviate", "pinecone", "pgvector
 EmbeddingProvider = Literal["openai", "cohere", "huggingface", "ollama"]
 LlmProvider = Literal["openai", "anthropic", "cohere", "ollama", "openai_compatible"]
 ChunkStrategy = Literal["fixed", "recursive", "semantic", "layout", "late"]
+TokenCounterMode = Literal["auto", "estimate", "model"]
 
 PROVIDERS_REQUIRING_EMBEDDING_KEY: frozenset[str] = frozenset({"openai", "cohere"})
 PROVIDERS_NOT_REQUIRING_LLM_KEY: frozenset[str] = frozenset({"ollama"})
@@ -343,6 +344,8 @@ class ChunkingSettings(Section):
     strategy: ChunkStrategy = "recursive"
     chunk_size: Annotated[int, Field(ge=64, le=2500)] = 768
     overlap: Annotated[int, Field(ge=0)] = 64
+    token_counter: TokenCounterMode = "auto"
+    chars_per_token: Annotated[int, Field(ge=1, le=16)] = 4
     contextual_enrichment: bool = False
     context_tokens: Annotated[int, Field(ge=25, le=150)] = 75
 

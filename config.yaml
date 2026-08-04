@@ -54,6 +54,8 @@ chunking:
   strategy: recursive
   chunk_size: 768
   overlap: 64
+  token_counter: auto
+  chars_per_token: 4
   contextual_enrichment: false
   context_tokens: 75
 
