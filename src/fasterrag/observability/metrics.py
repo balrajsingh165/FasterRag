@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Final
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "Gauge",
     "Histogram",
     "Registry",
+    "Sample",
     "render",
 ]
 
@@ -79,6 +81,25 @@ def _render_labels(labels: Labels, extra: tuple[tuple[str, str], ...] = ()) -> s
     return f"{{{inner}}}"
 
 
+@dataclass(frozen=True, slots=True)
+class Sample:
+    """One instrument's series, in a form an exporter can read without parsing text.
+
+    The registry is the single source of truth for both readers. Rendering to Prometheus
+    text and then parsing it back would make the OTLP view a lossy copy of the scrape view,
+    and the two would eventually disagree about a value neither of them got wrong.
+    """
+
+    name: str
+    kind: str
+    documentation: str
+    labels: dict[str, str] = field(default_factory=dict)
+    value: float = 0.0
+    count: int | None = None
+    bucket_counts: tuple[int, ...] | None = None
+    bucket_bounds: tuple[float, ...] | None = None
+
+
 class Instrument:
     """Shared naming, documentation, and locking for every metric type."""
 
@@ -100,6 +121,10 @@ class Instrument:
 
     def render(self) -> list[str]:
         """Return this instrument's exposition lines."""
+        raise NotImplementedError
+
+    def samples(self) -> list[Sample]:
+        """Return this instrument's series in structured form."""
         raise NotImplementedError
 
 
@@ -141,6 +166,21 @@ class Counter(Instrument):
             *(f"{self.name}{_render_labels(key)} {value}" for key, value in series),
         ]
 
+    def samples(self) -> list[Sample]:
+        """Return one sample per series."""
+        with self._lock:
+            series = sorted(self._values.items())
+        return [
+            Sample(
+                name=self.name,
+                kind=self.kind,
+                documentation=self.documentation,
+                labels=dict(key),
+                value=value,
+            )
+            for key, value in series
+        ]
+
 
 class Gauge(Instrument):
     """A value that goes up and down."""
@@ -169,6 +209,21 @@ class Gauge(Instrument):
         return [
             *self._header(),
             *(f"{self.name}{_render_labels(key)} {value}" for key, value in series),
+        ]
+
+    def samples(self) -> list[Sample]:
+        """Return one sample per series."""
+        with self._lock:
+            series = sorted(self._values.items())
+        return [
+            Sample(
+                name=self.name,
+                kind=self.kind,
+                documentation=self.documentation,
+                labels=dict(key),
+                value=value,
+            )
+            for key, value in series
         ]
 
 
@@ -237,6 +292,40 @@ class Histogram(Instrument):
             lines.append(f"{self.name}_count{_render_labels(key)} {counts[-1]}")
         return lines
 
+    def samples(self) -> list[Sample]:
+        """Return one sample per series, with cumulative bucket counts.
+
+        Cumulative here as in the exposition format: OTLP explicit-bucket histograms take
+        *per-bucket* counts, so the exporter undoes this. Presenting the cumulative form is
+        deliberate — it is what the catalogue documents and what a reader comparing a
+        scrape against an OTLP payload will be holding.
+        """
+        with self._lock:
+            series = sorted(self._counts.items())
+            sums = dict(self._sums)
+
+        collected: list[Sample] = []
+        for key, counts in series:
+            running = 0
+            cumulative: list[int] = []
+            for index in range(len(self.buckets)):
+                running += counts[index]
+                cumulative.append(running)
+            cumulative.append(counts[-1])
+            collected.append(
+                Sample(
+                    name=self.name,
+                    kind=self.kind,
+                    documentation=self.documentation,
+                    labels=dict(key),
+                    value=sums.get(key, 0.0),
+                    count=counts[-1],
+                    bucket_counts=tuple(cumulative),
+                    bucket_bounds=self.buckets,
+                )
+            )
+        return collected
+
 
 class Registry:
     """Every declared instrument, in catalogue order."""
@@ -280,6 +369,13 @@ class Registry:
         for instrument in self._instruments:
             lines.extend(instrument.render())
         return "\n".join(lines) + "\n"
+
+    def snapshot(self) -> list[Sample]:
+        """Return every instrument's series, in catalogue order."""
+        collected: list[Sample] = []
+        for instrument in self._instruments:
+            collected.extend(instrument.samples())
+        return collected
 
     @property
     def names(self) -> list[str]:

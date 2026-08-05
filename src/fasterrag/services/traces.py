@@ -33,6 +33,7 @@ from fasterrag.errors import ConfigError
 from fasterrag.observability.langfuse_export import LangfuseExporter
 from fasterrag.observability.logging import get_logger
 from fasterrag.observability.otel_export import OtelExporter
+from fasterrag.observability.otel_metrics import MetricPusher
 
 __all__ = [
     "DEFAULT_LANGFUSE_HOST",
@@ -44,6 +45,7 @@ __all__ = [
     "TraceStore",
     "create_exporters",
     "create_langfuse_exporter",
+    "create_metric_pusher",
     "create_otel_exporter",
     "create_trace_store",
 ]
@@ -322,6 +324,35 @@ def create_otel_exporter(settings: Settings) -> OtelExporter | None:
         _logger.warning(
             "observability.otel is on but the OpenTelemetry SDK is not installed, so no "
             "trace will be exported; install it with 'pip install fasterrag[otel]'",
+            extra={"endpoint": endpoint, "detail": exc.detail},
+        )
+        return None
+
+
+def create_metric_pusher(settings: Settings) -> MetricPusher | None:
+    """Build the OTLP metric pusher when ``observability.otel`` is on.
+
+    Shares the toggle and the endpoint with trace export: a deployment pointing fasterRag
+    at a collector wants both halves of what it emits, and a second toggle would mostly
+    exist to be set inconsistently.
+
+    Returns:
+        The pusher, or ``None`` when the toggle is off or the SDK is not installed. A
+        missing SDK warns rather than failing, for the same reason it does for traces.
+    """
+    if not settings.observability.otel:
+        return None
+
+    endpoint = settings.observability.otel_endpoint
+    if not endpoint:
+        return None
+
+    try:
+        return MetricPusher(endpoint)
+    except ConfigError as exc:
+        _logger.warning(
+            "observability.otel is on but the OpenTelemetry SDK is not installed, so no "
+            "metric will be exported; install it with 'pip install fasterrag[otel]'",
             extra={"endpoint": endpoint, "detail": exc.detail},
         )
         return None

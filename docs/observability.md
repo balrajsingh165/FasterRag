@@ -57,7 +57,8 @@ It still has no transport security of its own — put it behind the same reverse
 - **The trace id is preserved end to end.** fasterRag mints a 32-hex id, which is exactly the OpenTelemetry trace-id shape, so the id in a `problem+json` error body, in the logs, in `GET /v1/traces/{id}`, and in your trace viewer's search box are all the same id. Span ids are derived from the trace id and stage name, so a retried export is one trace in the backend rather than two overlapping copies.
 - Export is fire-and-forget on the query path: `store` runs after the answer is ready, and an unreachable collector costs the record and nothing else.
 - OTLP export and Langfuse export can both be on. They answer different questions — Langfuse "what did the model see and say", OTLP "where did the time go across the whole system" — and a deployment that wants both should not have to choose.
-- **Spans only.** `observability.otel` does not yet export metrics over OTLP; `/metrics` remains the Prometheus scrape endpoint (TASK-0189).
+- **Metrics ship too.** The same toggle and endpoint push the whole catalogue on an interval (60s), so an OTLP-native stack sees fasterRag's counters as well as its traces. `/metrics` remains the Prometheus scrape endpoint and both views read one registry — a renderer that parsed another renderer's text would be a lossy copy that eventually reports a number neither of them got wrong.
+- One caveat when comparing the two by eye: a `/metrics` scrape cannot count the request that is serving it, so a scrape taken during traffic reads one request behind an OTLP snapshot taken just after. At the same instant they are identical.
 
 ## 4. Langfuse auto-provisioning (`observability.langfuse: true`)
 
