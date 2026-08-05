@@ -87,7 +87,11 @@ def test_empty_text_costs_no_call(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_chars_per_token_stays_the_estimate() -> None:
-    """It sizes a search window, not a count; a per-model value would only add variance."""
+    """It seeds the first split pass, which real counts then refine.
+
+    A per-model average would move the starting guess without making it right for any
+    particular text, because the ratio varies more within a model than between models.
+    """
     assert ModelTokenCounter("some/model").chars_per_token == CHARS_PER_TOKEN
 
 

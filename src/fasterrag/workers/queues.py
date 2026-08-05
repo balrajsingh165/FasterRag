@@ -77,6 +77,14 @@ class ChunkPayload:
     chunk: TextChunk
     metadata: Mapping[str, Any] = field(default_factory=dict)
     tenant: str | None = None
+    document_text: str = ""
+    """The whole document, carried only for late chunking.
+
+    Every chunk of one document references the *same* string object, attached on the
+    parent side after the worker returns, so this costs a pointer per chunk rather than a
+    copy. Late chunking needs it because a chunk's vector is pooled out of a pass over the
+    document, not computed from the chunk alone.
+    """
 
     @property
     def text(self) -> str:

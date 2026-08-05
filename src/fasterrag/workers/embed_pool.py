@@ -19,16 +19,23 @@ import asyncio
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, cast, runtime_checkable
 
-from fasterrag.adapters.embeddings.base import EmbeddingAdapter
+from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.config.schema import Settings
+from fasterrag.core.chunking.models import Segment
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload, EmbeddedBatch
 
-__all__ = ["ChunkSink", "EmbedReport", "EmbeddingWorkerPool", "backoff_delay"]
+__all__ = [
+    "ChunkSink",
+    "EmbedReport",
+    "EmbeddingWorkerPool",
+    "PoolingAdapter",
+    "backoff_delay",
+]
 
 _logger = get_logger(__name__)
 
@@ -38,6 +45,21 @@ class ChunkSink(Protocol):
 
     async def write(self, batch: EmbeddedBatch) -> None:
         """Persist a batch of embedded chunks."""
+        ...
+
+
+@runtime_checkable
+class PoolingAdapter(Protocol):
+    """An embedding adapter that can late-chunk a document.
+
+    Kept separate from ``EmbeddingAdapter`` because only a locally loaded model can satisfy
+    it: pooling needs token-level output, and an embedding API returns one vector per input
+    with no way to ask for more. Making it part of the base contract would force every
+    hosted adapter to implement something it cannot do.
+    """
+
+    async def embed_pooled(self, document: str, spans: Sequence[Segment]) -> EmbeddingResult:
+        """Return one vector per span, pooled from a pass over the whole document."""
         ...
 
 
@@ -134,16 +156,76 @@ class EmbeddingWorkerPool:
             grouped.setdefault(adapter, []).append(payload)
         return grouped
 
+    def _pooled_documents(
+        self, adapter: EmbeddingAdapter, group: Sequence[ChunkPayload]
+    ) -> dict[str, list[ChunkPayload]] | None:
+        """Return the group split by document when it should be embedded by pooling.
+
+        ``None`` means embed normally, which covers every case pooling cannot serve: a
+        strategy other than ``late``, an adapter with no token-level output (any hosted
+        provider), or chunks that reached here without their document. Falling back rather
+        than failing is deliberate — a slightly worse vector beats a dead-lettered corpus,
+        and the alternative would make ``strategy: late`` unusable on a hosted model
+        instead of merely no better than ``recursive``.
+        """
+        if self.settings.chunking.strategy != "late":
+            return None
+        if not isinstance(adapter, PoolingAdapter):
+            return None
+        if not all(payload.document_text for payload in group):
+            return None
+
+        documents: dict[str, list[ChunkPayload]] = {}
+        for payload in group:
+            documents.setdefault(payload.document_id, []).append(payload)
+        return documents
+
+    async def _embed_pooled(
+        self, adapter: PoolingAdapter, documents: dict[str, list[ChunkPayload]]
+    ) -> EmbeddingResult:
+        """Pool every document in the group, returning vectors in the group's own order.
+
+        One pass per document rather than one per chunk: that single pass is the whole
+        point, and it is what makes each chunk's vector carry context from beyond its own
+        boundaries.
+        """
+        vectors: list[list[float]] = []
+        model = ""
+        version = ""
+
+        for chunks in documents.values():
+            spans = [(payload.chunk.start, payload.chunk.end) for payload in chunks]
+            result = await adapter.embed_pooled(chunks[0].document_text, spans)
+            vectors.extend(result.vectors)
+            model, version = result.model, result.model_version
+
+        return EmbeddingResult(vectors=vectors, model=model, model_version=version)
+
     async def _embed_group(
         self, adapter: EmbeddingAdapter, group: Sequence[ChunkPayload], worker: int
     ) -> None:
         """Embed one same-model group, retrying only what the provider said to retry."""
         attempts = self.settings.reliability.retries.max_attempts
         last: FasterRagError | None = None
+        documents = self._pooled_documents(adapter, group)
+
+        # CRITICAL: when pooling, the group is reordered to match the per-document batches
+        # the vectors come back in. Writing the original order against pooled vectors would
+        # pair every chunk with another chunk's vector — a corpus that indexes cleanly and
+        # retrieves nonsense.
+        ordered = (
+            [payload for chunks in documents.values() for payload in chunks]
+            if documents
+            else list(group)
+        )
 
         for attempt in range(attempts + 1):
             try:
-                result = await adapter.embed_documents([payload.text for payload in group])
+                result = (
+                    await self._embed_pooled(cast(PoolingAdapter, adapter), documents)
+                    if documents
+                    else await adapter.embed_documents([payload.text for payload in group])
+                )
             except FasterRagError as exc:
                 last = exc
                 if not exc.retryable or attempt == attempts:
@@ -166,7 +248,7 @@ class EmbeddingWorkerPool:
 
             await self.sink.write(
                 EmbeddedBatch(
-                    chunks=list(group),
+                    chunks=ordered,
                     vectors=result.vectors,
                     model=result.model,
                     model_version=result.model_version,

@@ -51,8 +51,6 @@ class LateChunker:
         The marked chunks carry their exact spans, which is all the embedding stage needs
         to pool the right token range out of the long-context pass.
         """
-        # TODO: TASK-0113 implements the pooling half in the embedding pool; until then the
-        # embedding stage embeds the chunk text directly and the marker is inert.
         chunks = self._inner.split(document)
         return [
             replace(

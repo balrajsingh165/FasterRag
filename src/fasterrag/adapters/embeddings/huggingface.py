@@ -18,6 +18,8 @@ from typing import Any
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
+from fasterrag.core.chunking.models import Segment
+from fasterrag.core.chunking.pooling import pool_spans
 from fasterrag.errors import ConfigError, EmbedError
 from fasterrag.observability.logging import get_logger
 
@@ -148,6 +150,35 @@ class HuggingFaceEmbedder(EmbeddingAdapter):
             ) from exc
 
         return [[float(value) for value in vector] for vector in vectors]
+
+    def pool(self, document: str, spans: Sequence[Segment]) -> list[list[float]]:
+        """Return one late-chunked vector per span, pooled from a pass over ``document``.
+
+        Synchronous for the same reason ``encode`` is: the caller decides which thread it
+        runs on.
+
+        Raises:
+            EmbedError: If the loaded model exposes no token-level output, or the pass
+                itself fails.
+        """
+        model = self._loaded()
+        try:
+            return pool_spans(model, document, spans)
+        except (RuntimeError, ValueError, IndexError) as exc:
+            raise EmbedError(
+                f"late-chunking pooling failed for a document: {type(exc).__name__}",
+                retryable=False,
+            ) from exc
+
+    async def embed_pooled(self, document: str, spans: Sequence[Segment]) -> EmbeddingResult:
+        """Late-chunk a document, keeping the event loop free while the model runs."""
+        vectors = await asyncio.to_thread(self.pool, document, spans)
+
+        return EmbeddingResult(
+            vectors=vectors,
+            model=self.model,
+            model_version=self.model_version,
+        )
 
     async def embed_documents(self, texts: Sequence[str]) -> EmbeddingResult:
         """Embed passages, keeping the event loop free while the model runs."""

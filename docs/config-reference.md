@@ -227,7 +227,7 @@ security:
 
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
-| `chunking.strategy` | str | `recursive` | one of `fixed`, `recursive`, `semantic`, `layout`, `late` | Chunking strategy (see [architecture.md](architecture.md) §5). |
+| `chunking.strategy` | str | `recursive` | one of `fixed`, `recursive`, `semantic`, `layout`, `late` | Chunking strategy (see [architecture.md](architecture.md) §5). `late` requires a local `embeddings.provider` for its pooling pass and falls back to ordinary embedding on a hosted one. |
 | `chunking.chunk_size` | int | `768` | 64–2500; warning logged above 1024 | Target chunk size in tokens. Practical working range is ~512–1024; the ~2,500-token "context cliff" (directional ceiling from a January 2026 preprint) is the hard upper bound. |
 | `chunking.overlap` | int | `64` | 0 ≤ overlap < `chunk_size` | Token overlap between adjacent chunks. |
 | `chunking.token_counter` | str | `auto` | one of `auto`, `estimate`, `model` | How `chunk_size` and `overlap` are counted. `auto` loads the embedding model's own tokenizer when the provider ships a local one and estimates otherwise; `estimate` forces the `chars_per_token` ratio; `model` forces the real tokenizer for any provider, which requires the matching tokenizer in the local Hugging Face cache and falls back to the estimate with a logged warning when it is absent. Loading never reaches the network. |

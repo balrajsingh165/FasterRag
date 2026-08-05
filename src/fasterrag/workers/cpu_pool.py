@@ -97,11 +97,12 @@ def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
         parser=document.parser,
         mime_type=document.mime_type,
         parse_flags=document.flags,
-        # Carried only when enrichment is on: otherwise this doubles what every parsed
-        # document sends back through IPC for a field nothing will read.
+        # Carried only when something downstream reads it — contextual enrichment writes
+        # a per-chunk prefix from it, and late chunking pools vectors out of it. Otherwise
+        # this doubles what every parsed document sends back through IPC for nothing.
         document_text=(
             "\n\n".join(block.text for block in document.blocks)
-            if settings.chunking.contextual_enrichment
+            if settings.chunking.contextual_enrichment or settings.chunking.strategy == "late"
             else ""
         ),
     )
@@ -272,7 +273,7 @@ class CpuWorkerPool:
             for flag in outcome.parse_flags:
                 flags[flag] = flags.get(flag, 0) + 1
 
-            for payload in outcome.chunks:
+            for payload in self._addressed(outcome):
                 await sink.put(payload)
 
             parsed += 1
@@ -290,6 +291,19 @@ class CpuWorkerPool:
             skipped=skipped,
             flags=flags,
         )
+
+    def _addressed(self, outcome: ParseOutcome) -> list[ChunkPayload]:
+        """Return the outcome's chunks, carrying the document text late chunking needs.
+
+        Attached here rather than in the worker because every chunk then references one
+        shared string object: crossing the process boundary once and being pointed at many
+        times costs a pointer per chunk, while attaching it before the return would pickle
+        a copy of the whole document for each one.
+        """
+        if self.settings.chunking.strategy != "late" or not outcome.document_text:
+            return outcome.chunks
+
+        return [replace(payload, document_text=outcome.document_text) for payload in outcome.chunks]
 
     def _dead_letter(self, job: str | None, task: DocumentTask, exc: FasterRagError) -> None:
         """Route a failed document to the dead-letter queue."""
