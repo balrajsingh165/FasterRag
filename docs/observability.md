@@ -53,7 +53,11 @@ It still has no transport security of its own — put it behind the same reverse
 
 - **OTel spans wrap retrieval and generation**: the retrieval span records source, number of documents, and latency; the generation span records model, temperature, prompt, and response length. Both are correlated by **trace ID**, which also appears in every log line and every API problem/response body.
 - **Four RAG trace types**: `retrieval`, `reranker`, `context-assembly`, `generation` — every query produces all four (minus skipped stages), nested under one root span.
-- Export via OTLP when `observability.otel: true` (`observability.otel_endpoint`); traces are additionally persisted locally by the trace store (D8) regardless of OTel, powering the dashboard and `fasterrag replay`.
+- Export via OTLP when `observability.otel: true` (`observability.otel_endpoint`); traces are additionally persisted locally by the trace store (D8) regardless of OTel, powering the dashboard and `fasterrag replay`. Needs the optional extra: `pip install fasterrag[otel]`. If the SDK is absent the toggle logs a warning and queries keep serving — refusing to answer because a trace backend is unavailable inverts the dependency between the system and the thing watching it.
+- **The trace id is preserved end to end.** fasterRag mints a 32-hex id, which is exactly the OpenTelemetry trace-id shape, so the id in a `problem+json` error body, in the logs, in `GET /v1/traces/{id}`, and in your trace viewer's search box are all the same id. Span ids are derived from the trace id and stage name, so a retried export is one trace in the backend rather than two overlapping copies.
+- Export is fire-and-forget on the query path: `store` runs after the answer is ready, and an unreachable collector costs the record and nothing else.
+- OTLP export and Langfuse export can both be on. They answer different questions — Langfuse "what did the model see and say", OTLP "where did the time go across the whole system" — and a deployment that wants both should not have to choose.
+- **Spans only.** `observability.otel` does not yet export metrics over OTLP; `/metrics` remains the Prometheus scrape endpoint (TASK-0189).
 
 ## 4. Langfuse auto-provisioning (`observability.langfuse: true`)
 

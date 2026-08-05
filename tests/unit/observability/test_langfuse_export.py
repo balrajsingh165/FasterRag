@@ -145,7 +145,7 @@ def test_an_exporter_is_built_when_the_toggle_and_keys_are_present(
 
 def test_storing_without_a_running_loop_does_not_raise(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """A CLI one-shot has no loop; the local write must still happen."""
-    store = TraceStore(tmp_path, exporter=LangfuseExporter("http://x", "pk", "sk"))
+    store = TraceStore(tmp_path, exporters=[LangfuseExporter("http://x", "pk", "sk")])
 
     store.store(trace())
 
@@ -154,7 +154,7 @@ def test_storing_without_a_running_loop_does_not_raise(tmp_path) -> None:  # typ
 
 async def test_an_export_task_is_retained_until_it_finishes(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Asyncio holds only a weak reference: an unretained task can vanish mid-flight."""
-    store = TraceStore(tmp_path, exporter=LangfuseExporter("http://127.0.0.1:1", "pk", "sk"))
+    store = TraceStore(tmp_path, exporters=[LangfuseExporter("http://127.0.0.1:1", "pk", "sk")])
 
     store.store(trace())
 

@@ -354,7 +354,7 @@ All integration toggles default `false`.
 |---|---|---|---|---|
 | `observability.dashboard` | bool | `false` | — | Self-hosted **read-only** inspection dashboard (cache stats, tokens, costs, latencies, full LLM I/O history). Never controls the RAG. |
 | `observability.dashboard_port` | int | `8080` | 1–65535 | Dashboard bind port. |
-| `observability.otel` | bool | `false` | — | OpenTelemetry export (spans + metrics). |
+| `observability.otel` | bool | `false` | — | OTLP export of the four RAG spans, preserving the fasterRag trace id so one id works in the API, the logs, and your trace viewer. Needs `pip install fasterrag[otel]`; without it the toggle warns and queries keep serving. **Spans only** — metrics are not yet exported over OTLP (TASK-0189), `/metrics` remains the Prometheus endpoint. |
 | `observability.otel_endpoint` | str\|null | `null` | valid URL when `otel: true` | OTLP collector endpoint. |
 | `observability.langfuse` | bool | `false` | — | Flipping to `true` auto-provisions self-hosted Langfuse v3 (Docker Compose stack), performs all configuration incl. headless bootstrap, and returns the running URL `http://<host>:3000`. **No application-code changes at toggle time.** Gated by `fasterrag doctor`. See [observability.md](observability.md). |
 | `observability.grafana` | bool | `false` | — | Flipping to `true` auto-provisions Grafana via provisioning-as-code (datasources + dashboards read at startup; UI read-only for provisioned resources). No manual clicks; no code changes. Gated by `fasterrag doctor`. |

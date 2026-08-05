@@ -20,16 +20,19 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol, runtime_checkable
 
 from fasterrag import __version__
 from fasterrag.config.schema import Settings
 from fasterrag.core.tracing import Trace
+from fasterrag.errors import ConfigError
 from fasterrag.observability.langfuse_export import LangfuseExporter
 from fasterrag.observability.logging import get_logger
+from fasterrag.observability.otel_export import OtelExporter
 
 __all__ = [
     "DEFAULT_LANGFUSE_HOST",
@@ -37,8 +40,11 @@ __all__ = [
     "LANGFUSE_HOST_VAR",
     "LANGFUSE_PUBLIC_KEY_VAR",
     "LANGFUSE_SECRET_KEY_VAR",
+    "TraceExporter",
     "TraceStore",
+    "create_exporters",
     "create_langfuse_exporter",
+    "create_otel_exporter",
     "create_trace_store",
 ]
 
@@ -61,6 +67,19 @@ _PRUNE_EVERY: Final = 50
 _logger = get_logger(__name__)
 
 
+@runtime_checkable
+class TraceExporter(Protocol):
+    """Ships a finished trace somewhere outside this process."""
+
+    async def export(self, trace: Trace) -> bool:
+        """Send one trace, reporting whether it was accepted. Never raises."""
+        ...
+
+    async def close(self) -> None:
+        """Release whatever the exporter holds open."""
+        ...
+
+
 class TraceStore:
     """Stores and retrieves query traces."""
 
@@ -70,7 +89,7 @@ class TraceStore:
         *,
         enabled: bool = True,
         retention_days: int = 30,
-        exporter: LangfuseExporter | None = None,
+        exporters: Sequence[TraceExporter] = (),
     ) -> None:
         """Build a store.
 
@@ -80,14 +99,16 @@ class TraceStore:
             enabled: From ``traces.store``. When false, nothing is written and every read
                 reports the trace as absent, which is the honest answer.
             retention_days: From ``traces.retention_days``.
-            exporter: Optional Langfuse exporter. Traces are written locally *and* shipped;
-                the local copy is what replay and ``GET /v1/traces/{id}`` read, so an
-                investigation never depends on the observability stack being healthy.
+            exporters: Trace exporters to ship to, if any. Traces are written locally *and*
+                shipped; the local copy is what replay and ``GET /v1/traces/{id}`` read, so
+                an investigation never depends on the observability stack being healthy.
+                A list rather than one slot because Langfuse and OTLP answer different
+                questions and a deployment may reasonably want both.
         """
         self.root = root or DEFAULT_TRACE_ROOT
         self.enabled = enabled
         self.retention_days = retention_days
-        self.exporter = exporter
+        self.exporters = list(exporters)
         self._writes = 0
         self._exports: set[asyncio.Task[bool]] = set()
 
@@ -142,7 +163,7 @@ class TraceStore:
         # reference to a running task, so one that nothing retains can be garbage-collected
         # mid-flight and the export vanishes with no error anywhere.
         """
-        if self.exporter is None:
+        if not self.exporters:
             return
 
         try:
@@ -152,16 +173,17 @@ class TraceStore:
             # started and torn down per trace, which costs more than the record is worth.
             return
 
-        task = loop.create_task(self.exporter.export(trace))
-        self._exports.add(task)
-        task.add_done_callback(self._exports.discard)
+        for exporter in self.exporters:
+            task = loop.create_task(exporter.export(trace))
+            self._exports.add(task)
+            task.add_done_callback(self._exports.discard)
 
     async def drain(self) -> None:
         """Wait for in-flight exports, so shutdown does not drop the last traces."""
         if self._exports:
             await asyncio.gather(*tuple(self._exports), return_exceptions=True)
-        if self.exporter is not None:
-            await self.exporter.close()
+        for exporter in self.exporters:
+            await exporter.close()
 
     def load(self, trace_id: str, *, tenant: str | None = None) -> Trace | None:
         """Return a stored trace, or ``None`` if it is absent or unreadable.
@@ -278,11 +300,49 @@ def create_langfuse_exporter(settings: Settings) -> LangfuseExporter | None:
     )
 
 
+def create_otel_exporter(settings: Settings) -> OtelExporter | None:
+    """Build the OTLP exporter when ``observability.otel`` is on.
+
+    Returns:
+        The exporter, or ``None`` when the toggle is off or the SDK is not installed. A
+        missing SDK is a warning rather than a failure, for the same reason a missing
+        Langfuse key is: refusing to serve queries because a trace backend is unavailable
+        inverts the dependency between the system and the thing watching it.
+    """
+    if not settings.observability.otel:
+        return None
+
+    endpoint = settings.observability.otel_endpoint
+    if not endpoint:
+        return None
+
+    try:
+        return OtelExporter(endpoint)
+    except ConfigError as exc:
+        _logger.warning(
+            "observability.otel is on but the OpenTelemetry SDK is not installed, so no "
+            "trace will be exported; install it with 'pip install fasterrag[otel]'",
+            extra={"endpoint": endpoint, "detail": exc.detail},
+        )
+        return None
+
+
+def create_exporters(settings: Settings) -> list[TraceExporter]:
+    """Build every trace exporter the configuration turns on.
+
+    Both may be on at once: Langfuse answers "what did the model see and say", OTLP answers
+    "where did the time go across the whole system", and a deployment that wants both should
+    not have to choose.
+    """
+    candidates = (create_langfuse_exporter(settings), create_otel_exporter(settings))
+    return [exporter for exporter in candidates if exporter is not None]
+
+
 def create_trace_store(settings: Settings, root: Path | None = None) -> TraceStore:
     """Build a trace store from validated configuration."""
     return TraceStore(
         root,
         enabled=settings.traces.store,
         retention_days=settings.traces.retention_days,
-        exporter=create_langfuse_exporter(settings),
+        exporters=create_exporters(settings),
     )
