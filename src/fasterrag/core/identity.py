@@ -24,6 +24,7 @@ from secrets import token_hex
 from typing import Any, Final
 
 from fasterrag.config.schema import Settings
+from fasterrag.errors import ErrorCode, IngestionError
 
 __all__ = [
     "IDENTITY_VERSION",
@@ -49,6 +50,10 @@ __all__ = [
 #      Windows file (drive-letter case, separator) now produce a single id
 IDENTITY_VERSION: Final = 2
 
+# Written as chr(0) rather than an escape so the byte cannot end up in this file literally,
+# which is a real hazard when a NUL is the thing being guarded against.
+_SEPARATOR: Final = chr(0)
+
 _DOCUMENT_PREFIX: Final = "d_"
 _CHUNK_PREFIX: Final = "c_"
 _JOB_PREFIX: Final = "job_"
@@ -63,9 +68,19 @@ _sequence = 0
 
 
 def _digest(*parts: str) -> str:
-    """Return a stable hex digest over the parts, separated so they cannot collide."""
-    joined = "\x00".join(parts)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    """Return a stable hex digest over the parts, separated so they cannot collide.
+
+    # CRITICAL: the separator only separates while no part contains it. A part carrying one
+    # can forge a different tuple entirely — joining ("a", SEP, "b") and ("a", "b") reaches
+    # the same string — so every field arriving here must be known free of it. Three of the
+    # four call sites pass hex digests, digits, or serialized configuration; the fourth
+    # passes a source URI, which `normalise_source` refuses one in for exactly this reason.
+    #
+    # A length-prefixed encoding would remove the constraint rather than police it, but it
+    # changes every id ever minted, so it belongs at a release boundary with
+    # IDENTITY_VERSION bumped (TASK-0209).
+    """
+    return hashlib.sha256(_SEPARATOR.join(parts).encode("utf-8")).hexdigest()
 
 
 def content_hash(data: bytes) -> str:
@@ -94,6 +109,14 @@ def normalise_source(source_uri: str) -> str:
     URLs are left exactly as given. Their paths are case-*sensitive* by specification, so
     folding one would merge two genuinely different resources.
     """
+    if _SEPARATOR in source_uri:
+        raise IngestionError(
+            "a source URI cannot contain a NUL byte; no filesystem or URL scheme permits "
+            "one, and it would let a source forge another document's identity",
+            code=ErrorCode.VALIDATION_FAILED,
+            retryable=False,
+        )
+
     if "://" in source_uri:
         return source_uri
 
