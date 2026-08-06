@@ -56,6 +56,9 @@ class AliasAdapter(VectorDBAdapter):
     async def list_snapshots(self, collection: str) -> list[str]:
         return list(self.snapshots.get(collection, []))
 
+    async def delete_snapshot(self, collection: str, snapshot: str) -> bool:
+        return True
+
     async def restore_snapshot(self, collection: str, snapshot: str) -> None:
         self.restored.append((collection, snapshot))
 

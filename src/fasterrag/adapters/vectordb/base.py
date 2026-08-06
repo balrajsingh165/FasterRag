@@ -326,6 +326,21 @@ class VectorDBAdapter(ABC):
         """Return the snapshots the backend holds for a collection, newest last."""
 
     @abstractmethod
+    async def delete_snapshot(self, collection: str, snapshot: str) -> bool:
+        """Delete one of a collection's snapshots.
+
+        Retention needs this. A snapshot lives inside the backend, not in the backup
+        directory, so pruning old backup sets without it would delete the *records* of
+        those snapshots and leave the snapshots themselves behind — orphaned, invisible to
+        every manifest, and consuming disk until someone finds them by hand.
+
+        Returns:
+            Whether a snapshot was actually removed. A name that does not exist is not an
+            error: deleting something already gone achieved the requested state, and
+            retention runs repeatedly over sets that may have been pruned already.
+        """
+
+    @abstractmethod
     async def restore_snapshot(self, collection: str, snapshot: str) -> None:
         """Restore a collection from one of its snapshots.
 

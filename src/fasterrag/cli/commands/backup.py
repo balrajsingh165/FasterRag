@@ -35,6 +35,7 @@ async def run_backup(args: argparse.Namespace, console: Console) -> ExitCode:
             adapter,
             config_path=Path(args.config),
             collections=args.collections or None,
+            retain=args.retain,
         )
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
@@ -43,6 +44,7 @@ async def run_backup(args: argparse.Namespace, console: Console) -> ExitCode:
         await adapter.close()
 
     console.emit(f"destination     {args.destination}")
+    console.emit(f"retained sets   {args.retain}")
     for name, snapshot in manifest.collections.items():
         console.emit(f"  {name}: {snapshot} ({manifest.vector_counts.get(name, 0)} vectors)")
     console.emit(f"artifacts       {', '.join(manifest.artifacts) or 'none on disk yet'}")

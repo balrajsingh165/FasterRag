@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from typing import Any, Final
 
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH
+from fasterrag.services.backup import DEFAULT_RETAIN
 
 __all__ = ["PENDING_COMMANDS", "build_parser"]
 
@@ -249,10 +250,18 @@ def _add_backup(subparsers: argparse._SubParsersAction[argparse.ArgumentParser])
     _add_global_flags(backup)
     backup.add_argument("destination", help="directory to write the backup into")
     backup.add_argument("--collections", nargs="*", default=[], help="limit to these")
+    backup.add_argument(
+        "--retain",
+        type=int,
+        default=DEFAULT_RETAIN,
+        help="how many backup sets to keep, pruning the oldest and their backend snapshots",
+    )
 
     restore = subparsers.add_parser("restore", help="restore a deployment from a backup")
     _add_global_flags(restore)
-    restore.add_argument("source", help="a backup directory holding a manifest")
+    restore.add_argument(
+        "source", help="a backup set, or the destination holding several (newest is used)"
+    )
     restore.add_argument("--collections", nargs="*", default=[], help="limit to these")
     restore.add_argument("--collections-only", action="store_true", help="skip the control files")
 

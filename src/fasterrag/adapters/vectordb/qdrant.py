@@ -359,6 +359,14 @@ class QdrantAdapter(VectorDBAdapter):
             described = await self.client.list_snapshots(collection_name=collection)
             return sorted(str(entry.name) for entry in described if entry.name)
 
+    async def delete_snapshot(self, collection: str, snapshot: str) -> bool:
+        """Delete one of a collection's snapshots, tolerating one already gone."""
+        async with self._mapped_errors("delete_snapshot"):
+            removed = await self.client.delete_snapshot(
+                collection_name=collection, snapshot_name=snapshot
+            )
+        return bool(removed)
+
     async def restore_snapshot(self, collection: str, snapshot: str) -> None:
         """Restore a collection from a snapshot the server already holds."""
         async with self._mapped_errors("restore_snapshot"):

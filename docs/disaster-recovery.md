@@ -13,7 +13,20 @@
 | **Trace store** | full query traces (retrieved chunks, scores, prompts, responses) | Replay/debugging history (D8); audit trail | File/DB snapshot |
 | *(not backed up)* `.env` | secrets | Deliberately excluded from automated backups; operators store secrets in their secret manager. Langfuse's `SALT`/`ENCRYPTION_KEY`/`NEXTAUTH_SECRET` MUST be preserved by the operator — losing them invalidates Langfuse credentials ([observability.md](observability.md)) | operator-owned |
 
-Backup cadence, destination, and retention are operator decisions; the tooling ships with a documented default of daily snapshots retained 14 days.
+### Sets, retention, and cadence
+
+Each `fasterrag backup <destination>` writes its own timestamped **set** under the destination, so runs accumulate a history instead of each overwriting the last. `--retain N` keeps the newest N sets (default **14**) and deletes the older ones **together with the backend snapshots they reference** — pruning only the directory would leave the snapshot inside the vector database, referenced by no manifest and consuming disk until somebody found it by hand.
+
+Retention counts **sets, not days**. fasterRag runs when it is invoked and cannot know what cadence a scheduler was configured with, so counting days would mean guessing at a number only the operator holds. At the daily cadence below, 14 sets is 14 days.
+
+**Cadence is not fasterRag's job.** cron, systemd timers, and Task Scheduler already run things on a schedule, do it better, and are what an operator already monitors — a scheduler built into a RAG framework would be a worse one that fails silently. Schedule it yourself:
+
+```cron
+# Daily at 02:30, keeping two weeks of sets.
+30 2 * * *  cd /srv/fasterrag && fasterrag backup /backups/fasterrag --retain 14 --json >> /var/log/fasterrag-backup.log 2>&1
+```
+
+Restore takes either one set or the destination holding several, in which case the newest is used — during an incident the path an operator has to hand is the one they backed up to, and making them list subdirectories first is an avoidable step at the worst possible moment.
 
 ## 2. Restore drill (write once, EXECUTE for real, tick in todo.md)
 

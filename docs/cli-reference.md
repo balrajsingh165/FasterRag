@@ -148,6 +148,30 @@ D8 time-travel replay: re-execute a past query under a candidate config and show
 
 Replay never writes: it stores no trace of its own and never populates the semantic cache, so investigating an incident cannot alter the evidence. The retrieval set is what replay guarantees is reproducible; answer *wording* is not, because a provider at non-zero temperature is not deterministic — which is why the diff reports citations alongside the text.
 
+## `fasterrag backup <destination>`
+
+Capture the artifact inventory of [disaster-recovery.md](disaster-recovery.md) §1 — backend-native collection snapshots plus the journal, lockfiles, traces, and `config.yaml` — into a new timestamped **set** under the destination. Runs accumulate a history; they do not overwrite one another.
+
+`.env` is never captured. Secrets belong in the operator's secret manager, and a backup routine that swept them into a tarball would put every credential wherever backups are stored. Its absence from a restore is expected, not an omission.
+
+| Flag | Description |
+|---|---|
+| `--collections NAME...` | Limit to these collections; every one by default. |
+| `--retain N` | Backup sets to keep (default 14). Older sets are pruned **together with the backend snapshots they reference**, so retention reclaims space inside the vector database rather than orphaning it. Values below 1 are refused. |
+
+Cadence is deliberately not fasterRag's job — schedule it with cron, a systemd timer, or Task Scheduler ([disaster-recovery.md](disaster-recovery.md) §1).
+
+## `fasterrag restore <source>`
+
+Restore from a backup. `source` is either one set, or the destination holding several — in which case the newest is used, because during an incident the path an operator has to hand is the one they backed up to.
+
+A collection whose restored vector count differs from what the manifest recorded is **reported, not raised**: a partial restore an operator can see beats one that aborts halfway with no report of how far it got.
+
+| Flag | Description |
+|---|---|
+| `--collections NAME...` | Limit to these collections; every one in the manifest by default. |
+| `--collections-only` | Skip the control files. The §4 shortcut for restoring one corrupted collection into an otherwise healthy deployment. |
+
 ## `fasterrag benchmark`
 
 Run the benchmark suite from [performance.md](performance.md) and print/append ledger-formatted results ([benchmarks.md](benchmarks.md)).
