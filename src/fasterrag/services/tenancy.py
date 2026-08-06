@@ -37,10 +37,20 @@ def _validated(tenant: str) -> str:
             separator. A tenant named ``acme__x`` could otherwise address ``acme``'s
             collection ``x``.
     """
-    if not _TENANT_PATTERN.match(tenant) or SEPARATOR in tenant:
+    # CRITICAL: the trailing check is not redundant with the `SEPARATOR in tenant` one. A
+    # tenant may not *contain* the separator, but one ending in its first character
+    # reconstructs it across the boundary with the collection name — `scoped_name("_b", "a")`
+    # and `scoped_name("b", "a_")` both produce `a___b`, so two tenants addressed one
+    # backend collection and `visible_to` returned true for both. Read *and* write, since
+    # the name is what the adapter upserts into (TASK-0211).
+    #
+    # With both rules, the encoding is injective: a longer tenant sharing a prefix with a
+    # shorter one would need either the separator inside it (first rule) or its first
+    # character at the end (this one).
+    if not _TENANT_PATTERN.match(tenant) or SEPARATOR in tenant or tenant.endswith(SEPARATOR[0]):
         raise FasterRagError(
-            "a tenant id must be alphanumeric with dots, dashes, or underscores, and may "
-            f"not contain {SEPARATOR!r}",
+            "a tenant id must be alphanumeric with dots, dashes, or underscores, may not "
+            f"contain {SEPARATOR!r}, and may not end with {SEPARATOR[0]!r}",
             code=ErrorCode.TENANT_FORBIDDEN,
             retryable=False,
         )

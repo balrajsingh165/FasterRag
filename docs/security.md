@@ -64,6 +64,8 @@ Enabling auth with no usable key **refuses to start**. Starting would refuse eve
 
 With this, every tenant-visible surface is scoped: queries, the semantic cache, collections, traces, replay, metrics, and ingestion jobs.
 
+**A tenant id may not contain `__` nor end with `_`.** Both rules exist for the same reason and neither is redundant: collection isolation is carried by the name (`<tenant>__<name>`), so an id that can reconstruct the separator against a caller-supplied collection name breaks it. An id *ending* in `_` did exactly that — `scoped_name("_b", "a")` and `scoped_name("b", "a_")` both produced `a___b`, giving two tenants one backend collection with read *and* write, and `visible_to` returning true for both. Fixed 2026-08-06 (TASK-0211); with both rules the encoding is injective.
+
 `POST /v1/replay` is scoped for the same reason the read endpoints are, and it is the easier one to overlook: replay re-executes the stored question and returns a diff, so an unscoped lookup discloses another tenant's query and retrieved chunks through a write-shaped endpoint rather than a read-shaped one. It looked its trace up unscoped until 2026-08-06 (TASK-0194).
 - Semantic-cache entries are tenant-scoped — a cache hit can never leak another tenant's answer.
 - Per-tenant token budgets (D9, `cost.per_tenant_token_budget`) bound spend per tenant.
