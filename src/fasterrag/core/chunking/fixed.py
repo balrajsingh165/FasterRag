@@ -13,6 +13,7 @@ from fasterrag.core.chunking.models import (
     TokenCounter,
     assemble,
     hard_split,
+    within_budget,
 )
 from fasterrag.core.parsing.models import ParsedDocument
 
@@ -39,6 +40,7 @@ class FixedChunker:
             counter: Token counter; defaults to the estimating counter.
         """
         self._counter = counter or EstimatingTokenCounter()
+        self._budget = chunk_size
         self._limit = chunk_size * self._counter.chars_per_token
         self._overlap_tokens = overlap
         self._overlap = overlap * self._counter.chars_per_token
@@ -50,7 +52,14 @@ class FixedChunker:
 
         return assemble(
             document.text,
-            hard_split(document.text, 0, self._limit),
+            within_budget(
+                document.text,
+                hard_split(document.text, 0, self._limit),
+                counter=self._counter,
+                budget=self._budget,
+                limit=self._limit,
+                split=lambda text, start, end, limit: hard_split(text[start:end], start, limit),
+            ),
             overlap_chars=self._overlap,
             overlap_tokens=self._overlap_tokens,
             strategy=self.strategy,

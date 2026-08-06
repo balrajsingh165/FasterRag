@@ -152,3 +152,118 @@ def test_structured_documents_keep_their_section_and_page(chunker: Chunker) -> N
 
     assert chunks
     assert any(chunk.section for chunk in chunks)
+
+
+DENSE_BUDGET = 40
+DENSE_OVERLAP = 6
+
+
+# The invariants above generate ASCII only. The token-budget pass added under TASK-0114
+# exists precisely for text where characters and tokens diverge — CJK, accented scripts,
+# emoji — so it had never been property-tested against the inputs it was written for.
+# CRITICAL: no whitespace in the alphabet, and a minimum length above the character limit
+# these chunkers derive (40 tokens x 4 chars). A strategy that emitted spaces would let the
+# separator splitting break every run into small pieces, so the budget pass would never
+# trigger and every assertion below would hold whether or not it existed. The first version
+# of this strategy did exactly that: disabling the budget pass failed none of these tests.
+DENSE_TEXT = st.text(
+    alphabet=st.characters(
+        min_codepoint=0x4E00,
+        max_codepoint=0x9FFF,
+        blacklist_categories=("Cs", "Cc", "Zs"),
+    ),
+    min_size=DENSE_BUDGET * 4 + 1,
+    max_size=400,
+)
+
+
+class DenseCounter:
+    """Every non-space character is a token, as CJK very nearly is.
+
+    The estimating counter can never trigger the budget pass, because the character limit
+    is derived from the same ratio it counts with. This one forces it on every document.
+    """
+
+    def count(self, text: str) -> int:
+        return len(text.strip())
+
+    @property
+    def chars_per_token(self) -> int:
+        return 4
+
+
+def dense_chunkers() -> list[Chunker]:
+    counter = DenseCounter()
+    return [
+        FixedChunker(chunk_size=DENSE_BUDGET, overlap=DENSE_OVERLAP, counter=counter),
+        RecursiveChunker(chunk_size=DENSE_BUDGET, overlap=DENSE_OVERLAP, counter=counter),
+        LayoutChunker(chunk_size=DENSE_BUDGET, overlap=DENSE_OVERLAP, counter=counter),
+        LateChunker(chunk_size=DENSE_BUDGET, overlap=DENSE_OVERLAP, counter=counter),
+    ]
+
+
+DENSE_CHUNKERS = pytest.mark.parametrize(
+    "chunker", dense_chunkers(), ids=[c.strategy for c in dense_chunkers()]
+)
+
+
+@DENSE_CHUNKERS
+@given(body=DENSE_TEXT)
+@settings(max_examples=60, suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_dense_text_still_reconstructs_the_source(chunker: Chunker, body: str) -> None:
+    """The budget pass re-splits segments; a tiling that stops being gapless loses text."""
+    document = parse_plaintext(body.encode())
+    chunks = chunker.split(document)
+
+    if not chunks:
+        assert not document.text.strip()
+        return
+
+    assert reconstruct(chunks) == document.text
+
+
+@DENSE_CHUNKERS
+@given(body=DENSE_TEXT)
+@settings(max_examples=60, suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_dense_text_keeps_offsets_exact(chunker: Chunker, body: str) -> None:
+    """Re-splitting must not move an offset off the text it names."""
+    document = parse_plaintext(body.encode())
+
+    for chunk in chunker.split(document):
+        assert 0 <= chunk.start < chunk.end <= len(document.text)
+        assert document.text[chunk.start : chunk.end] == chunk.text
+
+
+@DENSE_CHUNKERS
+@given(body=DENSE_TEXT)
+@settings(max_examples=60, suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_dense_text_respects_the_token_budget(chunker: Chunker, body: str) -> None:
+    """The whole point of TASK-0114: a "40-token" chunk must not really be 200."""
+    counter = DenseCounter()
+
+    for chunk in chunker.split(parse_plaintext(body.encode())):
+        assert counter.count(chunk.text) <= DENSE_BUDGET + DENSE_OVERLAP
+
+
+@DENSE_CHUNKERS
+@given(body=DENSE_TEXT)
+@settings(max_examples=60, suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_dense_text_bounds_the_overlap_in_tokens(chunker: Chunker, body: str) -> None:
+    """A character reach-back runs several times the configured tokens on dense text."""
+    document = parse_plaintext(body.encode())
+    counter = DenseCounter()
+
+    for earlier, later in pairwise(chunker.split(document)):
+        repeated = document.text[later.start : earlier.end]
+        assert counter.count(repeated) <= DENSE_OVERLAP
+
+
+@DENSE_CHUNKERS
+@given(body=DENSE_TEXT)
+@settings(max_examples=60, suppress_health_check=[HealthCheck.function_scoped_fixture])
+def test_dense_text_terminates_without_degenerate_chunks(chunker: Chunker, body: str) -> None:
+    """The budget pass halves toward a floor; without one it would split to one character."""
+    chunks = chunker.split(parse_plaintext(body.encode()))
+
+    assert all(chunk.text.strip() for chunk in chunks)
+    assert len(chunks) <= max(len(body), 1)

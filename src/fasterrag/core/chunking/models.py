@@ -18,21 +18,28 @@ what makes span-level citations (D5) possible at all.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final, Protocol
 
 __all__ = [
     "CHARS_PER_TOKEN",
+    "MINIMUM_LIMIT",
     "EstimatingTokenCounter",
     "Segment",
     "TextChunk",
     "TokenCounter",
     "assemble",
     "hard_split",
+    "within_budget",
 ]
 
 CHARS_PER_TOKEN: Final = 4
+
+# The character limit below which the budget pass stops halving. Without a floor a text the
+# counter never reports as fitting — a single glyph tokenizing to several tokens — would
+# recurse until the segments were one character wide.
+MINIMUM_LIMIT: Final = 16
 
 Segment = tuple[int, int]
 
@@ -225,3 +232,54 @@ def _lookup_str(lookup: object, offset: int) -> str | None:
         return None
     value = lookup(offset)
     return value if isinstance(value, str) else None
+
+
+def within_budget(
+    text: str,
+    segments: Sequence[Segment],
+    *,
+    counter: TokenCounter,
+    budget: int,
+    limit: int,
+    split: Callable[[str, int, int, int], list[Segment]],
+) -> list[Segment]:
+    """Re-split any segment the counter says exceeds ``budget`` tokens.
+
+    Every chunker sizes its first pass in *characters*, because a character tiling is what
+    keeps chunk offsets exact and gapless. Characters per token is only an assumption
+    though, and a wrong one for code, CJK text, and long identifiers — all of which tokenize
+    far denser than prose. This pass re-splits where the assumption was wrong, so the
+    configured size means tokens rather than a guess about them.
+
+    Shared by every strategy rather than owned by one. It lived on the recursive chunker
+    alone until a property test over dense text caught `fixed` and `layout` emitting chunks
+    3.6x their budget — the same defect the pass was written to fix, in the two strategies
+    that never got it (TASK-0208).
+
+    With the estimating counter the check can never fail, since the character limit derives
+    from the same ratio the count uses; it then costs one count per segment and changes
+    nothing.
+
+    Args:
+        text: The document the segments index into.
+        segments: The character tiling to refine.
+        counter: Decides what a token is.
+        budget: Ceiling in tokens.
+        limit: The character limit the tiling was built with.
+        split: How to cut a span finer, given a smaller character limit.
+
+    Returns:
+        A tiling no coarser than the input, with every over-budget segment re-split.
+    """
+
+    def refine(segment: Segment, current: int) -> list[Segment]:
+        start, end = segment
+        if current <= MINIMUM_LIMIT or counter.count(text[start:end]) <= budget:
+            return [segment]
+
+        halved = max(current // 2, MINIMUM_LIMIT)
+        return [
+            piece for finer in split(text, start, end, halved) for piece in refine(finer, halved)
+        ]
+
+    return [piece for segment in segments for piece in refine(segment, limit)]

@@ -17,6 +17,7 @@ from fasterrag.core.chunking.models import (
     TextChunk,
     TokenCounter,
     assemble,
+    within_budget,
 )
 from fasterrag.core.chunking.recursive import split_span
 from fasterrag.core.parsing.models import ParsedDocument
@@ -44,6 +45,7 @@ class LayoutChunker:
             counter: Token counter; defaults to the estimating counter.
         """
         self._counter = counter or EstimatingTokenCounter()
+        self._budget = chunk_size
         self._limit = chunk_size * self._counter.chars_per_token
         self._overlap_tokens = overlap
         self._overlap = overlap * self._counter.chars_per_token
@@ -56,14 +58,28 @@ class LayoutChunker:
         if not document.blocks:
             return assemble(
                 text,
-                split_span(text, 0, len(text), self._limit),
+                within_budget(
+                    text,
+                    split_span(text, 0, len(text), self._limit),
+                    counter=self._counter,
+                    budget=self._budget,
+                    limit=self._limit,
+                    split=split_span,
+                ),
                 overlap_chars=self._overlap,
                 overlap_tokens=self._overlap_tokens,
                 strategy=self.strategy,
                 counter=self._counter,
             )
 
-        segments = self._pack_blocks(document)
+        segments = within_budget(
+            text,
+            self._pack_blocks(document),
+            counter=self._counter,
+            budget=self._budget,
+            limit=self._limit,
+            split=split_span,
+        )
         return assemble(
             text,
             segments,
