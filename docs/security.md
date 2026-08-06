@@ -58,11 +58,13 @@ Enabling auth with no usable key **refuses to start**. Starting would refuse eve
 
 **Collections are scoped by name, not by a filter.** A vector database has no notion of our tenants, so isolation cannot be a field check — a tenant's collections carry a `<tenant>__` prefix and a tenant may only address names carrying its own. That makes isolation a property of the identifier: a missing filter fails open, a name that does not resolve fails closed. The prefix never appears in a response — a tenant that created `docs` sees `docs`. A tenant id may not itself contain the separator, or `acme__x` could address `acme`'s collection `x`; ids are validated and refused with `TENANT_FORBIDDEN`.
 
-**Traces and metrics are tagged too.** A trace records the query text and every retrieved chunk, so `GET /v1/traces/{id}` reports another tenant's trace as **absent** rather than forbidden — a distinct error would confirm the id is real, and trace ids are guessable from a caller's own listing. The same reasoning applies to `GET /v1/collections/{name}`. Metric series carry the tenant resolved by the middleware, not one re-read from the header, so an unauthenticated request cannot label its own series.
+**Traces and metrics are tagged too.** A trace records the query text and every retrieved chunk, so `GET /v1/traces/{id}`, `GET /v1/traces`, and `POST /v1/replay` all report another tenant's trace as **absent** rather than forbidden — a distinct error would confirm the id is real, and trace ids are guessable from a caller's own listing. The same reasoning applies to `GET /v1/collections/{name}`. Metric series carry the tenant resolved by the middleware, not one re-read from the header, so an unauthenticated request cannot label its own series.
 
 **Ingestion jobs are scoped too.** A job record carries the source paths of the corpus it ingested, and job ids sort chronologically — so a caller holding one of their own can guess at neighbours. Another tenant's job therefore raises the same `NOT_FOUND` an unknown id does, with the same message. The tenant is recorded when the job is *created*: without that every job would be written untenanted and scoping the read path would refuse a tenant access to the job it had just started, presenting as an outage rather than as isolation.
 
-With this, every tenant-visible surface is scoped: queries, the semantic cache, collections, traces, metrics, and ingestion jobs.
+With this, every tenant-visible surface is scoped: queries, the semantic cache, collections, traces, replay, metrics, and ingestion jobs.
+
+`POST /v1/replay` is scoped for the same reason the read endpoints are, and it is the easier one to overlook: replay re-executes the stored question and returns a diff, so an unscoped lookup discloses another tenant's query and retrieved chunks through a write-shaped endpoint rather than a read-shaped one. It looked its trace up unscoped until 2026-08-06 (TASK-0194).
 - Semantic-cache entries are tenant-scoped — a cache hit can never leak another tenant's answer.
 - Per-tenant token budgets (D9, `cost.per_tenant_token_budget`) bound spend per tenant.
 

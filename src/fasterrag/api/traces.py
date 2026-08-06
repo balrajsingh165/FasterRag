@@ -93,11 +93,17 @@ async def replay(
     request: Request,
     settings: CurrentSettings,
     adapter: CurrentVectorDB,
+    tenant: CurrentTenant,
 ) -> dict[str, Any]:
     """Re-execute a past query under a candidate configuration and diff the outcome."""
     _require_replay(settings)
 
-    trace = get_trace_store(request).load(body.trace_id)
+    # CRITICAL: tenant-scoped, exactly as GET /v1/traces/{id} is. Replay re-executes the
+    # stored query and returns a diff, so an unscoped lookup here would let any tenant read
+    # another's question and retrieved chunks — the same disclosure the trace endpoints
+    # refuse, reached through a different door. An absent trace and another tenant's trace
+    # are deliberately indistinguishable, for the reason `TraceStore.load` documents.
+    trace = get_trace_store(request).load(body.trace_id, tenant=tenant)
     if trace is None:
         raise FasterRagError(
             f"no stored trace {body.trace_id!r}",
