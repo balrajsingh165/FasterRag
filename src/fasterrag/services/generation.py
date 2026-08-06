@@ -110,6 +110,23 @@ class Answer:
     threshold: float | None = None
     best_candidates: list[dict[str, Any]] = field(default_factory=list)
     cache: dict[str, Any] = field(default_factory=lambda: dict(MISS))
+    truncated: bool = False
+    """Whether the model stopped at ``llm.max_tokens`` rather than finishing.
+
+    A cut-off answer is served, not withheld — a partial answer with a flag beats no answer
+    — but serving one *silently* means a caller cannot tell a complete answer from one that
+    ran out of budget mid-sentence. A reasoning model can also spend the whole ceiling before
+    emitting anything, which arrives here as an empty answer flagged truncated.
+    """
+
+    evidence_dropped: int = 0
+    """Chunks that were retrieved and reranked but did not fit the context budget.
+
+    Distinct from ``truncated``: nothing was cut off, but the answer is grounded in a subset
+    of the evidence the retriever chose. Raising ``chunking.chunk_size`` or lowering
+    ``retrieval.top_k`` is what an operator does about it, and neither is discoverable if the
+    number is never reported.
+    """
 
     @property
     def degraded(self) -> bool:
@@ -149,6 +166,8 @@ class Answer:
             "timings_ms": self.timings_ms,
             "degraded": self.degraded,
             "mode": self.mode,
+            "truncated": self.truncated,
+            "evidence_dropped": self.evidence_dropped,
             "faithfulness": self.faithfulness,
             "cache": self.cache,
             "trace_id": self.trace_id,
@@ -624,6 +643,28 @@ class GenerationService:
             self._store_trace(question, collection, filters, prepared, completion.text, refusal)
             return refusal
 
+        if completion.truncated:
+            _logger.warning(
+                "the model stopped at the token ceiling; the answer may be cut off",
+                extra={
+                    "trace_id": trace_id,
+                    "max_tokens": self.settings.llm.max_tokens,
+                    "completion_tokens": completion.completion_tokens,
+                    "answer_empty": not completion.text.strip(),
+                },
+            )
+
+        if prepared.context.truncated:
+            _logger.info(
+                "evidence was dropped to fit the context budget; the answer is grounded in "
+                "a subset of what retrieval returned",
+                extra={
+                    "trace_id": trace_id,
+                    "dropped": prepared.context.dropped_budget,
+                    "kept": len(prepared.context.citations),
+                },
+            )
+
         answer = Answer(
             answer=completion.text,
             citations=resolve_citations(completion.text, prepared.context.citations),
@@ -633,6 +674,8 @@ class GenerationService:
             completion_tokens=completion.completion_tokens,
             timings_ms=timings,
             faithfulness=verdict.score,
+            truncated=completion.truncated,
+            evidence_dropped=prepared.context.dropped_budget,
         )
 
         if vector is not None and self.cache is not None and prepared.mode == FULL_MODE:

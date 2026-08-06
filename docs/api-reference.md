@@ -140,11 +140,17 @@ Non-streaming `200`:
   "timings_ms": {"embed": 8, "retrieve": 41, "fuse": 1, "rerank": 143, "assemble": 6, "generate": 902, "total": 1101},
   "degraded": false,
   "mode": "full",
+  "truncated": false,
+  "evidence_dropped": 0,
   "faithfulness": 0.93,
   "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
   "cache": {"semantic_hit": false}
 }
 ```
+
+`truncated` is `true` when the model stopped at `llm.max_tokens` rather than finishing. The answer is still served — a partial answer with a flag beats no answer — but a caller cannot otherwise tell a complete answer from one that ran out mid-sentence. A reasoning model can spend the whole ceiling before emitting anything, which arrives as an **empty** `answer` with `truncated: true`; this was observed against a real OpenAI-compatible endpoint (TASK-0206).
+
+`evidence_dropped` counts chunks that were retrieved and reranked but did not fit the context budget. Unlike `truncated`, nothing was cut off — the answer is simply grounded in a subset of the evidence the retriever chose. A non-zero value is what tells an operator to raise `chunking.chunk_size` or lower `retrieval.top_k`.
 
 Degraded responses (D4) always carry `degraded: true` and `mode` ∈ `full`, `hybrid_only` (reranker down), `cache_only` (vector DB down), `extractive` (LLM down) — there is never a silent quality drop. **As built, only `hybrid_only` and `extractive` are served; `cache_only` is specified but not implemented (TASK-0159), and a vector-DB outage currently returns a retryable `RETRIEVAL_FAILED` problem instead.**
 

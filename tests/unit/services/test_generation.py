@@ -24,13 +24,20 @@ class ScriptedLLM(LLMAdapter):
         super().__init__(settings)
         self.text = text
         self.error = error
+        self.finish_reason: str | None = "stop"
         self.prompts: list[tuple[str, str | None]] = []
 
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         self.prompts.append((prompt, system))
         if self.error is not None:
             raise self.error
-        return Completion(text=self.text, model="scripted", prompt_tokens=11, completion_tokens=7)
+        return Completion(
+            text=self.text,
+            model="scripted",
+            prompt_tokens=11,
+            completion_tokens=7,
+            finish_reason=self.finish_reason,
+        )
 
     async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
         self.prompts.append((prompt, system))
@@ -208,6 +215,8 @@ async def test_the_answer_serializes_to_the_documented_body() -> None:
         "timings_ms",
         "degraded",
         "mode",
+        "truncated",
+        "evidence_dropped",
         "faithfulness",
         "cache",
         "trace_id",
@@ -695,3 +704,47 @@ async def test_a_tight_budget_still_answers(budget: int) -> None:
     result = await service.answer("q")
 
     assert result.answer == "short answer"
+
+
+async def test_a_truncated_completion_is_reported() -> None:
+    """Serving a cut-off answer silently means a caller cannot tell it apart from a whole one."""
+    service, llm = build()
+    llm.finish_reason = "length"
+
+    answer = await service.answer("q")
+
+    assert answer.truncated is True
+    assert answer.as_dict()["truncated"] is True
+
+
+async def test_a_finished_completion_is_not_reported_as_truncated() -> None:
+    service, _ = build()
+
+    assert (await service.answer("q")).truncated is False
+
+
+async def test_an_empty_answer_at_the_ceiling_still_reports_truncation() -> None:
+    """A reasoning model can spend the whole budget before emitting anything.
+
+    Observed against a real OpenAI-compatible endpoint: 32 tokens of budget, zero completion
+    tokens, `finish_reason='length'`, empty text. Without the flag that is a 200 with an
+    empty answer and no signal at all.
+    """
+    service, llm = build()
+    llm.finish_reason = "length"
+    llm.text = ""
+
+    answer = await service.answer("q")
+
+    assert answer.answer == ""
+    assert answer.truncated is True
+
+
+async def test_evidence_dropped_by_the_budget_is_reported() -> None:
+    """The answer is grounded in a subset of what the retriever chose; that must be visible."""
+    service, _ = build()
+
+    answer = await service.answer("q")
+
+    assert answer.as_dict()["evidence_dropped"] == answer.evidence_dropped
+    assert isinstance(answer.evidence_dropped, int)
