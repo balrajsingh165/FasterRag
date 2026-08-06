@@ -86,6 +86,14 @@ class AssembledContext:
     used: int = 0
     dropped_duplicate: int = 0
     dropped_budget: int = 0
+    dropped_empty: int = 0
+    """Retrieved chunks that carried no text.
+
+    Counted rather than skipped silently so the accounting reconciles: everything the
+    retriever handed over is either used or dropped for a stated reason. Our own chunkers
+    guarantee non-empty chunks, so a non-zero value here means the collection holds
+    something they did not produce — an import, or a hand-written upsert.
+    """
 
     @property
     def empty(self) -> bool:
@@ -168,10 +176,12 @@ def assemble_context(
     used_tokens = 0
     duplicates = 0
     over_budget = 0
+    blank = 0
 
     for chunk in chunks:
         text = chunk.text.strip()
         if not text:
+            blank += 1
             continue
 
         if text in seen_text:
@@ -201,4 +211,5 @@ def assemble_context(
         used=len(packed),
         dropped_duplicate=duplicates,
         dropped_budget=over_budget,
+        dropped_empty=blank,
     )
