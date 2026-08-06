@@ -77,6 +77,16 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
     if metadata is None:
         return ExitCode.USAGE
 
+    # The routing class is ordinary chunk metadata, because that is what the tiering rules
+    # match on (`embeddings.tiering.rules[].match`). A separate channel would need every
+    # rule to know about a second source of truth.
+    priority = getattr(args, "priority_class", None)
+    if priority:
+        metadata["priority_class"] = priority
+
+    if getattr(args, "watch", False):
+        console.error("--watch is not implemented yet; this command already runs to completion")
+
     sources = expand_sources(args.sources, recursive=getattr(args, "recursive", False))
     if not sources:
         console.error(f"no files to ingest under {', '.join(args.sources)}")
@@ -132,6 +142,60 @@ def _build_generation(settings: Settings, adapter: VectorDBAdapter) -> Generatio
     )
 
 
+async def _streamed(
+    service: Any,
+    args: argparse.Namespace,
+    filters: dict[str, Any] | None,
+    console: Console,
+) -> Any:
+    """Print tokens as they arrive and return the assembled answer.
+
+    The stream carries the same information as the non-streaming call, so the command's
+    reporting below is unchanged — this reassembles an ``Answer`` from the events rather
+    than making every later line aware of which path produced it.
+    """
+    from fasterrag.core.context import Citation
+    from fasterrag.services.generation import Answer
+
+    pieces: list[str] = []
+    citations: list[Citation] = []
+    meta: dict[str, Any] = {}
+    usage: dict[str, Any] = {}
+    withheld: dict[str, Any] = {}
+
+    async for event in service.stream(
+        args.question, collection=args.collection, top_k=args.top_k, filters=filters
+    ):
+        if event.type == "token":
+            text = str(event.data.get("text", ""))
+            pieces.append(text)
+            console.stream(text)
+        elif event.type == "meta":
+            meta = dict(event.data)
+        elif event.type == "citations":
+            citations = [Citation(**item) for item in event.data.get("citations", [])]
+        elif event.type == "usage":
+            usage = dict(event.data)
+        elif event.type == "insufficient_evidence":
+            withheld = dict(event.data)
+
+    if pieces:
+        console.stream("\n")
+
+    return Answer(
+        answer="".join(pieces) or None,
+        citations=citations,
+        mode=str(meta.get("mode", "full")),
+        trace_id=str(meta.get("trace_id", "")),
+        prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+        completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+        timings_ms=dict(meta.get("timings_ms") or {}),
+        faithfulness=withheld.get("faithfulness"),
+        threshold=withheld.get("threshold"),
+        best_candidates=list(withheld.get("best_candidates") or []),
+    )
+
+
 async def run_query(args: argparse.Namespace, console: Console) -> ExitCode:
     """Answer a question, streaming tokens unless ``--no-stream`` was given."""
     settings = _settings_or_none(args, console)
@@ -145,13 +209,30 @@ async def run_query(args: argparse.Namespace, console: Console) -> ExitCode:
     adapter = create_vector_db_adapter(settings)
     service = _build_generation(settings, adapter)
 
+    chunks: list[Any] = []
+    streamed = not (args.no_stream or console.as_json or args.show_chunks)
     try:
-        answer = await service.answer(
-            args.question,
-            collection=args.collection,
-            top_k=args.top_k,
-            filters=filters or None,
-        )
+        # Streaming is the default because time-to-first-token is what a person at a
+        # terminal actually waits on. It is skipped for --json, where a partial document is
+        # not a document, and for --show-chunks, which needs the candidate set the
+        # non-streaming call returns.
+        if not streamed:
+            if args.show_chunks:
+                answer, chunks = await service.answer_with_candidates(
+                    args.question,
+                    collection=args.collection,
+                    top_k=args.top_k,
+                    filters=filters or None,
+                )
+            else:
+                answer = await service.answer(
+                    args.question,
+                    collection=args.collection,
+                    top_k=args.top_k,
+                    filters=filters or None,
+                )
+        else:
+            answer = await _streamed(service, args, filters or None, console)
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
@@ -167,7 +248,15 @@ async def run_query(args: argparse.Namespace, console: Console) -> ExitCode:
         console.document(answer.as_dict())
         return ExitCode.SUCCESS
 
-    console.emit(answer.answer or "")
+    if not streamed:
+        console.emit(answer.answer or "")
+    if chunks:
+        console.emit("")
+        for chunk in chunks:
+            source = chunk.payload.get("source", "unknown source")
+            score = chunk.rerank_score if chunk.rerank_score is not None else chunk.rrf_score
+            console.emit(f"  #{chunk.final_rank} {score:.4f}  {chunk.chunk_id}  {source}")
+            console.emit(f"      {chunk.text[:160].strip()}")
     if answer.citations:
         console.emit("")
         for citation in answer.citations:

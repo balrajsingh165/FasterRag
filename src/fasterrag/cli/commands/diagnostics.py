@@ -187,6 +187,9 @@ async def run_doctor_command(args: argparse.Namespace, console: Console) -> Exit
     Exits ``4`` when any check fails. Doctor gates provisioning, so this code is what stops
     an automated setup from proceeding into an environment that cannot host it.
     """
+    if getattr(args, "fix", False):
+        console.error("--fix is not implemented yet; the report below is unchanged by it")
+
     report = await diagnose(args.config, overrides=overrides_from(args))
 
     console.lines(format_report(report))

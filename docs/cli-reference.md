@@ -65,9 +65,9 @@ Submit sources for ingestion (async job; same path as `POST /v1/ingest`).
 | Flag | Description |
 |---|---|
 | `--metadata KEY=VALUE` | Repeatable; merged into chunk metadata. |
-| `--priority-class NAME` | Tiered-embedding routing class (D9). |
+| `--priority-class NAME` | Tiered-embedding routing class (D9). Sets `priority_class` in chunk metadata, which is what `embeddings.tiering.rules[].match` matches on. |
 | `--recursive` | Descend into subdirectories. Without it a directory source contributes only its immediate files. Hidden files and `.git`, `node_modules`, `__pycache__`, and virtualenv directories are skipped either way; files from a directory are ingested in sorted order so the same command produces the same job. |
-| `--watch` | Follow the job and print per-stage progress until completion. |
+| `--watch` | **Not yet implemented** (TASK-0196). The CLI runs the job inline to completion, so there is nothing to follow until the queue-backed job path lands (TASK-0130). Passing it prints a notice. |
 | `--dry-run` | Parse + chunk only; report what would be indexed (no embedding, no writes). |
 
 ## `fasterrag query "<question>"`
@@ -78,8 +78,8 @@ Run a query (same path as `POST /v1/query`).
 |---|---|
 | `--top-k N` | Override `retrieval.top_k`. |
 | `--filter KEY=VALUE` | Repeatable metadata filter. |
-| `--no-stream` | Wait for the full answer instead of streaming tokens. |
-| `--show-chunks` | Print retrieved chunks with scores (retrieval debugging). |
+| `--no-stream` | Wait for the full answer instead of streaming tokens. Streaming is the default at a terminal; `--json` and `--show-chunks` imply `--no-stream`, because a partial document is not a document and the candidate set only exists on the non-streaming path. |
+| `--show-chunks` | Print the retrieved candidate set with ranks and scores (retrieval debugging). Implies `--no-stream`. |
 | `--show-timings` | Print per-stage latency breakdown. |
 
 ## `fasterrag index <subcommand>`
@@ -112,7 +112,7 @@ D10 preflight diagnostics. Checks: Docker present and running · required ports 
 
 | Flag | Description |
 |---|---|
-| `--fix` | Apply safe automatic fixes (e.g. create missing named volume). |
+| `--fix` | **Not yet implemented** (TASK-0197). Every candidate fix needs a running Docker daemon to attempt or verify (B7). Passing it prints a notice and leaves the report unchanged. |
 | `--json` | Machine-readable report (same schema as `GET /v1/admin/doctor`). |
 
 ## `fasterrag estimate <path|url> [...]`

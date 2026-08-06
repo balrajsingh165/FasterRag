@@ -115,7 +115,13 @@ def _add_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentParser])
     )
     parser.add_argument("--priority-class", default=None, help="tiered-embedding routing class")
     parser.add_argument("--recursive", action="store_true", help="recurse into directories")
-    parser.add_argument("--watch", action="store_true", help="print progress until completion")
+    # TODO: TASK-0196 implements --watch. The CLI runs the job inline to completion, so
+    # there is nothing to follow yet; it needs the queue-backed job path (TASK-0130).
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="(not yet implemented) follow an asynchronous job until it settles",
+    )
     parser.add_argument("--dry-run", action="store_true", help="parse and chunk only")
 
 
@@ -160,7 +166,11 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     reembed.add_argument("sources", nargs="+", help="paths to ingest into the new build")
     reembed.add_argument("--no-eval-gate", action="store_true", help="swap without the gate (dev)")
     reembed.add_argument("--dataset", default=None, help="eval dataset directory to gate on")
-    reembed.add_argument("--watch", action="store_true", help="print progress until completion")
+    reembed.add_argument(
+        "--watch",
+        action="store_true",
+        help="(not yet implemented) follow an asynchronous job until it settles",
+    )
 
     rollback = actions.add_parser("rollback", help="flip the alias back to a retained build (D2)")
     _add_global_flags(rollback)
@@ -354,7 +364,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="preflight diagnostics (D10)")
     _add_global_flags(doctor)
-    doctor.add_argument("--fix", action="store_true", help="apply safe automatic fixes")
+    # TODO: TASK-0197 implements --fix. Every candidate fix (creating the named volume,
+    # freeing a port) needs a running Docker daemon to attempt or verify, which is B7.
+    doctor.add_argument(
+        "--fix",
+        action="store_true",
+        help="(not yet implemented) apply safe automatic fixes",
+    )
 
     _add_estimate(subparsers)
     _add_autopilot(subparsers)

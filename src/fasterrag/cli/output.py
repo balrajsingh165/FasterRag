@@ -55,6 +55,19 @@ class Console:
             return
         sys.stdout.write(f"{message}\n")
 
+    def stream(self, text: str) -> None:
+        """Write a fragment with no newline and flush it immediately.
+
+        Streaming exists so a person sees the first words while the rest is still being
+        generated. Python buffers stdout when it is not a terminal, so without the flush a
+        piped or redirected stream would arrive in one block at the end — which is the
+        thing streaming is for, undone.
+        """
+        if self.quiet or self.as_json:
+            return
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
     def lines(self, messages: Iterable[str]) -> None:
         """Write several human-readable lines."""
         for message in messages:
