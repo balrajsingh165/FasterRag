@@ -27,6 +27,7 @@ from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.api import admin, collections, health, ingest, metrics, query, traces
 from fasterrag.api.auth import AuthMiddleware
+from fasterrag.api.limits import BodyLimitMiddleware
 from fasterrag.api.problems import install_exception_handlers
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
 from fasterrag.config.schema import Settings
@@ -242,6 +243,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(metrics.MetricsMiddleware)
     app.add_middleware(CorrelationIdMiddleware)
     app.add_middleware(AuthMiddleware, settings=resolved)
+    # CRITICAL: added last, so Starlette wraps it outermost and it runs *first*. An
+    # oversized body has to be refused before authentication, metrics, or routing spend
+    # anything on it — checking after auth would mean an unauthenticated caller could still
+    # make the server read the whole body.
+    app.add_middleware(BodyLimitMiddleware, settings=resolved)
     install_exception_handlers(app)
     app.include_router(health.router)
     app.include_router(ingest.router)
