@@ -1,6 +1,6 @@
 # config-reference.md — Full `config.yaml` Schema
 
-`config.yaml` drives ALL behavior. `.env` holds ONLY credentials/secrets — config references secrets exclusively **by environment-variable name** (e.g. `api_key_env: OPENAI_API_KEY`); secret values are NEVER inlined in YAML. The loader is **pydantic-settings** with a YAML source for config and env/`.env` for secrets; it validates the entire schema at startup and **fails fast** with a clear error naming the offending key. **Every integration toggle defaults to `false`.**
+`config.yaml` drives ALL behavior. Any key here can be overridden per invocation with `--set dotted.key=value`, or through the `FASTERRAG_SET` environment variable for containers ([cli-reference.md](cli-reference.md)); both are validated exactly as a file value is. `.env` holds ONLY credentials/secrets — config references secrets exclusively **by environment-variable name** (e.g. `api_key_env: OPENAI_API_KEY`); secret values are NEVER inlined in YAML. The loader is **pydantic-settings** with a YAML source for config and env/`.env` for secrets; it validates the entire schema at startup and **fails fast** with a clear error naming the offending key. **Every integration toggle defaults to `false`.**
 
 Conventions used below:
 

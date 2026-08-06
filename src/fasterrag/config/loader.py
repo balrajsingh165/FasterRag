@@ -26,10 +26,21 @@ from fasterrag.config.schema import Settings
 from fasterrag.errors import ConfigError
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["DEFAULT_CONFIG_PATH", "DEFAULT_ENV_FILE", "apply_overrides", "load_settings"]
+__all__ = [
+    "DEFAULT_CONFIG_PATH",
+    "DEFAULT_ENV_FILE",
+    "ENV_OVERRIDE_VAR",
+    "apply_overrides",
+    "env_overrides",
+    "load_settings",
+]
 
 DEFAULT_CONFIG_PATH: Final = Path("config.yaml")
 DEFAULT_ENV_FILE: Final = Path(".env")
+
+# The environment-variable form of `--set`. Named after it so the two are obviously the same
+# mechanism reached two ways.
+ENV_OVERRIDE_VAR: Final = "FASTERRAG_SET"
 
 _CHUNK_SIZE_WARN_ABOVE: Final = 1024
 
@@ -65,8 +76,13 @@ def load_settings(
     """
     config_path = Path(path)
     raw = _read_yaml(config_path)
-    if overrides:
-        raw = apply_overrides(raw, overrides)
+
+    # CRITICAL: the environment is applied *first* so an explicit `--set` wins. An operator
+    # reaching for the flag is overriding what the deployment already set, and losing to an
+    # environment variable they cannot see from the command line would be silent.
+    combined = [*env_overrides(), *(overrides or ())]
+    if combined:
+        raw = apply_overrides(raw, combined)
     settings = _validate(raw, config_path)
     _reject_unenforced_settings(settings)
 
@@ -80,6 +96,26 @@ def load_settings(
 
     _warn_about_risky_settings(settings)
     return settings
+
+
+def env_overrides() -> list[str]:
+    """Return the ``dotted.key=value`` overrides named by ``FASTERRAG_SET``.
+
+    The environment-variable form of ``--set``, because a container has no command line to
+    add flags to. A compose override file can set an environment variable on one service;
+    making it append a flag instead means restating the whole ``command``, which then has to
+    be kept in step with the base file by hand.
+
+    Entries are comma-separated. A value containing a comma has to use the ``--set`` flag,
+    which takes one override per occurrence and needs no separator at all.
+
+    Returns:
+        The overrides, empty when the variable is unset or blank.
+    """
+    raw = os.environ.get(ENV_OVERRIDE_VAR, "").strip()
+    if not raw:
+        return []
+    return [entry.strip() for entry in raw.split(",") if entry.strip()]
 
 
 def apply_overrides(raw: dict[str, Any], overrides: Sequence[str]) -> dict[str, Any]:

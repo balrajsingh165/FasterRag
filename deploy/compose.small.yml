@@ -1,0 +1,35 @@
+# Sizing preset: up to ~1M chunks, single machine (docs/deployment.md §4).
+#
+# CPU embeddings are fine at this scale, so one embedding worker is enough and the pools
+# stay small enough to leave the machine usable for something else.
+#
+#   docker compose -f docker-compose.yml -f deploy/compose.small.yml --profile core up -d
+#
+# These are planning defaults, not measurements. Real numbers come from the benchmark ledger
+# once it has entries taken on isolated hardware (docs/benchmarks.md, TASK-0084).
+
+services:
+  api:
+    environment:
+      FASTERRAG_SET: app.workers=2
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+
+  worker:
+    environment:
+      FASTERRAG_SET: workers.cpu_pool_size=4,workers.embedding_pool_size=1
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+
+  qdrant:
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G

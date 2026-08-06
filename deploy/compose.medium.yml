@@ -1,0 +1,36 @@
+# Sizing preset: ~1M–50M chunks (docs/deployment.md §4).
+#
+# A separate database host is recommended at this scale; if Qdrant moves off this machine,
+# drop the `qdrant` profile and set `vector_db.mode: external` with its address.
+#
+#   docker compose -f docker-compose.yml -f deploy/compose.medium.yml --profile core up -d
+#
+# Planning defaults, not measurements (docs/benchmarks.md, TASK-0084).
+
+services:
+  api:
+    environment:
+      FASTERRAG_SET: app.workers=4
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+
+  worker:
+    # cpu_pool_size=0 means "one per core", which is what the schema documents and what a
+    # dedicated worker host wants.
+    environment:
+      FASTERRAG_SET: workers.cpu_pool_size=0,workers.embedding_pool_size=2
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 16G
+
+  qdrant:
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 32G

@@ -1,0 +1,26 @@
+# Everything the build does not need. Keeping the context small is not cosmetic: the whole
+# context is sent to the daemon before the first layer is evaluated.
+.git
+.github
+.venv
+.fasterrag
+.mypy_cache
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+dist
+build
+*.egg-info
+tests
+docs
+deploy
+htmlcov
+.coverage*
+
+# CRITICAL: never copy secrets into an image layer. A layer is readable by anyone who can
+# pull the image, and deleting the file in a later layer does not remove it from the earlier
+# one. The container reads .env at runtime through compose's env_file instead.
+.env
+.env.*
+!.env.example

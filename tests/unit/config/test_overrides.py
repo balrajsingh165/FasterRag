@@ -139,3 +139,56 @@ def test_the_flag_is_accepted_before_the_subcommand(
 
     assert code == ExitCode.SUCCESS
     assert "app.port" in capsys.readouterr().out
+
+
+def test_the_environment_can_carry_overrides(config: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A container has no command line to add flags to."""
+    monkeypatch.setenv("FASTERRAG_SET", "chunking.chunk_size=512")
+
+    assert load_settings(config, require_env=False).chunking.chunk_size == 512
+
+
+def test_several_environment_overrides_are_comma_separated(
+    config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FASTERRAG_SET", "chunking.chunk_size=512, retrieval.top_k=5")
+
+    settings = load_settings(config, require_env=False)
+
+    assert settings.chunking.chunk_size == 512
+    assert settings.retrieval.top_k == 5
+
+
+def test_an_explicit_flag_beats_the_environment(
+    config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Losing to a variable invisible from the command line would be silent."""
+    monkeypatch.setenv("FASTERRAG_SET", "chunking.chunk_size=512")
+
+    settings = load_settings(config, require_env=False, overrides=["chunking.chunk_size=256"])
+
+    assert settings.chunking.chunk_size == 256
+
+
+def test_an_environment_override_is_validated_like_any_other(
+    config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FASTERRAG_SET", "chunking.chunk_size=99999")
+
+    with pytest.raises(ConfigError):
+        load_settings(config, require_env=False)
+
+
+def test_a_blank_environment_override_changes_nothing(
+    config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FASTERRAG_SET", "   ")
+
+    assert load_settings(config, require_env=False).chunking.chunk_size == 768
+
+
+def test_trailing_separators_are_tolerated(config: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A compose file with a trailing comma is a typo, not a reason to refuse to start."""
+    monkeypatch.setenv("FASTERRAG_SET", "chunking.chunk_size=512,")
+
+    assert load_settings(config, require_env=False).chunking.chunk_size == 512

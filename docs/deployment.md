@@ -6,17 +6,30 @@ fasterRag is self-hosted software in beta (no managed cloud). Three ways to run 
 2. **Service mode** — `fasterrag serve` (API) + `fasterrag worker` (pipelines) as processes.
 3. **Docker mode** — compose profiles for the full stack.
 
-## 1. Compose profiles (documented intention)
+## 1. Compose profiles
 
 | Profile | Containers | Enabled by |
 |---|---|---|
 | `core` | API, workers | always |
 | `qdrant` | Qdrant (system-managed) | `vector_db.mode: docker` |
-| `langfuse` | Langfuse v3 stack (web, worker, Postgres, ClickHouse, Redis, MinIO) | `observability.langfuse: true` |
-| `grafana` | Grafana with provisioning-as-code mounts | `observability.grafana: true` |
 | `dashboard` | fasterRag read-only dashboard | `observability.dashboard: true` |
+| *(langfuse)* | Langfuse v3 stack (web, worker, Postgres, ClickHouse, Redis, MinIO) | `observability.langfuse: true` — **provisioned, not in this file** |
+| *(grafana)* | Grafana with provisioning-as-code mounts | `observability.grafana: true` — **provisioned, not in this file** |
 
-Containers whose images **fasterRag builds itself** run non-root; third-party images fasterRag provisions (Qdrant, the Langfuse stack, Grafana) run as their upstream images ship — forcing a `--user` onto an image that expects to own its storage volume risks an unstartable container (resolved AUDIT-0007, 2026-08-02). Images are pinned by tag (no `latest`); provisioning is idempotent, with doctor-gating shipped for Qdrant and pending for Langfuse/Grafana (TASK-0147/0149 in [todo.md](todo.md)).
+`docker-compose.yml` ships the first three profiles. Langfuse and Grafana are deliberately **not** in it: both are provisioned by their config toggle (`observability.langfuse: true` writes and runs its own compose file under `.fasterrag/langfuse/`; Grafana starts on a user-defined network), and restating them here would create a second source of truth that drifts the first time a pinned version changes on one side. Turn the toggle on and run `fasterrag doctor`.
+
+```console
+$ docker compose --profile core --profile qdrant up -d
+$ docker compose -f docker-compose.yml -f deploy/compose.medium.yml --profile core up -d
+```
+
+Sizing presets live in `deploy/compose.{small,medium,large}.yml` and map to the table in §4. They set resource limits and pass pipeline settings through `FASTERRAG_SET`, the environment-variable form of `--set` — a container has no command line to add flags to, and overriding `command:` in a layer file means restating it and keeping it in step by hand.
+
+**Published ports bind to `127.0.0.1`, not `0.0.0.0`.** The API serves unauthenticated until `security.auth: true`, and the dashboard renders prompts and responses verbatim, so a stack that published on every interface would expose the corpus the moment it started. Put a TLS-terminating proxy in front and widen the binding deliberately.
+
+> **`docker compose config` prints your secrets.** It renders `env_file` contents inline, so inspecting the stack dumps everything in `.env` to stdout — terminal scrollback, CI logs, pasted bug reports. Use `docker compose config --no-interpolate`, which leaves `${VAR}` unexpanded, whenever the output is going anywhere it will be kept.
+
+The image fasterRag builds (`Dockerfile`) runs as uid 10001, carries no compiler or build backend in its runtime layer, and healthchecks against `/readyz` rather than `/healthz` — the latter answers as soon as the process is up, so a container reporting healthy on it gets traffic before it can serve a query. Containers whose images **fasterRag builds itself** run non-root; third-party images fasterRag provisions (Qdrant, the Langfuse stack, Grafana) run as their upstream images ship — forcing a `--user` onto an image that expects to own its storage volume risks an unstartable container (resolved AUDIT-0007, 2026-08-02). Images are pinned by tag (no `latest`); provisioning is idempotent, with doctor-gating shipped for Qdrant and pending for Langfuse/Grafana (TASK-0147/0149 in [todo.md](todo.md)).
 
 ## 2. Vector DB deployment modes (Qdrant reference)
 

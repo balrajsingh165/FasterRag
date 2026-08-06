@@ -1,0 +1,38 @@
+# Sizing preset: ~50M–500M chunks (docs/deployment.md §4).
+#
+# At this scale the API tier is replicated and stateless, workers want dedicated hosts with
+# GPUs, and Qdrant should be a cluster rather than the single container this file starts —
+# set `collection.shard_number` >= 4 and `replication_factor` >= 2 and run it separately.
+# This preset sizes the fasterRag side only.
+#
+#   docker compose -f docker-compose.yml -f deploy/compose.large.yml --profile core up -d
+#
+# Planning defaults, not measurements (docs/benchmarks.md, TASK-0084).
+
+services:
+  api:
+    # Stateless, so replicas scale horizontally. The published port is dropped and a load
+    # balancer goes in front; compose cannot publish one host port from several replicas.
+    #
+    # An empty sequence rather than compose's `!reset` tag: `!reset` is a Compose-only
+    # extension that every standard YAML parser rejects, so the file would stop being
+    # readable by the repository's own yaml check, by editors, and by any config linter.
+    ports: []
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+    environment:
+      FASTERRAG_SET: app.workers=4
+
+  worker:
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "16"
+          memory: 32G
+    environment:
+      FASTERRAG_SET: workers.cpu_pool_size=0,workers.embedding_pool_size=4

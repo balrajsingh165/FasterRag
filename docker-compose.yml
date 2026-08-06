@@ -1,0 +1,110 @@
+# fasterRag compose profiles (docs/deployment.md §1).
+#
+# Covers only the services fasterRag itself owns: the API, the worker pool, the vector
+# database, and the read-only dashboard.
+#
+# **Langfuse and Grafana are deliberately absent.** Both are provisioned by their config
+# toggles — `observability.langfuse: true` writes and runs its own compose file under
+# `.fasterrag/langfuse/`, and `observability.grafana: true` starts its containers on a
+# user-defined network. Restating them here would create a second source of truth for the
+# same stack, and the two would drift the first time a pinned version changed on one side.
+# Turn the toggle on and run `fasterrag doctor`; that is the documented path.
+#
+# Usage:
+#   docker compose --profile core --profile qdrant up -d
+#   docker compose --profile core --profile qdrant --profile dashboard up -d
+#
+# Sizing presets layer on top (docs/deployment.md §4):
+#   docker compose -f docker-compose.yml -f deploy/compose.medium.yml --profile core up -d
+
+name: fasterrag
+
+x-fasterrag-common: &fasterrag-common
+  build:
+    context: .
+    args:
+      # Local embedding models are the default provider, so the default build carries them.
+      # Build with EXTRAS="" for a hosted-provider deployment that never loads one.
+      EXTRAS: huggingface
+  image: fasterrag:local
+  # CRITICAL: `docker compose config` renders this file's contents inline. Running it to
+  # inspect the stack prints every secret in .env to stdout — into terminal scrollback, CI
+  # logs, and pasted bug reports. Use `docker compose config --no-interpolate`, or pipe
+  # through a filter, whenever the output is going anywhere it will be kept.
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    FASTERRAG_CONFIG: /app/config.yaml
+  volumes:
+    # The config is mounted rather than baked so a change does not need a rebuild. Read-only
+    # because nothing in fasterRag writes it, and a container that can rewrite its own
+    # configuration is a container whose configuration nobody can reason about.
+    - ./config.yaml:/app/config.yaml:ro
+    - fasterrag_state:/app/.fasterrag
+  restart: unless-stopped
+
+services:
+  api:
+    <<: *fasterrag-common
+    profiles: ["core"]
+    command: ["serve", "--host", "0.0.0.0"]
+    ports:
+      # CRITICAL: bound to loopback. The API serves unauthenticated until
+      # `security.auth: true`, so publishing it on every interface would expose the whole
+      # corpus to the network the moment the stack starts. Put a TLS-terminating proxy in
+      # front and change this deliberately (docs/deployment.md §3).
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+        required: false
+
+  worker:
+    <<: *fasterrag-common
+    profiles: ["core"]
+    command: ["worker"]
+    # No ports and no healthcheck: a worker serves nothing. It is alive if the process is,
+    # and its real progress signal is the ingestion journal, not a socket.
+    depends_on:
+      qdrant:
+        condition: service_healthy
+        required: false
+
+  qdrant:
+    profiles: ["qdrant"]
+    image: qdrant/qdrant:v1.18.1
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
+    ports:
+      # CRITICAL: both ports, both on loopback. The client attempts gRPC and fails when only
+      # 6333 is reachable (Qdrant Discussion #2195), so publishing one is a connection error
+      # that looks like a fasterRag bug.
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      # CRITICAL: a named volume, never a bind mount. Bind-mounted Qdrant storage has known
+      # data-loss issues on Windows and WSL per Qdrant's own install docs.
+      - fasterrag_qdrant_storage:/qdrant/storage
+    healthcheck:
+      # Qdrant's image carries no curl, so the check runs against its own HTTP port using the
+      # shell's /dev/tcp — enough to know the listener is up, which is what `depends_on` needs.
+      test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  dashboard:
+    <<: *fasterrag-common
+    profiles: ["dashboard"]
+    command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      # CRITICAL: loopback, and not negotiable. The dashboard is read-only but renders
+      # prompts and responses verbatim, so exposing it publicly publishes the corpus.
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  fasterrag_state:
+  fasterrag_qdrant_storage:

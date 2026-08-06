@@ -28,6 +28,14 @@ Values are read as YAML scalars, so `512`, `0.75`, `true`, and `null` arrive as 
 
 An override is held to **exactly** the rules a file value is — range, type, unknown-key, and cross-field. `--set retrieval.top_k=200` fails the same way writing it into the file would, and `--set chunking.chunk_sise=512` is rejected as an unknown key rather than silently ignored. Overrides are merged before validation rather than assigned afterwards, which is what keeps the cross-field rules running.
 
+`FASTERRAG_SET` is the environment-variable form, for containers and anything else without a command line to add flags to. It takes the same `dotted.key=value` pairs, comma-separated:
+
+```console
+$ FASTERRAG_SET="chunking.chunk_size=512,retrieval.top_k=5" fasterrag serve
+```
+
+An explicit `--set` beats the environment, because an operator reaching for the flag is overriding what the deployment already set and losing to a variable they cannot see would be silent. A value containing a comma has to use the flag, which needs no separator. Environment overrides are validated exactly as file values and flags are.
+
 Run `fasterrag config show` to see every key `--set` accepts.
 
 ---
