@@ -87,7 +87,7 @@ Request:
 | `collection` | str | no (default collection) | Must exist. |
 | `sources[]` | list | yes, ≥ 1 | `type` ∈ `path`, `url`, `inline`; `value` per type. |
 | `metadata` | object | no | Merged into every produced chunk's metadata. |
-| `priority_class` | str | no | Used by tiered embedding routing (D9). |
+| `priority_class` | str | no | Tiered-embedding routing class (D9). Merged into chunk metadata as `priority_class`, which is what `embeddings.tiering.rules[].match` matches on. |
 
 Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `422` · `429 QUEUE_FULL`.
 

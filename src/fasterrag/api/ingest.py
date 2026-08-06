@@ -117,7 +117,13 @@ async def start_ingest(
     )
 
     if record.status in {"queued"}:
-        background.add_task(_run_job, request, record, body.metadata)
+        # The routing class is ordinary chunk metadata, because that is what the tiering
+        # rules match on (`embeddings.tiering.rules[].match`). Merged here rather than
+        # threaded separately so the REST and CLI surfaces produce identical chunks.
+        metadata = dict(body.metadata or {})
+        if body.priority_class:
+            metadata["priority_class"] = body.priority_class
+        background.add_task(_run_job, request, record, metadata or None)
 
     return {"job_id": record.job_id, "status": record.status}
 

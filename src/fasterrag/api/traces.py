@@ -129,4 +129,11 @@ async def replay(
         await service.close()
         await embedding_router.close()
 
-    return result.as_dict()
+    payload = result.as_dict()
+    if body.diff_only:
+        # The two answer texts are the bulk of this response and the part a config sweep
+        # never reads — it is comparing whether the outcome moved, not reading both
+        # outcomes. Citations stay: they are how a caller finds which chunks changed.
+        for side in ("original", "replayed"):
+            payload[side] = {"citations": payload[side]["citations"]}
+    return payload

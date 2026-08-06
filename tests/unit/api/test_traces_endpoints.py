@@ -166,3 +166,66 @@ def test_the_trace_endpoints_need_a_key(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
     assert client.get(f"/v1/traces/{TRACE_ID}").status_code == 401
     assert client.post("/v1/replay", json={"trace_id": TRACE_ID}).status_code == 401
+
+
+def test_diff_only_drops_the_answer_texts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A config sweep compares whether the outcome moved; it never reads both answers."""
+    from fasterrag.api import traces as traces_module
+    from fasterrag.services.replay import ReplayResult, RetrievalDiff
+
+    client = tenanted(monkeypatch, tmp_path)
+
+    async def fake_replay(*args: object, **kwargs: object) -> ReplayResult:
+        return ReplayResult(
+            trace_id=TRACE_ID,
+            query="the confidential question",
+            config_changes=[],
+            retrieval=RetrievalDiff(),
+            original_answer="a long original answer",
+            original_citations=["chunk-1"],
+            replayed_answer="a long replayed answer",
+            replayed_citations=["chunk-1"],
+        )
+
+    monkeypatch.setattr(traces_module, "replay_trace", fake_replay)
+
+    full = client.post("/v1/replay", json={"trace_id": TRACE_ID}, headers=owner()).json()
+    trimmed = client.post(
+        "/v1/replay", json={"trace_id": TRACE_ID, "diff_only": True}, headers=owner()
+    ).json()
+
+    assert full["original"]["answer"] == "a long original answer"
+    assert "answer" not in trimmed["original"]
+    assert "answer" not in trimmed["replayed"]
+
+
+def test_diff_only_keeps_what_the_diff_is_for(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Citations are how a caller finds which chunks changed; dropping them empties it."""
+    from fasterrag.api import traces as traces_module
+    from fasterrag.services.replay import ReplayResult, RetrievalDiff
+
+    client = tenanted(monkeypatch, tmp_path)
+
+    async def fake_replay(*args: object, **kwargs: object) -> ReplayResult:
+        return ReplayResult(
+            trace_id=TRACE_ID,
+            query="q",
+            config_changes=[{"setting": "retrieval.top_k", "from": 10, "to": 5}],
+            retrieval=RetrievalDiff(removed=["chunk-9"]),
+            original_answer="before",
+            original_citations=["chunk-9"],
+            replayed_answer="after",
+            replayed_citations=[],
+        )
+
+    monkeypatch.setattr(traces_module, "replay_trace", fake_replay)
+
+    body = client.post(
+        "/v1/replay", json={"trace_id": TRACE_ID, "diff_only": True}, headers=owner()
+    ).json()
+
+    assert body["original"]["citations"] == ["chunk-9"]
+    assert body["answer_changed"] is True
+    assert body["retrieval"]["removed"] == ["chunk-9"]
