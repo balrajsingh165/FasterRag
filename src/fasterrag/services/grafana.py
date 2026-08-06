@@ -300,8 +300,11 @@ def dashboard() -> dict[str, Any]:
                 "fasterrag_circuit_state",
                 "short",
                 16,
-                "Empty by design for now: only the breaker's configuration exists, not the "
-                "breaker (TASK-0148). This panel is not evidence of a datasource problem.",
+                "0 closed, 1 half-open, 2 open, per outbound provider. A breaker opens "
+                "after reliability.circuit_breaker.failure_threshold consecutive "
+                "*retryable* failures and refuses traffic until reset_timeout_ms has "
+                "passed, then admits one probe. A line sitting at 0 is healthy, not idle: "
+                "every provider publishes its state from startup.",
                 "{{provider}}",
             ),
             _panel(

@@ -7,10 +7,14 @@
 Blockers are grouped by **root cause**, not by id. A root gets a whole number; everything it holds up gets a decimal under it:
 
 ```
-B3      TASK-0165   the decision nobody has made
-B3.1    TASK-0148   cannot start until B3 is answered
-B3.2    TASK-0159   cannot start until B3 is answered
+B9      <root-task>    the decision nobody has made
+B9.1    <child-task>   cannot start until B9 is answered
+B9.2    <child-task>   cannot start until B9 is answered
 ```
+
+Deliberately not real ids. The gate below reads every `TASK-` reference in this file and
+checks it against todo.md, so an illustration built from live ids fails the moment one of
+them is ticked — the gate would then be reporting on the example rather than on a blocker.
 
 **Answering the root either resolves the children outright or opens the path to them.** That is the whole point of the grouping: `B3` is one conversation that unblocks three pieces of work, and it is worth more attention than three separate line items would suggest.
 
@@ -50,9 +54,8 @@ Feeds **B1.1**.
 
 | | Task | Blocked because |
 |---|---|---|
-| **B3.1** | TASK-0148 | The circuit breaker. `fasterrag_circuit_state` is the one catalogue metric nothing writes, so the dashboard's circuit panel is empty by design and a test pins it as the single permitted exemption. That exemption should not become permanent by inertia. |
-| **B3.2** | TASK-0159 | The `cache_only` rung — consult the semantic cache when retrieval raises, instead of returning a bare `RETRIEVAL_FAILED`. |
-| **B3.3** | — | Four documents (`reliability.md`, `api-reference.md`, `glossary.md`, `failure-modes.md`) carry *specified-not-built* annotations that stay until B3 is answered either way. |
+| **B3.1** | TASK-0159 | The `cache_only` rung — consult the semantic cache when retrieval raises, instead of returning a bare `RETRIEVAL_FAILED`. |
+| **B3.2** | — | Four documents (`reliability.md`, `api-reference.md`, `glossary.md`, `failure-modes.md`) carry *specified-not-built* annotations that stay until B3 is answered either way. |
 
 ---
 

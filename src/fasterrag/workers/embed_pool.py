@@ -24,6 +24,7 @@ from typing import Protocol, cast, runtime_checkable
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.config.schema import Settings
+from fasterrag.core.breaker import CircuitBreaker, CircuitOpenError
 from fasterrag.core.chunking.models import Segment
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
@@ -96,6 +97,7 @@ class EmbeddingWorkerPool:
         settings: Settings,
         router: TieringRouter,
         sink: ChunkSink,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         """Build the pool.
 
@@ -104,10 +106,18 @@ class EmbeddingWorkerPool:
                 pool and ``embeddings.batch_size`` sizes each request.
             router: Owns the adapters, so each model is loaded exactly once.
             sink: Receives embedded batches.
+            breaker: Circuit breaker for the embedding provider. Built from
+                ``reliability.circuit_breaker`` when omitted; injected by tests.
         """
         self.settings = settings
         self.router = router
         self.sink = sink
+        self.breaker = breaker or CircuitBreaker(
+            provider="embeddings",
+            failure_threshold=settings.reliability.circuit_breaker.failure_threshold,
+            reset_timeout_ms=settings.reliability.circuit_breaker.reset_timeout_ms,
+            enabled=settings.reliability.circuit_breaker.enabled,
+        )
         self.size = settings.workers.embedding_pool_size
         self.batch_size = settings.embeddings.batch_size
         self.report = EmbedReport()
@@ -221,6 +231,10 @@ class EmbeddingWorkerPool:
 
         for attempt in range(attempts + 1):
             try:
+                # CRITICAL: checked inside the retry loop, not before it. A breaker that
+                # opens mid-batch must stop the *remaining* attempts — checking once at the
+                # top would spend the whole retry budget on a provider already known dead.
+                self.breaker.check()
                 result = (
                     await self._embed_pooled(cast(PoolingAdapter, adapter), documents)
                     if documents
@@ -228,7 +242,9 @@ class EmbeddingWorkerPool:
                 )
             except FasterRagError as exc:
                 last = exc
-                if not exc.retryable or attempt == attempts:
+                if not isinstance(exc, CircuitOpenError):
+                    self.breaker.record_failure(exc)
+                if not exc.retryable or attempt == attempts or self.breaker.is_open:
                     break
 
                 self.report.retries += 1
@@ -254,6 +270,7 @@ class EmbeddingWorkerPool:
                     model_version=result.model_version,
                 )
             )
+            self.breaker.record_success()
             self.report.embedded += len(group)
             self.report.batches += 1
             return

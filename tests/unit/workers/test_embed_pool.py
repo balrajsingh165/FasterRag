@@ -224,7 +224,14 @@ async def test_a_non_retryable_failure_is_not_retried() -> None:
 
 
 async def test_attempts_are_bounded_and_the_pool_keeps_running() -> None:
-    configured = settings()
+    # The breaker is held open-proof with a threshold this run cannot reach, so what is
+    # asserted here is the retry bound alone. Their interaction is its own test.
+    configured = settings(
+        reliability={
+            "retries": {"max_attempts": 2, "backoff_base_ms": 1, "jitter": False},
+            "circuit_breaker": {"failure_threshold": 100},
+        }
+    )
     embedder = RecordingEmbedder(configured)
     embedder.failures = 99
     embedder.error = EmbedError("provider down", retryable=True)

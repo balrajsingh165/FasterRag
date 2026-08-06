@@ -81,10 +81,11 @@ def test_every_panel_queries_a_metric_the_catalogue_declares() -> None:
         assert referenced, f"{panel['title']} queries no declared metric: {expression}"
 
 
-# The one catalogue metric with no write site: only the circuit breaker's *configuration*
-# exists, not the breaker itself (TASK-0148). Listed rather than tolerated, so a second dead
-# metric fails the suite instead of joining a growing silent exemption.
-KNOWN_UNWRITTEN = {"fasterrag_circuit_state"}
+# Every catalogue metric now has a write site. `fasterrag_circuit_state` was the last
+# exemption and left this set when the breaker shipped (TASK-0148). Kept as an empty set
+# rather than deleted: it is the seam a future declared-but-unwritten metric must be added
+# to deliberately, which is what stops one from joining a growing silent exemption.
+KNOWN_UNWRITTEN: set[str] = set()
 
 
 def _writers() -> dict[str, bool]:
