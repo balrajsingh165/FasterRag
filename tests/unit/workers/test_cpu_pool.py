@@ -183,6 +183,34 @@ async def test_resuming_skips_documents_a_checkpoint_already_covered(corpus: Pat
     assert report.parsed == 1
 
 
+async def test_the_pool_loads_the_tokenizer_before_it_accepts_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup pays the tokenizer load, so the first document does not.
+
+    ``create_token_counter`` returns immediately and the tokenizer behind it loads on first
+    use. Left to happen inside chunking, that first use cost a measured 5.4 s in the middle
+    of the first document — the pool started, took work, and produced nothing, which reads as
+    a hang and lands on whichever document arrives first. It also made the backpressure test
+    below pass or fail on whether an earlier test had warmed the process-wide cache.
+    """
+    counted: list[str] = []
+
+    class RecordingCounter:
+        chars_per_token = 4
+
+        def count(self, text: str) -> int:
+            counted.append(text)
+            return len(text)
+
+    monkeypatch.setattr(
+        "fasterrag.workers.cpu_pool.create_token_counter", lambda _settings: RecordingCounter()
+    )
+
+    async with CpuWorkerPool(settings(), executor_factory=threads):
+        assert counted, "the pool accepted work without loading the tokenizer"
+
+
 async def test_a_full_queue_makes_the_parser_wait(corpus: Path) -> None:
     queue: BoundedQueue[ChunkPayload] = BoundedQueue(2)
 

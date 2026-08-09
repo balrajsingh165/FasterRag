@@ -19,10 +19,11 @@ from concurrent.futures import Executor, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from time import perf_counter
 
 from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.config.schema import Settings
-from fasterrag.core.chunking import create_chunker
+from fasterrag.core.chunking import create_chunker, create_token_counter
 from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
 from fasterrag.core.parsing import create_parsing_options, parse_bytes
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
@@ -33,6 +34,10 @@ from fasterrag.workers.queues import BoundedQueue, ChunkPayload, DocumentTask, P
 __all__ = ["CpuWorkerPool", "PoolReport", "parse_and_chunk", "resolve_pool_size"]
 
 _MEGABYTE = 1024 * 1024
+
+# Below this, the load is the estimating counter or an already-warm cache and there is nothing
+# worth a log line. Above it, a slow start needs explaining.
+_SLOW_TOKENIZER_LOAD_SECONDS = 0.5
 
 _logger = get_logger(__name__)
 
@@ -199,10 +204,35 @@ class CpuWorkerPool:
         self._executor: Executor | None = None
 
     async def __aenter__(self) -> CpuWorkerPool:
-        """Start the worker processes."""
+        """Start the worker processes and pay the tokenizer load up front."""
         self._executor = self._executor_factory(self.size)
+        await self._warm_token_counter()
         _logger.info("cpu worker pool started", extra={"workers": self.size})
         return self
+
+    async def _warm_token_counter(self) -> None:
+        """Load the embedding tokenizer before the first document rather than during it.
+
+        ``create_token_counter`` is cheap but the tokenizer behind it loads on first use, and
+        that first use was inside the first document's chunking: a measured 5.4 s during which
+        the pool has started, accepted work, and produced nothing. It reads as a hang, it lands
+        in whatever document happens to be first, and it made a queue-backpressure test pass or
+        fail purely on whether an earlier test had already warmed the process-wide cache.
+
+        Warming here moves the cost to startup, where a slow start is expected and the log line
+        below explains it. The load is cached per process and never raises — a counter that
+        could fail configuration would make chunking depend on a model download — so this
+        cannot turn a working pool into one that will not start.
+        """
+        counter = create_token_counter(self.settings)
+        started = perf_counter()
+        await asyncio.get_running_loop().run_in_executor(None, counter.count, "warm")
+        elapsed = perf_counter() - started
+        if elapsed > _SLOW_TOKENIZER_LOAD_SECONDS:
+            _logger.info(
+                "loaded the embedding tokenizer",
+                extra={"seconds": round(elapsed, 2), "model": self.settings.embeddings.model},
+            )
 
     async def __aexit__(self, *exc_info: object) -> None:
         """Shut the worker processes down."""
