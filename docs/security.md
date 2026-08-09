@@ -39,7 +39,7 @@ Key comparison uses `secrets.compare_digest` against every configured key with n
 
 Enabling auth with no usable key **refuses to start**. Starting would refuse every request afterwards, which reads as a broken deployment rather than a configuration mistake.
 - **Keys carry scopes**: `ingest`, `query`, `collections`, `admin`. Admin endpoints (provisioning, export/import, collection delete) require `admin`.
-- **Rate limiting is on by default once auth is enabled** (`security.rate_limit_per_minute`, per key), returning `429` + `Retry-After`. Keyed per API key, not per IP — a limit keyed on something the caller chooses is not a limit. It is an in-process fixed window, correct for a single server and **not claimed to hold across replicas**: a distributed limiter needs shared state this deployment does not have (TASK-0124).
+- **Rate limiting is on by default once auth is enabled** (`security.rate_limit_per_minute`, per key), returning `429` + `Retry-After`. Keyed per API key, not per IP — a limit keyed on something the caller chooses is not a limit. It is an in-process fixed window, correct for a single server and **not claimed to hold across replicas**: a distributed limiter needs shared state this limiter does not use. Shared state now exists — the `redis` cache backend (TASK-0124) — but the limiter is not wired to it (TASK-0216).
 - Failed auth returns RFC 9457 problems (`AUTH_MISSING`/`AUTH_INVALID`/`AUTH_SCOPE`) with no information about whether a key exists.
 - TLS terminates at a reverse proxy in front of the API ([deployment.md](deployment.md)); plain HTTP is acceptable only on loopback/dev.
 

@@ -62,6 +62,9 @@ TokenCounterMode = Literal["auto", "estimate", "model"]
 PROVIDERS_REQUIRING_EMBEDDING_KEY: frozenset[str] = frozenset({"openai", "cohere"})
 PROVIDERS_NOT_REQUIRING_LLM_KEY: frozenset[str] = frozenset({"ollama"})
 
+REDIS_URL_SCHEMES: frozenset[str] = frozenset({"redis", "rediss", "unix"})
+DEFAULT_REDIS_URL: str = "redis://localhost:6379/0"
+
 
 def _is_ip_address(value: str) -> bool:
     """Return whether ``value`` parses as an IPv4 or IPv6 address."""
@@ -82,6 +85,19 @@ def is_windows_or_wsl() -> bool:
         return True
     release = platform.uname().release.lower()
     return "microsoft" in release or "wsl" in release
+
+
+def _validate_redis_url(value: str) -> str:
+    """Validate that ``value`` is a Redis connection URL the client can parse.
+
+    Checked here rather than at first use so a typo fails at startup naming the key, not
+    hours later inside a cache write that degrades silently to cache-off.
+    """
+    scheme, separator, rest = value.partition("://")
+    if not separator or scheme.lower() not in REDIS_URL_SCHEMES or not rest:
+        supported = ", ".join(f"{name}://" for name in sorted(REDIS_URL_SCHEMES))
+        raise ValueError(f"must be a redis connection URL starting with one of: {supported}")
+    return value
 
 
 def _validate_env_var_name(value: str | None) -> str | None:
@@ -224,6 +240,13 @@ class EmbeddingCacheSettings(Section):
     enabled: bool = True
     backend: Literal["memory", "disk", "redis"] = "disk"
     max_entries: Annotated[int, Field(ge=1)] = 10_000
+    redis_url: str = DEFAULT_REDIS_URL
+
+    @field_validator("redis_url")
+    @classmethod
+    def _check_redis_url(cls, value: str) -> str:
+        """Require a parseable Redis URL; only read when the backend is ``redis``."""
+        return _validate_redis_url(value)
 
 
 class TierRule(Section):
@@ -433,8 +456,9 @@ class CacheSettings(Section):
     ``disk`` is accepted here as well as on the embedding cache. Without it the semantic
     cache was unusable from the CLI: ``memory`` dies with each short-lived process, so every
     ``fasterrag query`` paid for a query embedding, stored the answer, and threw it away —
-    strictly worse than no cache — and ``redis`` is not implemented. A disk store is the only
-    backend that survives between two invocations of a command-line tool (TASK-0127).
+    strictly worse than no cache. A disk store is the only backend that survives between two
+    invocations of a command-line tool on one host (TASK-0127); ``redis`` is the only one
+    that survives across hosts, and the only one several API replicas can share (TASK-0124).
     """
 
     semantic: bool = False
@@ -442,6 +466,13 @@ class CacheSettings(Section):
     ttl: Annotated[int, Field(ge=1)] = 3600
     backend: Literal["memory", "disk", "redis"] = "memory"
     max_entries: Annotated[int, Field(ge=1)] = 10_000
+    redis_url: str = DEFAULT_REDIS_URL
+
+    @field_validator("redis_url")
+    @classmethod
+    def _check_redis_url(cls, value: str) -> str:
+        """Require a parseable Redis URL; only read when the backend is ``redis``."""
+        return _validate_redis_url(value)
 
 
 class WorkersSettings(Section):

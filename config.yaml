@@ -38,6 +38,7 @@ embeddings:
     enabled: true
     backend: disk
     max_entries: 10000
+    redis_url: redis://localhost:6379/0
   tiering:
     enabled: false
     rules: []
@@ -91,6 +92,7 @@ cache:
   ttl: 3600
   backend: memory
   max_entries: 10000
+  redis_url: redis://localhost:6379/0
 
 workers:
   cpu_pool_size: 0

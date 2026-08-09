@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache.embedding import CachingEmbeddingAdapter
+from fasterrag.core.cache.redis import EMBEDDING_NAMESPACE, SEMANTIC_NAMESPACE, RedisStore
 from fasterrag.core.cache.semantic import CacheHit, SemanticCache, cosine_similarity
 from fasterrag.core.cache.stats import CacheStats
 from fasterrag.core.cache.store import (
@@ -22,17 +23,19 @@ from fasterrag.core.cache.store import (
     DiskStore,
     MemoryStore,
 )
-from fasterrag.errors import ConfigError
 
 __all__ = [
     "DEFAULT_CACHE_ROOT",
+    "EMBEDDING_NAMESPACE",
     "MAXIMUM_ENTRIES",
+    "SEMANTIC_NAMESPACE",
     "CacheHit",
     "CacheStats",
     "CacheStore",
     "CachingEmbeddingAdapter",
     "DiskStore",
     "MemoryStore",
+    "RedisStore",
     "SemanticCache",
     "cosine_similarity",
     "create_embedding_store",
@@ -40,23 +43,33 @@ __all__ = [
 ]
 
 
-def _create(backend: str, setting: str, maximum_entries: int = MAXIMUM_ENTRIES) -> CacheStore:
+def _create(
+    backend: str,
+    setting: str,
+    maximum_entries: int,
+    redis_url: str,
+    namespace: str,
+) -> CacheStore:
     """Return the store ``backend`` names, holding at most ``maximum_entries`` entries.
 
+    The two caches are handed different namespaces so that one Redis server can back both
+    without either one's ``clear`` reaching the other's entries.
+
     Raises:
-        ConfigError: If the backend is Redis, which needs an optional install that is not
-            yet shipped. Naming the setting keeps the error actionable rather than generic.
+        ConfigError: If the backend is Redis and the optional client is not installed, or
+            the configured URL cannot be parsed. Naming the setting keeps the error
+            actionable rather than generic.
     """
     if backend == "memory":
         return MemoryStore(maximum_entries)
     if backend == "disk":
         return DiskStore(maximum_entries=maximum_entries)
 
-    # TODO: the redis backend ships with TASK-0124; config validation accepts the value now
-    # so the schema stays faithful to docs/config-reference.md.
-    raise ConfigError(
-        f"{setting} is 'redis', which is not implemented yet; "
-        "use 'memory' or 'disk' until the redis backend ships"
+    return RedisStore(
+        redis_url,
+        namespace=namespace,
+        maximum_entries=maximum_entries,
+        setting=setting,
     )
 
 
@@ -66,9 +79,17 @@ def create_embedding_store(settings: Settings) -> CacheStore:
         settings.embeddings.cache.backend,
         "embeddings.cache.backend",
         settings.embeddings.cache.max_entries,
+        settings.embeddings.cache.redis_url,
+        EMBEDDING_NAMESPACE,
     )
 
 
 def create_semantic_store(settings: Settings) -> CacheStore:
     """Return the store backing the semantic cache, per ``cache.backend``."""
-    return _create(settings.cache.backend, "cache.backend", settings.cache.max_entries)
+    return _create(
+        settings.cache.backend,
+        "cache.backend",
+        settings.cache.max_entries,
+        settings.cache.redis_url,
+        SEMANTIC_NAMESPACE,
+    )
