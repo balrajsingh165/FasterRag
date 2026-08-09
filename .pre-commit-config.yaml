@@ -16,7 +16,12 @@ repos:
         exclude: ^uv\.lock$
       - id: check-merge-conflict
       - id: check-toml
+      # deploy/compose.large.yml is excluded because it needs Compose's `!reset` tag to drop
+      # a port the base file publishes, and yaml.safe_load — which this hook uses — rejects
+      # any unknown tag. The standard-YAML alternative (`ports: []`) parses cleanly and does
+      # nothing, which is the worse failure (TASK-0190).
       - id: check-yaml
+        exclude: ^deploy/compose\.large\.yml$
       - id: detect-private-key
       - id: end-of-file-fixer
       - id: trailing-whitespace

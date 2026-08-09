@@ -36,6 +36,15 @@ x-fasterrag-common: &fasterrag-common
       required: false
   environment:
     FASTERRAG_CONFIG: /app/config.yaml
+    # CRITICAL: config.yaml ships `vector_db.host: localhost`, which is right for a process
+    # run on the host and wrong inside a container, where localhost is the container itself.
+    # Without this override /readyz never leaves 503, the api healthcheck never passes, and
+    # the worker exits VECTOR_DB_UNAVAILABLE into a restart loop.
+    #
+    # Compose merges `environment` per key, so a sizing preset that sets FASTERRAG_SET
+    # replaces this value outright rather than adding to it. Every deploy/compose.*.yml
+    # therefore repeats `vector_db.host=qdrant` in its own FASTERRAG_SET.
+    FASTERRAG_SET: vector_db.host=qdrant
   volumes:
     # The config is mounted rather than baked so a change does not need a rebuild. Read-only
     # because nothing in fasterRag writes it, and a container that can rewrite its own
@@ -64,8 +73,16 @@ services:
     <<: *fasterrag-common
     profiles: ["core"]
     command: ["worker"]
-    # No ports and no healthcheck: a worker serves nothing. It is alive if the process is,
-    # and its real progress signal is the ingestion journal, not a socket.
+    # No ports: a worker serves nothing. It is alive if the process is, and its real progress
+    # signal is the ingestion journal, not a socket.
+    #
+    # CRITICAL: the healthcheck is disabled explicitly, not merely left unset. The image
+    # carries a HEALTHCHECK that probes http://127.0.0.1:8000/readyz, and a container
+    # inherits it whatever its command is — a worker binds no socket, so the inherited probe
+    # reports the container unhealthy forever and any orchestrator watching health restarts
+    # a process that is working fine.
+    healthcheck:
+      disable: true
     depends_on:
       qdrant:
         condition: service_healthy
@@ -99,10 +116,20 @@ services:
   dashboard:
     <<: *fasterrag-common
     profiles: ["dashboard"]
-    command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
+    command: ["serve", "--host", "0.0.0.0"]
+    # CRITICAL: `serve` starts the dashboard beside the API in the same process, and only
+    # when `observability.dashboard` is on — the toggle is what starts it, nothing else. This
+    # service previously ran `serve --port 8080`, which moved the *API* onto 8080 and started
+    # no dashboard at all, so the profile published a second copy of the API under the
+    # dashboard's name. Leaving the API on its own port also keeps the image's HEALTHCHECK
+    # meaningful: it probes 8000, which this container does bind.
+    environment:
+      FASTERRAG_SET: vector_db.host=qdrant,observability.dashboard=true
     ports:
       # CRITICAL: loopback, and not negotiable. The dashboard is read-only but renders
       # prompts and responses verbatim, so exposing it publicly publishes the corpus.
+      # Only the dashboard port is published; the API this container also runs stays
+      # unreachable from the host, because the `api` service is the one that serves it.
       - "127.0.0.1:8080:8080"
 
 volumes:

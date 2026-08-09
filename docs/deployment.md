@@ -25,6 +25,8 @@ $ docker compose -f docker-compose.yml -f deploy/compose.medium.yml --profile co
 
 Sizing presets live in `deploy/compose.{small,medium,large}.yml` and map to the table in §4. They set resource limits and pass pipeline settings through `FASTERRAG_SET`, the environment-variable form of `--set` — a container has no command line to add flags to, and overriding `command:` in a layer file means restating it and keeping it in step by hand.
 
+`config.yaml` ships `vector_db.host: localhost`, which is right for a process on the host and wrong inside a container. The base compose file therefore sets `FASTERRAG_SET: vector_db.host=qdrant` on every fasterRag service. Compose merges `environment` **per key**, so a layer file that sets `FASTERRAG_SET` replaces that value rather than adding to it — every preset repeats the host for that reason, and so must any override file you write. Point it at your own address when the database is external.
+
 **Published ports bind to `127.0.0.1`, not `0.0.0.0`.** The API serves unauthenticated until `security.auth: true`, and the dashboard renders prompts and responses verbatim, so a stack that published on every interface would expose the corpus the moment it started. Put a TLS-terminating proxy in front and widen the binding deliberately.
 
 > **`docker compose config` prints your secrets.** It renders `env_file` contents inline, so inspecting the stack dumps everything in `.env` to stdout — terminal scrollback, CI logs, pasted bug reports. Use `docker compose config --no-interpolate`, which leaves `${VAR}` unexpanded, whenever the output is going anywhere it will be kept.

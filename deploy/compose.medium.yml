@@ -6,11 +6,15 @@
 #   docker compose -f docker-compose.yml -f deploy/compose.medium.yml --profile core up -d
 #
 # Planning defaults, not measurements (docs/benchmarks.md, TASK-0084).
+#
+# CRITICAL: every FASTERRAG_SET below repeats `vector_db.host=qdrant` from the base file.
+# Compose merges `environment` per key, so setting FASTERRAG_SET here replaces the base value
+# rather than extending it, and dropping the host sends both services at their own localhost.
 
 services:
   api:
     environment:
-      FASTERRAG_SET: app.workers=4
+      FASTERRAG_SET: vector_db.host=qdrant,app.workers=4
     deploy:
       resources:
         limits:
@@ -21,7 +25,7 @@ services:
     # cpu_pool_size=0 means "one per core", which is what the schema documents and what a
     # dedicated worker host wants.
     environment:
-      FASTERRAG_SET: workers.cpu_pool_size=0,workers.embedding_pool_size=2
+      FASTERRAG_SET: vector_db.host=qdrant,workers.cpu_pool_size=0,workers.embedding_pool_size=2
     deploy:
       resources:
         limits:
