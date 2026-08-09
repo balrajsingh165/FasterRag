@@ -23,13 +23,12 @@ from typing import Any, Final
 from fasterrag.errors import ConfigError
 from fasterrag.observability.logging import get_logger
 from fasterrag.observability.metrics import REGISTRY, Registry, Sample
-from fasterrag.observability.otel_export import SERVICE_NAME
+from fasterrag.observability.otel_export import SCOPE_NAME, SERVICE_NAME, signal_endpoint
 
 __all__ = ["DEFAULT_INTERVAL_SECONDS", "MetricPusher", "build_metrics"]
 
 DEFAULT_INTERVAL_SECONDS: Final = 60.0
 
-_SCOPE_NAME: Final = "fasterrag"
 _TIMEOUT_SECONDS: Final = 10
 
 _logger = get_logger(__name__)
@@ -129,7 +128,7 @@ def build_metrics(registry: Registry, start_ns: int, now_ns: int) -> Any:
         metrics.append(sdk.Metric(name=name, description=first.documentation, unit="", data=data))
 
     scope = sdk.ScopeMetrics(
-        scope=sdk.InstrumentationScope(_SCOPE_NAME),
+        scope=sdk.InstrumentationScope(SCOPE_NAME),
         metrics=metrics,
         schema_url="",
     )
@@ -213,7 +212,8 @@ class MetricPusher:
         """Build the pusher without starting it or connecting.
 
         Args:
-            endpoint: The OTLP/HTTP metrics endpoint.
+            endpoint: The collector's OTLP/HTTP endpoint from ``observability.otel_endpoint``.
+                Taken as a base URL; the ``/v1/metrics`` path is derived from it.
             registry: Catalogue to read; defaults to the process-wide one.
             interval_seconds: How often to push.
             timeout: Seconds to wait for the collector.
@@ -229,10 +229,10 @@ class MetricPusher:
                 "install it with 'pip install fasterrag[otel]'"
             ) from exc
 
-        self.endpoint = endpoint
+        self.endpoint = signal_endpoint(endpoint, "metrics")
         self.registry = registry or REGISTRY
         self.interval_seconds = interval_seconds
-        self._exporter = OTLPMetricExporter(endpoint=endpoint, timeout=timeout)
+        self._exporter = OTLPMetricExporter(endpoint=self.endpoint, timeout=timeout)
         self._started_ns = _now_ns()
         self._task: asyncio.Task[None] | None = None
 

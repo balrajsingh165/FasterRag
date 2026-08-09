@@ -26,16 +26,56 @@ from fasterrag.core.tracing import Trace
 from fasterrag.errors import ConfigError
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["SERVICE_NAME", "OtelExporter", "build_spans", "span_id_for"]
+__all__ = [
+    "SCOPE_NAME",
+    "SERVICE_NAME",
+    "OtelExporter",
+    "build_spans",
+    "signal_endpoint",
+    "span_id_for",
+]
 
 SERVICE_NAME: Final = "fasterrag"
+SCOPE_NAME: Final = "fasterrag"
 
 _NANOSECONDS_PER_MILLISECOND: Final = 1_000_000
 _SPAN_ID_BYTES: Final = 8
 _ROOT_SPAN: Final = "query"
 _TIMEOUT_SECONDS: Final = 10
+_SIGNAL_PATHS: Final = ("/v1/traces", "/v1/metrics", "/v1/logs")
 
 _logger = get_logger(__name__)
+
+
+def signal_endpoint(endpoint: str, signal: str) -> str:
+    """Return the OTLP/HTTP URL for one signal, derived from the configured endpoint.
+
+    # CRITICAL: ``observability.otel_endpoint`` is one setting feeding two exporters, and
+    # OTLP/HTTP puts each signal on its own path. Passing the configured value through
+    # verbatim — which is what this did until it met a real collector — means no value works
+    # for both: a bare ``http://host:4318`` 404s for traces *and* metrics, ``.../v1/traces``
+    # 400s every metric push, and ``.../v1/metrics`` 400s every trace. Every one of those is
+    # a logged warning and nothing else, so the toggle looks on and nothing arrives. The
+    # endpoint is therefore treated as the collector's base URL, exactly as the OTel
+    # specification treats ``OTEL_EXPORTER_OTLP_ENDPOINT``.
+
+    A path already naming a signal is replaced rather than appended to, so the
+    ``http://collector:4318/v1/traces`` form that earlier docs and configurations used keeps
+    working for traces and starts working for metrics.
+
+    Args:
+        endpoint: The configured collector endpoint, with or without a signal path.
+        signal: ``"traces"`` or ``"metrics"``.
+
+    Returns:
+        The absolute URL to POST that signal to.
+    """
+    base = endpoint.rstrip("/")
+    for path in _SIGNAL_PATHS:
+        if base.endswith(path):
+            base = base[: -len(path)]
+            break
+    return f"{base}/v1/{signal}"
 
 
 def span_id_for(trace_id: str, name: str) -> int:
@@ -118,6 +158,9 @@ def build_spans(trace: Trace) -> list[Any]:
     base = _epoch_nanoseconds(started)
 
     resource = sdk.Resource.create({"service.name": SERVICE_NAME})
+    # Named for the same reason the metric payload names its scope: a backend groups and
+    # filters by it, and spans arriving with an empty scope are attributed to nothing.
+    scope = sdk.InstrumentationScope(SCOPE_NAME)
     trace_id = int(trace.trace_id, 16)
     root_id = span_id_for(trace.trace_id, _ROOT_SPAN)
 
@@ -140,6 +183,7 @@ def build_spans(trace: Trace) -> list[Any]:
             resource=resource,
             attributes=_attributes(trace),
             kind=sdk.SpanKind.SERVER,
+            instrumentation_scope=scope,
             start_time=base,
             end_time=base + int(last * _NANOSECONDS_PER_MILLISECOND),
         )
@@ -161,6 +205,7 @@ def build_spans(trace: Trace) -> list[Any]:
                     key: _attribute(value) for key, value in (stage.attributes or {}).items()
                 },
                 kind=sdk.SpanKind.INTERNAL,
+                instrumentation_scope=scope,
                 start_time=base + int(stage.start_ms * _NANOSECONDS_PER_MILLISECOND),
                 end_time=base + int(stage.end_ms * _NANOSECONDS_PER_MILLISECOND),
             )
@@ -181,6 +226,7 @@ class _Sdk:
         try:
             from opentelemetry.sdk.resources import Resource
             from opentelemetry.sdk.trace import ReadableSpan
+            from opentelemetry.sdk.util.instrumentation import InstrumentationScope
             from opentelemetry.trace import SpanContext, SpanKind, TraceFlags
         except ImportError as exc:
             raise ConfigError(
@@ -188,6 +234,7 @@ class _Sdk:
                 "install it with 'pip install fasterrag[otel]'"
             ) from exc
 
+        self.InstrumentationScope = InstrumentationScope
         self.Resource = Resource
         self.ReadableSpan = ReadableSpan
         self.SpanContext = SpanContext
@@ -217,7 +264,8 @@ class OtelExporter:
         """Build the exporter without connecting.
 
         Args:
-            endpoint: The OTLP/HTTP traces endpoint from ``observability.otel_endpoint``.
+            endpoint: The collector's OTLP/HTTP endpoint from ``observability.otel_endpoint``.
+                Taken as a base URL; the ``/v1/traces`` path is derived from it.
             timeout: Seconds to wait for the collector.
 
         Raises:
@@ -231,8 +279,8 @@ class OtelExporter:
                 "install it with 'pip install fasterrag[otel]'"
             ) from exc
 
-        self.endpoint = endpoint
-        self._exporter = OTLPSpanExporter(endpoint=endpoint, timeout=timeout)
+        self.endpoint = signal_endpoint(endpoint, "traces")
+        self._exporter = OTLPSpanExporter(endpoint=self.endpoint, timeout=timeout)
 
     async def export(self, trace: Trace) -> bool:
         """Send one trace, reporting whether the collector accepted it.

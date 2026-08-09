@@ -16,7 +16,13 @@ pytest.importorskip("opentelemetry.sdk", reason="OTLP export ships in the option
 
 from fasterrag.config.schema import Settings
 from fasterrag.core.tracing import Span, Trace
-from fasterrag.observability.otel_export import SERVICE_NAME, OtelExporter, build_spans, span_id_for
+from fasterrag.observability.otel_export import (
+    SERVICE_NAME,
+    OtelExporter,
+    build_spans,
+    signal_endpoint,
+    span_id_for,
+)
 from fasterrag.services.traces import TraceStore, create_exporters, create_otel_exporter
 
 TRACE_ID = "169a6d2cb76270357a33642877487b02"
@@ -180,6 +186,48 @@ def test_it_encodes_as_real_otlp_protobuf() -> None:
 
     assert len(encoded.SerializeToString()) > 0
     assert len(encoded.resource_spans[0].scope_spans[0].spans) == 5
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("http://collector:4318", "http://collector:4318/v1/traces"),
+        ("http://collector:4318/", "http://collector:4318/v1/traces"),
+        ("http://collector:4318/v1/traces", "http://collector:4318/v1/traces"),
+        ("http://collector:4318/v1/metrics", "http://collector:4318/v1/traces"),
+        ("http://gateway/otlp", "http://gateway/otlp/v1/traces"),
+    ],
+)
+def test_the_traces_path_is_derived_from_the_configured_endpoint(
+    configured: str, expected: str
+) -> None:
+    """One setting feeds two exporters, so it is a base URL, not a traces URL.
+
+    Verified against a real collector (TASK-0216): posting a bare endpoint 404s and posting
+    a metrics payload to /v1/traces 400s, and both are a warning nobody reads.
+    """
+    assert signal_endpoint(configured, "traces") == expected
+
+
+def test_the_metrics_path_is_derived_from_the_same_endpoint() -> None:
+    """The form earlier docs used must keep working for traces and start working for metrics."""
+    assert signal_endpoint("http://collector:4318/v1/traces", "metrics") == (
+        "http://collector:4318/v1/metrics"
+    )
+
+
+def test_the_exporter_reports_the_url_it_actually_posts_to() -> None:
+    """The warning on a failed export names the endpoint; the configured one would mislead."""
+    exporter = OtelExporter("http://collector:4318")
+
+    assert exporter.endpoint == "http://collector:4318/v1/traces"
+
+
+def test_spans_carry_a_named_instrumentation_scope() -> None:
+    """A backend groups and filters by scope; an empty one attributes the spans to nothing."""
+    spans = build_spans(trace())
+
+    assert {span.instrumentation_scope.name for span in spans} == {"fasterrag"}
 
 
 class Receiver(BaseHTTPRequestHandler):

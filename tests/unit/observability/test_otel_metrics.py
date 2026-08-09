@@ -233,6 +233,18 @@ async def test_a_snapshot_reaches_a_listening_endpoint() -> None:
     assert {metric.name for metric in wire} >= {"fasterrag_requests_total"}
 
 
+def test_the_pusher_posts_to_the_metrics_path_of_the_configured_endpoint() -> None:
+    """``otel_endpoint`` is shared with trace export, so it is a base URL, not a metrics URL.
+
+    Verified against a real collector (TASK-0216): a metrics payload posted to ``/v1/traces``
+    is rejected with 400, and a bare endpoint 404s, both as a warning and a lost snapshot.
+    """
+    assert MetricPusher("http://collector:4318/v1/traces").endpoint == (
+        "http://collector:4318/v1/metrics"
+    )
+    assert MetricPusher("http://collector:4318").endpoint == "http://collector:4318/v1/metrics"
+
+
 async def test_an_unreachable_collector_costs_the_snapshot_and_nothing_else() -> None:
     """Metrics describe a process that is otherwise working fine."""
     pusher = MetricPusher("http://127.0.0.1:1/v1/metrics", registry=populated(), timeout=1)
