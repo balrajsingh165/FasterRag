@@ -60,6 +60,8 @@ All five LLM providers below are **shipped**, with streaming.
 | Ollama (local) | `ollama` | — | ✅ | Fully local generation. |
 | Any OpenAI-compatible endpoint | `openai_compatible` | per endpoint | ✅ | `llm.base_url` required — covers vLLM, LM Studio, llama.cpp servers, TGI, and most hosted gateways. |
 
+**Cost coverage.** OpenAI, Anthropic, and part of the Cohere lineup have dated list prices recorded, so their traffic reaches `fasterrag_cost_usd_total`; Ollama is priced at zero because it is local. `openai_compatible` never is — a gateway sets its own prices, and charging its traffic at the upstream vendor's rate would be a fabricated bill. Unpriced traffic is counted by `fasterrag_unpriced_tokens_total` rather than silently dropped. The exact per-model coverage and its check dates are in [config-reference.md](config-reference.md#which-models-carry-a-price).
+
 ## 4. Rerankers (`retrieval.reranker_model`)
 
 Cross-encoder models loaded locally in the query path (e.g. `BAAI/bge-reranker-v2-m3`, `cross-encoder/ms-marco-MiniLM-L-6-v2`). Selected by model id; ~100–300 ms per query; toggle with `retrieval.rerank`.

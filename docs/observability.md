@@ -37,8 +37,8 @@ It still has no transport security of its own — put it behind the same reverse
 | `fasterrag_stage_duration_seconds` | histogram | stage ∈ parse, chunk, embed, retrieve_dense, retrieve_bm25, fuse, rerank, assemble, generate | Per-stage latency — the retrieval-vs-generation split. |
 | `fasterrag_ttft_seconds` | histogram | — | Time to first streamed token. |
 | `fasterrag_tokens_total` | counter | kind ∈ prompt, completion; provider, tenant | Token counts. |
-| `fasterrag_cost_usd_total` | counter | provider, tenant | Estimated cost per query, accumulated. List prices, dated and sourced — not a measurement. |
-| `fasterrag_unpriced_tokens_total` | counter | provider, model | Tokens spent on a model with no recorded list price, and therefore **absent from** `fasterrag_cost_usd_total`. A non-zero value means the cost figure understates real spend; without this counter that gap is invisible. |
+| `fasterrag_cost_usd_total` | counter | provider, tenant | Estimated cost per query, accumulated. List prices — not a measurement. Each rate carries its own source and the date it was read, and is applied only to the provider that published it. Coverage is listed in [config-reference.md](config-reference.md#which-models-carry-a-price). |
+| `fasterrag_unpriced_tokens_total` | counter | provider, model | Tokens spent on a model with no recorded list price, and therefore **absent from** `fasterrag_cost_usd_total`. A non-zero value means the cost figure understates real spend; without this counter that gap is invisible. Locally served models are **not** counted here — zero is their recorded price, not a missing one. |
 | `fasterrag_cache_events_total` | counter | cache ∈ semantic, embedding; result ∈ hit, miss, invalidated | Cache hit/miss ratio source. |
 | `fasterrag_retrieval_quality` | gauge | metric ∈ precision_at_k, recall_at_k, mrr, ndcg | Latest eval-harness scores. |
 | `fasterrag_faithfulness` | histogram | — | Grounding/faithfulness score distribution (D5). |

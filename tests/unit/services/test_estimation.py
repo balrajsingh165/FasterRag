@@ -5,7 +5,7 @@ import pytest
 
 from fasterrag.config.schema import Settings
 from fasterrag.services.estimation import (
-    PRICES_USD_PER_MILLION_TOKENS,
+    EMBEDDING_PRICES,
     estimate_sources,
     price_for,
 )
@@ -43,7 +43,9 @@ def test_a_known_model_is_priced_from_the_published_rate() -> None:
 def test_cost_scales_with_tokens() -> None:
     cost, _ = price_for("openai", "text-embedding-3-large", 500_000)
 
-    assert cost == pytest.approx(PRICES_USD_PER_MILLION_TOKENS["text-embedding-3-large"] / 2)
+    assert cost == pytest.approx(
+        EMBEDDING_PRICES["text-embedding-3-large"].input_usd_per_million / 2
+    )
 
 
 def test_an_unknown_model_reports_no_price_rather_than_guessing() -> None:
