@@ -99,9 +99,9 @@ TASK-0174 ✅ made the wait *visible* — the loader now warns, names the cost, 
 
 ---
 
-## B7 — No running Docker on this machine (TASK-0178)
+## B7 — Verified against unit tests, never against the real backend (TASK-0178)
 
-Docker Desktop stopped partway through 2026-08-03 and has not come back. Everything that needs a live backend is unverifiable until it does — not blocked on a decision, just on a daemon.
+**The daemon is back** (Docker Desktop 4.85.0 / engine 29.6.2, 2026-08-09), so nothing here is blocked any longer — each row is simply still unrun. Kept as a group because the reason they are all unverified is the same one, and because the first thing run against the real thing (TASK-0190 ✅ — the container image) failed on its first build, which is the argument for working through the rest of the list rather than assuming it.
 
 Nothing below is *broken*; each is **built and unit-tested but never run against the real thing**, and that distinction is the point of listing them.
 
@@ -111,7 +111,7 @@ Nothing below is *broken*; each is **built and unit-tested but never run against
 | **B7.2** | TASK-0079 | `iterate_points` has never walked a live collection, and no archive has been exported from or imported into a real Qdrant. The D11 round-trip acceptance test (Qdrant → Qdrant vector copy, Qdrant → pgvector re-embed) cannot run at all. |
 | **B7.3** | — | The Grafana and Langfuse provisioners, the `/readyz` failure path, and every end-to-end query check that was passing earlier in the session. |
 
-**What is needed:** start Docker Desktop. Everything else is scripted and ready.
+**What is needed:** nothing but the time to run them. Everything is scripted and ready.
 
 ---
 

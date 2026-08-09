@@ -7,11 +7,15 @@
 #
 # These are planning defaults, not measurements. Real numbers come from the benchmark ledger
 # once it has entries taken on isolated hardware (docs/benchmarks.md, TASK-0084).
+#
+# CRITICAL: every FASTERRAG_SET below repeats `vector_db.host=qdrant` from the base file.
+# Compose merges `environment` per key, so setting FASTERRAG_SET here replaces the base value
+# rather than extending it, and dropping the host sends both services at their own localhost.
 
 services:
   api:
     environment:
-      FASTERRAG_SET: app.workers=2
+      FASTERRAG_SET: vector_db.host=qdrant,app.workers=2
     deploy:
       resources:
         limits:
@@ -20,7 +24,7 @@ services:
 
   worker:
     environment:
-      FASTERRAG_SET: workers.cpu_pool_size=4,workers.embedding_pool_size=1
+      FASTERRAG_SET: vector_db.host=qdrant,workers.cpu_pool_size=4,workers.embedding_pool_size=1
     deploy:
       resources:
         limits:

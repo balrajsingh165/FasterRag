@@ -26,7 +26,10 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 WORKDIR /build
 
 # Copied before the source so a source-only change does not re-resolve dependencies.
-COPY pyproject.toml README.md ./
+# CRITICAL: .env.example is a build input, not documentation. The wheel target force-includes
+# it (pyproject.toml [tool.hatch.build.targets.wheel.force-include]), so omitting it here
+# fails the build with "Forced include not found" before a single dependency is resolved.
+COPY pyproject.toml README.md .env.example ./
 COPY src/ ./src/
 COPY config.yaml ./
 

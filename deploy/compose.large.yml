@@ -8,16 +8,29 @@
 #   docker compose -f docker-compose.yml -f deploy/compose.large.yml --profile core up -d
 #
 # Planning defaults, not measurements (docs/benchmarks.md, TASK-0084).
+#
+# CRITICAL: every FASTERRAG_SET below repeats `vector_db.host=qdrant` from the base file.
+# Compose merges `environment` per key, so setting FASTERRAG_SET here replaces the base value
+# rather than extending it, and dropping the host sends both services at their own localhost.
+# Point it at the external cluster this preset assumes as soon as there is one.
 
 services:
   api:
     # Stateless, so replicas scale horizontally. The published port is dropped and a load
     # balancer goes in front; compose cannot publish one host port from several replicas.
     #
-    # An empty sequence rather than compose's `!reset` tag: `!reset` is a Compose-only
-    # extension that every standard YAML parser rejects, so the file would stop being
-    # readable by the repository's own yaml check, by editors, and by any config linter.
-    ports: []
+    # CRITICAL: `!reset` is the only thing that drops it. This was `ports: []` — chosen to
+    # keep the file readable by a standard YAML parser — and that silently does nothing:
+    # compose merges sequences by appending, so an empty one contributes no entries and the
+    # base file's 127.0.0.1:8000:8000 survives into the rendered config. With replicas: 3
+    # that is two containers that cannot bind their host port. Verified by rendering both
+    # forms with `docker compose config` (TASK-0190).
+    #
+    # The cost is real and paid deliberately: `!reset` is a Compose-only tag that
+    # yaml.safe_load rejects, so this one file is excluded from the check-yaml hook in
+    # .pre-commit-config.yaml. A guard that passes over a file that does not work is worth
+    # less than the file working.
+    ports: !reset null
     deploy:
       replicas: 3
       resources:
@@ -25,7 +38,7 @@ services:
           cpus: "4"
           memory: 4G
     environment:
-      FASTERRAG_SET: app.workers=4
+      FASTERRAG_SET: vector_db.host=qdrant,app.workers=4
 
   worker:
     deploy:
@@ -35,4 +48,4 @@ services:
           cpus: "16"
           memory: 32G
     environment:
-      FASTERRAG_SET: workers.cpu_pool_size=0,workers.embedding_pool_size=4
+      FASTERRAG_SET: vector_db.host=qdrant,workers.cpu_pool_size=0,workers.embedding_pool_size=4
