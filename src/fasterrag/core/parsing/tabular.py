@@ -14,12 +14,12 @@ import json
 from typing import Any, Final
 
 from fasterrag.core.parsing.models import DocumentBuilder, ParsedDocument, ParseFlag
+from fasterrag.core.parsing.options import DEFAULT_PARSING_OPTIONS, ParsingOptions
 from fasterrag.core.parsing.plaintext import decode
 from fasterrag.errors import ParseError
 
-__all__ = ["ROWS_PER_BLOCK", "parse_csv", "parse_json"]
+__all__ = ["parse_csv", "parse_json"]
 
-ROWS_PER_BLOCK: Final = 20
 _SNIFF_BYTES: Final = 8192
 
 
@@ -28,8 +28,23 @@ def _describe(row: dict[str, Any]) -> str:
     return "; ".join(f"{key}: {value}" for key, value in row.items() if value not in (None, ""))
 
 
-def parse_csv(data: bytes, *, mime_type: str = "text/csv") -> ParsedDocument:
-    """Parse delimited text, detecting the dialect from a sample of the file."""
+def parse_csv(
+    data: bytes,
+    *,
+    mime_type: str = "text/csv",
+    options: ParsingOptions = DEFAULT_PARSING_OPTIONS,
+) -> ParsedDocument:
+    """Parse delimited text, detecting the dialect from a sample of the file.
+
+    Args:
+        data: The raw delimited-text bytes.
+        mime_type: MIME type recorded on the parsed document.
+        options: Parser thresholds; ``rows_per_block`` decides how many records are
+            serialized into one block.
+
+    Returns:
+        The structured document.
+    """
     builder = DocumentBuilder(mime_type=mime_type, parser="csv")
     text = decode(data, builder)
 
@@ -50,7 +65,7 @@ def parse_csv(data: bytes, *, mime_type: str = "text/csv") -> ParsedDocument:
             continue
         group.append(described)
         rows += 1
-        if len(group) >= ROWS_PER_BLOCK:
+        if len(group) >= options.rows_per_block:
             builder.add("table", "\n".join(group))
             group = []
 

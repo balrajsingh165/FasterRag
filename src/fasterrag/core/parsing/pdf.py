@@ -13,6 +13,10 @@ Three things make PDF the hardest format and each is handled explicitly:
   the document is flagged ``low_text_yield`` rather than quietly indexed as empty, and a
   document with no extractable text at all fails so it lands in the dead-letter queue
   (``docs/failure-modes.md`` row 2).
+
+All four thresholds — the OCR trigger, the OCR resolution, and the two heading rules —
+come from :class:`~fasterrag.core.parsing.options.ParsingOptions`, because what counts as
+a scan and what counts as a heading is a property of the corpus, not of the format.
 """
 
 from __future__ import annotations
@@ -26,15 +30,12 @@ from typing import Any, Final
 import pdfplumber
 
 from fasterrag.core.parsing.models import DocumentBuilder, ParsedDocument, ParseFlag
+from fasterrag.core.parsing.options import DEFAULT_PARSING_OPTIONS, ParsingOptions
 from fasterrag.errors import ParseError
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["MINIMUM_CHARS_PER_PAGE", "parse_pdf"]
+__all__ = ["parse_pdf"]
 
-MINIMUM_CHARS_PER_PAGE: Final = 40
-HEADING_SIZE_RATIO: Final = 1.15
-MAX_HEADING_CHARS: Final = 120
-OCR_RESOLUTION: Final = 200
 _MAX_HEADING_LEVEL: Final = 6
 
 _logger = get_logger(__name__)
@@ -75,7 +76,7 @@ def _serialize_table(rows: Sequence[Sequence[str | None]]) -> str:
     return "\n".join(lines)
 
 
-def _ocr_page(page: pdfplumber.page.Page) -> str | None:
+def _ocr_page(page: pdfplumber.page.Page, options: ParsingOptions) -> str | None:
     """Return OCR text for a page, or None when OCR is unavailable.
 
     Both the Python extra and the tesseract binary are optional. Their absence is a
@@ -88,7 +89,7 @@ def _ocr_page(page: pdfplumber.page.Page) -> str | None:
         return None
 
     try:
-        image = page.to_image(resolution=OCR_RESOLUTION).original
+        image = page.to_image(resolution=options.ocr_resolution).original
         return str(pytesseract.image_to_string(image))
     except pytesseract.TesseractNotFoundError:
         _logger.info("ocr unavailable: the tesseract binary is not installed")
@@ -98,7 +99,7 @@ def _ocr_page(page: pdfplumber.page.Page) -> str | None:
         return None
 
 
-def _extract(pdf: pdfplumber.pdf.PDF) -> list[_Page]:
+def _extract(pdf: pdfplumber.pdf.PDF, options: ParsingOptions) -> list[_Page]:
     """Pull tables, text lines, and any OCR text out of every page."""
     pages: list[_Page] = []
 
@@ -126,8 +127,8 @@ def _extract(pdf: pdfplumber.pdf.PDF) -> list[_Page]:
 
         page_chars = sum(len(text) for text, _ in extracted.lines)
         page_chars += sum(len(table) for table in extracted.tables)
-        if page_chars < MINIMUM_CHARS_PER_PAGE:
-            extracted.ocr_text = _ocr_page(page)
+        if page_chars < options.minimum_chars_per_page:
+            extracted.ocr_text = _ocr_page(page, options)
 
         pages.append(extracted)
 
@@ -140,13 +141,31 @@ def _body_size(pages: Sequence[_Page]) -> float:
     return statistics.median(sizes) if sizes else 0.0
 
 
-def _is_heading(text: str, size: float, body: float) -> bool:
+def _is_heading(text: str, size: float, body: float, options: ParsingOptions) -> bool:
     """Return whether a line looks like a heading rather than prose."""
-    return bool(body) and size >= body * HEADING_SIZE_RATIO and len(text) <= MAX_HEADING_CHARS
+    return (
+        bool(body)
+        and size >= body * options.heading_size_ratio
+        and len(text) <= options.max_heading_chars
+    )
 
 
-def parse_pdf(data: bytes, *, mime_type: str = "application/pdf") -> ParsedDocument:
+def parse_pdf(
+    data: bytes,
+    *,
+    mime_type: str = "application/pdf",
+    options: ParsingOptions = DEFAULT_PARSING_OPTIONS,
+) -> ParsedDocument:
     """Parse a PDF into structural blocks.
+
+    Args:
+        data: The raw PDF bytes.
+        mime_type: MIME type recorded on the parsed document.
+        options: Parser thresholds; the shipped defaults when a caller has no
+            configuration to derive them from.
+
+    Returns:
+        The structured document.
 
     Raises:
         ParseError: If the file cannot be opened, or if no page yields any text even
@@ -157,7 +176,7 @@ def parse_pdf(data: bytes, *, mime_type: str = "application/pdf") -> ParsedDocum
     try:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             metadata = dict(pdf.metadata or {})
-            pages = _extract(pdf)
+            pages = _extract(pdf, options)
     except ParseError:
         raise
     # CRITICAL: the catch stays broad because pdfminer raises undocumented exception types
@@ -194,7 +213,7 @@ def parse_pdf(data: bytes, *, mime_type: str = "application/pdf") -> ParsedDocum
 
         paragraph: list[str] = []
         for text, size in page.lines:
-            if _is_heading(text, size, body):
+            if _is_heading(text, size, body, options):
                 builder.add("paragraph", " ".join(paragraph), page=page.number)
                 paragraph = []
                 level = (

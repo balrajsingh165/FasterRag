@@ -58,6 +58,13 @@ llm:
   max_tokens: 1024
   streaming: true
 
+parsing:
+  minimum_chars_per_page: 40
+  ocr_resolution: 200
+  heading_size_ratio: 1.15
+  max_heading_chars: 120
+  rows_per_block: 20
+
 chunking:
   strategy: recursive
   chunk_size: 768
@@ -222,6 +229,18 @@ security:
 | `llm.temperature` | float | `0.1` | 0.0–2.0 | Sampling temperature. Low default favors grounded answers. |
 | `llm.max_tokens` | int | `1024` | 1–32768 | Max generated tokens per answer. |
 | `llm.streaming` | bool | `true` | — | Stream tokens via SSE (time-to-first-token). |
+
+## `parsing`
+
+Thresholds the parsers apply before chunking sees anything. They are corpus-dependent: a corpus of scans needs a different OCR trigger and render than a born-digital one, and a PDF laid out with a large body face needs a different heading ratio. **Changing any of these alters the text that gets indexed, but changes neither the chunk ids nor the document content hash** — so re-ingesting an unchanged corpus is deduplicated and the new value has no effect on it. Rebuild with `fasterrag index reembed` to apply them to documents already indexed.
+
+| Name | Type | Default | Allowed values / validation | Description |
+|---|---|---|---|---|
+| `parsing.minimum_chars_per_page` | int | `40` | 0–10000 | Characters a PDF page must yield before it is accepted as born-digital text. Below it the page is rasterized and sent through OCR (which needs the `ocr` extra and the tesseract binary; without them the document is flagged `low_text_yield` instead). Raise it for a corpus of scans whose pages carry a text layer that is present but useless — a stamped header, a page number — and would otherwise suppress OCR; `0` disables the OCR path entirely. |
+| `parsing.ocr_resolution` | int | `200` | 72–1200 (DPI) | Resolution the page is rendered at before OCR. Higher resolves small type and dense tables better; the rendered bitmap grows with the square of the value, so render time and per-page memory grow with it too. Raise it when OCR output is garbled on fine print, lower it when ingesting a large scanned corpus is memory-bound. |
+| `parsing.heading_size_ratio` | float | `1.15` | 1.0–4.0 | How much larger than the document's median type size a PDF line must be to be inferred as a heading. A PDF carries no semantic headings, so this is a heuristic and it only ever affects the `section` label a chunk inherits. Raise it when body emphasis is being read as structure; lower it for documents whose headings are only slightly larger. |
+| `parsing.max_heading_chars` | int | `120` | 1–1000 | Length ceiling for an inferred PDF heading. A long line is prose whatever its type size, so this stops a large-type paragraph from becoming the section label for everything under it. |
+| `parsing.rows_per_block` | int | `20` | 1–1000 | CSV/TSV rows serialized into one block. Rows are emitted as `column: value` pairs so a retrieved chunk stays self-describing; this decides how many of them travel together. Lower it for wide tables whose rows are long, raise it for narrow tables where one row alone carries too little context to retrieve on. |
 
 ## `chunking`
 
