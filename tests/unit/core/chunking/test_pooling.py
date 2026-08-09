@@ -3,15 +3,21 @@
 The fake returns a distinct constant vector per token id, so a pooled span is the mean of
 exactly the tokens inside it — which makes "did the right tokens get pooled" an equality
 rather than an approximation.
+
+The model is faked but ``torch`` is not: pooling averages real tensors. Torch ships in the
+optional ``huggingface`` extra, so this module skips rather than erroring without it — a
+hard import made a fresh core-only install fail to *collect* the whole unit suite, not just
+fail these tests.
 """
 
 from typing import Any
 
 import pytest
-import torch
 
 from fasterrag.core.chunking.pooling import WINDOW_OVERLAP_FRACTION, pool_spans, supports_pooling
 from fasterrag.errors import EmbedError
+
+torch = pytest.importorskip("torch", reason="pooling needs the optional 'huggingface' extra")
 
 WIDTH = 4
 

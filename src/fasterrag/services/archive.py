@@ -314,9 +314,15 @@ def _digest(path: Path) -> str:
 def _write_tar(target: Path, staging: Path, names: list[str]) -> None:
     """Pack the staged members into the archive.
 
-    # CRITICAL: every member gets a fixed mtime and owner. Two exports of an unchanged
-    # collection must produce byte-identical archives, or every backup diff reports a change
-    # that is only a timestamp and nobody can tell a real one from noise.
+    # CRITICAL: every member gets a fixed mtime and owner. Without it a backup diff reports
+    # a change on every member of every export, and nobody can tell a real one from noise.
+    #
+    # This makes the *data* members byte-identical across two exports of an unchanged
+    # collection — `chunks.jsonl`, `documents.jsonl`, `vectors.jsonl`, `index.lock`, and
+    # `checksums.sha256` all match exactly. `manifest.json` does not: it carries
+    # `created_at`, which is deliberately a wall clock, so a diff of two exports shows that
+    # one line and nothing else. Verified against a live Qdrant (TASK-0214) — the earlier
+    # wording here claimed whole archives were byte-identical, which they are not.
     """
     with tarfile.open(target, "w:gz") as archive:
         for name in names:
