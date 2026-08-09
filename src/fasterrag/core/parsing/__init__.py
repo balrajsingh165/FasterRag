@@ -173,6 +173,26 @@ def parse_document(
         ParseError: If the file is missing, unreadable, or of an unsupported type.
     """
     path = Path(source)
+
+    # CRITICAL: the size is checked against the file's metadata before a byte is read.
+    # Reading first and letting parse_bytes compare afterwards admitted the whole document
+    # into memory to decide it was too big to admit — which is the one thing the limit
+    # exists to prevent, and the failure mode is an OOM on a file that was correctly
+    # configured to be rejected.
+    if max_bytes is not None:
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError as exc:
+            raise ParseError(f"{path} does not exist") from exc
+        except OSError as exc:
+            raise ParseError(f"{path} could not be read: {exc.strerror}") from exc
+
+        if size > max_bytes:
+            raise IngestionError(
+                f"{path.name} is {size} bytes, above the configured limit of {max_bytes}",
+                code=ErrorCode.PAYLOAD_TOO_LARGE,
+            )
+
     try:
         data = path.read_bytes()
     except FileNotFoundError as exc:

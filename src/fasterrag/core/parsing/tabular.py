@@ -24,8 +24,39 @@ _SNIFF_BYTES: Final = 8192
 
 
 def _describe(row: dict[str, Any]) -> str:
-    """Render one record as ``column: value`` pairs."""
-    return "; ".join(f"{key}: {value}" for key, value in row.items() if value not in (None, ""))
+    """Render one record as ``column: value`` pairs, skipping values with no content.
+
+    A blank value is dropped rather than labelled. ``value not in (None, "")`` let a
+    whitespace-only cell through, which renders as ``column:    `` — and since the builder
+    strips the block as a whole rather than each pair, a file of nothing but spaces and
+    commas reached the index as one block of colons and semicolons.
+    """
+    return "; ".join(
+        f"{key}: {value}" for key, value in row.items() if value is not None and str(value).strip()
+    )
+
+
+def _dialect(sample: str) -> type[csv.Dialect] | csv.Dialect:
+    """Return the sniffed dialect, or the Excel default when the sniff is unusable.
+
+    The sniffer validates a candidate on its own terms and can still hand back one
+    ``csv.reader`` refuses — most easily a delimiter equal to the quote character, which
+    ``"a"b"c"`` produces. The reader rejects that with a plain ``ValueError``, not a
+    ``csv.Error``, so it escaped the parsing layer untyped and reached the API as a generic
+    500 with no problem+json body. A sniff is a guess; an unusable one is discarded exactly
+    like a failed one.
+    """
+    try:
+        sniffed = csv.Sniffer().sniff(sample)
+    except csv.Error:
+        return csv.excel
+
+    try:
+        csv.reader([""], sniffed)
+    except (csv.Error, ValueError, TypeError):
+        return csv.excel
+
+    return sniffed
 
 
 def parse_csv(
@@ -44,30 +75,37 @@ def parse_csv(
 
     Returns:
         The structured document.
+
+    Raises:
+        ParseError: If the delimited content cannot be read as rows.
     """
     builder = DocumentBuilder(mime_type=mime_type, parser="csv")
     text = decode(data, builder)
 
-    try:
-        dialect: type[csv.Dialect] | csv.Dialect = csv.Sniffer().sniff(text[:_SNIFF_BYTES])
-    except csv.Error:
-        dialect = csv.excel
-
-    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+    # CRITICAL: newline="" is what the csv module's own documentation requires. Without it
+    # StringIO translates newlines itself, and a lone CR — an old Mac line ending, or a cell
+    # a spreadsheet exported with an embedded carriage return — reaches the reader as a
+    # newline inside an unquoted field, which it rejects with `csv.Error`. Excel opens those
+    # files without complaint, so the failure looked like a fasterRag bug, and the error was
+    # untyped besides.
+    reader = csv.DictReader(io.StringIO(text, newline=""), dialect=_dialect(text[:_SNIFF_BYTES]))
     if reader.fieldnames:
         builder.meta(columns=[name for name in reader.fieldnames if name])
 
     group: list[str] = []
     rows = 0
-    for record in reader:
-        described = _describe({key: value for key, value in record.items() if key})
-        if not described:
-            continue
-        group.append(described)
-        rows += 1
-        if len(group) >= options.rows_per_block:
-            builder.add("table", "\n".join(group))
-            group = []
+    try:
+        for record in reader:
+            described = _describe({key: value for key, value in record.items() if key})
+            if not described:
+                continue
+            group.append(described)
+            rows += 1
+            if len(group) >= options.rows_per_block:
+                builder.add("table", "\n".join(group))
+                group = []
+    except csv.Error as exc:
+        raise ParseError(f"the delimited file could not be read: {exc}") from exc
 
     if group:
         builder.add("table", "\n".join(group))
@@ -75,6 +113,19 @@ def parse_csv(
     builder.meta(row_count=rows)
     builder.flag(ParseFlag.TABLES_DETECTED)
     return builder.build()
+
+
+def _leaf(path: str, value: Any) -> str:
+    """Render one scalar with its key path, or nothing when it carries no content.
+
+    A scalar at the root has no path, and pasting one on anyway produced blocks like
+    ``": None"`` for ``null`` and a lone ``":"`` for ``""`` — chunks that get embedded and
+    retrieved while saying nothing. Empty values are dropped here for the same reason
+    :func:`_describe` drops them inside an object.
+    """
+    if value is None or value == "":
+        return ""
+    return f"{path}: {value}" if path else str(value)
 
 
 def _walk(node: Any, path: str, builder: DocumentBuilder, depth: int = 0) -> None:
@@ -94,10 +145,10 @@ def _walk(node: Any, path: str, builder: DocumentBuilder, depth: int = 0) -> Non
             if isinstance(item, dict | list):
                 _walk(item, f"{path}[{index}]", builder, depth)
             else:
-                builder.add("paragraph", f"{path}[{index}]: {item}")
+                builder.add("paragraph", _leaf(f"{path}[{index}]", item))
         return
 
-    builder.add("paragraph", f"{path}: {node}")
+    builder.add("paragraph", _leaf(path, node))
 
 
 def parse_json(data: bytes, *, mime_type: str = "application/json") -> ParsedDocument:
