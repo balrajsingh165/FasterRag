@@ -398,9 +398,9 @@ async def test_authentication_failure_is_not_retryable_and_hides_the_key(
         (403, ErrorCode.VECTOR_DB_AUTH_FAILED, False),
         (404, ErrorCode.NOT_FOUND, False),
         (409, ErrorCode.CONFLICT, False),
-        (429, ErrorCode.EMBED_PROVIDER_ERROR, False),
-        (500, ErrorCode.EMBED_PROVIDER_ERROR, True),
-        (503, ErrorCode.EMBED_PROVIDER_ERROR, True),
+        (429, ErrorCode.RETRIEVAL_FAILED, False),
+        (500, ErrorCode.RETRIEVAL_FAILED, True),
+        (503, ErrorCode.RETRIEVAL_FAILED, True),
     ],
 )
 async def test_http_failures_map_onto_the_taxonomy(
@@ -430,11 +430,11 @@ class FakeRpcError(RpcError):
     [
         (StatusCode.UNAUTHENTICATED, ErrorCode.VECTOR_DB_AUTH_FAILED, False),
         (StatusCode.PERMISSION_DENIED, ErrorCode.VECTOR_DB_AUTH_FAILED, False),
-        (StatusCode.INVALID_ARGUMENT, ErrorCode.EMBED_PROVIDER_ERROR, False),
+        (StatusCode.INVALID_ARGUMENT, ErrorCode.RETRIEVAL_FAILED, False),
         (StatusCode.NOT_FOUND, ErrorCode.NOT_FOUND, False),
         (StatusCode.ALREADY_EXISTS, ErrorCode.CONFLICT, False),
-        (StatusCode.UNAVAILABLE, ErrorCode.EMBED_PROVIDER_ERROR, True),
-        (StatusCode.DEADLINE_EXCEEDED, ErrorCode.EMBED_PROVIDER_ERROR, True),
+        (StatusCode.UNAVAILABLE, ErrorCode.RETRIEVAL_FAILED, True),
+        (StatusCode.DEADLINE_EXCEEDED, ErrorCode.RETRIEVAL_FAILED, True),
     ],
 )
 async def test_grpc_failures_map_onto_the_taxonomy(

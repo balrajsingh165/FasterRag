@@ -47,7 +47,7 @@ from fasterrag.adapters.vectordb.base import (
     validate_filter,
 )
 from fasterrag.config.schema import Settings
-from fasterrag.errors import EmbedError, ErrorCode, FasterRagError, ProviderError
+from fasterrag.errors import EmbedError, ErrorCode, FasterRagError, ProviderError, RetrievalError
 from fasterrag.observability.logging import get_logger
 
 __all__ = ["POINT_ID_PAYLOAD_KEY", "QdrantAdapter"]
@@ -184,10 +184,10 @@ class QdrantAdapter(VectorDBAdapter):
     def _auth_error(self, operation: str, transport: str) -> ProviderError:
         """Build the non-retryable error for a rejected credential.
 
-        Reported as ``VECTOR_DB_AUTH_FAILED``, not ``EMBED_PROVIDER_ERROR``. A rejected
-        vector-database key has nothing to do with embeddings, and sending an operator to
-        check their embedding provider over a Qdrant credential is a wrong answer with a
-        confident tone — the whole reason the taxonomy exists is to point at the right knob.
+        Reported as ``VECTOR_DB_AUTH_FAILED``, not as the generic ``RETRIEVAL_FAILED`` every
+        other backend failure carries. A rejected key is not a backend that is unwell: it
+        will fail identically forever, so it must never be retried and must name
+        ``vector_db.api_key_env`` rather than send an operator looking for an outage.
         """
         named = self._api_key_env or "vector_db.api_key_env"
         return ProviderError(
@@ -222,14 +222,21 @@ class QdrantAdapter(VectorDBAdapter):
             )
 
         name = status.name if isinstance(status, StatusCode) else "UNKNOWN"
-        return ProviderError(
+        return RetrievalError(
             f"qdrant failed during {operation} over grpc ({name})",
-            code=ErrorCode.EMBED_PROVIDER_ERROR,
+            code=ErrorCode.RETRIEVAL_FAILED,
             retryable=status not in _GRPC_NON_RETRYABLE,
         )
 
     def _translate(self, exc: BaseException, operation: str) -> FasterRagError:
         """Map a Qdrant client failure onto the typed error taxonomy.
+
+        A backend failure is ``RETRIEVAL_FAILED``, never ``EMBED_PROVIDER_ERROR``. The two
+        render different problem documents — "Retrieval failed" against "Embedding provider
+        failed" — and a stopped Qdrant reported as the latter sends an operator to inspect a
+        healthy embedding provider while their vector database is down, besides making a real
+        embedding outage indistinguishable from this one. Measured against a genuinely
+        stopped container (TASK-0225).
 
         Authentication failures are never retried and name the environment variable
         rather than the key, so a credential cannot reach a log line.
@@ -251,15 +258,15 @@ class QdrantAdapter(VectorDBAdapter):
                     f"qdrant reported a conflicting state during {operation}",
                     code=ErrorCode.CONFLICT,
                 )
-            return ProviderError(
+            return RetrievalError(
                 f"qdrant returned HTTP {status} during {operation}",
-                code=ErrorCode.EMBED_PROVIDER_ERROR,
+                code=ErrorCode.RETRIEVAL_FAILED,
                 retryable=status >= _SERVER_ERROR_THRESHOLD,
             )
 
-        return ProviderError(
+        return RetrievalError(
             f"qdrant was unreachable during {operation}: {type(exc).__name__}",
-            code=ErrorCode.EMBED_PROVIDER_ERROR,
+            code=ErrorCode.RETRIEVAL_FAILED,
             retryable=True,
         )
 
