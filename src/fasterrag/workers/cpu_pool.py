@@ -24,7 +24,7 @@ from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.chunking import create_chunker
 from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
-from fasterrag.core.parsing import parse_bytes
+from fasterrag.core.parsing import create_parsing_options, parse_bytes
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
 from fasterrag.observability.logging import current_trace_id, get_logger
 from fasterrag.services.journal import DocumentRecord, Journal
@@ -65,13 +65,22 @@ def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
     The bytes are read exactly once and both hashed and parsed from memory: reading twice
     would double the I/O on the pipeline's hottest path.
 
+    The parser thresholds are derived from ``settings`` here, inside the worker, rather
+    than passed in alongside it: the settings already cross the process boundary, so
+    deriving on this side keeps the per-document pickle payload unchanged.
+
     Raises:
         ParseError: If the document cannot be read or parsed.
         IngestionError: If the document exceeds ``ingestion.max_document_mb``.
     """
     limit = settings.ingestion.max_document_mb * _MEGABYTE
     data = _read(task.readable, limit)
-    document = parse_bytes(data, filename=Path(task.source).name, max_bytes=limit)
+    document = parse_bytes(
+        data,
+        filename=Path(task.source).name,
+        max_bytes=limit,
+        options=create_parsing_options(settings),
+    )
 
     chunker = create_chunker(settings)
     chunker_hash = chunker_config_hash(settings)

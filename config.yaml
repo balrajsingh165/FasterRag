@@ -51,6 +51,13 @@ llm:
   max_tokens: 1024
   streaming: true
 
+parsing:
+  minimum_chars_per_page: 40
+  ocr_resolution: 200
+  heading_size_ratio: 1.15
+  max_heading_chars: 120
+  rows_per_block: 20
+
 chunking:
   strategy: recursive
   chunk_size: 768

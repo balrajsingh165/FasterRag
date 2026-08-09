@@ -33,6 +33,7 @@ __all__ = [
     "IngestionSettings",
     "LlmSettings",
     "ObservabilitySettings",
+    "ParsingSettings",
     "ReliabilitySettings",
     "RetrievalSettings",
     "SecuritySettings",
@@ -339,6 +340,22 @@ class LlmSettings(Section):
         return self
 
 
+class ParsingSettings(Section):
+    """Parser thresholds: the OCR trigger, the OCR render, headings, and row grouping.
+
+    These decide what text ever reaches chunking, so they are corpus-dependent in a way
+    a single default cannot cover. A born-digital corpus and a corpus of scans disagree
+    about when a page is a scan and about how sharp the render has to be, and tuning that
+    used to mean editing ``core/parsing`` (TASK-0218).
+    """
+
+    minimum_chars_per_page: Annotated[int, Field(ge=0, le=10_000)] = 40
+    ocr_resolution: Annotated[int, Field(ge=72, le=1200)] = 200
+    heading_size_ratio: Annotated[float, Field(ge=1.0, le=4.0)] = 1.15
+    max_heading_chars: Annotated[int, Field(ge=1, le=1000)] = 120
+    rows_per_block: Annotated[int, Field(ge=1, le=1000)] = 20
+
+
 class ChunkingSettings(Section):
     """Chunking strategy, sizing, and contextual enrichment."""
 
@@ -620,6 +637,7 @@ class Settings(BaseSettings):
     vector_db: VectorDbSettings = VectorDbSettings()
     embeddings: EmbeddingsSettings = EmbeddingsSettings()
     llm: LlmSettings = LlmSettings()
+    parsing: ParsingSettings = ParsingSettings()
     chunking: ChunkingSettings = ChunkingSettings()
     retrieval: RetrievalSettings = RetrievalSettings()
     generation: GenerationSettings = GenerationSettings()

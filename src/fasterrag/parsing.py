@@ -10,6 +10,8 @@ from fasterrag.core.parsing import (
     Block,
     ParsedDocument,
     ParseFlag,
+    ParsingOptions,
+    create_parsing_options,
     parse_bytes,
     parse_document,
 )
@@ -19,6 +21,8 @@ __all__ = [
     "Block",
     "ParseFlag",
     "ParsedDocument",
+    "ParsingOptions",
+    "create_parsing_options",
     "parse_bytes",
     "parse_document",
 ]

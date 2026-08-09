@@ -150,7 +150,7 @@ fused = rrf_fuse(dense_ranking, bm25_ranking, k=60)
 report = evaluate(golden_set, retriever=my_retriever)
 ```
 
-Each standalone component obeys the same contracts (typed errors, docstrings, tested invariants) as the full pipeline.
+Each standalone component obeys the same contracts (typed errors, docstrings, tested invariants) as the full pipeline. A standalone parser needs no `config.yaml`: `parse_document`/`parse_bytes` apply the shipped defaults and accept `options=ParsingOptions(...)` to override the [`parsing`](config-reference.md#parsing) thresholds — the OCR trigger and DPI, the PDF heading rules, and CSV row grouping. Inside the pipeline the same object is built from configuration by `create_parsing_options(settings)`.
 
 ## Embedding fasterRag inside an existing FastAPI/ASGI app
 
