@@ -17,6 +17,12 @@ Documents and queries encode differently on purpose. A document's terms carry th
 term frequency, while a query's terms carry a flat weight — the query has no length to
 normalize against, and weighting its terms by their rarity is precisely the IDF the backend
 applies.
+
+Term indices are a 32-bit hash, so two different terms can land on the same index. That is
+a tolerated loss of precision, but it must never produce a *malformed* vector: colliding
+terms are merged into one entry, because a sparse vector carrying the same index twice has
+no defined meaning and the backend either rejects it or keeps whichever value it happens to
+see last (TASK-0228).
 """
 
 from __future__ import annotations
@@ -137,6 +143,9 @@ def tokenize(text: str) -> list[str]:
     Identifiers keep their internal punctuation, so ``bge-small-en`` and ``v1.9.0`` survive
     as single terms rather than fragmenting into meaningless pieces — those exact tokens are
     the main reason a keyword leg exists at all.
+
+    Both filters run again after stemming, because stemming can shorten a token past the
+    minimum or turn it into a stopword: ``ueds`` stems to ``u`` and ``doing`` to ``do``.
     """
     candidates = [
         token
@@ -147,7 +156,7 @@ def tokenize(text: str) -> list[str]:
         return []
 
     stemmed = _stemmer.stemWords(candidates)
-    return [term for term in stemmed if term and term not in STOPWORDS]
+    return [term for term in stemmed if len(term) >= _MINIMUM_TERM_LENGTH and term not in STOPWORDS]
 
 
 def encode_document(text: str, *, k1: float = K1, b: float = B) -> SparseVector:
@@ -163,7 +172,8 @@ def encode_document(text: str, *, k1: float = K1, b: float = B) -> SparseVector:
         b: Length-normalization strength, from ``0`` (off) to ``1`` (full).
 
     Returns:
-        The sparse vector for the passage.
+        The sparse vector for the passage: one entry per distinct term index, ordered by the
+        term that first claimed the index.
     """
     terms = tokenize(text)
     if not terms:
@@ -173,19 +183,20 @@ def encode_document(text: str, *, k1: float = K1, b: float = B) -> SparseVector:
     normalizer = k1 * (1 - b + b * length / AVERAGE_DOCUMENT_LENGTH)
 
     counted = Counter(terms)
-    indices: list[int] = []
-    values: list[float] = []
+    frequencies: dict[int, int] = {}
     for term, frequency in sorted(counted.items()):
-        indices.append(term_index(term))
-        values.append(frequency * (k1 + 1) / (frequency + normalizer))
+        index = term_index(term)
+        frequencies[index] = frequencies.get(index, 0) + frequency
 
-    return SparseVector(indices=indices, values=values)
+    return SparseVector(
+        indices=list(frequencies),
+        values=[
+            frequency * (k1 + 1) / (frequency + normalizer) for frequency in frequencies.values()
+        ],
+    )
 
 
 def encode_query(text: str) -> SparseVector:
     """Encode a query as flat term weights, leaving rarity to the backend's IDF."""
-    terms = sorted(set(tokenize(text)))
-    return SparseVector(
-        indices=[term_index(term) for term in terms],
-        values=[1.0] * len(terms),
-    )
+    indices = list(dict.fromkeys(term_index(term) for term in sorted(set(tokenize(text)))))
+    return SparseVector(indices=indices, values=[1.0] * len(indices))

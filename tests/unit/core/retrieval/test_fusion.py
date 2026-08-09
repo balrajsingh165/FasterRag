@@ -94,14 +94,30 @@ def test_agreement_still_beats_a_heavily_weighted_single_leg() -> None:
 
 
 def test_a_zero_weight_leg_contributes_nothing() -> None:
+    """Not even a candidate: a scoreless hit still reaches the reranker and the context."""
     fused = rrf_fuse(
         Ranking(name="dense", ids=["a"], weight=1.0),
         Ranking(name="bm25", ids=["b"], weight=0.0),
     )
-    by_id = {result.id: result for result in fused}
 
-    assert by_id["b"].score == 0.0
-    assert fused[0].id == "a"
+    assert ids(fused) == ["a"]
+
+
+def test_a_zero_weight_leg_still_records_where_it_ranked_a_surviving_document() -> None:
+    fused = rrf_fuse(
+        Ranking(name="dense", ids=["a"], weight=1.0),
+        Ranking(name="bm25", ids=["b", "a"], weight=0.0),
+    )
+
+    assert ids(fused) == ["a"]
+    assert fused[0].rank_in("bm25") == 2
+
+
+def test_a_repeated_id_in_one_leg_votes_once_at_its_best_rank() -> None:
+    fused = rrf_fuse(Ranking(name="dense", ids=["a", "b", "b"]))
+
+    assert ids(fused) == ["a", "b"]
+    assert fused[1].rank_in("dense") == 2
 
 
 def test_a_larger_constant_flattens_the_advantage_of_top_positions() -> None:
