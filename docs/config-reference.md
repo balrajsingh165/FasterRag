@@ -45,6 +45,7 @@ embeddings:
     enabled: true
     backend: disk
     max_entries: 10000
+    redis_url: redis://localhost:6379/0
   tiering:
     enabled: false
     rules: []
@@ -91,6 +92,7 @@ cache:
   ttl: 3600
   backend: memory
   max_entries: 10000
+  redis_url: redis://localhost:6379/0
 
 workers:
   cpu_pool_size: 0
@@ -207,7 +209,8 @@ security:
 | `embeddings.dimensions` | int\|null | `null` | ≥ 8 when set | Output dimensionality; `null` = the model's native size, which is the right setting unless you have a reason. Behaviour differs by provider, because shortening a vector is only lossless for a model trained for it (Matryoshka representation learning). **Hosted providers that support it** (OpenAI `text-embedding-3-*`) receive the value as an API parameter and shorten server-side — verified against the live API: `text-embedding-3-small` returns 1536 natively and exactly 256 when asked (TASK-0207). **Local `huggingface` models** cannot be shortened, so a value that disagrees with what the model emits is refused at load time with an error naming both sizes — rather than left to fail later as a rejected upsert against a collection already created at the wrong width. Must match the collection's vector size. |
 | `embeddings.cache.enabled` | bool | `true` | — | Embedding cache keyed by content hash + model + version. |
 | `embeddings.cache.max_entries` | int | `10000` | ≥ 1 | Entry ceiling for the embedding cache. Raise when reingesting a large corpus repeatedly, which is exactly when the cache pays for itself. |
-| `embeddings.cache.backend` | str | `disk` | one of `memory`, `disk`, `redis` | Where embedding-cache entries live. |
+| `embeddings.cache.backend` | str | `disk` | one of `memory`, `disk`, `redis` | Where embedding-cache entries live. `disk` survives a restart on one host; `redis` is the only backend several workers or replicas can share, so a vector one of them paid for is not re-embedded by the next. |
+| `embeddings.cache.redis_url` | str | `redis://localhost:6379/0` | starts with `redis://`, `rediss://`, or `unix://` | Connection URL, read only when `embeddings.cache.backend` is `redis`. Needs `pip install fasterrag[redis]`. Entries are namespaced under `fasterrag:embedding`, so one server can back both caches and `clear` never reaches the other's keys or a co-tenant application's. **A URL containing a password is a secret and must not be written here** — supply it through the environment instead (`FASTERRAG_SET=embeddings.cache.redis_url=...`), which is exactly what the `.env`-only policy requires. |
 | `embeddings.tiering.enabled` | bool | `false` | — | Tiered embedding: route document classes to different models (cheap models for high-volume/low-priority classes; higher-cost models where retrieval precision matters). |
 | `embeddings.tiering.rules` | list[TierRule] | `[]` | each rule: `{match: <metadata filter>, provider: <provider>, model: <model>}`; must be non-empty when tiering enabled | Ordered routing rules, first match wins. |
 
@@ -267,7 +270,8 @@ security:
 | `cache.similarity_threshold` | float | `0.95` | 0.90–0.99 | Cosine similarity above which a cached response is served. Typical useful range ~0.92–0.97. |
 | `cache.ttl` | int | `3600` | ≥ 1 (seconds) | Entry lifetime. Corpus-change events invalidate affected entries immediately regardless of TTL. |
 | `cache.max_entries` | int | `10000` | ≥ 1 | Entry ceiling for the semantic cache; the oldest are evicted past it. Raise for a high-traffic deployment with repetitive queries, lower to cap memory or disk. |
-| `cache.backend` | str | `memory` | one of `memory`, `disk`, `redis` | Semantic-cache storage backend. Use `disk` from the CLI: a `memory` cache dies with each short-lived process, so every invocation would pay for a query embedding and then discard the answer. `redis` is accepted by the schema but not implemented (TASK-0124) and fails fast at startup. |
+| `cache.backend` | str | `memory` | one of `memory`, `disk`, `redis` | Semantic-cache storage backend. Use `disk` from the CLI: a `memory` cache dies with each short-lived process, so every invocation would pay for a query embedding and then discard the answer. Use `redis` for more than one API replica — `memory` gives each replica its own cache, so a hit depends on which one the load balancer picked. |
+| `cache.redis_url` | str | `redis://localhost:6379/0` | starts with `redis://`, `rediss://`, or `unix://` | Connection URL, read only when `cache.backend` is `redis`. Needs `pip install fasterrag[redis]`. Entries are namespaced under `fasterrag:semantic`, separately from the embedding cache. **A URL containing a password is a secret and must not be written here** — supply it through the environment instead (`FASTERRAG_SET=cache.redis_url=...`). |
 
 ## `workers`
 

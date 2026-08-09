@@ -16,7 +16,8 @@ are indistinguishable, so the endpoint cannot be used to enumerate valid keys.
 Rate limiting is per key and turns on with auth, because a limit keyed on something the
 caller chooses is not a limit. It is an in-process fixed window: correct for a single
 server, and deliberately not claimed to work across replicas — a distributed limiter needs
-shared state this deployment does not have (TASK-0124).
+shared state this limiter does not use. Shared state now exists (the ``redis`` cache
+backend, TASK-0124), but wiring the limiter to it is a separate change (TASK-0216).
 """
 
 from __future__ import annotations

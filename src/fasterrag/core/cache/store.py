@@ -36,6 +36,7 @@ __all__ = [
     "DiskStore",
     "Entry",
     "MemoryStore",
+    "deadline_for",
 ]
 
 DEFAULT_CACHE_ROOT: Final = Path(".fasterrag") / "cache"
@@ -79,8 +80,12 @@ class Entry:
         return cls(raw[_HEADER.size :], deadline)
 
 
-def _deadline_for(ttl: int | None) -> float:
-    """Return the absolute expiry for ``ttl`` seconds, or zero for no expiry."""
+def deadline_for(ttl: int | None) -> float:
+    """Return the absolute expiry for ``ttl`` seconds, or zero for no expiry.
+
+    Shared by every backend so all three agree on what "no TTL" means: a deadline of zero,
+    never a timestamp already in the past.
+    """
     return time.time() + ttl if ttl else _NO_DEADLINE
 
 
@@ -150,7 +155,7 @@ class MemoryStore(CacheStore):
     async def set(self, key: str, value: bytes, *, ttl: int | None = None) -> None:
         """Store ``value``, evicting the least recently used entry if full."""
         async with self._lock:
-            self._entries[key] = Entry(value, _deadline_for(ttl))
+            self._entries[key] = Entry(value, deadline_for(ttl))
             self._entries.move_to_end(key)
             while len(self._entries) > self._maximum:
                 self._entries.popitem(last=False)
@@ -240,7 +245,7 @@ class DiskStore(CacheStore):
 
     async def set(self, key: str, value: bytes, *, ttl: int | None = None) -> None:
         """Store ``value`` under ``key``, replacing any existing entry atomically."""
-        await asyncio.to_thread(self._write, key, Entry(value, _deadline_for(ttl)).encode())
+        await asyncio.to_thread(self._write, key, Entry(value, deadline_for(ttl)).encode())
 
     async def delete(self, key: str) -> None:
         """Remove ``key``'s file if it exists."""

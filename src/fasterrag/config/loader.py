@@ -249,9 +249,6 @@ def _reject_unenforced_settings(settings: Settings) -> None:
     startup failure naming the missing slice is the only outcome that cannot be mistaken
     for protection.
 
-    Mirrors the ``cache.backend: redis`` rejection in ``core/cache``, which fails the same
-    way for the same reason.
-
     Raises:
         ConfigError: If any accepted-but-unenforced setting is enabled.
     """
