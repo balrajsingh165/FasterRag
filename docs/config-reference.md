@@ -331,6 +331,21 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | `cost.per_query_token_budget` | int | `0` | ≥ 0 (0 = unlimited) | Hard token budget per query; exceeding returns a budget-exceeded problem response. |
 | `cost.per_tenant_token_budget` | int | `0` | ≥ 0 (0 = unlimited) | Rolling per-tenant token budget (requires `security.multi_tenancy: true` to be meaningful). |
 
+### Which models carry a price
+
+Costing is a lookup in the dated list-price tables in `services/estimation.py`, keyed by **provider *and* model** — a rate is never applied across providers, because the same model name behind a different vendor is a different bill. Priced today:
+
+| Provider | Priced models | Checked |
+|---|---|---|
+| `openai` (embeddings) | `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002` | 2026-08-09 |
+| `openai` (generation) | the GPT-5.x, GPT-4.1, GPT-4o, GPT-4, GPT-3.5-turbo and o-series chat models | 2026-08-09 |
+| `anthropic` | the Claude Fable/Mythos 5, Opus 5, Opus 4.5–4.8, Sonnet 4.5/4.6/5 and Haiku 4.5 ids, alias and dated forms | 2026-08-09 |
+| `cohere` (embeddings) | `embed-english-v3.0`, `embed-multilingual-v3.0`, `embed-english-light-v3.0` | 2026-07-30 |
+| `cohere` (generation) | `command-r-plus-08-2024` | 2026-08-09 |
+| `huggingface`, `ollama` | **every** model — locally served, so zero is the recorded price, not a missing one | — |
+
+Anything else — `openai_compatible` gateways, Cohere's Command A / R7B lineup (published as instance-hour rates, which cannot be converted to a per-token rate without a throughput measurement fasterRag does not have), a model released after the dates above — is **deliberately unpriced**: it contributes nothing to `fasterrag_cost_usd_total` and is counted instead by `fasterrag_unpriced_tokens_total` ([observability.md](observability.md)). A wrong price produces a confident wrong bill, which is worse than a visible gap.
+
 ## `autopilot`
 
 | Name | Type | Default | Allowed values / validation | Description |
