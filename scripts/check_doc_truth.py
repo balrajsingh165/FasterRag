@@ -42,6 +42,17 @@ GUARDED_DOCS: Final[tuple[str, ...]] = ("CLAUDE.md", "README.md")
 # A source tree this small is a scaffold, not an implementation; the claim would be fair.
 IMPLEMENTATION_THRESHOLD: Final = 20
 
+# CRITICAL: collisions already on `main`, recorded so the gate reports growth rather than
+# history. Each is two distinct pieces of work that were assigned one id by parallel sessions
+# reading the ledger at the same moment. Ticked entries are append-only and frozen, so these
+# are not renumbered; TASK-0184's two live citations both mean its dashboard entry. Never add
+# to this map to silence a new collision — pick the next free id instead.
+KNOWN_DUPLICATE_IDS: Final[dict[str, int]] = {
+    "TASK-0184": 2,
+    "TASK-0185": 2,
+    "TASK-0186": 2,
+}
+
 
 def _python_modules(root: Path) -> int:
     """Return how many Python modules the package actually ships."""
@@ -60,6 +71,37 @@ def _strip_code_blocks(text: str) -> str:
     return re.sub(r"```.*?```", "", text, flags=re.DOTALL)
 
 
+def _duplicate_task_ids(root: Path) -> list[str]:
+    """Return one message per ``TASK-`` id that defines more than one entry.
+
+    An id is how code, docs, and blockers.md point at a piece of work, so two entries sharing
+    one is a reference that resolves to two different things. Three collisions
+    (TASK-0184/0185/0186, six distinct pieces of work) reached `main` unnoticed because
+    nothing looked — parallel work picks "the next free id" by reading a ledger that a
+    sibling has already extended.
+
+    Existing collisions are reported but not repaired here: ticked entries are append-only
+    and frozen by CLAUDE.md, so renumbering history is not this gate's call. What it does is
+    stop the count from growing.
+    """
+    ledger = root / "docs" / "todo.md"
+    if not ledger.is_file():
+        return []
+
+    entries = re.findall(r"^- \[[ x]\] (TASK-\d{4}):", ledger.read_text(encoding="utf-8"), re.M)
+    seen: dict[str, int] = {}
+    for identifier in entries:
+        seen[identifier] = seen.get(identifier, 0) + 1
+
+    duplicates = sorted(
+        name for name, count in seen.items() if count > KNOWN_DUPLICATE_IDS.get(name, 1)
+    )
+    return [
+        f"docs/todo.md: {name} defines {seen[name]} entries; an id must name one piece of work"
+        for name in duplicates
+    ]
+
+
 def check(root: Path = REPOSITORY_ROOT) -> list[str]:
     """Return one message per contradicted claim, empty when the docs are truthful.
 
@@ -67,11 +109,12 @@ def check(root: Path = REPOSITORY_ROOT) -> list[str]:
         root: Repository to inspect. Parameterised so the gate itself can be tested against
             a constructed tree — a check nobody has watched fail is not a check.
     """
+    violations: list[str] = _duplicate_task_ids(root)
+
     modules = _python_modules(root)
     if modules < IMPLEMENTATION_THRESHOLD:
-        return []
+        return violations
 
-    violations: list[str] = []
     for name in GUARDED_DOCS:
         path = root / name
         if not path.is_file():
@@ -98,13 +141,23 @@ def main(argv: list[str] | None = None) -> int:
     if not violations:
         return 0
 
-    sys.stderr.write("the always-loaded docs contradict the repository:\n")
+    sys.stderr.write("the docs contradict the repository:\n")
     for violation in violations:
         sys.stderr.write(f"  {violation}\n")
-    sys.stderr.write(
-        "\nupdate the document to describe the build phase, or delete the code. "
-        "CLAUDE.md is loaded as instructions on every session — a false one is followed.\n"
-    )
+
+    # The two violation classes have nothing to do with each other, and a gate that prints
+    # the wrong remedy teaches people to ignore the right one.
+    if any("docs/todo.md:" in violation for violation in violations):
+        sys.stderr.write(
+            "\nfor a duplicate id: give the newer entry the next free TASK- id. Parallel "
+            "sessions collide here because each reads the ledger before the other appends.\n"
+        )
+    if any(name in violation for name in GUARDED_DOCS for violation in violations):
+        sys.stderr.write(
+            "\nfor a no-code claim: update the document to describe the build phase, or "
+            "delete the code. CLAUDE.md is loaded as instructions on every session — a false "
+            "one is followed.\n"
+        )
     return 1
 
 
