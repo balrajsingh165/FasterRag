@@ -19,6 +19,7 @@ from fasterrag.adapters.embeddings.tiering import create_embedding_router
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.commands.pipeline import _build_generation, _settings_or_none
 from fasterrag.cli.output import Console, ExitCode
+from fasterrag.cli.sources import expand_sources
 from fasterrag.errors import FasterRagError
 from fasterrag.services.benchmark import (
     REPETITIONS,
@@ -94,15 +95,24 @@ async def _ingest_suite(
         console.error("the ingest suite needs --sources naming a corpus to measure against")
         return None, ExitCode.USAGE
 
+    # CRITICAL: a directory is expanded to the files inside it, and an expansion that finds
+    # nothing refuses to run. Taking the directory verbatim measured the cost of failing to
+    # read one path and then offered the result as a --ledger entry — a published throughput
+    # number for a corpus of zero documents.
+    sources = expand_sources(args.sources)
+    if not sources:
+        console.error(f"no readable files under {', '.join(args.sources)} to measure")
+        return None, ExitCode.USAGE
+
     async def once() -> None:
-        estimate_sources(args.sources, settings)
+        estimate_sources(sources, settings)
 
     # CRITICAL: the iteration count is used as given. An earlier version quietly divided it
     # because an ingest iteration is expensive, which produced a single-sample run whose p50,
     # p95, and p99 were the same number — a percentile that looks measured and is not.
     cold, runs = await measure(once, iterations=args.iterations)
 
-    estimate = estimate_sources(args.sources, settings)
+    estimate = estimate_sources(sources, settings)
     return (
         SuiteResult(
             suite="ingest",

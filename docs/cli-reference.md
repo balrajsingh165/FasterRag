@@ -89,7 +89,7 @@ Run a query (same path as `POST /v1/query`).
 | `list` | Collections with vector counts, embedding model+version, drift status. |
 | `create NAME` | Create a collection (`--distance`, `--shards`, `--replicas`). |
 | `delete NAME` | Drop a collection (`--force` required if alias target). |
-| `reembed NAME` | D2 zero-downtime re-embed: blue/green build → eval gate → alias swap (`--no-eval-gate` for dev; `--watch`). |
+| `reembed NAME` | D2 zero-downtime re-embed: blue/green build → eval gate → alias swap (`--no-eval-gate` for dev). `--recursive` expands directory sources; `--watch` is **not yet implemented** (TASK-0196) and prints a notice. |
 | `rollback NAME` | Alias flip back to the retained previous collection (within `index.reindex.rollback_retention_hours`). |
 | `lock verify [NAME]` | D1: verify `index.lock` against current config/corpus; report any drift (model version, config hash, content hashes). Exit 1 on drift. |
 
@@ -125,6 +125,7 @@ Wall-clock time is deliberately **not** projected — throughput has not been me
 
 | Flag | Description |
 |---|---|
+| `--recursive` | Descend into subdirectories, exactly as `ingest --recursive` does. Directory arguments are expanded the same way with or without it, so the estimate prices the file set the ingestion it precedes would read. |
 | `--provider NAME` | Compare against a specific provider instead of the configured one. |
 | `--all-providers` | Cost table across all configured/known providers. |
 
@@ -181,6 +182,7 @@ Run the benchmark suite from [performance.md](performance.md) and print/append l
 | `--suite ingest\|query\|eval\|all` | Which suite (default `all`). |
 | `--dataset NAME` | Named dataset fixture. |
 | `--ledger` | Emit a ready-to-commit benchmark ledger entry (includes hardware fingerprint + commit hash). |
+| `--sources PATH [...]` | Corpus the `ingest` suite measures against. Directories are expanded to the files inside them; an expansion that finds nothing is refused rather than measured, because a ledger entry for a corpus of zero documents is a published number backed by nothing. |
 
 ## `fasterrag export --out <archive>`
 

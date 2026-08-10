@@ -14,6 +14,7 @@ import argparse
 
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import settings_from
+from fasterrag.cli.sources import expand_sources
 from fasterrag.errors import ConfigError, FasterRagError, ProvisioningError
 from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.grafana import grafana_status, provision_grafana, stop_grafana
@@ -93,6 +94,12 @@ async def run_estimate(args: argparse.Namespace, console: Console) -> ExitCode:
     Refuses with a usage exit when ``cost.estimator`` is false, rather than estimating
     anyway: the setting reads as a control over this command, so honouring it here is what
     makes it one.
+
+    Directory arguments are expanded exactly as ``ingest`` expands them. An estimate is only
+    a preflight if it prices the same file set the ingestion it precedes would read; taking
+    a directory verbatim priced it as one unreadable document, which quoted every corpus at
+    zero. The expansion happens after the refusal, because a disabled command has no business
+    walking the filesystem.
     """
     try:
         settings = settings_from(args)
@@ -106,9 +113,11 @@ async def run_estimate(args: argparse.Namespace, console: Console) -> ExitCode:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE
 
+    sources = expand_sources(args.sources, recursive=getattr(args, "recursive", False))
+
     try:
         estimate = estimate_sources(
-            args.sources, settings, all_providers=bool(args.all_providers or args.provider)
+            sources, settings, all_providers=bool(args.all_providers or args.provider)
         )
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)

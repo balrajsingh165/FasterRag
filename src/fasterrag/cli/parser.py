@@ -166,6 +166,7 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     reembed.add_argument("sources", nargs="+", help="paths to ingest into the new build")
     reembed.add_argument("--no-eval-gate", action="store_true", help="swap without the gate (dev)")
     reembed.add_argument("--dataset", default=None, help="eval dataset directory to gate on")
+    reembed.add_argument("--recursive", action="store_true", help="recurse into directories")
     reembed.add_argument(
         "--watch",
         action="store_true",
@@ -199,6 +200,7 @@ def _add_estimate(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser = subparsers.add_parser("estimate", help="preflight cost estimate")
     _add_global_flags(parser)
     parser.add_argument("sources", nargs="+", help="paths or URLs to estimate")
+    parser.add_argument("--recursive", action="store_true", help="recurse into directories")
     parser.add_argument("--provider", default=None, help="price against a specific provider")
     parser.add_argument("--all-providers", action="store_true", help="price every known provider")
 

@@ -221,6 +221,56 @@ def test_estimate_refuses_when_the_estimator_is_switched_off(
     assert "tokens" not in captured.out
 
 
+def test_estimate_prices_the_files_inside_a_directory(
+    config: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An estimate is a preflight only if it prices what the ingestion it precedes would read.
+
+    A directory used to reach the estimator verbatim, so the whole corpus was priced as one
+    unreadable document and every quote came back at zero.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "a.txt").write_text("Either party may terminate on thirty days notice.")
+    (corpus / "b.txt").write_text("Invoices are payable within forty-five days.")
+
+    code = run(["estimate", "--config", config, str(corpus), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == ExitCode.SUCCESS
+    assert payload["documents"] == 2
+    assert payload["unreadable"] == 0
+    assert payload["tokens"] > 0
+
+
+def test_estimate_leaves_a_subdirectory_alone_without_recursive(
+    config: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    corpus = tmp_path / "corpus"
+    (corpus / "annex").mkdir(parents=True)
+    (corpus / "a.txt").write_text("Either party may terminate on thirty days notice.")
+    (corpus / "annex" / "c.txt").write_text("The annex records the agreed schedule of rates.")
+
+    run(["estimate", "--config", config, str(corpus), "--json"])
+
+    assert json.loads(capsys.readouterr().out)["documents"] == 1
+
+
+def test_estimate_recursive_prices_the_subdirectory_too(
+    config: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``ingest --recursive`` exists, so the preflight for it has to as well."""
+    corpus = tmp_path / "corpus"
+    (corpus / "annex").mkdir(parents=True)
+    (corpus / "a.txt").write_text("Either party may terminate on thirty days notice.")
+    (corpus / "annex" / "c.txt").write_text("The annex records the agreed schedule of rates.")
+
+    code = run(["estimate", "--config", config, str(corpus), "--recursive", "--json"])
+
+    assert code == ExitCode.SUCCESS
+    assert json.loads(capsys.readouterr().out)["documents"] == 2
+
+
 def test_estimate_never_reports_a_price_it_does_not_know(
     config: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

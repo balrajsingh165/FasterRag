@@ -463,6 +463,9 @@ async def _index_reembed(
     args: argparse.Namespace, settings: Settings, adapter: VectorDBAdapter, console: Console
 ) -> ExitCode:
     """Rebuild an index behind its alias, swapping only if the gate allows it (D2)."""
+    if getattr(args, "watch", False):
+        console.error("--watch is not implemented yet; this command already runs to completion")
+
     plan = await plan_reindex(args.name, settings, adapter)
     console.emit(f"building        {plan.green}")
     console.emit(f"replacing       {plan.blue or '(first build)'}")

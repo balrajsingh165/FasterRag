@@ -19,6 +19,7 @@ from fasterrag.adapters.embeddings.tiering import create_embedding_router
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.commands.pipeline import _settings_or_none
 from fasterrag.cli.output import Console, ExitCode
+from fasterrag.cli.sources import expand_sources
 from fasterrag.errors import FasterRagError
 from fasterrag.services.autopilot import SUGGESTION_FILE, render_suggestion, tune
 from fasterrag.services.evaluation import load_dataset
@@ -113,6 +114,9 @@ async def run_generate_golden_set(args: argparse.Namespace, console: Console) ->
     ``--size`` falls back to ``autopilot.golden_set_size`` rather than to a second hardcoded
     number. The two happened to agree at 100, which is why the configured value being
     ignored looked like nothing at all until somebody changed it.
+
+    Directory arguments are expanded as ``ingest`` expands them; a corpus is named by its
+    folder far more often than by every file in it.
     """
     settings = _settings_or_none(args, console)
     if settings is None:
@@ -130,7 +134,7 @@ async def run_generate_golden_set(args: argparse.Namespace, console: Console) ->
 
     try:
         records, tally = await generate_from_sources(
-            args.sources,
+            expand_sources(args.sources),
             settings,
             destination=destination,
             size=size,
