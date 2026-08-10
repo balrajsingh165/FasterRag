@@ -209,7 +209,14 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["scripts"]
+# CRITICAL: "src" comes first, and it is what makes the suite test the checkout it is run
+# from. The editable install writes an absolute path into
+# site-packages/_editable_impl_fasterrag.pth, so `import fasterrag` resolves to the ORIGINAL
+# checkout's src no matter the working directory. In a git worktree that means pytest runs
+# the worktree's tests against main's source: a change can be committed green without its
+# code ever having been executed, and the pre-commit hook runs pytest, so the gate agrees.
+# pytest inserts these at the front of sys.path, which puts the local tree ahead of the .pth.
+pythonpath = ["src", "scripts"]
 addopts = "--strict-markers --strict-config"
 asyncio_mode = "auto"
 markers = [
