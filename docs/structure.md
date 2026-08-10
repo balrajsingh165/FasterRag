@@ -24,7 +24,9 @@ fasterRag/
 │   ├── data-model.md  prompts.md  archive-format.md
 │   ├── observability.md  deployment.md  security.md
 │   ├── testing-strategy.md  performance.md  benchmarks.md  integrations.md
-│   ├── cookbook.md  troubleshooting.md  migration-guide.md
+│   ├── cookbook.md  troubleshooting.md  migration-guide.md  how-to-use.md
+│   ├── internals.md  rebuild-playbook.md  verification.md
+│   ├── release.md  release-readiness.md
 │   ├── glossary.md  references.md
 │   ├── differentiators.md        # The twelve flagship capabilities (uniqueness contract)
 │   ├── reliability.md            # Reliability doctrine + resilience patterns

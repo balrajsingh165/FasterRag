@@ -79,6 +79,11 @@ All documentation lives in [`docs/`](docs/) (only `CLAUDE.md` and this README si
 | Read this | For |
 |---|---|
 | **[quickstart.md](docs/quickstart.md)** | **Start here** — zero to an answered query via CLI, Python, or REST |
+| [how-to-use.md](docs/how-to-use.md) | The post-release user manual: install, drive, tune, operate, upgrade |
+| [internals.md](docs/internals.md) | How the code implements the contract: module map, lifecycles, extension recipes |
+| [rebuild-playbook.md](docs/rebuild-playbook.md) | Reproduce the system from the docs: build order + the trap registry |
+| [verification.md](docs/verification.md) | Prove a checkout matches the docs: tiered acceptance procedure |
+| [release.md](docs/release.md) · [release-readiness.md](docs/release-readiness.md) | How a release ships, and the confidence threshold (≥85) that authorizes it |
 | [cookbook.md](docs/cookbook.md) | Ready-made config recipes (local/air-gapped, max accuracy, cost-optimized, multi-tenant, …) |
 | [migration-guide.md](docs/migration-guide.md) | Coming from LangChain / LlamaIndex / Haystack / a hand-rolled stack |
 | [troubleshooting.md](docs/troubleshooting.md) | Symptom → cause → fix |

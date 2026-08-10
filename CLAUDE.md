@@ -82,6 +82,11 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 ## Pointers (all under docs/)
 
 - [quickstart.md](docs/quickstart.md) — zero-to-answered-query walkthrough (CLI, Python, REST)
+- [how-to-use.md](docs/how-to-use.md) — post-release user manual for the published package
+- [internals.md](docs/internals.md) — spec→module→proof map, lifecycle traces, extension recipes
+- [rebuild-playbook.md](docs/rebuild-playbook.md) — build order + trap registry to reproduce the system from docs
+- [verification.md](docs/verification.md) — tiered acceptance procedure proving a checkout matches the docs
+- [release.md](docs/release.md) — release procedure + the confidence threshold that authorizes it
 - [release-readiness.md](docs/release-readiness.md) — release confidence assessment (re-derived at each release decision)
 - [scope.md](docs/scope.md) — vision, goals, non-goals, pain-point catalogue
 - [structure.md](docs/structure.md) — repository layout and layer responsibilities
