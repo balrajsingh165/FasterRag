@@ -99,7 +99,7 @@ TASK-0174 ✅ made the wait *visible* — the loader now warns, names the cost, 
 
 ---
 
-## B7 — Verified against unit tests, never against the real backend (TASK-0178)
+## B7 — Verified against unit tests, never against the real backend (TASK-0079)
 
 **The daemon is back** (Docker Desktop 4.85.0 / engine 29.6.2, 2026-08-09), so nothing here is blocked any longer — each row is simply still unrun. Kept as a group because the reason they are all unverified is the same one, and because the first thing run against the real thing (TASK-0190 ✅ — the container image) failed on its first build, which is the argument for working through the rest of the list rather than assuming it.
 
