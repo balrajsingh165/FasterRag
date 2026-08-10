@@ -2,7 +2,7 @@
 
 **A FastAPI-based, backend-only, all-in-one Retrieval-Augmented Generation (RAG) framework engineered for very large datasets.** Install it as a Python package, drive it from a CLI or REST API, plug in any vector database, any embedding model, and any LLM provider — all through one config file. Its goal is to be the fastest, most efficient, and most reliable RAG framework available, and this repository holds itself to a standing rule: **a claim without a measurement is a bug** ([docs/benchmarks.md](docs/benchmarks.md)).
 
-> **Status: build phase, pre-beta (not yet on PyPI — install from source).** The engineering specification in [`docs/`](docs/) is being implemented in tracked vertical slices; slices **S1–S13 have landed** and the full ledger lives in [docs/todo.md](docs/todo.md).
+> **Status: build phase, pre-beta (not yet on PyPI — install from source).** The engineering specification in [`docs/`](docs/) is being implemented in tracked vertical slices; all fourteen slices **S1–S14 have landed** and the full ledger lives in [docs/todo.md](docs/todo.md). Release confidence for the first tagged beta is assessed and re-derived in [docs/release-readiness.md](docs/release-readiness.md) — **62/100 as of 2026-08-10**, held down by unmade release decisions and unverified claims rather than construction, with the gating checklist recorded there.
 >
 > | Shipped | Partial | Not yet |
 > |---|---|---|

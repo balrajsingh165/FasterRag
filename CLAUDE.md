@@ -82,6 +82,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 ## Pointers (all under docs/)
 
 - [quickstart.md](docs/quickstart.md) — zero-to-answered-query walkthrough (CLI, Python, REST)
+- [release-readiness.md](docs/release-readiness.md) — release confidence assessment (re-derived at each release decision)
 - [scope.md](docs/scope.md) — vision, goals, non-goals, pain-point catalogue
 - [structure.md](docs/structure.md) — repository layout and layer responsibilities
 - [data-model.md](docs/data-model.md) — canonical entity schemas and invariants (never invent fields)
