@@ -4,10 +4,12 @@ from typing import Any
 import pytest
 
 from fasterrag.config.schema import Settings
+from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.estimation import (
     EMBEDDING_PRICES,
     estimate_sources,
     price_for,
+    require_estimator,
 )
 
 BODY = "# Vendor Agreement\n\n" + ("sentence body text here. " * 60)
@@ -154,3 +156,33 @@ def test_nothing_is_embedded_while_estimating(
     monkeypatch.setattr("fasterrag.adapters.embeddings.huggingface.load_model", refuse)
 
     assert estimate_sources(corpus, settings()).tokens > 0
+
+
+def test_a_disabled_estimator_is_refused_by_the_name_of_its_setting() -> None:
+    """``cost.estimator`` was declared, documented, and read by nothing (TASK-0200).
+
+    The refusal names the setting, because that is the only thing telling an operator which
+    switch produced it; a bare "disabled" leaves them grepping for it.
+    """
+    with pytest.raises(FasterRagError) as caught:
+        require_estimator(settings(cost={"estimator": False}))
+
+    assert caught.value.code == ErrorCode.VALIDATION_FAILED
+    assert "cost.estimator" in caught.value.detail
+
+
+def test_an_enabled_estimator_passes_the_guard() -> None:
+    """The gate must refuse the off position only; a guard that always raised would too."""
+    require_estimator(settings())
+
+
+def test_the_throughput_measurement_survives_the_estimator_being_off(corpus: list[str]) -> None:
+    """The one deliberate exemption, pinned here so it stays deliberate.
+
+    ``benchmark --suite ingest`` reuses this function to time parse-and-chunk and reports no
+    cost at all, so switching cost estimation off must not take the benchmark harness with
+    it. That is why the gate sits at the D9 entry points rather than inside this function.
+    """
+    estimate = estimate_sources(corpus, settings(cost={"estimator": False}))
+
+    assert estimate.documents == 2

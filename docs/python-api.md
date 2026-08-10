@@ -84,7 +84,7 @@ Everything importable from the top-level `fasterrag` namespace is public and sta
 | `query_stream` | `(...) -> AsyncIterator[QueryEvent]` | Streaming variant; yields `meta`, `token`, `citations`, `usage`, `done` events mirroring the SSE contract. |
 | `retrieve` | `(text: str, *, top_k: int \| None = None, filters: dict \| None = None, rerank: bool \| None = None) -> list[ScoredChunk]` | Retrieval only — no generation. For apps that bring their own LLM step. |
 | `collections` | `CollectionsAPI` | `list()`, `create()`, `delete()`, `reindex()` (blue/green, eval-gated), `rollback()`, `verify_lock()`. |
-| `estimate` | `(sources: list[str \| Source]) -> Estimate` | D9 preflight: token counts, projected embedding cost/time per provider. |
+| `estimate` | `(sources: list[str \| Source]) -> Estimate` | D9 preflight: token counts, projected embedding cost/time per provider. Raises `FasterRagError` (`VALIDATION_FAILED`) when `cost.estimator` is false — the library obeys the same switch as the CLI and the API. |
 | `doctor` | `() -> DoctorReport` | D10 diagnostics; each check has `passed: bool` and `fix: str`. |
 | `replay` | `(trace_id: str, config_overrides: dict) -> ReplayDiff` | D8 side-by-side replay diff. |
 | `export_archive` / `import_archive` | `(path, *, include_vectors=False)` / `(path, *, reembed=False)` | D11 portability. |

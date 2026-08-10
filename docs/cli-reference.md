@@ -68,7 +68,7 @@ Submit sources for ingestion (async job; same path as `POST /v1/ingest`).
 | `--priority-class NAME` | Tiered-embedding routing class (D9). Sets `priority_class` in chunk metadata, which is what `embeddings.tiering.rules[].match` matches on. |
 | `--recursive` | Descend into subdirectories. Without it a directory source contributes only its immediate files. Hidden files and `.git`, `node_modules`, `__pycache__`, and virtualenv directories are skipped either way; files from a directory are ingested in sorted order so the same command produces the same job. |
 | `--watch` | **Not yet implemented** (TASK-0196). The CLI runs the job inline to completion, so there is nothing to follow until the queue-backed job path lands (TASK-0130). Passing it prints a notice. |
-| `--dry-run` | Parse + chunk only; report what would be indexed (no embedding, no writes). |
+| `--dry-run` | Parse + chunk only; report what would be indexed (no embedding, no writes). This is the D9 estimator, so it obeys `cost.estimator`: with the estimator off it exits `2` naming the setting instead of pricing the corpus anyway. |
 
 ## `fasterrag query "<question>"`
 
@@ -117,7 +117,7 @@ D10 preflight diagnostics. Checks: Docker present and running · required ports 
 
 ## `fasterrag estimate <path|url> [...]`
 
-D9 preflight cost estimator — BEFORE ingestion: document/token counts and projected embedding cost per configured provider.
+D9 preflight cost estimator — BEFORE ingestion: document/token counts and projected embedding cost per configured provider. Requires `cost.estimator: true` (the default); with it off the command exits `2` with a `VALIDATION_FAILED` problem naming the setting, because a disabled estimator reporting zeroes would read as a corpus that costs nothing.
 
 With `chunking.contextual_enrichment: true` the report also carries the **enrichment** cost, separately from embedding rather than blended into it — enrichment is a *generation* charge on a different model at different rates, and one combined number would hide which knob to turn. It is one call per chunk, each sending the whole parent document, so the prompt cost scales with document tokens × chunk count. That figure is quoted **uncached**: prompt caching is what makes enrichment affordable, but its discount depends on the provider and the cache window, so quoting a number fasterRag cannot verify would understate a real bill. An over-estimate an operator can reason about is the safer error.
 

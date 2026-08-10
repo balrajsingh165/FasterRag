@@ -39,7 +39,7 @@ from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.doctor import DoctorReport
-from fasterrag.services.estimation import Estimate, estimate_sources
+from fasterrag.services.estimation import Estimate, estimate_sources, require_estimator
 from fasterrag.services.generation import Answer, GenerationService, QueryEvent
 from fasterrag.services.journal import JobRecord, Journal, create_journal
 from fasterrag.services.lockfile import IndexLock, create_lock_store
@@ -417,7 +417,13 @@ class FasterRag:
 
         Synchronous and safe to call before starting: it parses and chunks for real but
         never contacts a backend, which is the whole point of a preflight estimate.
+
+        Raises:
+            FasterRagError: With ``VALIDATION_FAILED`` when ``cost.estimator`` is false. The
+                library obeys the same switch as the CLI and the API; a control the embedded
+                surface ignored would be a control only two of the three respected.
         """
+        require_estimator(self.settings)
         return estimate_sources(sources, self.settings, all_providers=all_providers)
 
     def index_lock(self, collection: str | None = None) -> IndexLock | None:

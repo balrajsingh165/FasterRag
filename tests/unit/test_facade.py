@@ -87,6 +87,20 @@ def test_estimate_works_without_starting(tmp_path: Path) -> None:
     assert estimate.documents == 1
 
 
+def test_estimate_obeys_the_setting_that_claims_to_control_it(tmp_path: Path) -> None:
+    """The embedded surface honours `cost.estimator` too (TASK-0200).
+
+    Three control planes read the same configuration; a switch two of them respected would
+    still leave the third reporting costs an operator had turned off.
+    """
+    document = tmp_path / "note.md"
+    document.write_text("# Title\n\nSome body text to chunk.\n", encoding="utf-8")
+    rag = FasterRag.from_settings(Settings.model_validate({"cost": {"estimator": False}}))
+
+    with pytest.raises(FasterRagError, match=r"cost\.estimator"):
+        rag.estimate([str(document)])
+
+
 def test_the_documented_surface_exists() -> None:
     """python-api.md's table is the beta contract; a missing member breaks it silently."""
     for member in (

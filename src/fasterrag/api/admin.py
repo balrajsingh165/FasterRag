@@ -26,7 +26,7 @@ from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.archive import export_archive
 from fasterrag.services.archive_import import import_archive, open_archive
 from fasterrag.services.doctor import run_doctor
-from fasterrag.services.estimation import estimate_sources
+from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.lockfile import create_lock_store
 from fasterrag.services.provisioning import provision_qdrant, qdrant_status
 from fasterrag.services.tenancy import scoped_name, unscoped_name
@@ -82,7 +82,13 @@ async def provision_status(tool: str, settings: CurrentSettings) -> dict[str, An
 
 @router.post("/estimate")
 async def estimate(body: EstimateRequest, settings: CurrentSettings) -> dict[str, Any]:
-    """Report what ingesting sources would cost, before embedding any of them (D9)."""
+    """Report what ingesting sources would cost, before embedding any of them (D9).
+
+    Raises:
+        FasterRagError: With ``VALIDATION_FAILED`` when ``cost.estimator`` is false, so the
+            setting reaches the REST surface it names and not only the CLI one.
+    """
+    require_estimator(settings)
     return estimate_sources(body.sources, settings, all_providers=body.all_providers).as_dict()
 
 

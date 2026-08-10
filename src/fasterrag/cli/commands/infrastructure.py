@@ -15,7 +15,7 @@ import argparse
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import settings_from
 from fasterrag.errors import ConfigError, FasterRagError, ProvisioningError
-from fasterrag.services.estimation import estimate_sources
+from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.grafana import grafana_status, provision_grafana, stop_grafana
 from fasterrag.services.langfuse import langfuse_status, provision_langfuse, stop_langfuse
 from fasterrag.services.provisioning import provision_qdrant, qdrant_status, stop_qdrant
@@ -88,10 +88,21 @@ async def run_provision(args: argparse.Namespace, console: Console) -> ExitCode:
 
 
 async def run_estimate(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Report what ingesting a set of sources would cost, before embedding any of it."""
+    """Report what ingesting a set of sources would cost, before embedding any of it.
+
+    Refuses with a usage exit when ``cost.estimator`` is false, rather than estimating
+    anyway: the setting reads as a control over this command, so honouring it here is what
+    makes it one.
+    """
     try:
         settings = settings_from(args)
     except ConfigError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return ExitCode.USAGE
+
+    try:
+        require_estimator(settings)
+    except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE
 

@@ -355,7 +355,7 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
-| `cost.estimator` | bool | `true` | — | D9: enable `fasterrag estimate` / `POST /v1/estimate` (token counts, projected embedding cost and time per provider, BEFORE ingestion). |
+| `cost.estimator` | bool | `true` | — | D9: enable `fasterrag estimate`, `POST /v1/estimate`, `fasterrag ingest --dry-run`, and `FasterRag.estimate` (token counts, projected embedding cost per provider, BEFORE ingestion). When `false` each refuses with `VALIDATION_FAILED` naming this setting, rather than reporting an estimate of zero. `benchmark --suite ingest` is unaffected: it times the same parse-and-chunk work and reports no cost. |
 | `cost.per_query_token_budget` | int | `0` | ≥ 0 (0 = unlimited) | Hard token budget per query; exceeding returns a budget-exceeded problem response. |
 | `cost.per_tenant_token_budget` | int | `0` | ≥ 0 (0 = unlimited) | Rolling per-tenant token budget (requires `security.multi_tenancy: true` to be meaningful). |
 

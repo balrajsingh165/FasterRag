@@ -324,6 +324,31 @@ async def test_a_dry_run_ingest_never_touches_the_pipeline(
     assert payload["chunks"] >= 1
 
 
+async def test_a_dry_run_is_refused_when_the_estimator_is_switched_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--dry-run` is the estimator, so it answers to `cost.estimator` (TASK-0200).
+
+    Left ungated it would be the way around the switch: the same token counts and the same
+    projected cost, reached by a different command.
+    """
+    monkeypatch.setenv("FASTERRAG_API_KEY", "test-key")
+    path = tmp_path / "estimator-off.yaml"
+    path.write_text(f"{CONFIG}cost:\n  estimator: false\n", encoding="utf-8")
+    source = tmp_path / "note.txt"
+    source.write_text("Either party may terminate on thirty days notice.")
+
+    code = await pipeline.run_ingest(
+        namespace(config=str(path), sources=[str(source)], metadata=[], dry_run=True),
+        Console(),
+    )
+    captured = capsys.readouterr()
+
+    assert code == ExitCode.USAGE
+    assert "cost.estimator" in captured.err
+    assert "would index" not in captured.out
+
+
 async def test_malformed_ingest_metadata_is_refused_before_any_work(
     config: str, tmp_path: Path
 ) -> None:

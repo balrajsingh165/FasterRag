@@ -7,7 +7,9 @@ to keep in step with the first.
 
 ``--dry-run`` on ``ingest`` is the exception that proves the rule: it calls the estimator
 rather than the ingestion service, because reporting what *would* be indexed without
-embedding anything is exactly what the estimator already does.
+embedding anything is exactly what the estimator already does. Being the estimator, it
+answers to ``cost.estimator`` as well — a dry run that still priced a corpus after the
+estimator was switched off would be the way around the switch.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from fasterrag.core.cache import create_semantic_store
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.rerank import CrossEncoderReranker
 from fasterrag.errors import ConfigError, FasterRagError
-from fasterrag.services.estimation import estimate_sources
+from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.evaluation import run_eval
 from fasterrag.services.generation import GenerationService
 from fasterrag.services.ingestion import IngestionService
@@ -94,6 +96,12 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
         return ExitCode.USAGE
 
     if args.dry_run:
+        try:
+            require_estimator(settings)
+        except FasterRagError as exc:
+            console.problem(exc.code.value, exc.detail)
+            return ExitCode.USAGE
+
         estimate = estimate_sources(sources, settings)
         console.emit(f"would index {estimate.chunks} chunks from {estimate.documents} documents")
         console.emit(f"tokens          {estimate.tokens}")

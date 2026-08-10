@@ -194,6 +194,33 @@ def test_estimate_counts_a_real_document(
     assert payload["tokens"] > 0
 
 
+def test_estimate_refuses_when_the_estimator_is_switched_off(
+    config: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`cost.estimator` read as a control over this command and disabled nothing (TASK-0200).
+
+    A refusal, not zeroes: an estimate reporting no tokens and no cost is indistinguishable
+    from a corpus that is free to ingest.
+    """
+    (tmp_path / "note.txt").write_text("Either party may terminate on thirty days notice.")
+
+    code = run(
+        [
+            "estimate",
+            "--config",
+            config,
+            "--set",
+            "cost.estimator=false",
+            str(tmp_path / "note.txt"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert code == ExitCode.USAGE
+    assert "cost.estimator" in captured.err
+    assert "tokens" not in captured.out
+
+
 def test_estimate_never_reports_a_price_it_does_not_know(
     config: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from fasterrag.config.schema import Settings
-from fasterrag.errors import FasterRagError
+from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
 from fasterrag.workers.cpu_pool import CpuWorkerPool, parse_and_chunk
 
@@ -42,6 +42,7 @@ __all__ = [
     "estimate_sources",
     "price_for",
     "price_generation",
+    "require_estimator",
 ]
 
 
@@ -249,6 +250,32 @@ _MILLION: Final = 1_000_000
 _CHARS_PER_TOKEN: Final = 4
 
 _logger = get_logger(__name__)
+
+
+def require_estimator(settings: Settings) -> None:
+    """Reject preflight estimation when ``cost.estimator`` has switched it off.
+
+    Every D9 surface calls this — ``fasterrag estimate``, ``POST /v1/estimate``,
+    ``fasterrag ingest --dry-run``, and ``FasterRag.estimate`` — because a switch one entry
+    point honours and another ignores is not a switch. The ``benchmark --suite ingest``
+    harness deliberately is not one of them: it reuses the same parse-and-chunk work purely
+    to time it and reports no cost at all, so turning cost estimation off must not take the
+    benchmark suite with it.
+
+    Args:
+        settings: The configuration whose ``cost.estimator`` value decides the answer.
+
+    Raises:
+        FasterRagError: With ``VALIDATION_FAILED`` when ``cost.estimator`` is false. A
+            refusal that names the setting, never an estimate of zero — empty numbers read
+            as a corpus that costs nothing to ingest.
+    """
+    if not settings.cost.estimator:
+        raise FasterRagError(
+            "preflight cost estimation is disabled; set cost.estimator to true to enable it",
+            code=ErrorCode.VALIDATION_FAILED,
+            retryable=False,
+        )
 
 
 @dataclass(frozen=True, slots=True)
