@@ -260,7 +260,7 @@ Sources are parsed and chunked exactly as ingestion would — no collection is n
 | Flag | Description |
 |---|---|
 | `--out PATH` | Where to write it; defaults to `./golden.jsonl`. An existing file is never overwritten. |
-| `--size N` | How many records to aim for (default 100). |
+| `--size N` | How many records to aim for. Defaults to `autopilot.golden_set_size`. |
 | `--seed N` | Makes sampling and adversarial selection reproducible. |
 
 A fraction of the set is generated deliberately **unanswerable** from the corpus, so the harness measures whether retrieval declines to return something confident when nothing relevant exists.

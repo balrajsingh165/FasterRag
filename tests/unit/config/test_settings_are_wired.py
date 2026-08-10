@@ -22,7 +22,6 @@ SRC = Path(__file__).resolve().parents[3] / "src" / "fasterrag"
 # entry here is a decision somebody made rather than an omission nobody noticed.
 PENDING: dict[str, str] = {
     "reliability.degradation_ladder": "TASK-0165",
-    "autopilot.golden_set_size": "TASK-0201",
 }
 
 

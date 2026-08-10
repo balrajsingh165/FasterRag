@@ -379,7 +379,7 @@ Anything else — `openai_compatible` gateways, Cohere's Command A / R7B lineup 
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
 | `autopilot.enabled` | bool | `false` | — | D6: eval-driven auto-tuning. Generates a golden Q&A set from the corpus, searches chunk size / top_k / hybrid weights / rerank settings, outputs a **suggested config diff with measured deltas**. **NEVER auto-applies** — human approves. |
-| `autopilot.golden_set_size` | int | `100` | 10–10000 | Q&A pairs generated for the golden set. |
+| `autopilot.golden_set_size` | int | `100` | 10–10000 | Q&A pairs generated for the golden set; the default for `fasterrag autopilot generate-golden-set --size`, which overrides it per run. |
 
 ## `eval`
 

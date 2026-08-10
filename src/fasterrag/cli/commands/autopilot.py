@@ -109,10 +109,16 @@ async def run_generate_golden_set(args: argparse.Namespace, console: Console) ->
     The shared machinery behind both the eval harness and Autopilot's search. It was
     reachable from Python but not from the terminal, which meant the one prerequisite for
     running D6 had no supported way to produce it.
+
+    ``--size`` falls back to ``autopilot.golden_set_size`` rather than to a second hardcoded
+    number. The two happened to agree at 100, which is why the configured value being
+    ignored looked like nothing at all until somebody changed it.
     """
     settings = _settings_or_none(args, console)
     if settings is None:
         return ExitCode.USAGE
+
+    size = args.size if args.size is not None else settings.autopilot.golden_set_size
 
     destination = Path(args.out)
     if destination.exists():
@@ -127,7 +133,7 @@ async def run_generate_golden_set(args: argparse.Namespace, console: Console) ->
             args.sources,
             settings,
             destination=destination,
-            size=args.size,
+            size=size,
             seed=args.seed,
         )
     except FasterRagError as exc:
@@ -139,5 +145,5 @@ async def run_generate_golden_set(args: argparse.Namespace, console: Console) ->
     for name, count in sorted(tally.items()):
         console.emit(f"  {name:<14}{count}")
     console.emit("review the questions before using them as a baseline; they are generated")
-    console.document({"path": str(destination), "records": len(records), **tally})
+    console.document({"path": str(destination), "records": len(records), "size": size, **tally})
     return ExitCode.SUCCESS

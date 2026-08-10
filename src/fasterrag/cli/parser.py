@@ -250,7 +250,12 @@ def _add_autopilot(subparsers: argparse._SubParsersAction[argparse.ArgumentParse
     _add_global_flags(golden)
     golden.add_argument("sources", nargs="+", help="corpus files or directories")
     golden.add_argument("--out", default="golden.jsonl", help="where to write the set")
-    golden.add_argument("--size", type=int, default=100, help="how many records to aim for")
+    golden.add_argument(
+        "--size",
+        type=int,
+        default=None,
+        help="how many records to aim for; defaults to autopilot.golden_set_size",
+    )
     golden.add_argument("--seed", type=int, default=0, help="makes generation reproducible")
 
 
