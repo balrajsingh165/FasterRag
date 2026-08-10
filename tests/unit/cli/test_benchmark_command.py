@@ -12,6 +12,7 @@ from fasterrag.cli.output import ExitCode
 from fasterrag.core.evals.harness import EvalReport
 from fasterrag.errors import FasterRagError
 from fasterrag.services.benchmark import Fingerprint
+from fasterrag.services.estimation import estimate_sources
 from fasterrag.services.regression import GateResult
 from tests.unit.cli.conftest import Closeable, corpus
 
@@ -116,6 +117,42 @@ def test_the_ingest_suite_measures_the_files_inside_a_directory(
     payload = json.loads(capsys.readouterr().out)
     assert code == ExitCode.SUCCESS
     assert payload["suites"][0]["dataset"].startswith("2 documents")
+
+
+def test_the_timed_work_is_the_expanded_corpus_and_not_the_directory(
+    config: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The timed loop must parse the same files the report counts.
+
+    Expanding only for the report would leave the throughput measured over one failed
+    directory read while the entry beside it claimed two documents — and the throughput is
+    the number a ``--ledger`` entry publishes.
+    """
+    source = corpus(tmp_path / "corpus")
+    seen: list[list[str]] = []
+
+    def spy(sources: Any, settings: Any, **kwargs: Any) -> Any:
+        seen.append([str(item) for item in sources])
+        return estimate_sources(sources, settings, **kwargs)
+
+    monkeypatch.setattr(benchmark_command, "estimate_sources", spy)
+
+    main(
+        [
+            "benchmark",
+            "--config",
+            config,
+            "--suite",
+            "ingest",
+            "--sources",
+            str(source),
+            "--iterations",
+            "1",
+        ]
+    )
+
+    assert seen, "the estimator was never called, so this asserts nothing"
+    assert all(sorted(Path(name).name for name in call) == ["a.txt", "b.txt"] for call in seen)
 
 
 def test_a_corpus_that_expands_to_nothing_is_refused_rather_than_measured(
