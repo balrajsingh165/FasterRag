@@ -46,7 +46,7 @@ Every item below was re-verified this session by running it, reading its impleme
 | **REST provisioning parity (TASK-0251, §4.1)** | api-reference promises three tools over REST; the router serves one | Engineering |
 | **Coverage-gate reconciliation (TASK-0252, §4.2)** | The documented blocking gate may not be holding | Engineering |
 | **LLM breaker: consult or stop constructing (TASK-0245)** | A metric reporting a state no code transitions is a false observability signal | Engineering |
-| **Disk-full typing (TASK-0234)** | FMEA row 33's promise is proven broken; the fix is one translation at one boundary | Engineering |
+| **Disk-full typing (TASK-0234 ✅)** | Closed 2026-08-10. One translation at one boundary, with the chained `OSError` preserved so errno 28 survives; the paired chaos assertion was inverted in the same commit | Engineering |
 | **Reranker default (TASK-0175, B6)** | A 2.2 GB model with a 400 s first-load *(dev machine)* as the default is every adopter's first impression | Maintainer |
 | **Ladder-scope ADR (TASK-0165, B3)** | Ships either `cache_only` (TASK-0159) or an honest narrowing; releasing with "specified-not-built" annotations is acceptable, releasing without the decision recorded is not | Maintainer |
 | **SBOM at tag (remainder of TASK-0087)** | Documented supply-chain promise attached to the first tag | Engineering |

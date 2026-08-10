@@ -55,7 +55,7 @@ Symptoms → cause → where the fix is now encoded. If rebuilding, read this li
 | T10 | Alias swap as delete-then-create leaves a window where the name resolves to nothing | single atomic alias op in the adapter contract, atomicity in the contract suite |
 | T11 | Regenerating Langfuse `SALT`/`ENCRYPTION_KEY`/`NEXTAUTH_SECRET` invalidates every credential; `LANGFUSE_INIT_*` values must not be quoted in compose | provisioner writes once, never regenerates; unquoted templates; R9/R10 in references.md |
 | T12 | An eval gate that *couldn't run* reported as a pass | three-state gate (`gate_ran: false`); blocked = exit 5, distinct from crash |
-| T13 | Chaos assertions accepting the untyped error too — the suite can't see the promise break | TASK-0234's paired test is written to go red when the fix lands; rule: never `(Typed, OSError)` |
+| T13 | Chaos assertions accepting the untyped error too — the suite can't see the promise break | TASK-0234's paired test was written to go red when the fix landed, and did (TASK-0234 ✅); rule: never `(Typed, OSError)`, and assert the chained cause so the errno survives translation |
 | T14 | Faked httpx clients: patching the module attribute patches the global (self-recursion), and async clients require async byte streams | capture-before-patch helper + async-generator bodies in `test_sources.py` |
 | T15 | Benchmark numbers from a busy laptop looked citable — variance exceeded the effect | ledger rule 5 (isolation) + non-citable entries as the worked example |
 | T16 | Relocating `config.yaml` in the sdist breaks the wheel's force-include (wheel builds *from* the sdist) | CRITICAL comment in pyproject; packaged template = repo file, byte-identical |

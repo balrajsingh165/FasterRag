@@ -363,9 +363,10 @@ def test_a_genuinely_full_filesystem_halts_the_journal_loudly(
     """Starting a new job on a full filesystem raises; it never silently loses the record.
 
     The assertion is on the operating system's own words rather than on ``errno``, so that
-    translating the failure into a typed error (TASK-0234) keeps this case passing — the
-    guarantee is that the write is loud, not that it stays untyped. What must go red when
-    that lands is ``test_the_journal_does_not_yet_type_a_full_disk`` alone.
+    translating the failure into a typed error (TASK-0234 ✅) kept this case passing — the
+    guarantee is that the write is loud, not that it stays untyped. The one case that had to
+    go red when that landed did, and is now
+    ``test_the_journal_types_a_full_disk_without_losing_the_errno``.
     """
     failure = disk_quota["create_while_full"]
 
@@ -398,18 +399,26 @@ def test_the_journal_writes_again_once_space_is_freed(disk_quota: Mapping[str, A
     assert disk_quota["reload_after_free"]["loaded"] is True
 
 
-def test_the_journal_does_not_yet_type_a_full_disk(disk_quota: Mapping[str, Any]) -> None:
-    """The gap this variant exists to expose, asserted so it cannot be forgotten.
+def test_the_journal_types_a_full_disk_without_losing_the_errno(
+    disk_quota: Mapping[str, Any],
+) -> None:
+    """A real ``ENOSPC`` arrives as the typed error row 33 promises, errno intact.
 
-    failure-modes.md row 33 promised the OS write error becomes a typed ``IngestionError``.
-    It does not: the raw ``OSError`` escapes ``Journal._write_atomically`` untranslated, and
-    only a real ``ENOSPC`` shows it, because the scripted suite's unwritable-directory case
-    accepts ``(IngestionError, OSError)`` and so passes either way. Filed as TASK-0234. When
-    that lands this case fails, which is the point — the fix must move the row and this
-    assertion together.
+    This case previously asserted the *opposite*, deliberately: the raw ``OSError`` escaped
+    ``Journal._write_atomically`` untranslated, and only a real ``ENOSPC`` could show it,
+    because the scripted suite's unwritable-directory case accepts ``(IngestionError,
+    OSError)`` and so passed either way. Writing it as a failing promise meant TASK-0234's fix
+    could not land without moving this assertion and the FMEA row together — which is what
+    happened.
+
+    Both halves are asserted. A typed error that has forgotten it was ``ENOSPC`` would satisfy
+    the taxonomy while telling an operator less than the raw error did, so the chained cause
+    must still carry errno 28.
     """
     failure = disk_quota["create_while_full"]
 
-    assert failure["typed"] is False
-    assert failure["type"] == "OSError"
-    assert failure["errno"] == 28
+    assert failure["typed"] is True
+    assert failure["type"] == "IngestionError"
+    assert failure["cause_type"] == "OSError"
+    assert failure["cause_errno"] == 28
+    assert "No space left on device" in failure["detail"]

@@ -1,4 +1,6 @@
+import errno
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -206,3 +208,55 @@ def test_a_job_record_round_trips_through_its_serialized_form() -> None:
     restored = JobRecord.from_dict(json.loads(json.dumps(record.as_dict())))
 
     assert restored == record
+
+
+def test_a_full_filesystem_becomes_a_typed_error_not_a_raw_oserror(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """failure-modes.md row 33 promises the OS write error arrives typed, and it did not.
+
+    Proven under TASK-0233 against a real ENOSPC — a tmpfs with a hard 512k limit filled to
+    zero free bytes returned ``[Errno 28] No space left on device`` untranslated, straight
+    through the taxonomy that CLAUDE.md makes mandatory. Simulated here by errno rather than
+    by tmpfs so it runs on every platform in the fast suite; the real-filesystem proof lives
+    in ``tests/chaos/test_real_faults.py``.
+
+    Reported rather than swallowed, unlike a lost trace or lockfile: the journal is what
+    crash-resume reads, so losing it quietly would lose the ability to resume with nothing
+    saying so.
+    """
+    full = OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(Path, "write_text", lambda *args, **kwargs: (_ for _ in ()).throw(full))
+
+    with pytest.raises(IngestionError) as caught:
+        journal.create_job("default", SOURCES)
+
+    assert caught.value.code is ErrorCode.INTERNAL
+    assert "No space left on device" in str(caught.value)
+    assert isinstance(caught.value.__cause__, OSError)
+
+
+def test_a_failed_publish_leaves_no_temporary_file_behind(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stray ``.tmp`` would be mistaken for a torn write by whoever looked next.
+
+    The failure is injected into the *publishing rename*, not into the write. Failing the
+    write leaves nothing on disk to clean up, so a test written that way passes whether or
+    not the cleanup exists — it looked like a guard and was not one.
+    """
+    created = journal.create_job("default", SOURCES)
+    real_replace = os.replace
+
+    def fail_on_publish(src: object, dst: object, **kwargs: object) -> None:
+        if str(src).endswith(".tmp"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "replace", fail_on_publish)
+
+    with pytest.raises(IngestionError):
+        journal.save_job(created)
+
+    monkeypatch.undo()
+    assert list(journal.root.rglob("*.tmp")) == []

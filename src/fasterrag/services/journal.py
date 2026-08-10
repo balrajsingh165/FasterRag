@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterator, Sequence
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -141,14 +142,42 @@ def _write_atomically(path: Path, payload: str) -> None:
 
     The rename is the only step that publishes the new content, so a crash leaves either
     the old file or the new one — never a half-written record.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        os.replace(path, path.with_suffix(path.suffix + _PREVIOUS_SUFFIX))
 
+    # CRITICAL: the `.prev` rename happens *before* the write, and that ordering is
+    # load-bearing rather than incidental. On a filesystem with zero free bytes it frees a
+    # file the size of the one about to be written, which is why an already-running job can
+    # still checkpoint on the very disk that halted it while a new job cannot start
+    # (docs/failure-modes.md row 33, measured against a real ENOSPC). Writing first and
+    # renaming after would make "resume from the last checkpoint" unreachable exactly when
+    # it is needed.
+
+    Raises:
+        IngestionError: If the record cannot be written. The journal is what crash-resume
+            reads, so a failure here is reported rather than warned about and swallowed the
+            way a lost trace or lockfile is — losing it silently would mean losing the
+            ability to resume without anything saying so.
+    """
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(payload, encoding="utf-8")
-    os.replace(temporary, path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            os.replace(path, path.with_suffix(path.suffix + _PREVIOUS_SUFFIX))
+
+        temporary.write_text(payload, encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError as exc:
+        # CRITICAL: the cleanup is itself suppressed, for the reason recorded in
+        # TraceStore.save and IndexLockStore.write — on Linux a parent that is a file rather
+        # than a directory makes `unlink` raise from inside this handler, replacing the error
+        # being reported with a second one that escapes.
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+        raise IngestionError(
+            f"the ingestion journal could not be written to {path}: {exc}. "
+            "The last checkpoint is still readable, so the job can be resumed once the "
+            "condition clears",
+            code=ErrorCode.INTERNAL,
+        ) from exc
 
 
 def _envelope(payload: dict[str, Any]) -> str:

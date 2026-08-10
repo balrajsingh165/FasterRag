@@ -37,8 +37,15 @@ DETAIL_LIMIT: Final = 200
 
 
 def describe(exc: BaseException) -> dict[str, Any]:
-    """Return the JSON-safe identity of an exception the probe caught."""
+    """Return the JSON-safe identity of an exception the probe caught.
+
+    The chained cause is recorded as well as the exception itself. Translating an ``OSError``
+    into the typed error the taxonomy requires is only an improvement if the original errno
+    survives the translation — a typed error that has forgotten it was ``ENOSPC`` tells an
+    operator less than the raw one did, so the test asserts both halves.
+    """
     code = getattr(exc, "code", None)
+    cause = exc.__cause__
     return {
         "type": type(exc).__name__,
         "module": type(exc).__module__,
@@ -46,6 +53,8 @@ def describe(exc: BaseException) -> dict[str, Any]:
         "typed": isinstance(exc, FasterRagError),
         "code": getattr(code, "value", None),
         "detail": str(exc)[:DETAIL_LIMIT],
+        "cause_type": type(cause).__name__ if cause is not None else None,
+        "cause_errno": getattr(cause, "errno", None),
     }
 
 
