@@ -191,7 +191,7 @@ class LangfuseExporter:
             )
             return False
 
-        # 207 is Langfuse's normal success: the batch endpoint reports per-event results, so a
+        # 207 is Langfuse's normal answer: the batch endpoint reports per-event results, so a
         # partial accept is the expected shape rather than an error.
         if response.status_code not in (200, 201, 207):
             _logger.warning(
@@ -200,7 +200,47 @@ class LangfuseExporter:
             )
             return False
 
-        return True
+        return self._all_events_accepted(response, trace)
+
+    @staticmethod
+    def _all_events_accepted(response: httpx.Response, trace: Trace) -> bool:
+        """Return whether Langfuse stored every event, not merely that it answered.
+
+        # CRITICAL: the status code alone does not say this. Langfuse answers 207 for *any*
+        # mixed outcome and lists the rejected events in the body, so treating 207 as success
+        # reports a trace exported when the server dropped part or all of it. Verified against
+        # Langfuse 3.225.1: a batch of two events, one carrying an invalid `type`, came back
+        # 207 with `successes` of length 1 and `errors` of length 1.
+        #
+        # This is exactly the failure a field-name mismatch produces, which is what made the
+        # export unverifiable against anything but a stub (blocker B7.1) — a stub accepts what
+        # the real server would reject, and the old check could not tell the difference.
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            # A 2xx whose body is not JSON is not something to fail a query over, but it is
+            # not evidence of storage either. Report it and move on.
+            _logger.warning(
+                "langfuse answered a trace export with an unreadable body",
+                extra={"trace_id": trace.trace_id, "status": response.status_code},
+            )
+            return False
+
+        errors = body.get("errors") if isinstance(body, dict) else None
+        if not errors:
+            return True
+
+        first = errors[0] if isinstance(errors, list) and errors else {}
+        _logger.warning(
+            "langfuse discarded part of a trace export; the query was unaffected",
+            extra={
+                "trace_id": trace.trace_id,
+                "rejected": len(errors),
+                "reason": str(first.get("message", ""))[:200] if isinstance(first, dict) else "",
+            },
+        )
+        return False
 
     async def close(self) -> None:
         """Release the HTTP client."""

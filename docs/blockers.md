@@ -105,9 +105,10 @@ TASK-0174 ✅ made the wait *visible* — the loader now warns, names the cost, 
 
 Nothing below is *broken*; each is **built and unit-tested but never run against the real thing**, and that distinction is the point of listing them.
 
+**B7.1 (the Langfuse trace export) closed on 2026-08-09.** Running it against a real server was worth doing: Langfuse accepted the batch, but the exercise also showed the exporter could not have told anyone if it had not. See the ledger for the evidence.
+
 | | Task | What cannot be confirmed |
 |---|---|---|
-| **B7.1** | TASK-0178 | The Langfuse trace export. The wire format is verified against a local HTTP server — path, auth header, batch shape, and 207/401/unreachable handling — but no real Langfuse has accepted a batch, so field *names* are checked against the documented API rather than the server. |
 | **B7.2** | TASK-0079 | `iterate_points` has never walked a live collection, and no archive has been exported from or imported into a real Qdrant. The D11 round-trip acceptance test (Qdrant → Qdrant vector copy, Qdrant → pgvector re-embed) cannot run at all. |
 | **B7.3** | — | The Grafana and Langfuse provisioners, the `/readyz` failure path, and every end-to-end query check that was passing earlier in the session. |
 
