@@ -4,6 +4,8 @@ All notable changes to fasterRag are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html). Entries are reverse-chronological; dates are `YYYY-MM-DD`. Sections used per release: Added / Changed / Deprecated / Removed / Fixed / Security.
 
+> **On the numbers in this file** (clarified by the 2026-08-09 claims audit, TASK-0238). Wall-clock figures quoted in entries below — load times, latencies, byte ratios — are **dated one-off observations from a developer machine**, recorded so a change's motivation is legible. They are **not** benchmark-ledger entries: they carry no isolated hardware, no dataset manifest, no repetitions, and no commit hash, and they must never be quoted as fasterRag's performance. The only citable numbers live in [benchmarks.md](benchmarks.md), which currently holds **two entries, both explicitly marked non-citable** pending the isolated-hardware run (TASK-0084). Likewise "verified against a real X" in an entry records that a manual check was run at the time; unless the entry names a committed test, nothing re-runs it.
+
 ## [Unreleased]
 
 ### Changed

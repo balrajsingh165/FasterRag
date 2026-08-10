@@ -49,11 +49,11 @@ the ADR mandates. ``sparsevec`` cannot serve this: its dimension ceiling is far 
 32-bit term-hash space, and its operators offer no way to weight by corpus rarity.
 
 **Known limits of this first cut**, none of them silent: one connection is held and
-operations are serialized on it (TASK-0221 adds pooling); ``shard_number`` and
+operations are serialized on it (TASK-0239 adds pooling); ``shard_number`` and
 ``replication_factor`` have no single-instance equivalent and are ignored rather than
 reinterpreted; and only the connect is time-bounded, because a statement timeout tight
 enough for a query would abort the index builds and snapshot copies that legitimately take
-longer (TASK-0222).
+longer (TASK-0240).
 """
 
 from __future__ import annotations

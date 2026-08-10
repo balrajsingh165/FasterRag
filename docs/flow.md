@@ -61,7 +61,7 @@ flowchart TB
     PAR --> S["∥ Sparse BM25 search (top rerank_top_n)"]
     D --> F["Fuse: Reciprocal Rank Fusion, k=60"]
     S --> F
-    F --> R["Cross-encoder rerank (top 100-1000 candidates, ~100-300 ms)"]
+    F --> R["Cross-encoder rerank (top 100-1000 candidates)"]
     R --> K["Truncate to top_k"]
     K --> CA["Context assembly: token budget, dedup, citations"]
     CA --> G["LLM generate (batched provider calls)"]

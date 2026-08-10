@@ -79,8 +79,10 @@ def shared_embedding_router(request: Request) -> TieringRouter:
     """Return the application's long-lived embedding router.
 
     # CRITICAL: built once per process, never per request. A local embedding model takes
-    # seconds to load, and building a router per request reloads it every time — measured at
-    # roughly five seconds added to every query, against forty milliseconds of retrieval.
+    # seconds to load, and building a router per request reloads it every time — a one-off
+    # developer-machine observation on 2026-08-01 put it at roughly 5 s added to every query
+    # against roughly 45 ms of retrieval (``docs/CHANGELOG.md``). That is an order-of-magnitude
+    # datapoint, not a benchmark-ledger entry: no isolated hardware, dataset, or repetitions.
     # The router is closed by the application lifespan, never by a request handler.
     """
     router: TieringRouter | None = getattr(request.app.state, "embeddings", None)

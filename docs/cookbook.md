@@ -64,7 +64,7 @@ chunking:
   strategy: recursive
   chunk_size: 1024               # fewer chunks = fewer embeddings and less storage
   overlap: 64
-  contextual_enrichment: false   # the biggest ingest-time cost; enable per-collection if needed
+  contextual_enrichment: false   # a large ingest-time cost (one LLM call per chunk, unmeasured); enable per-collection if needed
 embeddings:
   provider: huggingface          # local embeddings = zero per-token cost
   model: BAAI/bge-small-en-v1.5
@@ -83,14 +83,13 @@ embeddings:
 cache:
   semantic: true                 # repeat questions never reach the LLM
   ttl: 86400
-cost:
-  per_query_token_budget: 8000
-  per_tenant_token_budget: 5000000
 retrieval:
   rerank_top_n: 50
 ```
 
-**Why:** local embeddings remove the dominant variable cost; tiering spends only where precision pays; the semantic cache eliminates repeat generation; token budgets make overspend a `402` instead of an invoice. **Trade-off:** larger chunks and a shallower rerank pool cost some precision — pair with R7 to prove the loss is acceptable.
+> ⚠️ **Token budgets are deliberately omitted from this recipe.** `cost.per_query_token_budget` and `cost.per_tenant_token_budget` are in the schema, but the runtime cost governor **is not built** (TASK-0242): setting either to a non-zero value makes `load_settings` raise `ConfigError` and the process refuse to start. That is intentional — a budget key that validated and enforced nothing would read as a spend cap while being none. Use `fasterrag estimate` before ingesting instead; it is the half of D9 that ships.
+
+**Why:** local embeddings remove the dominant variable cost; tiering spends only where precision pays; the semantic cache eliminates repeat generation. **Trade-off:** larger chunks and a shallower rerank pool cost some precision — pair with R7 to prove the loss is acceptable.
 
 ## R4 — Low latency / high throughput
 
@@ -124,7 +123,9 @@ reliability:
 
 Serving many customers from one deployment.
 
-> ⚠️ **Not deployable yet.** The security slice (TASK-0046) has not shipped: every `security.*` key and both token budgets below **validate but are not enforced** — flipping `auth: true` today changes nothing, and the API serves unauthenticated. Until enforcement lands (and the fail-fast guard of TASK-0156 makes this misconfiguration impossible to miss), do not put a multi-tenant deployment on a network you don't control.
+> ✅ **The security half of this recipe is enforced** (corrected 2026-08-09; the warning that stood here said the opposite and was two slices out of date). `security.auth` shipped with TASK-0046 ✅ and `security.multi_tenancy` with TASK-0179–0181 ✅: authentication, scopes, per-key rate limiting, and tenant isolation run as ASGI middleware, `max_request_mb` is enforced before the body is read (TASK-0199 ✅), and enabling auth without a usable key refuses to start.
+>
+> ⚠️ **Two real limits remain.** The per-key rate limiter is an **in-process fixed window**, so N replicas grant N times the configured limit (TASK-0216). And `cost.per_tenant_token_budget` is **not enforced by anything** — the runtime governor is unbuilt, so setting it raises `ConfigError` at startup (TASK-0242); it is omitted below for that reason.
 
 ```yaml
 security:
@@ -133,8 +134,6 @@ security:
   tenant_header: X-Tenant-ID
   rate_limit_per_minute: 300
   max_request_mb: 10
-cost:
-  per_tenant_token_budget: 2000000
 cache:
   semantic: true                 # entries are tenant-scoped; a hit can never cross tenants
 traces:
@@ -144,7 +143,7 @@ observability:
   dashboard: false               # shows prompts/responses — never expose to tenants
 ```
 
-**Why:** isolation is enforced at the service layer, so collections, caches, traces, metrics, and budgets are all tenant-tagged ([security.md](security.md)). **Trade-off:** the dashboard is operator-only by construction — it renders every tenant's LLM I/O history, so it belongs on an internal network, never in a tenant-facing surface.
+**Why:** isolation is enforced at the service layer, so collections, caches, traces, metrics, and ingestion jobs are all tenant-tagged ([security.md](security.md)) — budgets are not, because they do not exist yet. **Trade-off:** the dashboard is operator-only by construction — it renders every tenant's LLM I/O history, so it belongs on an internal network, never in a tenant-facing surface.
 
 ## R6 — Retrieval only (bring your own LLM)
 
@@ -230,10 +229,12 @@ Run the API and workers as separate processes (`fasterrag serve` / `fasterrag wo
 
 Minimal, fast, no external dependencies — for a fair look on your own data.
 
+> ⚠️ This recipe previously suggested `provider: chroma`. **Chroma is not built** (TASK-0049) and the loader refuses it by name, so the recipe most likely to be a reader's first config could not start. It now uses the reference backend, which `fasterrag provision qdrant` brings up for you.
+
 ```yaml
 vector_db:
-  provider: chroma               # lightweight; swap to qdrant later with one line
-  mode: external
+  provider: qdrant               # reference backend; `fasterrag provision qdrant` runs it for you
+  mode: docker
 embeddings:
   provider: huggingface
   model: BAAI/bge-small-en-v1.5
@@ -256,6 +257,6 @@ Then: ingest a representative slice → `fasterrag autopilot run` for a measured
 |---|---|
 | R1 + R2 | Excellent — maximum accuracy, fully local. Watch ingest time: enrichment runs through your local LLM. |
 | R3 + R4 | Good — cheap and fast; verify recall with R7 before trusting it in production. |
-| R5 + R3 | Natural pairing — per-tenant budgets are the enforcement arm of cost control. |
+| R5 + R3 | Natural pairing in principle — but per-tenant budgets are unbuilt (TASK-0242), so today the pairing is tenant isolation plus preflight estimation, with no runtime enforcement arm. |
 | R2 + R4 | Conflicting: `rerank_top_n` 300 vs 50 is the same dial pulled in opposite directions. Pick your point on the curve and measure it. |
 | Any + R7 | Always worth adding. A tuned config with no regression gate degrades silently over time. |

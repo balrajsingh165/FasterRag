@@ -8,8 +8,8 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 
 Speed and efficiency come from three pillars:
 
-1. **Multi-worker parallel processing** across ingestion, chunking, embedding, and indexing — a CPU worker pool streams into a GPU/embedding worker pool so expensive workers never idle.
-2. **Maximum chunking quality as the goal**, via a configurable chunking pipeline (fixed, recursive, semantic, layout-aware, late chunking, contextual enrichment) whose defaults follow the strongest published evidence.
+1. **Multi-worker parallel processing** across ingestion, chunking, embedding, and indexing — a CPU worker pool streams into a GPU/embedding worker pool, so expensive workers wait on parsing only when the bounded queue runs dry. How often that happens is unmeasured (TASK-0084).
+2. **Maximum chunking quality as the goal**, via a configurable chunking pipeline (fixed, recursive, semantic, layout-aware, late chunking, contextual enrichment) whose defaults are drawn from the published evidence catalogued in [references.md](references.md) — noting that the chunk-size guidance rests on a single preliminary source (R3) and is treated as directional, not settled.
 3. Aggressive **caching, batching, streaming, and async I/O** at every stage.
 
 **Total pluggability**: any vector database, any embedding model, any LLM provider — all selected purely through configuration (`config.yaml`), with secrets isolated in `.env`.
@@ -36,7 +36,7 @@ Speed and efficiency come from three pillars:
 - Parsing pipeline for PDF (incl. tables and scanned/OCR), HTML, Markdown, DOCX, TXT, CSV/JSON.
 - Configurable chunking: fixed, recursive/hierarchical, semantic, layout/structure-aware, late chunking, contextual-retrieval-style enrichment.
 - Parallel workers: CPU pool (load/parse/chunk) → queue → stateful GPU/embedding pool (batch embed) → indexer.
-- Vector DB adapters: Qdrant (reference), Milvus, Weaviate, Pinecone, pgvector, Chroma.
+- Vector DB adapters: Qdrant (reference) and pgvector are **built and pass the shared contract suite**; Milvus, Weaviate, Pinecone, and Chroma are in scope for beta but **not yet built** (TASK-0049) and are refused by name at config load.
 - Embedding providers: OpenAI, Cohere, HuggingFace/sentence-transformers, Ollama/local; tiered embedding.
 - LLM providers: any, via config (OpenAI, Anthropic, Cohere, Ollama/local, OpenAI-compatible endpoints).
 - Hybrid retrieval (dense + BM25), RRF fusion (k=60), cross-encoder reranking, metadata filtering.
@@ -55,7 +55,7 @@ Speed and efficiency come from three pillars:
 - Fine-tuning pipelines and embedding-model training.
 - GraphRAG / knowledge-graph construction.
 - Real-time collaborative index editing.
-- Additional vector DB adapters beyond the six in beta (e.g. Elasticsearch, Vespa, LanceDB) — community adapters welcome post-beta.
+- Additional vector DB adapters beyond the six scoped for beta (e.g. Elasticsearch, Vespa, LanceDB) — community adapters welcome post-beta via the entry-point plugin contract.
 
 ## Target users
 
@@ -90,14 +90,14 @@ Every known RAG pain point, with fasterRag's concrete mitigation. Architecture-l
 | # | Pain point | fasterRag mitigation |
 |---|---|---|
 | 1 | **Poor chunking quality** | Configurable chunking pipeline with six strategies (fixed, recursive, semantic, layout-aware, late chunking, contextual enrichment); practical default range ~512–1024 tokens; documented "context cliff" ceiling near ~2,500 tokens (directional, from a January 2026 preprint); per-collection chunking config. |
-| 2 | **Bad retrieval accuracy** | Hybrid dense + BM25 retrieval fused with RRF (k=60) plus cross-encoder reranking — the two highest-impact retrieval upgrades — and Contextual Retrieval enrichment (Anthropic, Sept 2024: 49% fewer failed retrievals; 67% fewer combined with reranking). |
+| 2 | **Bad retrieval accuracy** | Hybrid dense + BM25 retrieval fused with RRF (k=60) plus cross-encoder reranking — the two upgrades this stack expects to matter most, unmeasured by us — and Contextual Retrieval enrichment (Anthropic, Sept 2024: 49% fewer failed retrievals; 67% fewer combined with reranking — their measurement, not ours). |
 | 3 | **Hallucinations / weak grounding** | Retrieval-grounded prompts with mandatory citation assembly; faithfulness scoring in the eval harness; configurable "answer only from context" prompting; low default temperature. |
 | 4 | **Stale / out-of-date indexes** | Incremental ingestion with versioned metadata; event-driven cache invalidation on corpus change; re-embedding workflows; `index reembed` CLI command. |
 | 5 | **Incremental updates & deduplication** | Content-hash dedup at ingestion; document version fields; upsert semantics in all adapters; partial re-index of changed documents only. |
 | 6 | **Parsing messy PDFs / tables / scanned docs** | Layout-aware parsing preserving reading order, tables, headings, and metadata; OCR path for scanned documents; table serialization strategies; parse-quality flags stored in metadata. |
 | 7 | **Metadata filtering** | First-class metadata schema per collection; filter expressions in query API/CLI pushed down to the vector DB adapter; BM25 index carries the same filters. |
 | 8 | **Hybrid-search needs** | Dense ANN + sparse BM25 run in parallel on every query (when `retrieval.hybrid: true`), fused with Reciprocal Rank Fusion using k=60 per Cormack, Clarke & Büttcher (SIGIR 2009). |
-| 9 | **Reranking** | Cross-encoder reranker stage (retrieve top 100–1000 → rerank → truncate to top-K); documented ~100–300 ms cost and its status as the single biggest quality lever; toggleable via config. |
+| 9 | **Reranking** | Cross-encoder reranker stage (retrieve top 100–1000 → rerank → truncate to top-K); toggleable via config. Its latency cost and quality benefit are both unmeasured (TASK-0084). |
 | 10 | **Evaluation difficulty** | Built-in eval harness: recall@k, MRR, nDCG, faithfulness; dataset fixtures; CI quality gates; `benchmark` CLI command. See [testing-strategy.md](testing-strategy.md). |
 | 11 | **Cost control** | Embedding cache; semantic response cache; batched embedding and LLM calls; tiered embedding (cheap models for low-priority classes); provider prompt caching; cost-per-query metric on the dashboard. |
 | 12 | **Latency** | Async FastAPI; streaming responses (time-to-first-token); parallel retrieval legs; batch inference; semantic cache short-circuit; p50/p95 tracked per stage. |

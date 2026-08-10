@@ -44,7 +44,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `PAYLOAD_TOO_LARGE` | 413 | — | Body exceeds `security.max_request_mb` / `ingestion.max_document_mb`. |
 | `RATE_LIMITED` | 429 | — | Per-key rate limit exceeded (`Retry-After` set). |
 | `QUEUE_FULL` | 429 | `IngestionError` | Bounded queue overflow (`Retry-After` set). |
-| `BUDGET_EXCEEDED` | 402 | — | Per-query or per-tenant token budget exhausted (D9). |
+| `BUDGET_EXCEEDED` | 402 | — | Per-query or per-tenant token budget exhausted (D9). **Defined in the taxonomy and raised by nothing** — the runtime cost governor is not built (TASK-0242), so no request can currently receive this problem. |
 | `PARSE_FAILED` | 422 | `ParseError` | Document unparseable; also the DLQ reason code. |
 | `CHUNK_FAILED` | 500 | `ChunkError` | Chunker invariant violated. |
 | `EMBED_PROVIDER_TIMEOUT` / `EMBED_PROVIDER_ERROR` | 503 | `EmbedError`/`ProviderError` | Embedding provider timeout / hard failure. |
@@ -136,7 +136,7 @@ Non-streaming `200`:
     {"chunk_id": "c_9f2", "source": "s3://contracts/vendor-2024.pdf", "page": 12,
      "span": {"start": 128, "end": 342}, "score": 0.91}
   ],
-  "usage": {"prompt_tokens": 3211, "completion_tokens": 187, "estimated_cost_usd": 0.0031},
+  "usage": {"prompt_tokens": 3211, "completion_tokens": 187},
   "timings_ms": {"embed": 8, "retrieve": 41, "fuse": 1, "rerank": 143, "assemble": 6, "generate": 902, "total": 1101},
   "degraded": false,
   "mode": "full",

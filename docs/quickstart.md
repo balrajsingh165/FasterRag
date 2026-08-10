@@ -1,6 +1,6 @@
 # quickstart.md — From Zero to Answered Query
 
-> **Status: this walkthrough works today from a source checkout** (`pip install -e ".[all]"`; PyPI publication lands with the first tagged beta). Slices S1–S13 have shipped, so `config validate`, `doctor`, `provision`, `estimate`, `ingest`, `query`, `serve`, `index`, `replay`, and `benchmark` are real commands; ingestion accepts `path`, `url`, and `inline` sources; and Path B's `FasterRag` facade (async + sync) is shipped. Known gaps, tracked in [todo.md](todo.md): contextual enrichment is pending. For the semantic cache to persist between one-shot CLI invocations set `cache.backend: disk`, or `cache.backend: redis` (with `pip install fasterrag[redis]`) to share one cache across hosts and replicas — the default `memory` backend only helps a single `fasterrag serve` process and the library.
+> **Status: this walkthrough works today from a source checkout** (`pip install -e ".[all]"`; PyPI publication lands with the first tagged beta). Slices S1–S13 have shipped, so `config validate`, `doctor`, `provision`, `estimate`, `ingest`, `query`, `serve`, `index`, `replay`, and `benchmark` are real commands; ingestion accepts `path`, `url`, and `inline` sources; and Path B's `FasterRag` facade (async + sync) is shipped. Known gaps, tracked in [todo.md](todo.md): `ingest --watch` and `doctor --fix` are declared flags that print a not-implemented notice (TASK-0196, TASK-0197); the `cache_only` degradation rung is not built (TASK-0159); and setting either `cost.*_token_budget` refuses startup rather than enforcing a budget (TASK-0242). For the semantic cache to persist between one-shot CLI invocations set `cache.backend: disk`, or `cache.backend: redis` (with `pip install fasterrag[redis]`) to share one cache across hosts and replicas — the default `memory` backend only helps a single `fasterrag serve` process and the library.
 
 Three paths, same engine and same `config.yaml`: [CLI](#path-a--cli) · [Python](#path-b--python-package) · [REST](#path-c--rest-service). Pick one; they interoperate.
 
@@ -58,7 +58,7 @@ fasterrag config validate         # exits 2 and names the offending key if inval
 fasterrag doctor
 ```
 
-`doctor` checks Docker, free ports (including **both 6333 and 6334** for Qdrant), disk, RAM/GPU, backend reachability, key validity, and config validity. **Every failed check prints a concrete fix.** It must pass before any provisioning runs — this is what makes one-toggle provisioning survivable on an arbitrary machine (D10). Try `--fix` for safe automatic remedies.
+`doctor` checks Docker, free ports (including **both 6333 and 6334** for Qdrant), disk, RAM/GPU, backend reachability, key validity, and config validity. **Every failed check prints a concrete fix.** It must pass before any provisioning runs — this is what makes one-toggle provisioning survivable on an arbitrary machine (D10). (`--fix` is declared but **not implemented**: it prints a notice and changes nothing — TASK-0197.)
 
 ## Step 3 — Bring up the vector database
 
@@ -88,10 +88,10 @@ Reports document/token counts, projected embedding cost per provider, and projec
 ## Step 5 — Ingest
 
 ```bash
-fasterrag ingest ./my-docs/ --recursive --watch
+fasterrag ingest ./my-docs/ --recursive
 ```
 
-Returns a `job_id` immediately (the API never blocks on parsing/embedding) and `--watch` follows per-stage progress. Under the hood: CPU workers parse and chunk, streaming into stateful embedding workers that hold the model in memory, feeding a batch indexer ([flow.md](flow.md)).
+**The CLI runs the job inline to completion** and prints the result; `--watch` is declared but not implemented (TASK-0196), because there is nothing to follow until ingestion moves behind the queue-backed job path (TASK-0130). The **REST** surface is the asynchronous one: `POST /v1/ingest` returns `202` with a `job_id` immediately and never blocks on parsing or embedding. Under the hood: CPU workers parse and chunk, streaming into stateful embedding workers that hold the model in memory, feeding a batch indexer ([flow.md](flow.md)).
 
 Ingestion is **checkpointed and idempotent** (D3): kill it mid-run and re-run — it resumes from the last checkpoint, and content-hash dedup makes replayed documents no-ops. Failed documents land in a dead-letter queue with a machine-readable reason:
 
@@ -117,7 +117,7 @@ fasterrag query "..." --show-chunks --show-timings   # retrieved chunks + per-st
 fasterrag query "..." --filter department=legal      # metadata filter, pushed into both legs
 ```
 
-Every response carries `degraded` and `mode`. If a component is down you still get an answer, explicitly labelled (`hybrid_only`, `cache_only`, `extractive`) — never a silent quality drop (D4).
+Every response carries `degraded` and `mode`. When a component is down you get an explicitly labelled degraded answer rather than a silent quality drop (D4) — **for the two rungs that are built**: `hybrid_only` (reranker lost) and `extractive` (LLM lost). The `cache_only` rung is specified and **not implemented** (TASK-0159), so a vector-database outage currently returns a retryable `RETRIEVAL_FAILED` problem instead of a degraded answer.
 
 ## Step 7 — Look at what happened
 

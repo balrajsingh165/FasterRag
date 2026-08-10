@@ -89,7 +89,7 @@ Default config is `retrieval.rerank: true` with `BAAI/bge-reranker-v2-m3`. **Mea
 
 TASK-0174 ✅ made the wait *visible* — the loader now warns, names the cost, and names the two ways out — but it did not decide whether the wait should exist.
 
-**The tension is real:** cross-encoder reranking is the single biggest quality lever in the stack. Turning it off by default trades the framework's best feature for a faster first run.
+**The tension is real:** cross-encoder reranking is expected to be the strongest retrieval-quality lever in the stack — expected, not measured (TASK-0084). Turning it off by default trades that expected quality for a faster first run, and the trade cannot be priced until the gain is a number.
 
 **Options:** a small cross-encoder by default with the large one as a documented upgrade; `rerank: false` by default; or keep it and treat the first-run cost as documented behaviour.
 

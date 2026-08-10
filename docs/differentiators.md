@@ -1,6 +1,11 @@
 # differentiators.md — The Twelve Flagship Capabilities (Uniqueness Contract)
 
-This file is the uniqueness contract: each capability below is what makes fasterRag defensibly different from assembling a RAG stack by hand — **not by adjectives, but by specified behavior proven by a test or a benchmark.** Provable-claims policy applies: uniqueness statements here describe *specified behavior*; any comparative performance claim must link to the [benchmark ledger](benchmarks.md).
+This file is the uniqueness contract: each capability below is what makes fasterRag defensibly different from assembling a RAG stack by hand — **not by adjectives, but by specified behavior that a test or a benchmark must prove.**
+
+> **How to read this file** (clarified by the 2026-08-09 claims audit, TASK-0238):
+> - **"Acceptance test"** and **"Proof metric"** state the bar a capability *must* clear. They are the contract, **not a report that it has been cleared.** Where the named test does not exist yet, the bullet says so.
+> - **"Proof metric ... (ledger)"** means the number belongs in [benchmarks.md](benchmarks.md) once measured. The ledger currently holds **two entries, both explicitly non-citable** (non-isolated hardware), so **no proof metric in this file has a measured value yet** — TASK-0084 is the entry that needs real hardware.
+> - **"Why it is unique"** is positioning based on our own reading of other frameworks. It is **not** a measured competitive comparison, and ledger rule 3 forbids treating it as one: a "faster/better than X" claim may only cite an entry that measured X itself.
 
 Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys live in [config-reference.md](config-reference.md); CLI/API surfaces in [cli-reference.md](cli-reference.md) / [api-reference.md](api-reference.md); tests in [testing-strategy.md](testing-strategy.md) and [failure-modes.md](failure-modes.md).
 
@@ -14,7 +19,7 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 - **Config keys.** `index.lockfile` (bool, default `true`).
 - **CLI / API surface.** `fasterrag index lock verify [NAME]` (exit 1 on drift); drift status in `GET /v1/collections/{name}` and `fasterrag index list`.
 - **Acceptance test.** Build an index; change `embeddings.model` in config; `index lock verify` exits 1 naming the drifted field; queries against the drifted collection log a drift warning. Covered in the adapter/integration suites.
-- **Proof metric.** Drift-detection latency (verify runtime on a 1M-chunk lockfile) recorded in the ledger; zero false negatives across the chaos suite's config-mutation scenarios.
+- **Proof metric.** *(Target, not a result.)* Drift-detection latency (verify runtime on a 1M-chunk lockfile) recorded in the ledger; zero false negatives across config-mutation scenarios. **Neither exists yet**: there is no ledger entry, and the chaos suite ships no config-mutation scenario (TASK-0241).
 
 ## D2 — Zero-Downtime Reindexing
 
@@ -23,8 +28,8 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 - **Why it is unique.** The common path elsewhere is "drop and re-ingest" with hours of downtime, or hand-rolled alias juggling. Here blue/green + eval gate + one-command rollback is the built-in default.
 - **Config keys.** `index.reindex.strategy` (`blue_green`|`in_place`, default `blue_green`), `index.reindex.eval_gate` (default `true`), `index.reindex.rollback_retention_hours` (default `72`).
 - **CLI / API surface.** `fasterrag index reembed NAME`, `fasterrag index rollback NAME`; `POST /v1/collections/{name}/reindex`, `POST /v1/collections/{name}/rollback`.
-- **Acceptance test.** Integration: continuous query load during a full reindex — zero failed queries, alias swap atomic, rollback restores prior answers byte-identically within the retention window.
-- **Proof metric.** Queries dropped during reindex (target and measured: 0); swap latency; ledger entry with corpus size + hardware.
+- **Acceptance test.** *(Specified; the load half is not written.)* Alias swap atomicity and rollback are covered by the shared adapter contract suite and `tests/unit/services/test_reindex.py`. The **continuous-query-load-during-reindex** integration test does not exist yet (TASK-0241).
+- **Proof metric.** *(Target, not a result.)* Queries dropped during reindex — target 0, **not yet measured**, since the load test above is what would measure it; swap latency; ledger entry with corpus size + hardware.
 
 ## D3 — Checkpointed, Idempotent Ingestion
 
@@ -32,19 +37,19 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 - **Pain point it kills.** #5 incremental updates & dedup, #13 very large datasets, #22 debugging (per-doc status).
 - **Why it is unique.** Typical pipelines restart from zero after a crash and silently double-index on retry. Journal + dedup + DLQ turns ingestion into a resumable, auditable batch system.
 - **Config keys.** `ingestion.dedup` (default `true`), `ingestion.journal.enabled` (default `true`), `ingestion.journal.checkpoint_every` (default `100`), `ingestion.dlq.enabled` (default `true`), `ingestion.dlq.max_retries` (default `3`).
-- **CLI / API surface.** `fasterrag ingest --watch`; `GET /v1/ingest/{job_id}`, `GET /v1/ingest/{job_id}/documents?status=dead_lettered`, `POST /v1/ingest/{job_id}/retry-dlq`.
+- **CLI / API surface.** `fasterrag ingest` (the `--watch` flag is declared but **not implemented** — it prints a notice; TASK-0196); `GET /v1/ingest/{job_id}`, `GET /v1/ingest/{job_id}/documents?status=dead_lettered`, `POST /v1/ingest/{job_id}/retry-dlq`.
 - **Acceptance test.** Chaos: kill workers mid-ingest → resume from checkpoint with no duplicate vectors; corrupt document → DLQ with `PARSE_FAILED`, pipeline continues; re-run identical ingest → zero new vectors.
 - **Proof metric.** Recovery time from kill (ledger); duplicate-vector count after chaos run (must be 0); dedup hit-rate on re-ingest (must be 100%).
 
 ## D4 — Degradation Ladder
 
-- **What it is.** A documented, tested table of graceful fallbacks: reranker down → hybrid-only retrieval; vector DB down → semantic-cache-only answers; LLM down → extractive, retrieval-only answers. Every degraded response carries explicit `degraded: true` + `mode`. There is never a silent quality drop.
+- **What it is.** A documented table of graceful fallbacks: reranker down → hybrid-only retrieval; vector DB down → semantic-cache-only answers; LLM down → extractive, retrieval-only answers. Every degraded response carries explicit `degraded: true` + `mode`. **As built, two of the three rungs exist**: `hybrid_only` and `extractive` are served; the **`cache_only` rung is specified and not implemented** (TASK-0159), so a vector-DB outage currently raises a retryable `RETRIEVAL_FAILED` rather than serving a degraded answer.
 - **Pain point it kills.** #12 latency (fail-fast fallbacks), #16 observability gaps (explicit modes), #22 debugging.
 - **Why it is unique.** Standard stacks return 500s or silently worse answers when a component dies. The ladder makes partial availability an explicit, tested product state.
 - **Config keys.** `reliability.degradation_ladder` (default `true`), plus breaker/timeout keys under `reliability.*`.
 - **CLI / API surface.** `mode`/`degraded` fields on every `POST /v1/query` response and SSE `meta` event; `fasterrag status` shows current ladder state; `fasterrag_degraded_responses_total` metric.
-- **Acceptance test.** Chaos suite: each rung exercised (stop reranker/vector DB/LLM) → correct mode served, flag present, automatic recovery on restore.
-- **Proof metric.** Availability under single-component failure (ledger); 100% of degraded responses flagged in chaos runs.
+- **Acceptance test.** *(Partially satisfied.)* The chaos suite exercises the slow-LLM rung (`extractive` served) and stop-vector-DB — but the latter asserts a retryable `RETRIEVAL_FAILED`, which is the built behaviour, **not** the `cache_only` rung this row specifies. That rung cannot be acceptance-tested until TASK-0159 builds it.
+- **Proof metric.** *(Target, not a result.)* Availability under single-component failure (ledger — no entry yet); every degraded response flagged, which holds for the two rungs that exist.
 
 ## D5 — Grounded-or-Refuse Answering
 
@@ -63,7 +68,7 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 - **Why it is unique.** Every other framework hands users a dozen knobs and a shrug; tuning is folklore. Autopilot replaces guesswork with measured suggestions on the user's own data.
 - **Config keys.** `autopilot.enabled` (default `false`), `autopilot.golden_set_size` (default `100`).
 - **CLI / API surface.** `fasterrag autopilot run --budget-minutes N [--golden-set PATH]` → suggested diff + `autopilot-suggestion.yaml`.
-- **Acceptance test.** On a fixture corpus with a known-better config, autopilot's suggestion matches or beats the known config; asserting the tool made zero writes to `config.yaml`. **Executed 2026-08-03** against `tests/eval/datasets/policies`, where the known-better configuration is BM25-weighted retrieval at nDCG@5 0.9308 / MRR 0.9062. Starting from the default 1.0/1.0 weights, autopilot evaluated 7 candidates in 33 s and suggested `bm25_weight=1.0, dense_weight=0.5` — **nDCG 0.9308, matching the known-better score exactly** — and `config.yaml` was byte-unmodified afterwards.
+- **Acceptance test.** On a fixture corpus with a known-better config, autopilot's suggestion matches or beats the known config; asserting the tool made zero writes to `config.yaml`. **Executed 2026-08-03** against `tests/eval/datasets/policies`, where the known-better configuration is BM25-weighted retrieval at nDCG@5 0.9308 / MRR 0.9062. Starting from the default 1.0/1.0 weights, autopilot evaluated 7 candidates (in tens of seconds on a developer laptop — an illustration, not a ledger entry) and suggested `bm25_weight=1.0, dense_weight=0.5` — **nDCG 0.9308, matching the known-better score exactly** — and `config.yaml` was byte-unmodified afterwards.
 - **Proof metric.** Measured nDCG/MRR delta of suggested vs default on a named dataset. On `policies`: **nDCG +0.0231, MRR +0.0312**. Note that **recall@5 stayed at 1.0000 across all seven trials** — a fixture whose recall is saturated is the only kind that can prove this differentiator, because a tuner that only moves ranking is invisible to recall.
 
 ## D7 — Continuous Retrieval Regression Gate
@@ -88,13 +93,13 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 
 ## D9 — Cost Governor & Preflight Estimator
 
-- **What it is.** `fasterrag estimate <path>` reports token counts, projected embedding cost, and projected time per configured provider BEFORE ingestion. Per-query and per-tenant token budgets enforce spend at runtime; tiered embedding routing sends low-priority document classes to cheaper models.
+- **What it is.** `fasterrag estimate <path>` reports token counts and projected embedding cost per configured provider BEFORE ingestion (wall-clock time is deliberately **not** projected — throughput has never been measured). Tiered embedding routing sends low-priority document classes to cheaper models. **The runtime cost governor is not built**: per-query and per-tenant token budgets enforce nothing, and setting either key makes the process refuse to start rather than silently pretend to bound spend (TASK-0242).
 - **Pain point it kills.** #11 cost control.
 - **Why it is unique.** Everyone else discovers embedding costs on the invoice. Preflight estimates + hard runtime budgets + tier routing make spend a first-class, enforced dimension.
 - **Config keys.** `cost.estimator` (default `true`), `cost.per_query_token_budget` (default `0` = unlimited), `cost.per_tenant_token_budget` (default `0`), `embeddings.tiering.*`.
-- **CLI / API surface.** `fasterrag estimate [--all-providers]`; `POST /v1/estimate`; `BUDGET_EXCEEDED` (402) problem on budget breach; `estimated_cost_usd` in every query response.
-- **Acceptance test.** Estimator accuracy test: projected vs actual tokens on a fixture corpus within ±5%; budget test: a query engineered to exceed the budget returns 402 before the provider call.
-- **Proof metric.** Estimator error % on named corpora (ledger); tier-routing cost delta on a mixed corpus (ledger).
+- **CLI / API surface.** `fasterrag estimate [--all-providers]`; `POST /v1/estimate`. **Specified but not built** (TASK-0242): the `BUDGET_EXCEEDED` (402) problem is defined in the taxonomy and raised by nothing, and `estimated_cost_usd` appears in no response — neither string exists in `src/`.
+- **Acceptance test.** *(Specified; neither is written.)* Estimator accuracy: projected vs actual tokens on a fixture corpus within ±5%. Budget test: a query engineered to exceed the budget returns 402 before the provider call — unwritable until TASK-0242 builds the governor.
+- **Proof metric.** *(Target, not a result.)* Estimator error % on named corpora (ledger); tier-routing cost delta on a mixed corpus (ledger). No entry for either.
 
 ## D10 — `fasterrag doctor`
 
@@ -102,9 +107,9 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 - **Pain point it kills.** #21 cold-start.
 - **Why it is unique.** Frameworks assume a working environment and fail with stack traces; doctor turns environment problems into named checks with fixes, and gates provisioning on them.
 - **Config keys.** None (always available); provisioning honors it implicitly.
-- **CLI / API surface.** `fasterrag doctor [--fix] [--json]`; `GET /v1/admin/doctor`; exit code 4 on failure.
-- **Acceptance test.** Matrix test: each simulated broken precondition (port taken, Docker stopped, missing env var, unreachable remote Qdrant on 6334 only) produces the correct failing check **with a non-empty fix string**; provisioning refuses to run while doctor fails.
-- **Proof metric.** Check coverage vs FMEA rows (every environment-class failure mode has a doctor check); doctor runtime (ledger).
+- **CLI / API surface.** `fasterrag doctor [--json]`; `GET /v1/admin/doctor`; exit code 4 on failure. The `--fix` flag is declared but **not implemented** — it prints a notice and changes nothing (TASK-0197, blocked on a Docker daemon).
+- **Acceptance test.** Matrix test: each simulated broken precondition (port taken, Docker stopped, missing env var, unreachable remote Qdrant on 6334 only) produces the correct failing check **with a non-empty fix string**; provisioning refuses to run while doctor fails. Covered by `tests/unit/services/test_doctor.py`.
+- **Proof metric.** *(Target, not a result.)* Check coverage vs FMEA rows (every environment-class failure mode has a doctor check); doctor runtime — no ledger entry.
 
 ## D11 — Portability & Anti-Lock-In
 
@@ -113,8 +118,8 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 - **Why it is unique.** Export elsewhere means writing a scraper against the vector DB. Here the portable archive + migration path is part of the product contract.
 - **Config keys.** None required (always available); `--include-vectors` at call time. Archive format specified in [archive-format.md](archive-format.md).
 - **CLI / API surface.** `fasterrag export --out <archive> [--include-vectors]`, `fasterrag import <archive> [--reembed] [--target-collection]`; `POST /v1/admin/export`, `POST /v1/admin/import`.
-- **Acceptance test.** Round-trip: export from Qdrant → import to pgvector (`--reembed`) and to a second Qdrant (vector copy) → eval metrics within tolerance of the source; archive validated against [archive-format.md](archive-format.md).
-- **Proof metric.** Round-trip fidelity (chunk/metadata loss = 0; eval delta ≤ gate tolerance); export/import throughput (ledger).
+- **Acceptance test.** *(Half satisfied.)* Qdrant → Qdrant vector copy round-trips against a **live** backend — `tests/integration/test_archive_round_trip.py`, six cases covering a 12-point collection, refusal of a corrupted archive, and refusal of a dimension mismatch (TASK-0214 ✅). The **Qdrant → pgvector `--reembed`** leg is still unrun (TASK-0079).
+- **Proof metric.** *(Partly a result.)* Round-trip fidelity: chunk/metadata loss = 0, verified on the Qdrant leg. Export/import throughput: **no ledger entry**.
 
 ## D12 — Chaos-Certified
 
@@ -122,6 +127,6 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 - **Pain point it kills.** #16 observability gaps, and it is the proof mechanism for D2/D3/D4.
 - **Why it is unique.** RAG frameworks do not ship fault-injection suites; reliability claims are prose. Here they are executable.
 - **Config keys.** None (test-side).
-- **CLI / API surface.** Chaos scripts in-repo, runnable against a local stack; results append to the ledger.
-- **Acceptance test.** The suite itself: every scenario in §1.9 passes; every FMEA row's "test that proves it" exists and runs.
-- **Proof metric.** Scenario pass rate (must be 100% at release); recovery times per scenario (ledger).
+- **CLI / API surface.** Chaos scripts in-repo (`tests/chaos/`), runnable against a local stack. Nothing appends results to the ledger automatically — that is a manual step.
+- **Acceptance test.** *(Partly satisfied.)* Every scripted scenario passes, and a self-audit test asserts the suite covers each one. **Not every FMEA row's named test exists**: rows citing a load test, a soak test, or network-partition injection name suites that have never been written (TASK-0241, TASK-0243).
+- **Proof metric.** *(Target, not a result.)* Scenario pass rate — currently 100% of the scripted scenarios. Recovery times per scenario are **not measured** (TASK-0136, which needs the isolated hardware of TASK-0084).

@@ -38,7 +38,7 @@ Pinned definitions for every loaded term in this repository. Documentation, code
 | **Problem (`problem+json`)** | The RFC 9457 error body every API error returns, always carrying a stable machine-readable `code`, a `trace_id`, and `retryable`. |
 | **Provisioning (config-driven)** | Flipping a config toggle (e.g. `observability.langfuse: true`) → doctor gate → auto-install → configure → running URL, with zero application-code changes at toggle time. Idempotent. |
 | **Regression gate** | D7: the CI/reindex check that blocks any change whose recall@k or nDCG drop exceeds `eval.*_tolerance`. |
-| **Reranker** | The cross-encoder model that re-scores fused candidates (top 100–1000 → rerank → truncate to `top_k`); ~100–300 ms; the biggest single quality lever. |
+| **Reranker** | The cross-encoder model that re-scores fused candidates (top 100–1000 → rerank → truncate to `top_k`). Its latency cost and its quality benefit are both **unmeasured** (TASK-0084); the "~100–300 ms" and "biggest single quality lever" this entry used to pin as canonical had no measurement behind them and are withdrawn. |
 | **RRF (Reciprocal Rank Fusion)** | Rank-based fusion `Σ 1/(k + rank)`, default k=60 per Cormack/Clarke/Büttcher SIGIR 2009 ([references.md](references.md)). |
 | **RPO / RTO** | Recovery Point Objective (max data-loss window) / Recovery Time Objective (clean host → serving). Both TBD-until-measured by the executed restore drill ([disaster-recovery.md](disaster-recovery.md)). |
 | **Semantic cache** | The response cache keyed by query-embedding cosine similarity (threshold ~0.92–0.97, default 0.95); TTL + corpus-change invalidation; tenant-scoped. |

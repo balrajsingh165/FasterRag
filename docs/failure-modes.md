@@ -44,7 +44,13 @@ Every anticipated failure, its detection signal, automatic mitigation, recovery 
 
 Coverage cross-check: parser (1–3), chunker (4–5), embedding pool (6–9), job queue (10–11), vector DB managed-Docker (12–13) / external (14) / remote-IP (15–16) / any (17), reranker (18–19), LLM provider (20–22), semantic cache (23–25), config loader (26), secrets loader (27), auto-provisioner (28–30), ingestion journal (31–32), disk (33–34), network (35), dashboard (36–37).
 
-> **As-built note.** Rows whose automatic mitigation names the circuit breaker or `cache_only` mode (12, 14, 16, 20, 35) describe the **specified** design; neither is implemented yet (TASK-0148/0159/0165 in [todo.md](todo.md)). The chaos log below records what the shipped system actually does today — typed retryable failures and, for LLM loss, the `extractive` rung — and is authoritative over the table until those rows' mitigations land.
+> **As-built note** (corrected by the 2026-08-09 claims audit, TASK-0238 — the previous version of this note said the circuit breaker was unimplemented, which stopped being true on 2026-08-06).
+>
+> - **The circuit breaker is built and wired** (`core/breaker.py`, TASK-0148 ✅): three states per [reliability.md](reliability.md) §3, consulted by the embedding worker pool and by the Qdrant and pgvector adapters, and exported as `fasterrag_circuit_state`. So rows 12, 14, 16, 20 and 35 get a real breaker. **Exception: the LLM path.** A breaker named `llm` is constructed at startup and no generation code path consults it (TASK-0245), so row 20's "retries → breaker opens" is currently just retries.
+> - **`cache_only` is still not implemented** (TASK-0159). The string does not appear anywhere in `src/`. Every row whose mitigation names that rung (12, 14, 16) describes specified, unbuilt behaviour: a vector-DB outage today raises a retryable `RETRIEVAL_FAILED` instead of serving a degraded answer.
+> - **Three rows name a test that does not exist.** Rows 8 and 19 cite a soak test and a load test, and rows 16 and 35 cite "partition injection" — none of these suites has been written (TASK-0243 for load/soak, TASK-0241 for the missing chaos scenarios). Row 10's "load test" clause is the same gap.
+>
+> The chaos log below records what the shipped system actually does today, and is authoritative over the table wherever the two disagree.
 
 ## Observed behavior — chaos suite run
 

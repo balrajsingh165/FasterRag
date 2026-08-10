@@ -235,8 +235,8 @@ class QdrantAdapter(VectorDBAdapter):
         render different problem documents — "Retrieval failed" against "Embedding provider
         failed" — and a stopped Qdrant reported as the latter sends an operator to inspect a
         healthy embedding provider while their vector database is down, besides making a real
-        embedding outage indistinguishable from this one. Measured against a genuinely
-        stopped container (TASK-0225).
+        embedding outage indistinguishable from this one. Verified against a genuinely
+        unreachable instance (TASK-0226).
 
         Authentication failures are never retried and name the environment variable
         rather than the key, so a credential cannot reach a log line.

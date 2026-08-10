@@ -274,7 +274,7 @@ Thresholds the parsers apply before chunking sees anything. They are corpus-depe
 | `retrieval.rrf_k` | float | `60` | > 0 | Reciprocal Rank Fusion constant. Default 60 per Cormack, Clarke & Büttcher (SIGIR 2009). |
 | `retrieval.bm25_k1` | float | `1.2` | 0.0–3.0 | BM25 term-frequency saturation. Lower flattens sooner, so a repeated term counts for less. **Changing this changes the stored sparse vectors — existing collections must be reindexed** (`fasterrag index reembed`) before the new value applies to anything already ingested. |
 | `retrieval.bm25_b` | float | `0.75` | 0.0–1.0 | BM25 length normalization, `0` off to `1` full. Lower it for a corpus of uniformly sized chunks. **Requires a reindex, as `bm25_k1` does.** |
-| `retrieval.rerank` | bool | `true` | — | Cross-encoder reranking of fused candidates (~100–300 ms per query; the biggest quality lever). |
+| `retrieval.rerank` | bool | `true` | — | Cross-encoder reranking of fused candidates. Expected to be the largest single contributor to query latency and a major retrieval-quality lever; **neither is measured** — benchmark it on your own hardware (TASK-0084). |
 | `retrieval.reranker_model` | str | `BAAI/bge-reranker-v2-m3` | non-empty when `rerank: true` | Cross-encoder model ID. |
 | `retrieval.rerank_top_n` | int | `100` | 10–1000; ≥ `top_k` | Candidates retrieved per leg and fed to the reranker (retrieve top 100–1000 → rerank → truncate to `top_k`). |
 

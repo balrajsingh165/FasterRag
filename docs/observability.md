@@ -47,7 +47,7 @@ It still has no transport security of its own — put it behind the same reverse
 | `fasterrag_queue_depth` | gauge | queue ∈ ingest, chunk | Bounded-queue occupancy. |
 | `fasterrag_dlq_depth` | gauge | collection | Dead-letter queue depth. |
 | `fasterrag_circuit_state` | gauge | provider ∈ llm, embeddings, vector_db | 0 closed / 1 half-open / 2 open. |
-| `fasterrag_degraded_responses_total` | counter | mode ∈ hybrid_only, cache_only, extractive | Degradation-ladder activations (D4). |
+| `fasterrag_degraded_responses_total` | counter | mode ∈ hybrid_only, extractive (`cache_only` is specified but never emitted — TASK-0159) | Degradation-ladder activations (D4). |
 
 ## 3. Tracing (OpenTelemetry)
 
@@ -143,7 +143,7 @@ No manual clicks; everything is version-controlled config:
 
 As with Langfuse: doctor-gated, idempotent, and **no application-code changes at toggle time**.
 
-**A declared metric is not an emitted metric.** A panel over an instrument that no code path ever writes exports zero series and renders "No data" forever, with nothing in any log to say why. `fasterrag_circuit_state` is currently the one such metric — its configuration exists but the breaker does not (TASK-0148) — and the test suite pins it as the only permitted exemption.
+**A declared metric is not an emitted metric.** A panel over an instrument that no code path ever writes exports zero series and renders "No data" forever, with nothing in any log to say why. **There is currently no such metric.** `fasterrag_circuit_state` used to be the one exemption, but the breaker shipped on 2026-08-06 (TASK-0148 ✅) and now writes it; the suite's `KNOWN_UNWRITTEN` set is empty, and `test_no_catalogue_metric_is_declared_and_never_written` fails if any catalogue metric loses its write site. (Corrected by the 2026-08-09 claims audit — this paragraph had described the pre-breaker state for three days.)
 
 ## 6. Reliability observability (summary; doctrine in [reliability.md](reliability.md))
 

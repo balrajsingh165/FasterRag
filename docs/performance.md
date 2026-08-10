@@ -21,7 +21,7 @@
 |---|---|---|
 | Retrieval-only p50 (10M chunks, hybrid, no rerank) | ≤ 150 ms | TBD-until-measured |
 | End-to-end p95 excl. LLM generation (with rerank) | ≤ 600 ms | TBD-until-measured |
-| Rerank stage cost | within the documented 100–300 ms band | TBD-until-measured |
+| Rerank stage cost | no target set — the "100–300 ms band" this row used to cite was never measured and has been withdrawn | TBD-until-measured |
 | Ingestion throughput (reference rig) | ≥ 50 docs/sec; ≥ 200k tokens/sec embedded | TBD-until-measured |
 | Top-20 retrieval failure rate (hybrid + contextual + rerank) | ≤ 2% | TBD-until-measured (literature anchor: 1.9% in Anthropic's Contextual Retrieval post) |
 | Semantic-cache hit response | ≤ 50 ms | TBD-until-measured |
@@ -37,10 +37,10 @@ Every row flips from goal → claim only by landing a ledger entry with numbers,
 4. **Percentiles over averages.** p50/p95 (p99 where sample size permits); minimum 1,000 samples per latency figure.
 5. **Isolation.** Benchmarks run with no co-tenant load; background jobs disabled; three repetitions, median run reported, all runs attached.
 6. **Baselines are measured, not quoted.** "Fastest" claims require a named competitor/baseline measured by us with the same harness, dataset, and hardware, harness committed to this repo.
-7. **Regression tracking.** Nightly benchmark runs append to the ledger; a >10% p95 regression or any eval-gate breach files a bug in [todo.md](todo.md) automatically.
+7. **Regression tracking.** *(Partly built.)* A nightly workflow runs the eval harness and the benchmark suite and uploads ledger-format artifacts with 30-day retention. It **does not append to the ledger and does not file bugs** — both are manual, and the workflow states in its own header that a shared runner's numbers are not citable. Automatic regression detection and bug filing are unbuilt (TASK-0246).
 
 ## 4. Harness
 
-- `fasterrag benchmark --suite ingest|query|eval|all --dataset <name> --ledger` orchestrates the suites and emits ready-to-commit ledger entries.
-- Load generation for concurrency scenarios uses k6 or Locust scripts committed under the benchmark suite ([testing-strategy.md](testing-strategy.md) §1.7).
+- `fasterrag benchmark --suite ingest|query|eval|all --dataset <name> --ledger` orchestrates the suites and emits ready-to-commit ledger entries. **Built.**
+- Load generation for concurrency scenarios is specified to use k6 or Locust scripts committed under the benchmark suite ([testing-strategy.md](testing-strategy.md) §1.7). **Not built — no such script exists in this repository** (TASK-0243), so no concurrency scenario has ever been run.
 - The reference-hardware baseline run happens at build-phase slice S11; until then this document contains **no measured numbers by design**.

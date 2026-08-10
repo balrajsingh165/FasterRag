@@ -45,7 +45,7 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 |---|---|---|
 | Exact identifiers/rare terms not found | Dense-only retrieval — vectors are weak on exact tokens | Set `retrieval.hybrid: true`; the BM25 leg exists for exactly this |
 | Right document retrieved, wrong passage | Chunks too large, or boundaries cutting through the answer | Move `chunking.chunk_size` toward 512–1024; try `strategy: layout` or `semantic`. Anything near ~2,500 tokens is past the documented context cliff ([references.md](references.md) R3) |
-| Retrieval finds it, but the answer misses it | Reranking off, or `top_k` truncating before the good chunk | Enable `retrieval.rerank` (biggest single quality lever, ~100–300 ms); raise `rerank_top_n` so the reranker sees more candidates |
+| Retrieval finds it, but the answer misses it | Reranking off, or `top_k` truncating before the good chunk | Enable `retrieval.rerank` — expected to help most here, though the gain is unmeasured; raise `rerank_top_n` so the reranker sees more candidates |
 | Chunks lack context to be understood alone | Pronouns/shorthand referencing surrounding text | Enable `chunking.contextual_enrichment` and reindex ([prompts.md](prompts.md) P2; evidence in [references.md](references.md) R1) |
 | Quality dropped after a change | A retrieval-affecting change shipped ungated | Enable `eval.regression_gate: true`; use `fasterrag replay --trace <id> --config candidate.yaml` to see exactly what changed (D8) |
 | No idea which knob to turn | Guesswork is the actual problem | `fasterrag autopilot run` — measured suggestions from your own corpus, never auto-applied (D6) |
@@ -84,7 +84,7 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | p95 latency high, retrieval fine | Generation dominates (provider-bound) | Check the `timings_ms` split; retrieval and generation are measured separately for exactly this reason |
-| Rerank stage dominates latency | `rerank_top_n` too high for your reranker/hardware | Lower it, or use a smaller cross-encoder; expect roughly 100–300 ms for the stage |
+| Rerank stage dominates latency | `rerank_top_n` too high for your reranker/hardware | Lower it, or use a smaller cross-encoder. fasterRag publishes no expected figure for the stage — read your own `fasterrag_stage_duration_seconds` |
 | Slow first query after startup | Cold caches and model load | Expected. Benchmarks report cold and warm separately ([performance.md](performance.md)); pre-warm if TTFT matters |
 | Memory grows over a long run | Should not happen — the soak test asserts no memory/fd growth | File a bug with duration, RSS trend, and `fasterrag status`; unbounded growth is a defect, not tuning |
 | Your numbers disagree with a doc | Docs contain **goals**, not measurements, until a ledger entry exists | Check [benchmarks.md](benchmarks.md). An unmeasured claim presented as fact is itself a bug — file it |

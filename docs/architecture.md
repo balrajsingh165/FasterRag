@@ -31,13 +31,13 @@ The ingestion pipeline is **decoupled** into two pools connected by a bounded qu
 Design rules:
 
 - **Streaming hand-off.** Chunks stream from the CPU pool to the embedding pool as they are produced, so expensive embedding workers never idle waiting on parsing.
-- **Stateful embedding workers.** Each embedding worker loads the embedding model into memory **once per worker** and reuses it across all batches. Reloading models per task is the single largest avoidable cost in naive pipelines and is prohibited by design.
+- **Stateful embedding workers.** Each embedding worker loads the embedding model into memory **once per worker** and reuses it across all batches. Reloading a model per task is a large avoidable cost — a local model takes seconds to load against milliseconds of retrieval — and is prohibited by design. The size of that gap on reference hardware is unmeasured (TASK-0084).
 - **Fault tolerance from decoupling.** Because stages communicate only via queues, a failed embedding job is retried from the queue without re-parsing its document; a crashed CPU worker loses only its in-flight item. Each stage checkpoints progress in the job record.
 - **Backpressure.** The chunk queue is bounded (`workers.queue_depth`). If embedding lags, CPU workers block on enqueue rather than filling memory; if a remote embedding provider throttles, the queue absorbs the burst instead of hammering the rate limit.
 
 ## 3. Batching
 
-- **Embedding**: per-document batched embedding is far cheaper than one-at-a-time calls — requests are aggregated to `embeddings.batch_size` texts. Async batch embedding with queued workers prevents pipeline stalls and provider rate-limit throttling.
+- **Embedding**: per-document batched embedding amortizes per-request overhead that one-at-a-time calls pay per text — requests are aggregated to `embeddings.batch_size` texts. The saving is unmeasured (TASK-0084). Async batch embedding with queued workers prevents pipeline stalls and provider rate-limit throttling.
 - **LLM inference**: provider calls are batched where the provider supports it; concurrent generation requests share connection pools.
 - **Indexing**: vector upserts go to the adapter in batches, amortizing network round-trips.
 
@@ -73,10 +73,10 @@ The retrieval stack, in order:
 3. **Fusion** — **Reciprocal Rank Fusion with k=60**, the value recommended in the original 2009 SIGIR paper by Gordon V. Cormack, Charles L. A. Clarke, and Stefan Büttcher, *"Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning Methods,"* shown robust across TREC/LETOR benchmarks. `RRF(d) = Σ 1/(k + rank_i(d))`.
 4. **Reranking** — a **cross-encoder reranker** scores the fused top candidates (retrieve top 100–1000 → rerank → truncate to `top_k`).
 
-Documented trade-offs:
+Design rationale (**not measurements** — no ledger entry isolates either stage, so neither statement may be quoted as a number or a ranking; see [benchmarks.md](benchmarks.md) and TASK-0084):
 
-- Reranking adds **~100–300 ms per query** and is **the single biggest quality lever** in the stack.
-- Hybrid retrieval is **the highest-impact upgrade over pure vector search** — dense misses exact identifiers and rare terms that BM25 catches, and vice versa.
+- Reranking adds latency to every query, growing with `retrieval.rerank_top_n` and the size of the cross-encoder. **fasterRag has never measured the stage**, and the "~100–300 ms" figure earlier revisions of this document quoted had no source; it has been withdrawn rather than re-stated. Measure it on your own hardware with `fasterrag benchmark`.
+- Reranking and the sparse leg are the two levers this stack expects to matter most for retrieval quality, because dense search misses exact identifiers and rare terms that BM25 catches, and a cross-encoder sees the query and the passage together where a bi-encoder cannot. That is the reasoning behind the defaults, not a measured ranking of upgrades.
 
 ## 7. Caching
 
@@ -118,7 +118,7 @@ class VectorDBAdapter(ABC):
 
 Each request type additionally carries an optional **sparse vector**, because the BM25 leg lives inside the collection rather than in a separate index ([ADR-0007](adr/ADR-0007-bm25-as-backend-sparse-vectors.md)): `CollectionSpec.sparse` creates the keyword index, `Point.sparse` writes term frequencies alongside the dense vector, and `SearchQuery.sparse` runs the keyword leg. A `SearchQuery` carries exactly one leg — hybrid retrieval runs both and fuses the rankings in fasterRag, so `retrieval.rrf_k` is the constant that actually applies rather than whatever a backend's built-in fusion hard-codes.
 
-A **factory** reads `vector_db.provider` and instantiates the concrete adapter. **Qdrant is the reference implementation**; adapters ship for **Milvus, Weaviate, Pinecone, pgvector, Chroma**. A single `vector_db.provider` change swaps backends with **no application-code changes**. Rationale in [ADR-0001](adr/ADR-0001-qdrant-as-reference-vector-db.md) and [ADR-0002](adr/ADR-0002-adapter-factory-pluggability.md).
+A **factory** reads `vector_db.provider` and instantiates the concrete adapter. **Qdrant is the reference implementation**, and **pgvector** ships alongside it — a second, deliberately opposite (SQL) paradigm passing the same contract suite, which is what makes the vendor-neutral contract evidence rather than intent. **Milvus, Weaviate, Pinecone, and Chroma are specified but not built** (TASK-0049); the factory refuses them by name at config load rather than accepting the setting and failing later. A single `vector_db.provider` change swaps between the shipped backends with **no application-code changes**. Rationale in [ADR-0001](adr/ADR-0001-qdrant-as-reference-vector-db.md) and [ADR-0002](adr/ADR-0002-adapter-factory-pluggability.md).
 
 ### Qdrant specifics
 
@@ -135,7 +135,7 @@ Same pattern: `embeddings.provider` and `llm.provider` select concrete adapters 
 
 - `config.yaml` drives ALL behavior; `.env` holds ONLY soft credentials/secrets ([ADR-0003](adr/ADR-0003-config-yaml-env-split.md)).
 - Loader: **pydantic-settings** with a YAML source for config and env/`.env` for secrets. Validation runs at startup and **fails fast** with a clear error naming the offending key. This decouples application logic from the config source and enforces 12-factor separation of config and credentials.
-- **Every integration option defaults to `false`.** Flipping e.g. `langfuse: true` causes the system to read config, **auto-install**, perform **all required configuration** on the user's system, and return a **running URL** — with the strict rule that **no code changes are made at that moment** (pure config-driven provisioning). The provisioning path is idempotent and highly optimized (cached images, converge-to-desired-state). The same pattern applies to `grafana` and similar tools. Details in [observability.md](observability.md).
+- **Every integration option defaults to `false`.** Flipping e.g. `langfuse: true` causes the system to read config, **auto-install**, perform **all required configuration** on the user's system, and return a **running URL** — with the strict rule that **no code changes are made at that moment** (pure config-driven provisioning). The provisioning path is idempotent and converges to the desired state, reusing cached images rather than re-pulling them. The same pattern applies to `grafana` and similar tools. Details in [observability.md](observability.md).
 
 ## 11. Scaling patterns
 

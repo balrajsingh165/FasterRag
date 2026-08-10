@@ -8,10 +8,10 @@ fasterRag is released as an installable Python package so applications can **imp
 > |---|---|
 > | Standalone components — `fasterrag.parsing`, `.chunking`, `.retrieval`, `.rerank`, `.evals` | **Shipped** and importable today |
 > | Typed error taxonomy — `fasterrag.errors` (same `code`s as the API) | **Shipped** |
-> | `FasterRag` facade — `from_config`, `from_settings`, `ingest`, `query`, `query_stream`, `retrieve`, `estimate`, `index_lock` | **Shipped**. Verified end to end against live Qdrant and OpenAI |
+> | `FasterRag` facade — `from_config`, `from_settings`, `ingest`, `query`, `query_stream`, `retrieve`, `estimate`, `index_lock` | **Shipped**. Verified end to end against live Qdrant and OpenAI — a one-off manual run, not a committed test, since a unit run must not depend on a credential or spend money (the standing gap is TASK-0205) |
 > | `FasterRag.doctor`, `.collections`, `.create_collection`, `.drop_collection`, `.replay` | **Shipped** on both facades |
-> | `FasterRag.export_archive` / `.import_archive` | **Not yet implemented** (TASK-0079) — the portability archive itself is unbuilt, so there is nothing to wrap |
-> | `fasterrag.sync` blocking facade | **Shipped**. Verified end to end against live Qdrant and OpenAI |
+> | `FasterRag.export_archive` / `.import_archive` | **Not yet wrapped on the facade** (TASK-0079). The archive itself **is** built — `services/archive.py`, `services/archive_import.py`, the `export`/`import` CLI commands, and `POST /v1/admin/export` / `/import` all ship, and a Qdrant round trip is verified against a live backend (TASK-0214 ✅). Only the facade methods are missing |
+> | `fasterrag.sync` blocking facade | **Shipped**. Verified end to end against live Qdrant and OpenAI — a one-off manual run, not a committed test, since a unit run must not depend on a credential or spend money (the standing gap is TASK-0205) |
 > | Entry-point plugin groups (`fasterrag.vectordb` / `.embeddings` / `.llm`) | **Shipped**. All three factories resolve registered plugins; a built-in name always wins, so an installed package cannot silently take over a configured provider |
 > | PyPI wheels (`pip install fasterrag`) | **Not yet published** (TASK-0087) — install from source: `pip install -e ".[all]"` |
 >
@@ -37,7 +37,7 @@ OCR is optional for a second reason: it additionally requires the `tesseract` ex
 
 - Requires **Python 3.12+**.
 - Versioned by **SemVer 2.0.0**; the public API defined in this document is the compatibility contract — breaking it requires a major version bump and a CHANGELOG entry.
-- Wheels published to PyPI at every tagged release; dependencies pinned and hash-locked in the repo.
+- Dependencies pinned and hash-locked in the repo (`uv.lock`, gated by `uv lock --check` in CI). Publishing wheels to PyPI at every tagged release is the **intended** release process; **nothing has been published yet** (TASK-0087) and there has been no tagged release.
 
 ## Quickstart
 
@@ -130,7 +130,7 @@ The sync facade wraps the async engine in a managed event loop; it is a thin ada
 
 - **It owns its event loop**, created on `__enter__` and closed on `__exit__`. `asyncio.run` per call would tear down the connection pools between calls, and borrowing an ambient loop would make behavior depend on what the caller happened to be running.
 - **It refuses to start inside a running event loop**, raising `CONFIG_INVALID` and naming the async facade. Blocking on a future from the thread already driving that loop deadlocks, and a deadlock reports nothing at all.
-- **`query_stream` stays incremental.** Each event is pulled individually rather than the answer being buffered and replayed — measured first token at 0.91 s against a 51-event response. Buffering would make the return type honest and the feature pointless.
+- **`query_stream` stays incremental.** Each event is pulled individually rather than the answer being buffered and replayed, so the first token arrives long before the last. Buffering would make the return type honest and the feature pointless. (A one-off developer-machine run on 2026-08-03 saw the first token well ahead of a 51-event response; that is an illustration, not a ledger entry — no hardware, dataset, or repetitions, so no time-to-first-token figure is published here.)
 
 The same `__main__` guard requirement applies here as in the async quickstart: ingestion parses in worker processes.
 

@@ -4,6 +4,8 @@ Doctrine: **a claim without a measurement is a bug** ([reliability.md](reliabili
 
 ## 1. Testing pyramid (all layers required)
 
+> **Build status (2026-08-09 claims audit, TASK-0238).** "Required" is the target, not a report. Layers **1.1–1.6 and 1.9 are built and run in CI**. Layers **1.7 (load), 1.8 (soak), and 1.10 (mutation) do not exist**: no k6 or Locust script, no soak suite, and `mutmut` is not a dependency — the `load`, `soak`, and `mutation` markers are declared in `pyproject.toml` and used by no test. They are tracked as TASK-0243, and FMEA rows that name one of them as their proving test are annotated accordingly.
+
 ### 1.1 Unit tests
 
 - Fast, isolated, no network/containers; mirror the `src/` layout under `tests/unit/`.
@@ -31,7 +33,7 @@ Messy PDFs, complex tables, and scanned/OCR documents parsed → structured outp
 
 ### 1.5 Adapter contract suite
 
-**One shared test suite that every `VectorDBAdapter` implementation must pass** (`create_collection`, `upsert`, `search`, `update`, `delete`, `health`, filter push-down, batch semantics, idempotent upserts). This is what makes "any vector DB" a **tested promise instead of a hope** — including third-party adapters registered via entry points ([python-api.md](python-api.md)). Embedding and LLM adapters have equivalent (smaller) contract suites.
+**One shared test suite that every `VectorDBAdapter` implementation must pass** (`create_collection`, `upsert`, `search`, `update`, `delete`, `health`, filter push-down, batch semantics, idempotent upserts). Two adapters currently pass it — **Qdrant and pgvector** — which is what turns "any vector DB" from an assertion into evidence against a genuinely different (SQL) paradigm; it is not yet a promise tested across all six backends named in [scope.md](scope.md), because four of them are unbuilt (TASK-0049). Third-party adapters registered via entry points run the same suite ([python-api.md](python-api.md)). Embedding and LLM adapters have equivalent (smaller) contract suites.
 
 ### 1.6 Retrieval eval harness
 
@@ -62,29 +64,35 @@ Messy PDFs, complex tables, and scanned/OCR documents parsed → structured outp
 
 Golden sets are versioned files; a set edit that changes scores is reviewed like code, and archives export them (`golden-set.jsonl`, [archive-format.md](archive-format.md)).
 
-### 1.7 Load tests (k6 or Locust)
+### 1.7 Load tests (k6 or Locust) — **NOT BUILT** (TASK-0243)
 
-Scripted scenarios (query-only, ingest-only, mixed) at stepped concurrency; publish p50/p95 **with the exact hardware spec** into the benchmark ledger. No load number is ever quoted without its hardware line.
+*Specified:* scripted scenarios (query-only, ingest-only, mixed) at stepped concurrency; publish p50/p95 **with the exact hardware spec** into the benchmark ledger. No load number is ever quoted without its hardware line.
 
-### 1.8 Soak test
+*As built:* no k6 or Locust script exists in this repository. The `load` pytest marker is declared and unused.
 
-24 h sustained ingest + query at moderate load; assert **no memory growth and no file-descriptor growth** (RSS and fd counts sampled and trend-tested), no queue leakage, no journal bloat.
+### 1.8 Soak test — **NOT BUILT** (TASK-0243)
+
+*Specified:* 24 h sustained ingest + query at moderate load; assert **no memory growth and no file-descriptor growth** (RSS and fd counts sampled and trend-tested), no queue leakage, no journal bloat.
+
+*As built:* no soak suite exists. The `soak` pytest marker is declared and unused. Nothing currently verifies the absence of memory or fd growth.
 
 ### 1.9 Chaos suite (scripted, repeatable — D12)
 
 | Injected fault | Asserted behavior |
 |---|---|
 | Kill an embedding worker mid-batch | Job resumes from the queue; **no duplicate vectors** (idempotent upserts). |
-| Stop the Qdrant container | Circuit opens; degraded `cache_only` responses with `degraded: true`; automatic recovery when it returns. |
+| Stop the Qdrant container | *Specified:* circuit opens; degraded `cache_only` responses with `degraded: true`; automatic recovery when it returns. **As built:** the breaker opens and recovery is automatic, but the `cache_only` rung does not exist (TASK-0159), so the suite asserts a retryable `RETRIEVAL_FAILED` instead — see [failure-modes.md](failure-modes.md) §observed behavior. |
 | Feed a corrupt/malformed document | Routed to DLQ with reason code; pipeline continues. |
 | Slow LLM (latency injection) | `reliability.timeouts.llm_ms` triggers; degradation ladder serves `extractive` mode. |
 | Disk-full during ingest | Clean halt with typed error; resumable from the journal checkpoint after space is freed. |
 
 Every scenario is a script in the repo; observed behavior is recorded in [failure-modes.md](failure-modes.md). Reliability anyone can re-run.
 
-### 1.10 Mutation testing (mutmut)
+### 1.10 Mutation testing (mutmut) — **NOT BUILT** (TASK-0243)
 
-Sampled on the two places where a subtle bug silently ruins quality: **chunk-boundary logic** and **retrieval-scoring/fusion logic**. Surviving mutants are triaged as missing-test bugs in [todo.md](todo.md).
+*Specified:* sampled on the two places where a subtle bug silently ruins quality — **chunk-boundary logic** and **retrieval-scoring/fusion logic**. Surviving mutants are triaged as missing-test bugs in [todo.md](todo.md).
+
+*As built:* `mutmut` is not a dependency and has no configuration; the `mutation` marker is declared and unused. Mutation checking is done **by hand** today — several slices record deliberately breaking the code and confirming exactly one test fails (TASK-0193, TASK-0208, TASK-0211, TASK-0229, TASK-0232) — which is the practice this layer would automate, not a substitute for it.
 
 ## 2. CI quality gates (all blocking)
 
@@ -93,7 +101,7 @@ Sampled on the two places where a subtle bug silently ruins quality: **chunk-bou
 3. Unit tests green; coverage ≥ 85% on `core/`, `adapters/`, `workers/`.
 4. Integration tests green (testcontainers).
 5. Adapter contract suite green for all in-repo adapters.
-6. Eval harness within regression tolerances (D7 gate) when retrieval-affecting paths change.
+6. Eval harness runs (`pytest -m eval`, the `models` job). **The D7 tolerance gate is not wired into CI** — `services/regression.py` and `fasterrag benchmark --suite eval` implement it, but no CI step compares against the committed baseline, so this gate is not currently blocking (TASK-0244).
 7. Secret scanning clean; dependency lockfile up to date ([security.md](security.md)).
 8. Commit-message rule enforced (single line, no trailers) via pre-commit/CI check.
 9. Docs updated in the same change for any behavior change (reviewed, not automated).
@@ -112,8 +120,9 @@ Sampled on the two places where a subtle bug silently ruins quality: **chunk-bou
 | (none) unit | every push, < 2 min | nothing external |
 | `integration` | every PR | Docker (testcontainers) |
 | `eval` | PRs touching retrieval paths + nightly | small datasets in repo |
-| `load`, `soak`, `chaos` | nightly/weekly + before every release; results → ledger | reference hardware |
-| `mutation` | weekly | — |
+| `chaos` | runnable now against a local stack | Docker |
+| `load`, `soak` | *planned* — no test carries either marker yet (TASK-0243); results would go to the ledger | reference hardware (TASK-0084) |
+| `mutation` | *planned* — no test carries the marker; `mutmut` is not installed (TASK-0243) | — |
 
 ## 4. Definition of done for any implemented feature
 

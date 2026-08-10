@@ -148,7 +148,7 @@ What retrieval returns internally and what `--show-chunks` / `include_chunks` ex
 | `answer` | str\|null | `null` when grounded-or-refuse declined (D5) |
 | `citations` | list[Citation] | Mandatory and non-empty whenever `answer` is non-null and `generation.citations: true` |
 | `chunks` | list[ScoredChunk]\|null | Present only when explicitly requested |
-| `usage` | `{prompt_tokens, completion_tokens, estimated_cost_usd}` | |
+| `usage` | `{prompt_tokens, completion_tokens}` | `estimated_cost_usd` is **specified but not emitted** (TASK-0242); per-query cost currently reaches operators through the `fasterrag_cost_usd_total` metric, not the response body. |
 | `timings_ms` | object | Per stage: `embed`, `retrieve`, `fuse`, `rerank`, `assemble`, `generate`, `total` |
 | `degraded` | bool | True whenever `mode != "full"` |
 | `mode` | str | `full` \| `hybrid_only` \| `cache_only` \| `extractive` (D4) |

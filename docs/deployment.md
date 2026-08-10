@@ -2,7 +2,7 @@
 
 fasterRag is self-hosted software in beta (no managed cloud). Three ways to run it:
 
-1. **Library mode** — `pip install fasterrag`, embed in your own process ([python-api.md](python-api.md)).
+1. **Library mode** — embed in your own process ([python-api.md](python-api.md)). Install from a source checkout (`pip install -e ".[all]"`) — **`pip install fasterrag` does not work yet**, because nothing has been published to PyPI (TASK-0087, blocked on the license decision TASK-0164 and the version stamp TASK-0020).
 2. **Service mode** — `fasterrag serve` (API) + `fasterrag worker` (pipelines) as processes.
 3. **Docker mode** — compose profiles for the full stack.
 

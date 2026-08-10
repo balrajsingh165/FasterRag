@@ -6,7 +6,7 @@
 >
 > | Shipped | Partial | Not yet |
 > |---|---|---|
-> | Config loader (fail-fast) · Qdrant adapter (docker/external/remote) + contract suite · `doctor` · parsing (PDF/OCR, HTML, MD, DOCX, tabular) · five chunkers with property-tested invariants · checkpointed ingestion with dedup + DLQ from `path`/`url`/`inline` sources · hybrid retrieval + RRF(k=60) · cross-encoder rerank · SSE generation with span citations · grounded-or-refuse · embedding + semantic caches · eval harness (recall/MRR/nDCG + faithfulness) · `FasterRag` facade (async + sync) + entry-point plugins · CLI · REST routers · trace store + replay · index lockfile + drift · blue/green reindex + rollback · chaos suite · benchmark suite + ledger · autopilot (suggest-only) · Langfuse/Grafana provisioning | Degradation ladder (2 of 3 rungs; no circuit breaker yet) · cost estimator (budgets not enforced) · OTel spans recorded locally (OTLP export pending) | Security layer (auth/tenancy/rate limits — config validates but is **not enforced**) · D11 export/import · Milvus/Weaviate/Pinecone/pgvector/Chroma adapters · observability dashboard (S14) · **citable benchmarks — the [ledger](docs/benchmarks.md) holds only non-citable entries until the isolated-hardware baseline run** |
+> | Config loader (fail-fast) · Qdrant adapter (docker/external/remote) **and pgvector adapter**, both passing the shared contract suite · `doctor` · parsing (PDF/OCR, HTML, MD, DOCX, tabular) · five chunkers with property-tested invariants · contextual enrichment · checkpointed ingestion with dedup + DLQ from `path`/`url`/`inline` sources · hybrid retrieval + RRF(k=60) · cross-encoder rerank · SSE generation with span citations · grounded-or-refuse · embedding + semantic caches (memory/disk/redis) · eval harness (recall/MRR/nDCG + faithfulness) · `FasterRag` facade (async + sync) + entry-point plugins · CLI · REST routers · trace store + replay · index lockfile + drift · blue/green reindex + rollback · chaos suite · benchmark suite + ledger · autopilot (suggest-only) · Langfuse/Grafana provisioning · **API-key auth with scopes, rate limiting, and multi-tenancy** · **circuit breaker** · **OTLP trace + metric export** · **read-only observability dashboard** · Docker image + compose profiles | Degradation ladder (`hybrid_only` and `extractive` served; the `cache_only` rung is specified but not built — TASK-0159) · cost **estimator** (preflight only; the runtime cost governor is not built, and setting either `cost.*_token_budget` refuses startup rather than enforcing a budget) · D11 export/import (archive round-trip verified against a live Qdrant; the cross-backend re-embed path still needs a second backend) | Milvus/Weaviate/Pinecone/Chroma adapters · cost governor (`BUDGET_EXCEEDED` / 402) · load, soak, and mutation test layers · PyPI publication · **citable benchmarks — the [ledger](docs/benchmarks.md) holds only non-citable entries until the isolated-hardware baseline run** |
 
 ---
 
@@ -27,9 +27,9 @@ There is deliberately **no control GUI**. A separate, optional, self-hosted dash
 Most RAG stacks make you assemble chunking, retrieval, reranking, caching, evaluation, and observability by hand — then leave you guessing whether any of it works. fasterRag's answer is an **engineered pipeline with proof built in**:
 
 - **Speed by architecture** *(shipped; unmeasured — no citable benchmark yet)*: decoupled CPU parse/chunk pool streaming into stateful embedding workers (model loaded once per worker), bounded queues with backpressure, batched embedding and upserts, async-everything API, SSE streaming for time-to-first-token. See [docs/architecture.md](docs/architecture.md).
-- **Retrieval quality by default** *(shipped except contextual enrichment, which is pending)*: hybrid dense + BM25 retrieval fused with Reciprocal Rank Fusion (k=60, per Cormack/Clarke/Büttcher SIGIR 2009) and cross-encoder reranking; contextual-retrieval-style chunk enrichment (Anthropic's Sept 2024 results: −49% failed retrievals, −67% with reranking) is specified and tracked in [docs/todo.md](docs/todo.md). See [docs/adr/ADR-0004](docs/adr/ADR-0004-hybrid-search-plus-reranking.md).
-- **Total pluggability** *(partial)*: Qdrant (reference adapter, shipped, contract-suite-tested in all three modes); Milvus/Weaviate/Pinecone/pgvector/Chroma adapters pending. OpenAI/Cohere/HuggingFace/Ollama embeddings and OpenAI/Anthropic/Cohere/Ollama/OpenAI-compatible LLMs: shipped. Entry-point plugin registration: pending. See [docs/integrations.md](docs/integrations.md).
-- **Reliability as a feature** *(partial)*: typed error taxonomy, RFC 9457 problem responses, bulkheads, timeouts + backoff retries, checkpointed exactly-once ingestion with a dead-letter queue, zero-downtime blue/green reindexing, and a public chaos suite: shipped. Circuit breaker and the `cache_only` degradation rung: specified, not yet built. See [docs/reliability.md](docs/reliability.md), [docs/differentiators.md](docs/differentiators.md).
+- **Retrieval quality by default** *(shipped)*: hybrid dense + BM25 retrieval fused with Reciprocal Rank Fusion (k=60, per Cormack/Clarke/Büttcher SIGIR 2009) and cross-encoder reranking; contextual-retrieval-style chunk enrichment (Anthropic's Sept 2024 results: −49% failed retrievals, −67% with reranking — their measurement, not ours). See [docs/adr/ADR-0004](docs/adr/ADR-0004-hybrid-search-plus-reranking.md).
+- **Total pluggability** *(partial)*: Qdrant (reference adapter, contract-suite-tested in all three modes) and pgvector both shipped, which is what makes the vendor-neutral contract evidence rather than intent; Milvus/Weaviate/Pinecone/Chroma adapters pending (TASK-0049) and refused at config load rather than silently accepted. OpenAI/Cohere/HuggingFace/Ollama embeddings and OpenAI/Anthropic/Cohere/Ollama/OpenAI-compatible LLMs: shipped. Entry-point plugin registration: shipped. See [docs/integrations.md](docs/integrations.md).
+- **Reliability as a feature** *(partial)*: typed error taxonomy, RFC 9457 problem responses, bulkheads, timeouts + backoff retries, checkpointed exactly-once ingestion with a dead-letter queue, zero-downtime blue/green reindexing, a circuit breaker on the embedding and vector-DB paths, and a public chaos suite: shipped. The `cache_only` degradation rung and a breaker on the LLM path: specified, not yet built. See [docs/reliability.md](docs/reliability.md), [docs/differentiators.md](docs/differentiators.md).
 
 ## Sixty-second tour *(works today, from a source checkout)*
 
@@ -38,7 +38,7 @@ pip install -e ".[all]"          # PyPI publication lands with the first tagged 
 fasterrag doctor                 # preflight: Docker, ports, disk, keys — every failure prints a fix
 fasterrag provision qdrant       # config-driven; system-managed container, named volume
 fasterrag estimate ./my-docs/    # token counts + projected embedding cost BEFORE ingesting
-fasterrag ingest ./my-docs/ --watch
+fasterrag ingest ./my-docs/      # runs inline to completion (`--watch` is declared but not yet implemented — TASK-0196)
 fasterrag query "What does the vendor agreement say about termination?"
 ```
 
@@ -110,7 +110,7 @@ All documentation lives in [`docs/`](docs/) (only `CLAUDE.md` and this README si
 2. **Control plane is programmatic only** (API/CLI/library); the dashboard is read-only observability.
 3. **A claim without a measurement is a bug** — unmeasured statements are goals, and "fastest" is only ever claimed against a baseline we measured ourselves.
 4. **Reliability is tested, not asserted** — FMEA rows name their proving tests; the chaos suite is public.
-5. **Incremental, revertible shipping** — feature branches, single-line commits, slice tags, a written revert playbook.
+5. **Incremental, revertible shipping** — trunk-based on `main` (no feature branches), single-line commits, slice tags, a written revert playbook.
 
 ## Contributing
 
