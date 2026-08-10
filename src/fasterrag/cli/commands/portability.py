@@ -3,6 +3,10 @@
 Both are thin: verification and writing live in ``services/archive`` and
 ``services/archive_import``, because the REST endpoints must behave identically and a rule
 enforced in a CLI handler is a rule the API does not have.
+
+A retryable failure exits 3, not 1, exactly as every other command does. These two returned 1
+for an unreachable backend, which made ``export`` the one command a retry wrapper could not
+branch on.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ async def run_export(args: argparse.Namespace, console: Console) -> ExitCode:
 
     collection = args.collection or settings.vector_db.collection.default_name
     store = create_lock_store(settings)
-    lock = store.read(collection) if store is not None and store.enabled else None
+    lock = store.read(collection) if store.enabled else None
 
     adapter = create_vector_db_adapter(settings)
     try:
@@ -46,7 +50,7 @@ async def run_export(args: argparse.Namespace, console: Console) -> ExitCode:
         )
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
-        return ExitCode.FAILURE
+        return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
     finally:
         await adapter.close()
 
@@ -93,7 +97,7 @@ async def run_import(args: argparse.Namespace, console: Console) -> ExitCode:
         )
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
-        return ExitCode.FAILURE
+        return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
     finally:
         await adapter.close()
         if router is not None:

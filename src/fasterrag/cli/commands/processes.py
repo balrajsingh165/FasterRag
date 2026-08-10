@@ -22,6 +22,7 @@ from fasterrag.cli.settings import settings_from
 from fasterrag.errors import ConfigError, FasterRagError
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import create_journal
+from fasterrag.workers.cpu_pool import resolve_pool_size
 
 __all__ = ["run_serve", "run_worker"]
 
@@ -114,7 +115,11 @@ async def run_worker(args: argparse.Namespace, console: Console) -> ExitCode:
             )
             return ExitCode.UNREACHABLE
 
-        cpu = args.cpu_workers or settings.workers.cpu_pool_size
+        # CRITICAL: the configured 0 is resolved to the CPU count before it is reported.
+        # `workers.cpu_pool_size: 0` is documented as "auto", and printing the raw 0 told an
+        # operator the process runs no parse workers at all while it was about to start one
+        # per core.
+        cpu = resolve_pool_size(args.cpu_workers or settings.workers.cpu_pool_size)
         embed = args.embed_workers or settings.workers.embedding_pool_size
         console.emit(f"worker ready: pools={','.join(pools)} cpu={cpu} embed={embed}")
         console.document({"pools": pools, "cpu": cpu, "embed": embed, "status": "ready"})
