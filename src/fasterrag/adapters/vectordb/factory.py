@@ -33,12 +33,11 @@ AdapterFactory = Callable[[Settings], VectorDBAdapter]
 
 _BUILTIN_ADAPTERS: Final[dict[str, str]] = {
     "qdrant": "fasterrag.adapters.vectordb.qdrant:QdrantAdapter",
+    "pgvector": "fasterrag.adapters.vectordb.pgvector:PgvectorAdapter",
 }
 
-# TODO: TASK-0049 ships the milvus, weaviate, pinecone, pgvector, and chroma adapters.
-_PLANNED_ADAPTERS: Final[frozenset[str]] = frozenset(
-    {"milvus", "weaviate", "pinecone", "pgvector", "chroma"}
-)
+# TODO: TASK-0049 ships the remaining milvus, weaviate, pinecone, and chroma adapters.
+_PLANNED_ADAPTERS: Final[frozenset[str]] = frozenset({"milvus", "weaviate", "pinecone", "chroma"})
 
 
 def _plugin_entry_points() -> dict[str, EntryPoint]:
@@ -99,8 +98,8 @@ def resolve_adapter_class(provider: str) -> type[VectorDBAdapter]:
     if provider in _PLANNED_ADAPTERS:
         raise ConfigError(
             f"vector_db.provider {provider!r} is specified but its adapter is not built "
-            "yet in this version; use 'qdrant', or register your own implementation "
-            f"through the {ENTRY_POINT_GROUP!r} entry point"
+            "yet in this version; use 'qdrant' or 'pgvector', or register your own "
+            f"implementation through the {ENTRY_POINT_GROUP!r} entry point"
         )
 
     known = ", ".join(sorted(available_providers()))

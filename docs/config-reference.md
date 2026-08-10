@@ -29,6 +29,9 @@ vector_db:
   docker:
     image: qdrant/qdrant:v1.18.1
     volume: fasterrag_qdrant_storage
+  pgvector:
+    dsn_env: null
+    db_schema: fasterrag
   collection:
     default_name: default
     distance: cosine
@@ -200,6 +203,8 @@ security:
 | `vector_db.api_key_env` | str\|null | `QDRANT_API_KEY` | valid env-var name or null | Name of the env var holding the backend API key (Qdrant: consumed as `QDRANT__SERVICE__API_KEY` on the server side). Never the key itself. Null = unauthenticated (local dev only). |
 | `vector_db.docker.image` | str | `qdrant/qdrant:v1.18.1` | non-empty image ref; pinned tag required (no `latest`) | Image used in `docker` mode. |
 | `vector_db.docker.volume` | str | `fasterrag_qdrant_storage` | valid Docker volume name | Storage volume for persistence. **On Windows/WSL this MUST be a named Docker volume** — bind mounts have known file-system data-loss issues per Qdrant's install docs. The loader rejects bind-mount paths on Windows/WSL. |
+| `vector_db.pgvector.dsn_env` | str\|null | `null` | valid env-var name | Name of the environment variable holding the PostgreSQL DSN. **Required when `provider: pgvector`** (cross-field rule 11) and left unset otherwise — it defaults to `null` rather than to a name because every populated `*_env` key is required to be present at startup by rule 9, so a default would demand a PostgreSQL DSN from every Qdrant deployment. A DSN carries the password, so it is named here and stored in `.env`, never in `config.yaml`. `host`, `port`, and `grpc_port` are ignored by this provider: a usable connection string already carries the host, the database, the role, and the SSL mode. |
+| `vector_db.pgvector.db_schema` | str | `fasterrag` | `^[a-z_][a-z0-9_]{0,62}$` | PostgreSQL schema the adapter owns. It holds the three catalog tables (`fasterrag_collections`, `fasterrag_aliases`, `fasterrag_snapshots`) plus one table per collection, so pointing two deployments at one database with different schemas keeps them isolated. Created on first use if absent. |
 | `vector_db.collection.default_name` | str | `default` | `^[a-zA-Z0-9_-]{1,64}$` | Default collection name. |
 | `vector_db.collection.distance` | str | `cosine` | one of `cosine`, `dot`, `euclid` | Distance metric for dense vectors. |
 | `vector_db.collection.shard_number` | int | `1` | ≥ 1 | Shards per collection (scaling knob; passed through the adapter). |
@@ -422,3 +427,4 @@ All integration toggles default `false`.
 8. `embeddings.tiering.rules` non-empty when `embeddings.tiering.enabled: true`.
 9. Any referenced `*_env` variable that is missing from the environment/`.env` at startup is a fatal `ConfigError` naming the variable (its value is never logged).
 10. `index.reindex.strategy: in_place` logs a prominent warning (dev-only path; no zero-downtime guarantee).
+11. `vector_db.pgvector.dsn_env` required when `vector_db.provider: pgvector`.

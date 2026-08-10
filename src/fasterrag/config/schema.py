@@ -34,6 +34,7 @@ __all__ = [
     "LlmSettings",
     "ObservabilitySettings",
     "ParsingSettings",
+    "PgvectorSettings",
     "ReliabilitySettings",
     "RetrievalSettings",
     "SecuritySettings",
@@ -49,6 +50,7 @@ _HOSTNAME_RE = re.compile(
     r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
 )
 _COLLECTION_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_PG_IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _DOCKER_VOLUME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 _HTTP_HEADER_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 _PATH_LIKE_RE = re.compile(r"^(~|\.{1,2}[\\/]|[A-Za-z]:[\\/])|[\\/]")
@@ -176,6 +178,41 @@ class DockerSettings(Section):
         return value
 
 
+class PgvectorSettings(Section):
+    """PostgreSQL connection and layout settings for ``vector_db.provider: pgvector``.
+
+    PostgreSQL is reached through a libpq DSN rather than ``vector_db.host`` and ``port``,
+    because a usable connection string also carries the database, the role, and the SSL
+    mode — and it carries the password, which is why it is named by environment variable
+    and never written into ``config.yaml``.
+    """
+
+    # CRITICAL: this defaults to None, not to "PGVECTOR_DSN". Every populated `*_env` field
+    # anywhere in the settings tree is collected by `referenced_env_vars` and then required
+    # to be present at startup by cross-field rule 9 — so a default here would demand a
+    # PostgreSQL DSN from every deployment, including the Qdrant ones that will never open a
+    # Postgres connection. Rule 10 below asks for it only when the provider is pgvector.
+    dsn_env: str | None = None
+    db_schema: str = "fasterrag"
+
+    @field_validator("dsn_env")
+    @classmethod
+    def _check_dsn_env(cls, value: str | None) -> str | None:
+        """Require an environment-variable name, never a DSN containing a password."""
+        return _validate_env_var_name(value)
+
+    @field_validator("db_schema")
+    @classmethod
+    def _check_db_schema(cls, value: str) -> str:
+        """Require a plain lower-case PostgreSQL identifier for the fasterRag schema."""
+        if not _PG_IDENTIFIER_RE.match(value):
+            raise ValueError(
+                f"{value!r} must be a lower-case PostgreSQL identifier matching "
+                "^[a-z_][a-z0-9_]{0,62}$"
+            )
+        return value
+
+
 class CollectionSettings(Section):
     """Defaults applied when a collection is created through an adapter."""
 
@@ -205,6 +242,7 @@ class VectorDbSettings(Section):
     https: bool = False
     api_key_env: str | None = "QDRANT_API_KEY"
     docker: DockerSettings = DockerSettings()
+    pgvector: PgvectorSettings = PgvectorSettings()
     collection: CollectionSettings = CollectionSettings()
 
     @field_validator("host")
@@ -230,6 +268,17 @@ class VectorDbSettings(Section):
             raise ValueError(
                 f"vector_db.grpc_port ({self.grpc_port}) must differ from vector_db.port; "
                 "both 6333 (REST) and 6334 (gRPC) must be reachable"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_pgvector_dsn(self) -> Self:
+        """Enforce cross-field rule 11: pgvector needs a DSN, and only pgvector does."""
+        if self.provider == "pgvector" and self.pgvector.dsn_env is None:
+            raise ValueError(
+                "vector_db.pgvector.dsn_env is required when vector_db.provider is "
+                "'pgvector'; name the environment variable holding the libpq connection "
+                "string, for example dsn_env: PGVECTOR_DSN"
             )
         return self
 

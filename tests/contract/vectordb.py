@@ -191,6 +191,31 @@ class VectorDBContract:
         assert hits[0].point_id == "c_a"
         assert hits[0].payload["department"] == "legal"
 
+    async def test_a_closer_point_scores_higher_than_a_further_one(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        """Under the default cosine distance, ``score`` must rank higher-is-better.
+
+        Nothing else in this contract looked at ``score``, only at order — and the two come
+        apart. A SQL adapter naturally orders by the distance operator itself, so returning a
+        raw cosine *distance* as the score leaves every result in the right position with the
+        sign of its score inverted. Breaking pgvector's score expression that way passed all
+        43 of its cases, which is what prompted this.
+
+        It matters because the score leaves the adapter: it reaches API responses, traces,
+        and the dashboard, and a caller comparing two backends' numbers would read one of
+        them exactly backwards.
+        """
+        await self.seed(adapter, collection)
+
+        hits = await adapter.search(
+            SearchQuery(collection=collection, vector=VECTORS["a"], limit=3)
+        )
+
+        assert hits[0].point_id == "c_a"
+        assert hits[0].score > hits[-1].score
+        assert [hit.score for hit in hits] == sorted((hit.score for hit in hits), reverse=True)
+
     async def test_upsert_is_idempotent(self, adapter: VectorDBAdapter, collection: str) -> None:
         await self.seed(adapter, collection)
         await self.seed(adapter, collection)

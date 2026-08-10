@@ -27,6 +27,9 @@ vector_db:
     distance: cosine
     shard_number: 1
     replication_factor: 1
+  pgvector:
+    dsn_env: null
+    db_schema: fasterrag
 
 embeddings:
   provider: huggingface

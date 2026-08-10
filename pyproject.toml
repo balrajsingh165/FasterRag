@@ -59,6 +59,7 @@ anthropic = ["anthropic>=0.40"]
 cohere = ["cohere>=5.5"]
 ollama = ["ollama>=0.3"]
 redis = ["redis>=5.0"]
+pgvector = ["psycopg[binary]>=3.2", "pgvector>=0.3"]
 otel = [
     "opentelemetry-exporter-otlp-proto-http>=1.27",
     "opentelemetry-sdk>=1.27",
@@ -70,7 +71,9 @@ all = [
     "openai>=1.40",
     "opentelemetry-exporter-otlp-proto-http>=1.27",
     "opentelemetry-sdk>=1.27",
+    "pgvector>=0.3",
     "pillow>=10.0",
+    "psycopg[binary]>=3.2",
     "pytesseract>=0.3.10",
     "redis>=5.0",
     "sentence-transformers>=3.0",
@@ -84,9 +87,12 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
-    # CRITICAL: the unit and integration CI jobs install only `.[dev]`, so the redis client
-    # belongs here as well as in its own extra — without it the RedisStore suite would skip
-    # in exactly the environment that is supposed to be gating it.
+    # CRITICAL: the unit and integration CI jobs install only `.[dev]`, so the redis and
+    # PostgreSQL clients belong here as well as in their own extras — without them the
+    # RedisStore and pgvector suites would skip in exactly the environment that is
+    # supposed to be gating them.
+    "pgvector>=0.3",
+    "psycopg[binary]>=3.2",
     "redis>=5.0",
     "reportlab>=4.0",
     "ruff>=0.6",
