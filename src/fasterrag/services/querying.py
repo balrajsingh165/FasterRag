@@ -22,7 +22,7 @@ failing the query, because unranked results beat no answer (D4).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,6 +36,7 @@ from fasterrag.adapters.vectordb.base import (
 )
 from fasterrag.adapters.vectordb.qdrant import POINT_ID_PAYLOAD_KEY
 from fasterrag.config.schema import Settings
+from fasterrag.core.breaker import CircuitBreaker
 from fasterrag.core.rerank import Reranker
 from fasterrag.core.retrieval.bm25 import encode_query
 from fasterrag.core.retrieval.fusion import Ranking, rrf_fuse
@@ -73,6 +74,7 @@ class RetrievalService:
         adapter: VectorDBAdapter,
         router: TieringRouter,
         reranker: Reranker | None = None,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         """Build the service.
 
@@ -84,11 +86,21 @@ class RetrievalService:
                 must be embedded by the same model that embedded the corpus.
             reranker: Reorders the shortlist. Omitted when ``retrieval.rerank`` is off, and
                 a failing one degrades the response rather than failing the query.
+            breaker: Circuit breaker for the vector database. Built from
+                ``reliability.circuit_breaker`` when omitted; injected by tests.
         """
         self.settings = settings
         self.adapter = adapter
         self.router = router
         self.reranker = reranker
+        # CRITICAL: one breaker for the life of the service, as in GenerationService and
+        # EmbeddingPool. A breaker rebuilt per query counts to one forever and never opens.
+        self.breaker = breaker or CircuitBreaker(
+            provider="vector_db",
+            failure_threshold=settings.reliability.circuit_breaker.failure_threshold,
+            reset_timeout_ms=settings.reliability.circuit_breaker.reset_timeout_ms,
+            enabled=settings.reliability.circuit_breaker.enabled,
+        )
 
     async def retrieve(
         self,
@@ -179,8 +191,43 @@ class RetrievalService:
         candidates: int,
         filters: Filter | None,
     ) -> dict[str, list[ScoredPoint]]:
-        """Run every configured leg concurrently and return their results by name."""
+        """Run the legs behind the vector-database breaker.
+
+        Retrieval is the one outbound call on the query path with nowhere to degrade to: a
+        failure here means there is nothing to answer *from*, so it surfaces rather than
+        dropping a rung the way a failed reranker or a failed generation does. That is
+        exactly why the breaker matters here — without it a backend that is down is retried
+        on every request, and the retries are the load keeping it down.
+
+        ``CircuitOpenError`` carries ``CIRCUIT_OPEN``, which the problem table already maps
+        to a retryable 503, so shedding is reported as the temporary condition it is.
+        """
+        # CRITICAL: the query is embedded *outside* the guarded region. It is an embedding
+        # provider call sitting on the retrieval path, and counting its failures here would
+        # open the vector-database breaker for an outage the vector database had no part in
+        # — shedding reads against a backend that is perfectly healthy, and hiding the real
+        # provider behind the wrong gauge.
         vector = await self.router.default.embed_query(text)
+
+        self.breaker.check()
+        try:
+            legs = await self._execute_legs(vector, text, collection, candidates, filters)
+        except FasterRagError as exc:
+            self.breaker.record_failure(exc)
+            raise
+
+        self.breaker.record_success()
+        return legs
+
+    async def _execute_legs(
+        self,
+        vector: Sequence[float],
+        text: str,
+        collection: str,
+        candidates: int,
+        filters: Filter | None,
+    ) -> dict[str, list[ScoredPoint]]:
+        """Run every configured leg concurrently and return their results by name."""
         dense = self.adapter.search(
             SearchQuery(
                 collection=collection,

@@ -19,7 +19,7 @@ from fasterrag.adapters.vectordb.base import (
 )
 from fasterrag.config.schema import Settings
 from fasterrag.core.retrieval.models import ScoredChunk
-from fasterrag.errors import ErrorCode, FasterRagError, RetrievalError
+from fasterrag.errors import EmbedError, ErrorCode, FasterRagError, RetrievalError
 from fasterrag.services.querying import FULL_MODE, HYBRID_ONLY_MODE, RetrievalService
 
 
@@ -424,3 +424,74 @@ async def test_reranking_is_skipped_when_the_config_disables_it() -> None:
     assert reranker.calls == []
     assert result.mode == FULL_MODE
     assert [chunk.chunk_id for chunk in result.chunks] == ["c_a", "c_b"]
+
+
+class FailingAdapter(ScriptedAdapter):
+    """Fails every search with a retryable backend error."""
+
+    async def search(self, query: SearchQuery) -> list[ScoredPoint]:
+        self.queries.append(query)
+        raise RetrievalError("the backend is unreachable", retryable=True)
+
+
+async def test_repeated_backend_failures_open_the_vector_db_breaker() -> None:
+    """Retrieval is the one outbound call on the query path with nowhere to degrade to.
+
+    A failure here means there is nothing to answer *from*, so it surfaces rather than
+    dropping a rung. That is precisely why shedding matters: without a breaker a backend that
+    is down is searched again on every request, and those retries are the load keeping it
+    down. Filed as TASK-0257 after TASK-0245 wired the LLM one.
+    """
+    resolved = settings()
+    adapter = FailingAdapter(resolved)
+    service = RetrievalService(resolved, adapter, TieringRouter(StubEmbedder(resolved)))
+    service.breaker.failure_threshold = 2
+
+    for _ in range(2):
+        with pytest.raises(FasterRagError):
+            await service.search("what is the notice period")
+
+    searches_before = len(adapter.queries)
+    with pytest.raises(FasterRagError) as caught:
+        await service.search("what is the notice period")
+
+    assert service.breaker.is_open is True
+    assert len(adapter.queries) == searches_before, "searched through an open breaker"
+    assert caught.value.code is ErrorCode.CIRCUIT_OPEN
+    assert caught.value.retryable is True
+
+
+async def test_an_embedding_outage_never_opens_the_vector_db_breaker() -> None:
+    """The query embedding is a *provider* call sitting on the retrieval path.
+
+    Counting its failures against the vector database would shed reads from a backend that is
+    perfectly healthy, and hide the real provider behind the wrong gauge. Caught while writing
+    this: the embed call was originally inside the guarded region.
+    """
+
+    class FailingEmbedder(StubEmbedder):
+        async def embed_query(self, text: str) -> list[float]:
+            raise EmbedError("the embedding provider is down", retryable=True)
+
+    resolved = settings()
+    adapter = ScriptedAdapter(resolved)
+    service = RetrievalService(resolved, adapter, TieringRouter(FailingEmbedder(resolved)))
+    service.breaker.failure_threshold = 1
+
+    for _ in range(3):
+        with pytest.raises(EmbedError):
+            await service.search("what is the notice period")
+
+    assert service.breaker.is_open is False
+
+
+async def test_a_recovered_backend_clears_the_failure_count() -> None:
+    """Failing, succeeding, then failing again against a threshold of two must stay closed."""
+    service, _ = build()
+    service.breaker.failure_threshold = 2
+    service.breaker.record_failure(RetrievalError("blip", retryable=True))
+
+    await service.search("what is the notice period")
+    service.breaker.record_failure(RetrievalError("another blip", retryable=True))
+
+    assert service.breaker.is_open is False
