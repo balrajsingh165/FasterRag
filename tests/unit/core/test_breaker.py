@@ -9,12 +9,10 @@ from typing import Any
 
 import pytest
 
-from fasterrag.config.schema import Settings
 from fasterrag.core.breaker import (
     CircuitBreaker,
     CircuitOpenError,
     CircuitState,
-    create_breakers,
 )
 from fasterrag.errors import EmbedError, ErrorCode
 from fasterrag.observability import metrics
@@ -225,26 +223,3 @@ def test_closing_publishes_the_state() -> None:
 def test_the_gauge_values_match_the_documented_encoding() -> None:
     """The metric is documented as 0 closed / 1 half-open / 2 open."""
     assert (CircuitState.CLOSED, CircuitState.HALF_OPEN, CircuitState.OPEN) == (0, 1, 2)
-
-
-def test_one_breaker_per_outbound_provider() -> None:
-    breakers = create_breakers(Settings.model_validate({}))
-
-    assert set(breakers) == {"llm", "embeddings", "vector_db"}
-
-
-def test_the_breakers_take_their_configuration() -> None:
-    settings = Settings.model_validate(
-        {"reliability": {"circuit_breaker": {"failure_threshold": 9, "reset_timeout_ms": 12345}}}
-    )
-
-    built = create_breakers(settings)["llm"]
-
-    assert built.failure_threshold == 9
-    assert built.reset_timeout_ms == 12345
-
-
-def test_the_toggle_reaches_the_breakers() -> None:
-    settings = Settings.model_validate({"reliability": {"circuit_breaker": {"enabled": False}}})
-
-    assert create_breakers(settings)["llm"].enabled is False

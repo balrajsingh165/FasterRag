@@ -748,3 +748,84 @@ async def test_evidence_dropped_by_the_budget_is_reported() -> None:
 
     assert answer.as_dict()["evidence_dropped"] == answer.evidence_dropped
     assert isinstance(answer.evidence_dropped, int)
+
+
+async def test_repeated_provider_failures_open_the_llm_breaker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FMEA row 20's "retries → breaker opens" was only ever retries.
+
+    ``create_breakers`` built an ``llm`` breaker that no production code called — it was
+    reachable from tests alone — so reliability.md's "one breaker per provider" overstated
+    the protection and the ``fasterrag_circuit_state`` gauge reported an ``llm`` state that
+    nothing ever transitioned. Filed as TASK-0245.
+
+    Two consecutive outages reach the threshold; the third query must be refused by the
+    breaker without the provider being called at all. Asserting on the provider's call count
+    is what distinguishes shedding from merely failing again.
+    """
+    service, llm = build(error=GenerationError("provider is down", retryable=True))
+    service.breaker.failure_threshold = 2
+
+    for _ in range(2):
+        await service.answer("what is the notice period", collection="policies")
+
+    calls_before = len(llm.prompts)
+    answer = await service.answer("what is the notice period", collection="policies")
+
+    assert service.breaker.is_open is True
+    assert len(llm.prompts) == calls_before, "the provider was called through an open breaker"
+    assert answer.mode == EXTRACTIVE_MODE
+
+
+async def test_an_open_breaker_degrades_rather_than_raising() -> None:
+    """Shedding load is a rung on the ladder, not a 503.
+
+    ``CircuitOpenError`` is retryable by construction, so it takes the same route a live
+    provider outage takes and the caller still gets the retrieved passages.
+    """
+    service, _ = build(error=GenerationError("provider is down", retryable=True))
+    service.breaker.failure_threshold = 1
+    await service.answer("what is the notice period", collection="policies")
+
+    answer = await service.answer("what is the notice period", collection="policies")
+
+    assert service.breaker.is_open is True
+    assert answer.mode == EXTRACTIVE_MODE
+    assert answer.answer is not None
+
+
+async def test_a_success_clears_the_failure_count_rather_than_only_the_state() -> None:
+    """A success resets the failure count, not merely the state.
+
+    Otherwise scattered blips accumulate into an open breaker that no single outage caused.
+
+    The threshold is two and the sequence is fail → succeed → fail. That is one failure since
+    the last success, so the breaker must still be closed. Asserting only "closed after a
+    success" would pass whether or not the count was cleared — the second failure is what
+    makes this test able to fail.
+    """
+    service, _ = build()
+    service.breaker.failure_threshold = 2
+    service.breaker.record_failure(GenerationError("transient", retryable=True))
+
+    await service.answer("what is the notice period", collection="policies")
+    service.breaker.record_failure(GenerationError("another blip", retryable=True))
+
+    assert service.breaker.is_open is False
+
+
+async def test_a_misconfigured_provider_never_opens_the_breaker() -> None:
+    """A misconfiguration never opens the breaker.
+
+    A rejected key fails the same way forever, so counting it would hide the one message that
+    explains it behind an intermittent-outage story.
+    """
+    service, _ = build(error=ConfigError("the api key was rejected"))
+    service.breaker.failure_threshold = 1
+
+    for _ in range(3):
+        with pytest.raises(ConfigError):
+            await service.answer("what is the notice period", collection="policies")
+
+    assert service.breaker.is_open is False

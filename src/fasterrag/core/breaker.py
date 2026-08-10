@@ -26,12 +26,11 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Final
 
-from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["CircuitBreaker", "CircuitOpenError", "CircuitState", "create_breakers"]
+__all__ = ["CircuitBreaker", "CircuitOpenError", "CircuitState"]
 
 _MILLISECONDS: Final = 1000.0
 
@@ -178,23 +177,3 @@ class CircuitBreaker:
         self._failures = 0
         self._opened_at = 0.0
         self._transition(CircuitState.CLOSED)
-
-
-def create_breakers(settings: Settings) -> dict[str, CircuitBreaker]:
-    """Return one breaker per provider fasterRag calls out to.
-
-    Built eagerly for all three rather than on first use, so ``fasterrag_circuit_state``
-    reports ``closed`` from startup. A gauge that springs into existence on the first
-    failure is absent exactly when someone goes looking for it, and absent reads the same
-    as healthy on every dashboard.
-    """
-    breaker = settings.reliability.circuit_breaker
-    return {
-        provider: CircuitBreaker(
-            provider=provider,
-            failure_threshold=breaker.failure_threshold,
-            reset_timeout_ms=breaker.reset_timeout_ms,
-            enabled=breaker.enabled,
-        )
-        for provider in ("llm", "embeddings", "vector_db")
-    }

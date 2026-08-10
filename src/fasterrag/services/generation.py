@@ -46,6 +46,7 @@ from typing import Any, Final
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
 from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.config.schema import Settings
+from fasterrag.core.breaker import CircuitBreaker
 from fasterrag.core.cache.semantic import MISS, CacheHit, SemanticCache
 from fasterrag.core.chunking.models import EstimatingTokenCounter, TokenCounter
 from fasterrag.core.context import AssembledContext, Citation, Span, assemble_context
@@ -302,6 +303,7 @@ class GenerationService:
         tenant: str | None = None,
         counter: TokenCounter | None = None,
         context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         """Build the service.
 
@@ -324,6 +326,8 @@ class GenerationService:
             counter: Token counter used for context budgeting.
             context_budget_tokens: Tokens available for context, which the caller sizes
                 from the model's window minus room for the answer.
+            breaker: Circuit breaker for the LLM provider. Built from
+                ``reliability.circuit_breaker`` when omitted; injected by tests.
         """
         self.settings = settings
         self.retrieval = retrieval
@@ -335,6 +339,16 @@ class GenerationService:
         self.tenant = tenant
         self.counter = counter or EstimatingTokenCounter()
         self.context_budget_tokens = context_budget_tokens
+        # CRITICAL: built here rather than fetched from `create_breakers`, matching how the
+        # embedding pool builds its own. One service instance owns one breaker for the whole
+        # of its life, which is what makes consecutive failures countable — a breaker rebuilt
+        # per query counts to one forever and can never open.
+        self.breaker = breaker or CircuitBreaker(
+            provider="llm",
+            failure_threshold=settings.reliability.circuit_breaker.failure_threshold,
+            reset_timeout_ms=settings.reliability.circuit_breaker.reset_timeout_ms,
+            enabled=settings.reliability.circuit_breaker.enabled,
+        )
         self._last_candidates: list[ScoredChunk] = []
 
     @property
@@ -593,8 +607,14 @@ class GenerationService:
 
         started = time.perf_counter()
         try:
+            # CRITICAL: inside the try, so an open circuit takes the same route a live
+            # provider failure takes. `CircuitOpenError` is retryable by construction, which
+            # makes shedding load a rung on the degradation ladder rather than a 503 — the
+            # behaviour FMEA row 20 describes as "retries → breaker opens → extractive".
+            self.breaker.check()
             completion = await self.llm.complete(prepared.prompt, system=P1_SYSTEM_PROMPT)
         except FasterRagError as exc:
+            self.breaker.record_failure(exc)
             # CRITICAL: only a retryable failure is a rung on the degradation ladder. A
             # rejected key, an unknown model, or a missing provider extra will never succeed
             # on a retry, so degrading one would answer every query extractively forever
@@ -625,6 +645,7 @@ class GenerationService:
                 timings_ms=timings,
             )
 
+        self.breaker.record_success()
         generate_ms = int((time.perf_counter() - started) * 1000)
         timings["generate"] = generate_ms
         self._record_generation(generate_ms, completion.prompt_tokens, completion.completion_tokens)
@@ -736,6 +757,7 @@ class GenerationService:
         parts: list[str] = []
         gated = self.grounded_or_refuse
         try:
+            self.breaker.check()
             async for delta in self.llm.stream(prepared.prompt, system=P1_SYSTEM_PROMPT):
                 if not parts:
                     # CRITICAL: time to first token is measured from the request arriving,
@@ -750,6 +772,7 @@ class GenerationService:
                 if not gated:
                     yield QueryEvent(type="token", data={"text": delta})
         except FasterRagError as exc:
+            self.breaker.record_failure(exc)
             if not exc.retryable:
                 raise
             _logger.warning(
@@ -772,6 +795,7 @@ class GenerationService:
             )
             return
 
+        self.breaker.record_success()
         answer = "".join(parts)
         generate_ms = int((time.perf_counter() - started) * 1000)
         timings["generate"] = generate_ms
