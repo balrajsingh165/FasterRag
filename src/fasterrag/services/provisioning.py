@@ -30,18 +30,24 @@ __all__ = [
     "ContainerState",
     "DockerResult",
     "ProvisionResult",
+    "await_backend_ready",
     "container_state",
     "docker_available",
+    "ensure_volume",
     "port_is_free",
     "provision_qdrant",
     "qdrant_status",
     "require_provisioning_gate",
     "run_docker",
+    "start_container",
     "stop_qdrant",
+    "volume_exists",
 ]
 
 QDRANT_CONTAINER: Final = "fasterrag-qdrant"
 CONTAINER_LABEL: Final = "fasterrag.managed=true"
+
+_MANAGED_LABEL_KEY, _, _MANAGED_LABEL_VALUE = CONTAINER_LABEL.partition("=")
 
 QDRANT_SERVER_KEY_VAR: Final = "QDRANT__SERVICE__API_KEY"
 QDRANT_GRPC_PORT_VAR: Final = "QDRANT__SERVICE__GRPC_PORT"
@@ -79,6 +85,14 @@ class ContainerState:
     exists: bool
     running: bool = False
     image: str | None = None
+    managed: bool = False
+    """Whether the container carries fasterRag's management label.
+
+    A container fasterRag did not create may still hold the configured name, and
+    ``fasterrag doctor --fix`` starts a stopped container only when this is true —
+    starting somebody else's stopped service would be exactly the surprising action a
+    diagnostic must never take.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,20 +164,22 @@ async def docker_available() -> bool:
 
 
 async def container_state(name: str = QDRANT_CONTAINER) -> ContainerState:
-    """Return the state of a managed container."""
-    result = await run_docker(
-        ["inspect", name, "--format", "{{.State.Running}}\t{{.Config.Image}}"],
-        timeout=20.0,
+    """Return the state of a managed container, including whether fasterRag created it."""
+    template = (
+        "{{.State.Running}}\t{{.Config.Image}}\t"
+        f'{{{{index .Config.Labels "{_MANAGED_LABEL_KEY}"}}}}'
     )
+    result = await run_docker(["inspect", name, "--format", template], timeout=20.0)
     if not result.ok:
         return ContainerState(name=name, exists=False)
 
-    running, _, image = result.stdout.partition("\t")
+    running, image, label = [*result.stdout.split("\t"), "", ""][:3]
     return ContainerState(
         name=name,
         exists=True,
         running=running.strip().lower() == "true",
         image=image.strip() or None,
+        managed=label.strip() == _MANAGED_LABEL_VALUE,
     )
 
 
@@ -336,7 +352,7 @@ async def provision_qdrant(settings: Settings) -> ProvisionResult:
     await require_provisioning_gate(settings)
 
     environment = _server_key_environment(settings)
-    await _ensure_volume(settings.vector_db.docker.volume)
+    await ensure_volume(settings.vector_db.docker.volume)
 
     state = await container_state()
     desired_image = settings.vector_db.docker.image
@@ -360,32 +376,89 @@ async def provision_qdrant(settings: Settings) -> ProvisionResult:
                 ),
             )
     elif not state.running:
-        result = await run_docker(["start", QDRANT_CONTAINER])
-        if not result.ok:
-            raise ProvisioningError(
-                f"could not start the existing qdrant container: {result.stderr}",
-                fix=f"Inspect it with 'docker logs {QDRANT_CONTAINER}'.",
-            )
+        await start_container(QDRANT_CONTAINER)
 
-    await _wait_until_ready(
-        settings.vector_db.host,
-        [settings.vector_db.port, settings.vector_db.grpc_port],
-    )
-    await _wait_until_answering(settings)
+    await await_backend_ready(settings)
 
     url = f"http://{settings.vector_db.host}:{settings.vector_db.port}"
     _logger.info("qdrant is provisioned and reachable", extra={"url": url})
     return ProvisionResult(tool="qdrant", status="running", url=url)
 
 
-async def _ensure_volume(volume: str) -> None:
-    """Create the named storage volume if it does not exist yet."""
+async def volume_exists(volume: str) -> bool:
+    """Return whether a named Docker volume exists.
+
+    Args:
+        volume: The volume name from ``vector_db.docker.volume``.
+
+    Returns:
+        Whether Docker knows the volume. An absent volume is not an error here — both
+        provisioning and ``fasterrag doctor --fix`` create it.
+
+    Raises:
+        ProvisioningError: If the docker executable is missing or the command times out.
+            A daemon that answers "no such volume" returns ``False`` instead, so callers
+            must establish that Docker is up before reading this as "not created yet".
+    """
+    result = await run_docker(["volume", "inspect", volume], timeout=20.0)
+    return result.ok
+
+
+async def ensure_volume(volume: str) -> None:
+    """Create the named storage volume if it does not exist yet.
+
+    Idempotent in the safe direction: ``docker volume create`` returns an existing volume
+    untouched, so this can neither reinitialise storage that already holds an index nor
+    detach one from its container. That is what makes it the one repair
+    ``fasterrag doctor --fix`` performs without asking.
+
+    Args:
+        volume: The volume name from ``vector_db.docker.volume``.
+
+    Raises:
+        ProvisioningError: If Docker refuses to create the volume.
+    """
     result = await run_docker(["volume", "create", volume], timeout=20.0)
     if not result.ok:
         raise ProvisioningError(
             f"could not create the docker volume {volume!r}: {result.stderr}",
             fix="Check Docker permissions, or choose another vector_db.docker.volume name.",
         )
+
+
+async def start_container(name: str = QDRANT_CONTAINER) -> None:
+    """Start an existing, stopped container.
+
+    Starting is not creating: this never pulls an image, never publishes a port that was
+    not already published, and never touches a volume. It restores a container to the
+    state whoever created it asked for, which is why ``fasterrag doctor --fix`` is allowed
+    to do it — but only after confirming the container is fasterRag's own.
+
+    Args:
+        name: The container to start.
+
+    Raises:
+        ProvisioningError: If Docker refuses to start it.
+    """
+    result = await run_docker(["start", name])
+    if not result.ok:
+        raise ProvisioningError(
+            f"could not start the existing container {name!r}: {result.stderr}",
+            fix=f"Inspect it with 'docker logs {name}'.",
+        )
+
+
+async def await_backend_ready(settings: Settings) -> None:
+    """Block until the configured backend's ports answer and it serves a real request.
+
+    Raises:
+        ProvisioningError: If either wait runs out of time.
+    """
+    await _wait_until_ready(
+        settings.vector_db.host,
+        [settings.vector_db.port, settings.vector_db.grpc_port],
+    )
+    await _wait_until_answering(settings)
 
 
 async def _remove_container() -> None:

@@ -377,12 +377,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="preflight diagnostics (D10)")
     _add_global_flags(doctor)
-    # TODO: TASK-0197 implements --fix. Every candidate fix (creating the named volume,
-    # freeing a port) needs a running Docker daemon to attempt or verify, which is B7.
     doctor.add_argument(
         "--fix",
         action="store_true",
-        help="(not yet implemented) apply safe automatic fixes",
+        help="apply the repairs that are safe to apply, then run every check again",
     )
 
     _add_estimate(subparsers)

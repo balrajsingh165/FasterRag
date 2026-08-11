@@ -16,7 +16,8 @@ SHARED = {"config", "collection", "overrides", "as_json", "quiet", "verbose", "r
 
 # Declared, documented as "(not yet implemented)", and answered with a message at the point
 # of use rather than silently ignored. Each cites the task that will implement it.
-PENDING = {"watch": "TASK-0196", "fix": "TASK-0197"}
+# `fix` left this set when TASK-0197 landed; `watch` is still waiting on TASK-0196.
+PENDING = {"watch": "TASK-0196"}
 
 
 def declared() -> dict[str, str]:

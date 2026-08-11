@@ -7,15 +7,21 @@ import pytest
 
 from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
+from fasterrag.errors import ProvisioningError
 from fasterrag.services import doctor
 from fasterrag.services.doctor import (
     DoctorCheck,
     DoctorReport,
+    FixAttempt,
+    FixOutcome,
+    apply_fixes,
     diagnose,
+    diagnose_and_fix,
+    format_fix_outcome,
     format_report,
     run_doctor,
 )
-from fasterrag.services.provisioning import ContainerState
+from fasterrag.services.provisioning import CONTAINER_LABEL, ContainerState
 
 
 class FakeAdapter:
@@ -55,8 +61,15 @@ def healthy_environment(monkeypatch: pytest.MonkeyPatch) -> FakeAdapter:
     async def no_container(name: str = "fasterrag-qdrant") -> ContainerState:
         return ContainerState(name=name, exists=False)
 
+    async def volume_present(volume: str) -> bool:
+        return True
+
     monkeypatch.setattr(doctor, "docker_available", docker_up)
     monkeypatch.setattr(doctor, "container_state", no_container)
+    # CRITICAL: without this the volume check shells out to a real Docker daemon, so the
+    # unit tier would pass or fail on whether the developer's machine happens to have the
+    # configured volume — and fail outright in CI, which has no daemon at all.
+    monkeypatch.setattr(doctor, "volume_exists", volume_present)
     monkeypatch.setattr(doctor, "port_is_free", lambda host, port: True)
     monkeypatch.setattr(doctor, "port_is_reachable", lambda host, port: True)
     monkeypatch.setattr(doctor, "create_vector_db_adapter", lambda settings: adapter)
@@ -256,3 +269,411 @@ def test_formatted_output_shows_fixes_for_failures() -> None:
     assert "[PASS] python" in lines
     assert "[FAIL] docker" in lines
     assert "fix: Start it." in lines
+
+
+VOLUME = Settings().vector_db.docker.volume
+
+
+class FakeDocker:
+    """A daemon that remembers named volumes and one container, and records mutations.
+
+    The vector database is healthy exactly when the container is running, so a repair that
+    starts the container is visible to the re-check the same way it would be on a real
+    machine. A stub where the backend is healthy regardless would make every assertion
+    about re-checking vacuous.
+    """
+
+    def __init__(self, *, volumes: set[str] | None = None, container: ContainerState) -> None:
+        self.volumes = volumes if volumes is not None else set()
+        self.container = container
+        self.created: list[str] = []
+        self.started: list[str] = []
+        self.waited = 0
+
+    async def volume_exists(self, volume: str) -> bool:
+        return volume in self.volumes
+
+    async def ensure_volume(self, volume: str) -> None:
+        self.created.append(volume)
+        self.volumes.add(volume)
+
+    async def container_state(self, name: str = "fasterrag-qdrant") -> ContainerState:
+        return self.container
+
+    async def start_container(self, name: str = "fasterrag-qdrant") -> None:
+        self.started.append(name)
+        self.container = ContainerState(
+            name=self.container.name,
+            exists=True,
+            running=True,
+            image=self.container.image,
+            managed=self.container.managed,
+        )
+
+    async def await_backend_ready(self, settings: Settings) -> None:
+        self.waited += 1
+
+
+def wire(monkeypatch: pytest.MonkeyPatch, fake: FakeDocker) -> FakeDocker:
+    """Point every Docker-touching name doctor imported at the fake, and nothing else."""
+    monkeypatch.setattr(doctor, "volume_exists", fake.volume_exists)
+    monkeypatch.setattr(doctor, "ensure_volume", fake.ensure_volume)
+    monkeypatch.setattr(doctor, "container_state", fake.container_state)
+    monkeypatch.setattr(doctor, "start_container", fake.start_container)
+    monkeypatch.setattr(doctor, "await_backend_ready", fake.await_backend_ready)
+    monkeypatch.setattr(
+        doctor, "create_vector_db_adapter", lambda settings: FakeAdapter(fake.container.running)
+    )
+    return fake
+
+
+@pytest.fixture
+def docker_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A responding daemon, free ports, and populated secrets."""
+
+    async def up() -> bool:
+        return True
+
+    monkeypatch.setattr(doctor, "docker_available", up)
+    monkeypatch.setattr(doctor, "port_is_free", lambda host, port: True)
+    monkeypatch.setattr(doctor, "port_is_reachable", lambda host, port: True)
+    monkeypatch.setenv("QDRANT_API_KEY", "key")
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "key")
+
+
+def absent_container() -> ContainerState:
+    return ContainerState(name="fasterrag-qdrant", exists=False)
+
+
+def stopped_managed_container() -> ContainerState:
+    return ContainerState(
+        name="fasterrag-qdrant", exists=True, running=False, image="qdrant", managed=True
+    )
+
+
+def named(report: DoctorReport, name: str) -> DoctorCheck:
+    """Return one check by name, failing loudly when the report has no such check."""
+    return next(check for check in report.checks if check.name == name)
+
+
+def attempt_for(outcome: FixOutcome, check: str) -> FixAttempt:
+    """Return the attempt recorded for one check, failing loudly when there is none."""
+    return next(item for item in outcome.attempts if item.check == check)
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_a_missing_storage_volume_is_a_failed_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The volume the index lives on is invisible until the container is replaced."""
+    wire(monkeypatch, FakeDocker(container=absent_container()))
+
+    check = named(await run_doctor(Settings()), "vector_db_volume")
+
+    assert check.passed is False
+    assert VOLUME in check.detail
+    assert check.fix
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_an_existing_storage_volume_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    wire(monkeypatch, FakeDocker(volumes={VOLUME}, container=absent_container()))
+
+    assert named(await run_doctor(Settings()), "vector_db_volume").passed is True
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_a_missing_volume_does_not_block_provisioning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`provision qdrant` creates the volume, so gating it on one would refuse the fix."""
+    wire(monkeypatch, FakeDocker(container=absent_container()))
+
+    assert named(await run_doctor(Settings()), "vector_db_volume").blocks_provisioning is False
+
+
+async def test_the_volume_check_is_omitted_rather_than_passed_when_docker_is_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A check that could not run must never report PASS — that is a gate passing blind."""
+
+    async def down() -> bool:
+        return False
+
+    monkeypatch.setattr(doctor, "docker_available", down)
+    monkeypatch.setattr(doctor, "port_is_free", lambda host, port: True)
+    monkeypatch.setattr(doctor, "port_is_reachable", lambda host, port: False)
+    wire(monkeypatch, FakeDocker(container=absent_container()))
+
+    report = await run_doctor(Settings())
+
+    assert "vector_db_volume" not in {check.name for check in report.checks}
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_the_volume_is_not_required_in_external_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wire(monkeypatch, FakeDocker(container=absent_container()))
+    settings = Settings.model_validate({"vector_db": {"mode": "external"}})
+
+    check = named(await run_doctor(settings), "vector_db_volume")
+
+    assert check.passed is True
+    assert "not required" in check.detail
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_fix_creates_the_missing_volume_and_verifies_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = wire(monkeypatch, FakeDocker(container=absent_container()))
+
+    outcome = await apply_fixes(Settings())
+
+    assert fake.created == [VOLUME]
+    assert outcome.rechecked is True
+    assert "vector_db_volume" in outcome.repaired
+    assert attempt_for(outcome, "vector_db_volume").status == "fixed"
+    assert named(outcome.after, "vector_db_volume").passed is True
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_a_repair_that_did_not_take_is_reported_not_fixed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The re-check is the only evidence that counts.
+
+    A repair that returns without raising and leaves the check failing must never be
+    reported as a success — that is precisely the "reports success without re-checking"
+    defect this command exists to avoid.
+    """
+    fake = wire(monkeypatch, FakeDocker(container=absent_container()))
+
+    async def pretend_to_create(volume: str) -> None:
+        return None
+
+    monkeypatch.setattr(doctor, "ensure_volume", pretend_to_create)
+
+    outcome = await apply_fixes(Settings())
+
+    assert fake.volumes == set()
+    assert attempt_for(outcome, "vector_db_volume").status == "failed"
+    assert outcome.repaired == []
+    assert outcome.passed is False
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_a_repair_that_raises_is_reported_not_fixed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wire(monkeypatch, FakeDocker(container=absent_container()))
+
+    async def refuse(volume: str) -> None:
+        raise ProvisioningError("docker refused", fix="Check permissions.")
+
+    monkeypatch.setattr(doctor, "ensure_volume", refuse)
+
+    outcome = await apply_fixes(Settings())
+    attempt = attempt_for(outcome, "vector_db_volume")
+
+    assert attempt.status == "failed"
+    assert "docker refused" in attempt.detail
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_a_stopped_container_fasterrag_created_is_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = wire(monkeypatch, FakeDocker(volumes={VOLUME}, container=stopped_managed_container()))
+
+    outcome = await apply_fixes(Settings())
+
+    assert fake.started == ["fasterrag-qdrant"]
+    assert fake.waited == 1
+    assert attempt_for(outcome, "vector_db").status == "fixed"
+    assert outcome.passed is True
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_a_container_fasterrag_did_not_create_is_never_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Starting somebody else's stopped service is the surprising action --fix must not take."""
+    fake = wire(
+        monkeypatch,
+        FakeDocker(
+            volumes={VOLUME},
+            container=ContainerState(
+                name="fasterrag-qdrant", exists=True, running=False, managed=False
+            ),
+        ),
+    )
+
+    outcome = await apply_fixes(Settings())
+    attempt = attempt_for(outcome, "vector_db")
+
+    assert fake.started == []
+    assert attempt.status == "manual"
+    assert CONTAINER_LABEL in attempt.detail
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_an_absent_container_is_not_created_by_fix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Creating one pulls an image and publishes ports; that is provisioning, not diagnosis."""
+    fake = wire(monkeypatch, FakeDocker(volumes={VOLUME}, container=absent_container()))
+
+    outcome = await apply_fixes(Settings())
+    attempt = attempt_for(outcome, "vector_db")
+
+    assert fake.started == []
+    assert attempt.status == "manual"
+    assert "fasterrag provision qdrant" in attempt.detail
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_a_running_container_is_not_restarted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreachable backend behind a running container is a credential or transport fault."""
+    fake = wire(
+        monkeypatch,
+        FakeDocker(
+            volumes={VOLUME},
+            container=ContainerState(
+                name="fasterrag-qdrant", exists=True, running=True, managed=True
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "create_vector_db_adapter",
+        lambda settings: FakeAdapter(healthy=False, detail="401"),
+    )
+
+    outcome = await apply_fixes(Settings())
+
+    assert fake.started == []
+    assert attempt_for(outcome, "vector_db").status == "manual"
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_a_held_port_needs_a_human_and_nothing_is_touched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = wire(monkeypatch, FakeDocker(volumes={VOLUME}, container=absent_container()))
+    monkeypatch.setattr(doctor, "port_is_free", lambda host, port: port != 8000)
+
+    outcome = await apply_fixes(Settings())
+    attempt = attempt_for(outcome, "api_port")
+
+    assert attempt.status == "manual"
+    assert "killing whatever holds it" in attempt.detail
+    assert fake.created == []
+    assert fake.started == []
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_nothing_is_rechecked_when_no_repair_ran(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-running the checks would be honest but pointless; saying so is what matters."""
+    wire(monkeypatch, FakeDocker(volumes={VOLUME}, container=absent_container()))
+    monkeypatch.setattr(doctor, "port_is_free", lambda host, port: port != 8000)
+    monkeypatch.setattr(
+        doctor, "create_vector_db_adapter", lambda settings: FakeAdapter(healthy=True)
+    )
+
+    outcome = await apply_fixes(Settings())
+
+    assert outcome.rechecked is False
+    assert outcome.after is outcome.before
+    assert [attempt.status for attempt in outcome.attempts] == ["manual"]
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_every_failing_check_is_accounted_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure with no attempt is a failure the operator is never told about."""
+    wire(monkeypatch, FakeDocker(container=absent_container()))
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: Usage(total=100, used=99, free=1))
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: Memory(total=1, available=1))
+    monkeypatch.setattr(doctor, "port_is_free", lambda host, port: False)
+
+    outcome = await apply_fixes(Settings())
+
+    assert {check.name for check in outcome.before.failures} == {
+        attempt.check for attempt in outcome.attempts
+    }
+    for attempt in outcome.attempts:
+        assert attempt.detail, f"{attempt.check} was reported with no explanation"
+
+
+async def test_invalid_config_is_never_rewritten_by_fix(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    original = "app:\n  port: 70000\n"
+    config.write_text(original, encoding="utf-8")
+
+    outcome = await diagnose_and_fix(config, env_file=None)
+
+    assert config.read_text(encoding="utf-8") == original
+    assert outcome.passed is False
+    assert outcome.rechecked is False
+    assert attempt_for(outcome, "config").status == "manual"
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_fix_json_is_a_superset_of_the_plain_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--json` consumers must find `passed` and `checks` in the same place either way.
+
+    They must also describe the machine *after* the repairs. A payload reporting the
+    failures that have since been fixed would send an automated caller after work already
+    done.
+    """
+    wire(monkeypatch, FakeDocker(container=stopped_managed_container()))
+
+    payload = (await apply_fixes(Settings())).as_dict()
+
+    assert set(payload) == {"passed", "checks", "fixes"}
+    assert payload["passed"] is True
+    assert [check for check in payload["checks"] if not check["passed"]] == []
+    assert payload["fixes"]["rechecked"] is True
+    assert payload["fixes"]["still_failing"] == []
+    assert sorted(payload["fixes"]["repaired"]) == ["vector_db", "vector_db_volume"]
+    assert {"check", "status", "detail"} == set(payload["fixes"]["attempts"][0])
+
+
+@pytest.mark.usefixtures("docker_up")
+async def test_fix_output_names_what_changed_and_what_needs_a_human(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wire(monkeypatch, FakeDocker(container=absent_container()))
+    monkeypatch.setattr(doctor, "port_is_free", lambda host, port: port != 8000)
+
+    lines = "\n".join(format_fix_outcome(await apply_fixes(Settings())))
+
+    assert "[fixed" in lines
+    assert "[needs human" in lines
+    assert "re-checked after fixing:" in lines
+    assert "repaired: vector_db_volume" in lines
+
+
+def test_every_check_has_a_repair_policy() -> None:
+    """A check added later with no policy would silently report the generic fallback."""
+    emitted = {
+        "config",
+        "python",
+        "disk",
+        "memory",
+        "gpu",
+        "docker",
+        "secrets",
+        "vector_db_ports",
+        "vector_db_volume",
+        "vector_db",
+        "api_port",
+        "dashboard_port",
+    }
+    covered = set(doctor._NO_SAFE_FIX) | set(doctor._FIXERS)
+
+    assert emitted <= covered, f"no repair policy for: {sorted(emitted - covered)}"

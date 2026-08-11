@@ -23,7 +23,12 @@ from fasterrag.cli.settings import overrides_from, settings_from
 from fasterrag.config.schema import Settings
 from fasterrag.config.template import canonical_config_text, env_template_text
 from fasterrag.errors import ConfigError, FasterRagError
-from fasterrag.services.doctor import diagnose, format_report
+from fasterrag.services.doctor import (
+    diagnose,
+    diagnose_and_fix,
+    format_fix_outcome,
+    format_report,
+)
 from fasterrag.services.provisioning import container_state, docker_available
 
 __all__ = [
@@ -182,18 +187,23 @@ async def run_config_show(args: argparse.Namespace, console: Console) -> ExitCod
 
 
 async def run_doctor_command(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Run preflight diagnostics.
+    """Run preflight diagnostics, repairing what is safe to repair under ``--fix``.
 
     Exits ``4`` when any check fails. Doctor gates provisioning, so this code is what stops
-    an automated setup from proceeding into an environment that cannot host it.
+    an automated setup from proceeding into an environment that cannot host it. ``--fix``
+    does not weaken that: the exit code is decided by the checks as they stand *after* the
+    repairs, so a repair that did not work still fails the gate. No new exit code is
+    introduced — an operator scripting against ``4`` keeps the meaning they had.
     """
-    if getattr(args, "fix", False):
-        console.error("--fix is not implemented yet; the report below is unchanged by it")
-
-    report = await diagnose(args.config, overrides=overrides_from(args))
-
-    console.lines(format_report(report))
-    console.document(report.as_dict())
+    if args.fix:
+        outcome = await diagnose_and_fix(args.config, overrides=overrides_from(args))
+        console.lines(format_fix_outcome(outcome))
+        console.document(outcome.as_dict())
+        report = outcome.after
+    else:
+        report = await diagnose(args.config, overrides=overrides_from(args))
+        console.lines(format_report(report))
+        console.document(report.as_dict())
 
     if report.passed:
         console.emit("all checks passed")
