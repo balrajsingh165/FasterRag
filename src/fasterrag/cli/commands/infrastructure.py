@@ -1,7 +1,10 @@
 """The commands that stand things up or price them out: ``provision`` and ``estimate``.
 
 ``provision`` is doctor-gated by the service layer, not here — putting the gate in the CLI
-would let the REST path around it, and a gate one caller can skip is not a gate.
+would let the REST path around it, and a gate one caller can skip is not a gate. Which tools
+it accepts is decided there too, by ``services/provision_registry``: the hand-written
+``if args.tool == ...`` chain this replaced was one half of the pair of lists that let REST
+and CLI disagree about Langfuse and Grafana for nine days (TASK-0251).
 
 ``estimate`` runs *before* ingestion for a reason: embedding cost is decided by chunk count
 and overlap, not by file size, so the only honest way to price a corpus is to chunk it. The
@@ -17,9 +20,7 @@ from fasterrag.cli.settings import settings_from
 from fasterrag.cli.sources import expand_sources
 from fasterrag.errors import ConfigError, FasterRagError, ProvisioningError
 from fasterrag.services.estimation import estimate_sources, require_estimator
-from fasterrag.services.grafana import grafana_status, provision_grafana, stop_grafana
-from fasterrag.services.langfuse import langfuse_status, provision_langfuse, stop_langfuse
-from fasterrag.services.provisioning import provision_qdrant, qdrant_status, stop_qdrant
+from fasterrag.services.provision_registry import provision_tool, stop_tool, tool_status
 
 __all__ = ["run_estimate", "run_provision"]
 
@@ -41,29 +42,10 @@ async def run_provision(args: argparse.Namespace, console: Console) -> ExitCode:
         console.error("--status and --down cannot be combined")
         return ExitCode.USAGE
 
+    verb = tool_status if args.status else stop_tool if args.down else provision_tool
+
     try:
-        if args.tool == "langfuse":
-            result = (
-                await langfuse_status()
-                if args.status
-                else await stop_langfuse()
-                if args.down
-                else await provision_langfuse(settings)
-            )
-        elif args.tool == "grafana":
-            result = (
-                await grafana_status()
-                if args.status
-                else await stop_grafana()
-                if args.down
-                else await provision_grafana(settings)
-            )
-        elif args.status:
-            result = await qdrant_status(settings)
-        elif args.down:
-            result = await stop_qdrant(settings)
-        else:
-            result = await provision_qdrant(settings)
+        result = await verb(args.tool, settings)
     except ProvisioningError as exc:
         console.problem(exc.code.value, exc.detail, exc.fix)
         console.document({"tool": args.tool, "status": "failed", "detail": exc.detail})

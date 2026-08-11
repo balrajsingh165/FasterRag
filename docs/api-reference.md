@@ -223,8 +223,9 @@ All require the `admin` scope.
 
 | Method + path | Purpose | Success |
 |---|---|---|
-| `POST /v1/admin/provision/{tool}` | Trigger config-driven provisioning for `qdrant`, `langfuse`, or `grafana` (equivalent to the config toggle path; idempotent; doctor-gated). Returns `{"status", "url"}` — e.g. Langfuse returns `http://<host>:3000`. | 200 |
-| `GET /v1/admin/provision/{tool}/status` | Provisioning/health state of the tool. | 200 |
+| `POST /v1/admin/provision/{tool}` | Trigger config-driven provisioning for `qdrant`, `langfuse`, or `grafana` (equivalent to the config toggle path; idempotent; doctor-gated). Returns `{"tool", "status", "url", "detail"}` — e.g. Langfuse returns `http://<host>:3000`. `detail` is where a Grafana run says why it came back `degraded` and a Langfuse run says how many secrets it generated; it never carries a secret value. Any other tool name is refused `404 NOT_FOUND` naming the three that are supported. | 200 |
+| `GET /v1/admin/provision/{tool}/status` | Provisioning/health state of the tool. Same body shape. | 200 |
+| `DELETE /v1/admin/provision/{tool}` | Stop the tool's managed containers, preserving data volumes and generated secrets — the REST half of `fasterrag provision <tool> --down`. Reversible by re-provisioning, but stopping `qdrant` stops the backend that answers queries. | 200 |
 | `GET /v1/admin/doctor` | Machine-readable doctor report (D10): every check with `pass|fail` and a concrete `fix` string. | 200 |
 | `POST /v1/estimate` | D9 preflight: `{"sources": [...]}` → token counts, projected embedding cost and time per configured provider, BEFORE ingestion. Requires `cost.estimator: true`; with it off the endpoint answers `422 VALIDATION_FAILED` naming the setting rather than estimating zero. | 200 |
 | `POST /v1/admin/export` | D11: export documents, chunks, metadata, and the index manifest to a portable archive. Body: `{"out", "collection", "include_vectors"}`. **Synchronous** — unlike ingestion it reads what is already indexed and writes a file, so there is no queue to wait behind and no partial state to poll. Returns the row counts written. | 200 |

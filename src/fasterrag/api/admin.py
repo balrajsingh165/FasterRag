@@ -22,20 +22,18 @@ from fasterrag.api.dependencies import (
     build_embedding_router,
 )
 from fasterrag.api.schemas import EstimateRequest, ExportRequest, ImportRequest
-from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.archive import export_archive
 from fasterrag.services.archive_import import import_archive, open_archive
 from fasterrag.services.doctor import run_doctor
 from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.lockfile import create_lock_store
-from fasterrag.services.provisioning import provision_qdrant, qdrant_status
+from fasterrag.services.provision_registry import provision_tool, stop_tool, tool_status
+from fasterrag.services.provisioning import ProvisionResult
 from fasterrag.services.tenancy import scoped_name, unscoped_name
 
 __all__ = ["router"]
 
 router = APIRouter(prefix="/v1", tags=["admin"])
-
-_PROVISIONABLE = frozenset({"qdrant"})
 
 
 @router.get("/admin/doctor")
@@ -44,40 +42,52 @@ async def doctor_report(settings: CurrentSettings) -> dict[str, Any]:
     return (await run_doctor(settings)).as_dict()
 
 
-def _require_provisionable(tool: str) -> None:
-    """Reject a tool nothing can provision yet.
+def _reported(result: ProvisionResult) -> dict[str, Any]:
+    """Render a provisioning outcome for the wire.
 
-    Raises:
-        FasterRagError: With ``NOT_FOUND`` for an unknown or unimplemented tool.
+    ``detail`` is carried on every verb, not only on status. It is where a Grafana run says
+    *why* it came back ``degraded`` and where a Langfuse run says how many secrets it
+    generated — dropping it would leave a caller with a status word and no way to act on it.
+    It never carries a secret value: the provisioners report counts and file names only.
     """
-    if tool not in _PROVISIONABLE:
-        # TODO: langfuse and grafana provisioning ship with TASK-0043 and TASK-0044.
-        raise FasterRagError(
-            f"{tool!r} cannot be provisioned yet; supported: {', '.join(sorted(_PROVISIONABLE))}",
-            code=ErrorCode.NOT_FOUND,
-            retryable=False,
-        )
-
-
-@router.post("/admin/provision/{tool}")
-async def provision(tool: str, settings: CurrentSettings) -> dict[str, Any]:
-    """Provision a managed dependency. Idempotent and doctor-gated by the service."""
-    _require_provisionable(tool)
-    result = await provision_qdrant(settings)
-    return {"tool": result.tool, "status": result.status, "url": result.url}
-
-
-@router.get("/admin/provision/{tool}/status")
-async def provision_status(tool: str, settings: CurrentSettings) -> dict[str, Any]:
-    """Report a managed dependency's provisioning state."""
-    _require_provisionable(tool)
-    result = await qdrant_status(settings)
     return {
         "tool": result.tool,
         "status": result.status,
         "url": result.url,
         "detail": result.detail,
     }
+
+
+@router.post("/admin/provision/{tool}")
+async def provision(tool: str, settings: CurrentSettings) -> dict[str, Any]:
+    """Provision a managed dependency. Idempotent and doctor-gated by the service.
+
+    Which tools exist is decided by ``services/provision_registry``, the same table the CLI
+    dispatches through, so this surface cannot offer less than ``fasterrag provision`` again.
+    """
+    return _reported(await provision_tool(tool, settings))
+
+
+@router.get("/admin/provision/{tool}/status")
+async def provision_status(tool: str, settings: CurrentSettings) -> dict[str, Any]:
+    """Report a managed dependency's provisioning state."""
+    return _reported(await tool_status(tool, settings))
+
+
+@router.delete("/admin/provision/{tool}")
+async def provision_down(tool: str, settings: CurrentSettings) -> dict[str, Any]:
+    """Stop a managed dependency's containers, the REST half of ``provision <tool> --down``.
+
+    Data volumes and generated secrets are preserved by the provisioners themselves, so this
+    is reversible by provisioning again — which is why it is a stop rather than a teardown,
+    and why the verb is safe to expose at all. Regenerating Langfuse's secrets would
+    invalidate every credential issued against them, so nothing here deletes them.
+
+    Guarded by the ``admin`` scope like the rest of the ``/v1/admin`` prefix, and not
+    tenant-scoped: a container is one process-wide resource, so scoping the request would
+    imply a per-tenant stack that does not exist.
+    """
+    return _reported(await stop_tool(tool, settings))
 
 
 @router.post("/estimate")

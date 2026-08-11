@@ -7,6 +7,13 @@ route landing under an existing prefix silently inherits that prefix's scope, an
 added to ``PUBLIC_PATHS`` becomes unauthenticated with no other signal.
 
 Updating this table is the point. It should be a deliberate line in a diff, not a discovery.
+
+The table under-reported until 2026-08-11: one path can carry several operations, each a
+separate route object, and the walker assigned rather than merged — so only the last verb
+seen survived. `GET /v1/collections` and `GET /v1/collections/{name}` were served the whole
+time and invisible here. Both are documented and correctly scoped, so nothing was exposed;
+what was broken was the guarantee that a *new* verb on an existing path shows up as a diff.
+Adding `DELETE /v1/admin/provision/{tool}` beside its `POST` (TASK-0251) is what surfaced it.
 """
 
 from typing import Any
@@ -26,10 +33,10 @@ EXPECTED: dict[str, tuple[str | None, list[str]]] = {
     "/v1/admin/doctor": ("admin", ["GET"]),
     "/v1/admin/export": ("admin", ["POST"]),
     "/v1/admin/import": ("admin", ["POST"]),
-    "/v1/admin/provision/{tool}": ("admin", ["POST"]),
+    "/v1/admin/provision/{tool}": ("admin", ["DELETE", "POST"]),
     "/v1/admin/provision/{tool}/status": ("admin", ["GET"]),
-    "/v1/collections": ("collections", ["POST"]),
-    "/v1/collections/{name}": ("collections", ["DELETE"]),
+    "/v1/collections": ("collections", ["GET", "POST"]),
+    "/v1/collections/{name}": ("collections", ["DELETE", "GET"]),
     "/v1/estimate": ("admin", ["POST"]),
     "/v1/ingest": ("ingest", ["POST"]),
     "/v1/ingest/{job_id}": ("ingest", ["GET"]),
@@ -51,15 +58,23 @@ def registered(app: FastAPI) -> dict[str, list[str]]:
     Walks nested routers rather than reading ``app.routes``: this FastAPI version wraps
     included routers, so the flat list holds only what was registered on the application
     itself — which would make this whole suite pass by inspecting almost nothing.
+
+    Methods are *merged* per path. One path can carry several operations, each registered as
+    its own route object, and assigning instead of merging kept only the last one seen — so
+    the first path to grow a second verb would have hidden the other from this table. That is
+    the direction the table exists to catch, and it went unnoticed until
+    ``DELETE /v1/admin/provision/{tool}`` landed beside the ``POST`` (TASK-0251).
     """
-    found: dict[str, list[str]] = {}
+    found: dict[str, set[str]] = {}
 
     def walk(router: Any, depth: int = 0) -> None:
         for route in getattr(router, "routes", []):
             path = getattr(route, "path", None)
             methods = getattr(route, "methods", None)
             if path and methods:
-                found[path] = sorted(method for method in methods if method != "HEAD")
+                found.setdefault(path, set()).update(
+                    method for method in methods if method != "HEAD"
+                )
             if depth >= 4:
                 continue
             for attribute in ("original_router", "router", "app"):
@@ -68,7 +83,7 @@ def registered(app: FastAPI) -> dict[str, list[str]]:
                     walk(child, depth + 1)
 
     walk(app.router)
-    return found
+    return {path: sorted(methods) for path, methods in found.items()}
 
 
 def app() -> FastAPI:
@@ -126,3 +141,13 @@ def test_reading_a_trace_needs_admin_not_query() -> None:
 def test_estimating_needs_admin_because_it_reads_server_paths() -> None:
     """`/v1/estimate` parses whatever paths it is handed on the server's filesystem."""
     assert required_scope("/v1/estimate") == "admin"
+
+
+def test_provisioning_needs_admin_in_every_verb() -> None:
+    """These start, stop, and replace containers on the host running the API.
+
+    The `DELETE` verb (TASK-0251) stops the managed backend, so it must never be reachable
+    with the `collections` scope a corpus-managing key would hold.
+    """
+    assert required_scope("/v1/admin/provision/qdrant") == "admin"
+    assert required_scope("/v1/admin/provision/langfuse/status") == "admin"

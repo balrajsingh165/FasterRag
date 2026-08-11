@@ -19,6 +19,7 @@ from typing import Any, Final
 
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH
 from fasterrag.services.backup import DEFAULT_RETAIN
+from fasterrag.services.provision_registry import PROVISIONABLE_TOOLS
 
 __all__ = ["PENDING_COMMANDS", "build_parser"]
 
@@ -187,10 +188,15 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
 
 
 def _add_provision(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register ``provision``."""
+    """Register ``provision``.
+
+    The tool choices come from the service registry rather than a literal list, so the CLI
+    offers exactly what the REST admin router serves. Two hand-written lists is how the two
+    control planes came to disagree about Langfuse and Grafana (TASK-0251).
+    """
     parser = subparsers.add_parser("provision", help="config-driven provisioning")
     _add_global_flags(parser)
-    parser.add_argument("tool", choices=["qdrant", "grafana", "langfuse"], help="tool to provision")
+    parser.add_argument("tool", choices=PROVISIONABLE_TOOLS, help="tool to provision")
     parser.add_argument("--status", action="store_true", help="report state instead")
     parser.add_argument("--down", action="store_true", help="stop the managed containers")
 
