@@ -2,7 +2,7 @@
 
 The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engineering-facing: failure mode → detection → mitigation → proving test). Start here when something looks wrong.
 
-**Before anything else, run `fasterrag doctor`.** It checks Docker, ports, disk, RAM/GPU, backend reachability, key validity, and config validity, and prints a concrete fix for every failure. A large share of the table below is caught by it in one command.
+**Before anything else, run `fasterrag doctor`.** It checks Docker, ports, disk, RAM/GPU, backend reachability, key validity, and config validity, and prints a concrete fix for every failure. A large share of the table below is caught by it in one command. `fasterrag doctor --fix` then applies the repairs that are safe to apply — the missing named storage volume, and fasterRag's own stopped container — and re-checks; anything it will not touch (a held port, full disk, missing secret) is named with the reason and the command to run yourself.
 
 **Three things to grab before investigating anything:** the `trace_id` (on every response and every problem document), the problem `code`, and `fasterrag status` output. Those three make the difference between diagnosis and guesswork.
 
@@ -73,6 +73,8 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Provisioning refuses to run | Doctor gate failed — by design, nothing is mutated while preconditions are broken (D10) | Run `fasterrag doctor`; every failed check prints its fix |
+| `vector_db_volume` fails: the named volume does not exist | Nothing has created it yet, or `vector_db.docker.volume` was renamed — the danger is that this looks fine until the container is replaced, and then the index is gone | `fasterrag doctor --fix` creates it (safe and idempotent), or `docker volume create <name>`. `fasterrag provision qdrant` creates it too. Check the name matches the volume your data is actually on before creating a second, empty one |
+| `doctor --fix` says `needs human` on a stopped container | The container of that name does not carry `fasterrag.managed=true`, so fasterRag did not create it and will not start somebody else's service | Start it yourself, or remove it and let `fasterrag provision qdrant` create a managed one |
 | `PROVISIONING_FAILED` naming a container | One stack component came up unhealthy; the stack is left inspectable and no URL is returned | Follow the hint, then re-run — provisioning is idempotent and converges |
 | Langfuse logins/API keys stopped working after a restart | `SALT` / `ENCRYPTION_KEY` / `NEXTAUTH_SECRET` changed ([references.md](references.md) R9) | Restore the original values from your secret store. The provisioner never regenerates them; if they were deleted manually, restore rather than re-create |
 | Langfuse headless bootstrap ignored | `LANGFUSE_INIT_*` values double-quoted in compose, or org vars missing (project/user require an org — [references.md](references.md) R10) | Remove the quotes; ensure `LANGFUSE_INIT_ORG_ID`/`_ORG_NAME` are set |

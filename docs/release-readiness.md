@@ -53,7 +53,7 @@ Every item below was re-verified this session by running it, reading its impleme
 
 ### 3.2 Should ship in the beta window but does not gate the tag
 
-Accumulated maintainer reviews (TASK-0123, 0126, 0131, 0133, 0182, 0191 — the adapter surface has grown four times under review-later; ratifying them is one sitting) · rate limiter across replicas or an slo.md boundary note (TASK-0216) · queue-backend decision (TASK-0130) · `--watch`/`--fix` (TASK-0196/0197) · D11 cross-backend acceptance + facade wrap (TASK-0079) · missing chaos scenarios (TASK-0241) · live-provider eval checks (TASK-0205) · nightly regression comparison (TASK-0246) · R3 citation (TASK-0247) · pgvector pooling/timeouts (TASK-0239/0240).
+Accumulated maintainer reviews (TASK-0123, 0126, 0131, 0133, 0182, 0191 — the adapter surface has grown four times under review-later; ratifying them is one sitting) · rate limiter across replicas or an slo.md boundary note (TASK-0216) · queue-backend decision (TASK-0130) · `--watch` (TASK-0196) · D11 cross-backend acceptance + facade wrap (TASK-0079) · missing chaos scenarios (TASK-0241) · live-provider eval checks (TASK-0205) · nightly regression comparison (TASK-0246) · R3 citation (TASK-0247) · pgvector pooling/timeouts (TASK-0239/0240).
 
 ### 3.3 Post-release program (honest to ship without, dishonest to forget)
 

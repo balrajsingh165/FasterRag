@@ -107,7 +107,7 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 - **Pain point it kills.** #21 cold-start.
 - **Why it is unique.** Frameworks assume a working environment and fail with stack traces; doctor turns environment problems into named checks with fixes, and gates provisioning on them.
 - **Config keys.** None (always available); provisioning honors it implicitly.
-- **CLI / API surface.** `fasterrag doctor [--json]`; `GET /v1/admin/doctor`; exit code 4 on failure. The `--fix` flag is declared but **not implemented** — it prints a notice and changes nothing (TASK-0197, blocked on a Docker daemon).
+- **CLI / API surface.** `fasterrag doctor [--fix] [--json]`; `GET /v1/admin/doctor`; exit code 4 on failure. `--fix` repairs only what is idempotent and non-destructive — the missing named volume, and fasterRag's *own* stopped container — then re-runs every check and classifies each attempt from that second report, so a repair that did not take is reported `not fixed` rather than claimed. Everything else keeps its concrete fix-it line and is reported as needing a human. `--fix` is CLI-only: `GET /v1/admin/doctor` stays read-only because a GET must not mutate (TASK-0258 tracks the REST counterpart).
 - **Acceptance test.** Matrix test: each simulated broken precondition (port taken, Docker stopped, missing env var, unreachable remote Qdrant on 6334 only) produces the correct failing check **with a non-empty fix string**; provisioning refuses to run while doctor fails. Covered by `tests/unit/services/test_doctor.py`.
 - **Proof metric.** *(Target, not a result.)* Check coverage vs FMEA rows (every environment-class failure mode has a doctor check); doctor runtime — no ledger entry.
 

@@ -108,12 +108,33 @@ One-screen system status: API reachability, worker pools, queue depths, DLQ dept
 
 ## `fasterrag doctor`
 
-D10 preflight diagnostics. Checks: Docker present and running · required ports free (API, dashboard, 6333 **and** 6334 for Qdrant, Langfuse stack ports) · disk space · RAM/GPU availability · vector DB reachable in the configured mode (docker / external local / remote host:port) · API keys valid (non-destructive provider ping) · config schema valid. **Every failed check prints a concrete fix-it instruction.** `doctor` must pass before any auto-provisioning runs.
+D10 preflight diagnostics. Checks: Docker present and running · required ports free (API, dashboard, 6333 **and** 6334 for Qdrant, Langfuse stack ports) · disk space · RAM/GPU availability · the named Docker storage volume exists (`vector_db.mode: docker`; omitted rather than passed when the daemon is down, since a check that could not run must never report a pass) · vector DB reachable in the configured mode (docker / external local / remote host:port) · API keys valid (non-destructive provider ping) · config schema valid. **Every failed check prints a concrete fix-it instruction.** `doctor` must pass before any auto-provisioning runs.
 
 | Flag | Description |
 |---|---|
-| `--fix` | **Not yet implemented** (TASK-0197). Every candidate fix needs a running Docker daemon to attempt or verify (B7). Passing it prints a notice and leaves the report unchanged. |
-| `--json` | Machine-readable report (same schema as `GET /v1/admin/doctor`). |
+| `--fix` | Apply the repairs that are safe to apply, then **run every check again** and report what is true afterwards. See below. |
+| `--json` | Machine-readable report (same schema as `GET /v1/admin/doctor`; `--fix` adds a `fixes` object alongside `passed` and `checks`). |
+
+### `doctor --fix`
+
+`--fix` never takes a destructive or surprising action. A repair qualifies only if it is idempotent, cannot destroy state, and cannot surprise, which today is exactly two:
+
+| Failed check | Repair |
+|---|---|
+| `vector_db_volume` | `docker volume create <vector_db.docker.volume>`. Converges — an existing volume is returned untouched, so an index can never be reinitialised. |
+| `vector_db` | `docker start` the **stopped** managed container, then wait until the backend answers a real request. Only ever a container carrying fasterRag's own `fasterrag.managed=true` label: a container of that name without the label belongs to somebody else and is left alone. |
+
+Everything else is reported as needing a human, with the reason and the concrete command already printed by the check's own fix-it line. `--fix` will not free a port (that means killing whatever holds it), free disk (that means deleting files fasterRag did not write), write `.env`, rewrite `config.yaml`, or **create** a container — creating one pulls an image and publishes ports, which is `fasterrag provision qdrant`'s job.
+
+Every attempted repair is verified by re-running the whole report afterwards, and each attempt is classified from that second report, never from the repair returning without an error:
+
+| Status | Meaning |
+|---|---|
+| `fixed` | Repaired, and the re-check now passes. |
+| `not fixed` | Attempted, and the check still fails (or the repair itself errored). |
+| `needs human` | No safe automatic repair; the reason is printed. |
+
+**Exit codes are unchanged**: `0` when every check passes after the repairs, `4` when any still fails. `--fix` cannot launder a failed preflight into a green one, so it stays safe to wire into a setup script that branches on `4`.
 
 ## `fasterrag estimate <path|url> [...]`
 
