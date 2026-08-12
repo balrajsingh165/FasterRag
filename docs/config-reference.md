@@ -32,6 +32,8 @@ vector_db:
   pgvector:
     dsn_env: null
     db_schema: fasterrag
+    pool_max_size: 8
+    maintenance_timeout_ms: 600000
   collection:
     default_name: default
     distance: cosine
@@ -205,6 +207,8 @@ security:
 | `vector_db.docker.volume` | str | `fasterrag_qdrant_storage` | valid Docker volume name | Storage volume for persistence. **On Windows/WSL this MUST be a named Docker volume** — bind mounts have known file-system data-loss issues per Qdrant's install docs. The loader rejects bind-mount paths on Windows/WSL. |
 | `vector_db.pgvector.dsn_env` | str\|null | `null` | valid env-var name | Name of the environment variable holding the PostgreSQL DSN. **Required when `provider: pgvector`** (cross-field rule 11) and left unset otherwise — it defaults to `null` rather than to a name because every populated `*_env` key is required to be present at startup by rule 9, so a default would demand a PostgreSQL DSN from every Qdrant deployment. A DSN carries the password, so it is named here and stored in `.env`, never in `config.yaml`. `host`, `port`, and `grpc_port` are ignored by this provider: a usable connection string already carries the host, the database, the role, and the SSL mode. |
 | `vector_db.pgvector.db_schema` | str | `fasterrag` | `^[a-z_][a-z0-9_]{0,62}$` | PostgreSQL schema the adapter owns. It holds the three catalog tables (`fasterrag_collections`, `fasterrag_aliases`, `fasterrag_snapshots`) plus one table per collection, so pointing two deployments at one database with different schemas keeps them isolated. Created on first use if absent. |
+| `vector_db.pgvector.pool_max_size` | int | `8` | 1–256 | Maximum connections the adapter's pool opens. It held a single connection before TASK-0239, which serialized every operation on it — one blocked statement stalled every other caller, including a health check needing no lock at all. Size it to the concurrency the API and worker pools actually offer; PostgreSQL's own `max_connections` is the ceiling, and this is per process, so N replicas open N times this many. |
+| `vector_db.pgvector.maintenance_timeout_ms` | int | `600000` | ≥ 1000 | Statement budget for schema changes, snapshot copies, and restores, applied with `SET LOCAL` so it cannot leak back to the pool. Deliberately separate from `reliability.timeouts.vector_db_ms`, which bounds ordinary queries: a bound tight enough for a query aborts the HNSW build on any collection large enough to need one, so the two budgets exist to be told apart. It is a longer bound, not the absence of one. |
 | `vector_db.collection.default_name` | str | `default` | `^[a-zA-Z0-9_-]{1,64}$` | Default collection name. |
 | `vector_db.collection.distance` | str | `cosine` | one of `cosine`, `dot`, `euclid` | Distance metric for dense vectors. |
 | `vector_db.collection.shard_number` | int | `1` | ≥ 1 | Shards per collection (scaling knob; passed through the adapter). |

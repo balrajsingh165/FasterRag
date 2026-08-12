@@ -30,6 +30,8 @@ vector_db:
   pgvector:
     dsn_env: null
     db_schema: fasterrag
+    pool_max_size: 8
+    maintenance_timeout_ms: 600000
 
 embeddings:
   provider: huggingface

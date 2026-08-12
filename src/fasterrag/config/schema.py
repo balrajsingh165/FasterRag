@@ -185,6 +185,11 @@ class PgvectorSettings(Section):
     because a usable connection string also carries the database, the role, and the SSL
     mode — and it carries the password, which is why it is named by environment variable
     and never written into ``config.yaml``.
+
+    ``pool_max_size`` and ``maintenance_timeout_ms`` live here rather than under
+    ``reliability`` because both are PostgreSQL concepts — a connection pool and the
+    ``statement_timeout`` GUC — that no other adapter can honour. A shared key only pgvector
+    reads would be a setting silently ignored by every Qdrant deployment.
     """
 
     # CRITICAL: this defaults to None, not to "PGVECTOR_DSN". Every populated `*_env` field
@@ -194,6 +199,13 @@ class PgvectorSettings(Section):
     # Postgres connection. Rule 10 below asks for it only when the provider is pgvector.
     dsn_env: str | None = None
     db_schema: str = "fasterrag"
+    pool_max_size: Annotated[int, Field(ge=1, le=256)] = 8
+
+    # CRITICAL: this is the ceiling for schema changes, snapshot copies, and restores only.
+    # Ordinary statements are bounded by reliability.timeouts.vector_db_ms; applying that
+    # bound to a CREATE INDEX would abort the HNSW build on any collection large enough to
+    # need one, which is the failure this second budget exists to prevent.
+    maintenance_timeout_ms: Annotated[int, Field(ge=1000)] = 600000
 
     @field_validator("dsn_env")
     @classmethod

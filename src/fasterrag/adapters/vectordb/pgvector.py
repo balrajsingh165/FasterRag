@@ -48,12 +48,26 @@ a term table and IDF is computed per query over the live corpus, which is exactl
 the ADR mandates. ``sparsevec`` cannot serve this: its dimension ceiling is far below the
 32-bit term-hash space, and its operators offer no way to weight by corpus rarity.
 
-**Known limits of this first cut**, none of them silent: one connection is held and
-operations are serialized on it (TASK-0239 adds pooling); ``shard_number`` and
+**Connections are pooled, and every statement is time-bounded twice over.** Operations run
+on a ``psycopg_pool.AsyncConnectionPool`` sized by ``vector_db.pgvector.pool_max_size``, so
+a query that blocks on a lock no longer stalls unrelated work; the adapter previously held
+one connection behind an ``asyncio.Lock``, which made it a global lock on the whole
+vector-database path. Two statement budgets apply, because one cannot fit both jobs:
+
+* Ordinary statements — searches, lookups, point writes, deletes, health — inherit
+  ``reliability.timeouts.vector_db_ms`` as a session ``statement_timeout``, which is the
+  bound ``docs/config-reference.md`` already promises for every vector-DB call.
+* Schema changes, snapshot copies, and restores take
+  ``vector_db.pgvector.maintenance_timeout_ms`` instead, applied with ``SET LOCAL`` inside
+  the transaction that carries them. A ``CREATE INDEX`` building HNSW over a real corpus
+  legitimately runs for minutes, so the query bound would abort exactly the operation the
+  collection cannot be used without. ``SET LOCAL`` rather than ``SET`` because a failed
+  maintenance statement must not hand a connection back to the pool still carrying the
+  longer budget.
+
+**Remaining limit of this first cut**, not silent: ``shard_number`` and
 ``replication_factor`` have no single-instance equivalent and are ignored rather than
-reinterpreted; and only the connect is time-bounded, because a statement timeout tight
-enough for a query would abort the index builds and snapshot copies that legitimately take
-longer (TASK-0240).
+reinterpreted.
 """
 
 from __future__ import annotations
@@ -93,6 +107,7 @@ from fasterrag.observability.logging import get_logger
 
 try:
     import psycopg
+    import psycopg_pool
     from pgvector import Vector
     from pgvector.psycopg import register_vector_async
     from psycopg import sql
@@ -163,6 +178,7 @@ _RANGE_OPERATORS: Final[dict[str, LiteralString]] = {
 _SET_OPERATORS: Final[frozenset[str]] = frozenset({"$in", "$nin"})
 
 _AUTH_SQLSTATES: Final[frozenset[str]] = frozenset({"28000", "28P01"})
+_STATEMENT_TIMEOUT_SQLSTATE: Final = "57014"
 _NOT_FOUND_SQLSTATES: Final[frozenset[str]] = frozenset({"42P01", "3F000"})
 _CONFLICT_SQLSTATES: Final[frozenset[str]] = frozenset({"42P07", "23505", "42710"})
 _RETRYABLE_SQLSTATE_CLASSES: Final[frozenset[str]] = frozenset({"08", "40", "53", "57", "58"})
@@ -264,8 +280,11 @@ class PgvectorAdapter(VectorDBAdapter):
 
         self._dsn_env = settings.vector_db.pgvector.dsn_env
         self._schema = settings.vector_db.pgvector.db_schema
+        self._statement_timeout_ms = settings.reliability.timeouts.vector_db_ms
+        self._maintenance_timeout_ms = settings.vector_db.pgvector.maintenance_timeout_ms
+        self._pool_max_size = settings.vector_db.pgvector.pool_max_size
         self._connect_timeout = max(1, round(settings.reliability.timeouts.vector_db_ms / 1000))
-        self._connection: AsyncConnection[DictRow] | None = None
+        self._pool: psycopg_pool.AsyncConnectionPool[AsyncConnection[DictRow]] | None = None
         self._lock = asyncio.Lock()
 
     def _qualified(self, table: str) -> sql.Identifier:
@@ -316,20 +335,86 @@ class PgvectorAdapter(VectorDBAdapter):
             retryable=False,
         )
 
-    async def _connect(self) -> AsyncConnection[DictRow]:
-        """Return the open connection, opening and preparing it on first use."""
-        if self._connection is not None and not self._connection.closed:
-            return self._connection
+    async def _ensure_pool(self) -> psycopg_pool.AsyncConnectionPool[AsyncConnection[DictRow]]:
+        """Return the pool, bootstrapping the schema and opening it on first use."""
+        pool = self._pool
+        if pool is not None and not pool.closed:
+            return pool
 
-        self._require_compatible_event_loop()
-        self._connection = await psycopg.AsyncConnection.connect(
+        async with self._lock:
+            existing = self._pool
+            if existing is not None and not existing.closed:
+                return existing
+
+            self._require_compatible_event_loop()
+            await self._bootstrap()
+            opened: psycopg_pool.AsyncConnectionPool[AsyncConnection[DictRow]] = (
+                psycopg_pool.AsyncConnectionPool(
+                    self._dsn(),
+                    min_size=1,
+                    max_size=self._pool_max_size,
+                    open=False,
+                    timeout=self._connect_timeout,
+                    kwargs={
+                        "autocommit": True,
+                        "row_factory": dict_row,
+                        "connect_timeout": self._connect_timeout,
+                    },
+                    configure=self._configure,
+                    name=f"fasterrag-pgvector-{self._schema}",
+                )
+            )
+            await opened.open(wait=True, timeout=self._connect_timeout)
+            self._pool = opened
+            return opened
+
+    async def _bootstrap(self) -> None:
+        """Converge the schema on one standalone connection, before the pool opens.
+
+        Deliberately not pool ``configure`` work, for two independent reasons. ``CREATE TABLE
+        IF NOT EXISTS`` is not race-free — two sessions running it at the same instant still
+        collide on the catalog's unique index — and a pool opens several connections at once,
+        so putting the DDL there would manufacture the race a single connection never had.
+        And a rejected credential has to surface as the authentication failure it is: a pool
+        retries a failed connection in the background and reports only that it could not fill
+        in time, which would turn a wrong password into a retryable timeout.
+        """
+        async with await psycopg.AsyncConnection.connect(
             self._dsn(),
             autocommit=True,
             row_factory=dict_row,
             connect_timeout=self._connect_timeout,
+        ) as connection:
+            await self._prepare(connection)
+
+    async def _configure(self, connection: AsyncConnection[DictRow]) -> None:
+        """Prepare one pooled connection: vector types, then the ordinary statement budget.
+
+        The budget is set per session rather than per statement so that every path is bounded
+        by construction — a query added later cannot forget to ask for a timeout.
+        """
+        await register_vector_async(connection)
+        await connection.execute(
+            sql.SQL("SET statement_timeout = {budget}").format(
+                budget=sql.Literal(self._statement_timeout_ms)
+            )
         )
-        await self._prepare(self._connection)
-        return self._connection
+
+    @asynccontextmanager
+    async def _maintenance(self, connection: AsyncConnection[DictRow]) -> AsyncIterator[None]:
+        """Run a transaction under the longer maintenance budget.
+
+        ``SET LOCAL`` rather than ``SET``: the setting dies with the transaction, so a
+        maintenance statement that fails cannot return a connection to the pool still
+        carrying a budget long enough to hide a hung query.
+        """
+        async with connection.transaction():
+            await connection.execute(
+                sql.SQL("SET LOCAL statement_timeout = {budget}").format(
+                    budget=sql.Literal(self._maintenance_timeout_ms)
+                )
+            )
+            yield
 
     async def _prepare(self, connection: AsyncConnection[DictRow]) -> None:
         """Converge the extension, the schema, and the catalog tables.
@@ -338,7 +423,6 @@ class PgvectorAdapter(VectorDBAdapter):
         both succeed instead of one failing against a half-created schema.
         """
         await connection.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        await register_vector_async(connection)
         await connection.execute(
             sql.SQL("CREATE SCHEMA IF NOT EXISTS {schema}").format(
                 schema=sql.Identifier(self._schema)
@@ -402,6 +486,17 @@ class PgvectorAdapter(VectorDBAdapter):
 
         if sqlstate in _AUTH_SQLSTATES:
             return self._auth_error(operation)
+        if sqlstate == _STATEMENT_TIMEOUT_SQLSTATE:
+            return ProviderError(
+                f"postgresql cancelled the statement during {operation} because it exceeded "
+                f"its budget; ordinary statements are bounded by "
+                f"reliability.timeouts.vector_db_ms ({self._statement_timeout_ms} ms) and "
+                f"schema changes, snapshots, and restores by "
+                f"vector_db.pgvector.maintenance_timeout_ms "
+                f"({self._maintenance_timeout_ms} ms)",
+                code=ErrorCode.EMBED_PROVIDER_ERROR,
+                retryable=True,
+            )
         if sqlstate in _NOT_FOUND_SQLSTATES:
             return FasterRagError(
                 f"postgresql reported a missing relation during {operation} (SQLSTATE {sqlstate})",
@@ -420,7 +515,15 @@ class PgvectorAdapter(VectorDBAdapter):
         )
 
     def _translate_without_sqlstate(self, exc: BaseException, operation: str) -> FasterRagError:
-        """Classify a connection-setup failure, which carries no SQLSTATE to key on."""
+        """Classify a pool or connection-setup failure, which carries no SQLSTATE to key on."""
+        if isinstance(exc, psycopg_pool.PoolTimeout | psycopg_pool.TooManyRequests):
+            return ProviderError(
+                f"every one of the {self._pool_max_size} pooled postgresql connections was "
+                f"still busy after {self._connect_timeout}s during {operation}; raise "
+                "vector_db.pgvector.pool_max_size or shed load upstream",
+                code=ErrorCode.EMBED_PROVIDER_ERROR,
+                retryable=True,
+            )
         message = str(exc).lower()
         if any(marker in message for marker in _AUTH_MESSAGE_MARKERS):
             return self._auth_error(operation)
@@ -430,35 +533,21 @@ class PgvectorAdapter(VectorDBAdapter):
             retryable=True,
         )
 
-    async def _discard_connection(self) -> None:
-        """Drop a failed connection so the next call reconnects instead of reusing it."""
-        broken, self._connection = self._connection, None
-        if broken is None or broken.closed:
-            return
-        try:
-            await broken.close()
-        except (psycopg.Error, OSError) as exc:
-            _logger.warning(
-                "closing a failed postgresql connection did not succeed",
-                extra={"error": type(exc).__name__},
-            )
-
     @asynccontextmanager
     async def _session(self, operation: str) -> AsyncIterator[AsyncConnection[DictRow]]:
-        """Serialize one operation on the connection, translating vendor failures.
+        """Borrow one pooled connection for one operation, translating vendor failures.
 
-        The lock is what makes a single connection safe to share: psycopg serializes
-        statements internally, but two coroutines interleaving them inside one transaction
-        would commit each other's half-finished work.
+        Nothing is serialized here. Each caller gets its own connection, so a statement
+        waiting on a lock delays only itself; the adapter used to hold a single connection
+        under an ``asyncio.Lock``, which made every operation queue behind the slowest one.
+        Discarding a connection left unusable is the pool's job now, done when it is returned.
         """
-        async with self._lock:
-            try:
-                connection = await self._connect()
+        try:
+            pool = await self._ensure_pool()
+            async with pool.connection() as connection:
                 yield connection
-            except (psycopg.Error, OSError) as exc:
-                if isinstance(exc, psycopg.OperationalError | psycopg.InterfaceError | OSError):
-                    await self._discard_connection()
-                raise self._translate(exc, operation) from exc
+        except (psycopg.Error, OSError) as exc:
+            raise self._translate(exc, operation) from exc
 
     def _filter_sql(
         self, filters: Filter | None, *, payload: sql.Composable | None = None
@@ -593,7 +682,7 @@ class PgvectorAdapter(VectorDBAdapter):
             if existing is not None:
                 self._require_compatible(spec, existing)
                 return
-            async with connection.transaction():
+            async with self._maintenance(connection):
                 await self._create_tables(connection, spec)
 
     async def _create_tables(
@@ -743,7 +832,7 @@ class PgvectorAdapter(VectorDBAdapter):
             )
             snapshot_tables = [str(entry["table_name"]) for entry in await snapshots.fetchall()]
 
-            async with connection.transaction():
+            async with self._maintenance(connection):
                 for snapshot_table in snapshot_tables:
                     await self._drop_tables(connection, snapshot_table)
                 await self._drop_tables(connection, str(row["table_name"]))
@@ -783,7 +872,7 @@ class PgvectorAdapter(VectorDBAdapter):
             name = f"{found.name}-{stamp}-{uuid.uuid4().hex[:8]}"
             table = _snapshot_table_name(found.name, name)
 
-            async with connection.transaction():
+            async with self._maintenance(connection):
                 await connection.execute(
                     sql.SQL("CREATE TABLE {snapshot} AS TABLE {source}").format(
                         snapshot=self._qualified(table), source=self._qualified(found.table)
@@ -830,7 +919,7 @@ class PgvectorAdapter(VectorDBAdapter):
             if row is None:
                 return False
 
-            async with connection.transaction():
+            async with self._maintenance(connection):
                 await self._drop_tables(connection, str(row["table_name"]))
                 await connection.execute(
                     sql.SQL("DELETE FROM {catalog} WHERE collection = %s AND name = %s").format(
@@ -883,7 +972,7 @@ class PgvectorAdapter(VectorDBAdapter):
             target = await self._require(connection, collection)
             self._require_compatible(spec, target)
 
-            async with connection.transaction():
+            async with self._maintenance(connection):
                 await connection.execute(
                     sql.SQL("DELETE FROM {table}").format(table=self._qualified(target.table))
                 )
@@ -1293,12 +1382,12 @@ class PgvectorAdapter(VectorDBAdapter):
         return HealthStatus(healthy=True, latency_ms=round(elapsed_ms, 3))
 
     async def close(self) -> None:
-        """Close the connection held by the adapter."""
+        """Close every connection the adapter's pool holds."""
         async with self._lock:
-            connection, self._connection = self._connection, None
-            if connection is None or connection.closed:
+            pool, self._pool = self._pool, None
+            if pool is None or pool.closed:
                 return
             try:
-                await connection.close()
+                await pool.close()
             except (psycopg.Error, OSError) as exc:
                 raise self._translate(exc, "close") from exc
