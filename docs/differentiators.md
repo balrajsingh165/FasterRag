@@ -97,7 +97,7 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 - **Pain point it kills.** #11 cost control.
 - **Why it is unique.** Everyone else discovers embedding costs on the invoice. Preflight estimates + hard runtime budgets + tier routing make spend a first-class, enforced dimension.
 - **Config keys.** `cost.estimator` (default `true`), `cost.per_query_token_budget` (default `0` = unlimited), `cost.per_tenant_token_budget` (default `0`), `embeddings.tiering.*`.
-- **CLI / API surface.** `fasterrag estimate [--all-providers]`; `POST /v1/estimate`. **Specified but not built** (TASK-0242): the `BUDGET_EXCEEDED` (402) problem is defined in the taxonomy and raised by nothing, and `estimated_cost_usd` appears in no response — neither string exists in `src/`.
+- **CLI / API surface.** `fasterrag estimate [--all-providers]`; `POST /v1/estimate`. The runtime governor ships (TASK-0242 ✅): both budgets are enforced before the provider is called and refuse with `BUDGET_EXCEEDED` (402). `estimated_cost_usd` is still **specified and not emitted** in the response body (TASK-0260) — per-query cost reaches operators through the `fasterrag_cost_usd_total` metric instead.
 - **Acceptance test.** *(Specified; neither is written.)* Estimator accuracy: projected vs actual tokens on a fixture corpus within ±5%. Budget test: a query engineered to exceed the budget returns 402 before the provider call — unwritable until TASK-0242 builds the governor.
 - **Proof metric.** *(Target, not a result.)* Estimator error % on named corpora (ledger); tier-routing cost delta on a mixed corpus (ledger). No entry for either.
 

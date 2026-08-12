@@ -190,26 +190,27 @@ def test_multi_tenancy_is_accepted_now_that_it_is_enforced(tmp_path: Path) -> No
     assert settings.security.multi_tenancy
 
 
-def test_the_failure_names_what_is_missing(tmp_path: Path) -> None:
-    """A refusal that does not say what is unbuilt leaves the operator nowhere to go."""
+@pytest.mark.usefixtures("env")
+def test_the_query_budget_is_accepted_now_that_it_is_enforced(tmp_path: Path) -> None:
+    """It left the unenforced list with TASK-0242; the cost governor refuses the query."""
     path = write_config(tmp_path, "cost:\n  per_query_token_budget: 100\n")
 
-    with pytest.raises(ConfigError, match="cost governor"):
-        load_settings(path, env_file=None)
+    settings = load_settings(path, env_file=None)
+
+    assert settings.cost.per_query_token_budget == 100
 
 
-def test_every_unenforced_setting_is_listed_at_once(tmp_path: Path) -> None:
-    """Reporting one at a time makes an operator restart four times to learn four things."""
+@pytest.mark.usefixtures("env")
+def test_the_tenant_budget_is_accepted_now_that_it_is_enforced(tmp_path: Path) -> None:
+    """Also TASK-0242. Enforced per replica, which config-reference.md states outright."""
     path = write_config(
         tmp_path,
         "cost:\n  per_query_token_budget: 1000\n  per_tenant_token_budget: 5000\n",
     )
 
-    with pytest.raises(ConfigError) as caught:
-        load_settings(path, env_file=None)
+    settings = load_settings(path, env_file=None)
 
-    for key in ("cost.per_query_token_budget", "cost.per_tenant_token_budget"):
-        assert key in caught.value.detail
+    assert settings.cost.per_tenant_token_budget == 5000
 
 
 @pytest.mark.usefixtures("env")

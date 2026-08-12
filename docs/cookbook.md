@@ -87,7 +87,7 @@ retrieval:
   rerank_top_n: 50
 ```
 
-> ⚠️ **Token budgets are deliberately omitted from this recipe.** `cost.per_query_token_budget` and `cost.per_tenant_token_budget` are in the schema, but the runtime cost governor **is not built** (TASK-0242): setting either to a non-zero value makes `load_settings` raise `ConfigError` and the process refuse to start. That is intentional — a budget key that validated and enforced nothing would read as a spend cap while being none. Use `fasterrag estimate` before ingesting instead; it is the half of D9 that ships.
+> ⚠️ **Token budgets now enforce, and the per-tenant one is per replica.** `cost.per_query_token_budget` and `cost.per_tenant_token_budget` are enforced before the provider is called (TASK-0242 ✅); a refused query gets `BUDGET_EXCEEDED` (402) rather than a degraded answer. The per-query budget is exact and identical on every replica. **The per-tenant budget is counted in-process**, like the per-key rate limiter (TASK-0216), so N replicas grant N times the configured budget — the error runs in the permissive direction, so size it for your replica count or run one. Budgets are checked against the prompt plus `llm.max_tokens`, the ceiling a call can reach, and a tenant is charged what the query actually cost. `fasterrag estimate` remains the preflight half.
 
 **Why:** local embeddings remove the dominant variable cost; tiering spends only where precision pays; the semantic cache eliminates repeat generation. **Trade-off:** larger chunks and a shallower rerank pool cost some precision — pair with R7 to prove the loss is acceptable.
 
@@ -257,6 +257,6 @@ Then: ingest a representative slice → `fasterrag autopilot run` for a measured
 |---|---|
 | R1 + R2 | Excellent — maximum accuracy, fully local. Watch ingest time: enrichment runs through your local LLM. |
 | R3 + R4 | Good — cheap and fast; verify recall with R7 before trusting it in production. |
-| R5 + R3 | Natural pairing in principle — but per-tenant budgets are unbuilt (TASK-0242), so today the pairing is tenant isolation plus preflight estimation, with no runtime enforcement arm. |
+| R5 + R3 | Natural pairing, and now complete: tenant isolation, preflight estimation, *and* a runtime per-tenant budget (TASK-0242 ✅). Size the budget for your replica count — it is counted per process. |
 | R2 + R4 | Conflicting: `rerank_top_n` 300 vs 50 is the same dial pulled in opposite directions. Pick your point on the curve and measure it. |
 | Any + R7 | Always worth adding. A tuned config with no regression gate degrades silently over time. |

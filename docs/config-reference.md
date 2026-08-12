@@ -360,8 +360,8 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
 | `cost.estimator` | bool | `true` | — | D9: enable `fasterrag estimate`, `POST /v1/estimate`, `fasterrag ingest --dry-run`, and `FasterRag.estimate` (token counts, projected embedding cost per provider, BEFORE ingestion). When `false` each refuses with `VALIDATION_FAILED` naming this setting, rather than reporting an estimate of zero. `benchmark --suite ingest` is unaffected: it times the same parse-and-chunk work and reports no cost. |
-| `cost.per_query_token_budget` | int | `0` | ≥ 0 (0 = unlimited) | Hard token budget per query; exceeding returns a budget-exceeded problem response. |
-| `cost.per_tenant_token_budget` | int | `0` | ≥ 0 (0 = unlimited) | Rolling per-tenant token budget (requires `security.multi_tenancy: true` to be meaningful). |
+| `cost.per_query_token_budget` | int | `0` | ≥ 0 (0 = unlimited) | Hard token budget per query, checked before the provider is called against the prompt plus `llm.max_tokens` — the ceiling the call can reach, because a completion length is unknown until the tokens are spent. Exceeding it returns `BUDGET_EXCEEDED` (402), which is non-retryable so the degradation ladder cannot absorb it into an extractive answer. Exact and identical on every replica. |
+| `cost.per_tenant_token_budget` | int | `0` | ≥ 0 (0 = unlimited) | Per-tenant token budget over a **rolling 24-hour window** (the documented "rolling" needs a period to mean anything). Charged the actual tokens a query cost, admitted against the ceiling. Without `security.multi_tenancy: true` all traffic shares one bucket, which is what a per-tenant budget means for a single-tenant deployment. **Counted in-process**, like the per-key rate limiter (TASK-0216): N replicas grant N times this budget, so size it for your replica count. |
 
 ### Which models carry a price
 

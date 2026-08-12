@@ -10,7 +10,13 @@ from fasterrag.config.schema import Settings
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.cache.store import MemoryStore
 from fasterrag.core.retrieval.models import ScoredChunk
-from fasterrag.errors import ConfigError, EmbedError, GenerationError
+from fasterrag.errors import (
+    ConfigError,
+    EmbedError,
+    ErrorCode,
+    FasterRagError,
+    GenerationError,
+)
 from fasterrag.services.generation import EXTRACTIVE_MODE, GenerationService, QueryEvent
 from fasterrag.services.querying import FULL_MODE, HYBRID_ONLY_MODE, Retrieval
 
@@ -829,3 +835,95 @@ async def test_a_misconfigured_provider_never_opens_the_breaker() -> None:
             await service.answer("what is the notice period", collection="policies")
 
     assert service.breaker.is_open is False
+
+
+async def test_a_query_over_the_budget_is_refused_rather_than_answered() -> None:
+    """The cap must reach the caller as 402, never as a quietly degraded answer.
+
+    This is the trap the placement guards against: the degradation ladder absorbs *retryable*
+    failures into an extractive answer, so a retryable budget error would turn a spend control
+    into a quality regression nobody could see. `BUDGET_EXCEEDED` is non-retryable and the
+    check sits outside that block, so both facts have to change before this can regress.
+    """
+    settings = Settings.model_validate(
+        {"cost": {"per_query_token_budget": 10}, "llm": {"max_tokens": 1024}}
+    )
+    llm = ScriptedLLM(settings, text="an answer")
+    retrieval = ScriptedRetrieval([chunk("c_a", "Either party may terminate.")])
+    service = GenerationService(settings, retrieval, llm)  # type: ignore[arg-type]
+
+    with pytest.raises(FasterRagError) as caught:
+        await service.answer("what is the notice period", collection="policies")
+
+    assert caught.value.code is ErrorCode.BUDGET_EXCEEDED
+    assert caught.value.retryable is False
+    assert llm.prompts == [], "the provider was called for a query the budget refused"
+
+
+async def test_a_streamed_query_over_the_budget_is_refused_before_any_token() -> None:
+    """A mid-stream refusal would arrive after `meta` had already promised an answer."""
+    settings = Settings.model_validate(
+        {"cost": {"per_query_token_budget": 10}, "llm": {"max_tokens": 1024}}
+    )
+    llm = ScriptedLLM(settings, text="an answer")
+    retrieval = ScriptedRetrieval([chunk("c_a", "Either party may terminate.")])
+    service = GenerationService(settings, retrieval, llm)  # type: ignore[arg-type]
+
+    with pytest.raises(FasterRagError) as caught:
+        [event async for event in service.stream("what is the notice period")]
+
+    assert caught.value.code is ErrorCode.BUDGET_EXCEEDED
+    assert llm.prompts == []
+
+
+async def test_an_unset_budget_permits_everything() -> None:
+    """The default is 0 = unlimited, and a governor nobody configured must not refuse."""
+    service, llm = build()
+
+    result = await service.answer("what is the notice period", collection="policies")
+
+    assert result.answer is not None
+    assert llm.prompts != []
+
+
+async def test_actual_usage_is_charged_to_the_tenant_not_the_admitted_ceiling() -> None:
+    """Charging the ceiling would bill every short answer for a long one.
+
+    The admission check uses the worst case because a completion's length is unknown until it
+    exists; the charge uses what it really cost. Admitting on the ceiling and charging the
+    actual is the pair that neither overspends nor over-refuses.
+    """
+    settings = Settings.model_validate(
+        {"cost": {"per_tenant_token_budget": 100_000}, "llm": {"max_tokens": 1024}}
+    )
+    llm = ScriptedLLM(settings, text="The notice period is thirty days [^c_a].")
+    retrieval = ScriptedRetrieval([chunk("c_a", "Either party may terminate.")])
+    service = GenerationService(settings, retrieval, llm, tenant="acme")  # type: ignore[arg-type]
+
+    await service.answer("what is the notice period", collection="policies")
+
+    assert service.governor.spent("acme") == 18, "ScriptedLLM reports 11 prompt + 7 completion"
+    assert service.governor.spent("other") == 0
+
+
+async def test_the_budget_is_checked_against_the_ceiling_not_just_the_prompt() -> None:
+    """A cap that admits a request it cannot pay for is not a cap.
+
+    The budget here sits deliberately *between* the prompt's size and the prompt plus
+    ``llm.max_tokens``: a check that weighed only the prompt would admit this query and then
+    let the provider spend eight thousand tokens against a two-thousand-token budget. Written
+    this way because a budget below the prompt size refuses either way, and cannot tell the
+    two implementations apart — the first version of this test could not.
+    """
+    settings = Settings.model_validate(
+        {"cost": {"per_query_token_budget": 2000}, "llm": {"max_tokens": 8000}}
+    )
+    llm = ScriptedLLM(settings, text="an answer")
+    retrieval = ScriptedRetrieval([chunk("c_a", "Either party may terminate.")])
+    service = GenerationService(settings, retrieval, llm)  # type: ignore[arg-type]
+
+    with pytest.raises(FasterRagError) as caught:
+        await service.answer("what is the notice period", collection="policies")
+
+    assert caught.value.code is ErrorCode.BUDGET_EXCEEDED
+    assert llm.prompts == []

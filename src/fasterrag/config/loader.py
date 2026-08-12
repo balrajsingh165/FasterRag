@@ -7,6 +7,13 @@ offending key or variable — startup aborts rather than serving a misconfigured
 
 Secret values are never read, echoed, or logged here: the loader only ever asserts that
 a named variable exists and is non-blank.
+
+**A setting the schema accepts but no code reads must not start silently.** Until
+TASK-0242 the loader carried a list of such keys and refused to start on any of them,
+because an operator who sets ``security.auth: true`` reads that as authentication being
+on. That list is now empty — every setting on it has been claimed by the slice that
+enforces it — so the check is gone rather than kept as a no-op. The rule it embodied
+still holds: a new key ships with the code that reads it, or with a guard here.
 """
 
 from __future__ import annotations
@@ -84,7 +91,6 @@ def load_settings(
     if combined:
         raw = apply_overrides(raw, combined)
     settings = _validate(raw, config_path)
-    _reject_unenforced_settings(settings)
 
     # CRITICAL: `require_env` defaults to True and every execution path must leave it
     # there. It exists for read-only inspection — `config show` is most useful on exactly
@@ -237,40 +243,6 @@ def _format_violations(exc: ValidationError) -> str:
         message = error["msg"].removeprefix("Value error, ")
         lines.append(f"  - {location}: {message}")
     return "\n".join(lines)
-
-
-def _reject_unenforced_settings(settings: Settings) -> None:
-    """Refuse to start under a security or budget setting that nothing enforces.
-
-    These keys validate, and the schema keeps them because ``docs/config-reference.md``
-    specifies them — but no code path consumes any of them yet. Accepting them silently is
-    the worst of the three options: an operator who sets ``security.auth: true`` reads that
-    as authentication being on, and gets an open API that reports itself configured. A
-    startup failure naming the missing slice is the only outcome that cannot be mistaken
-    for protection.
-
-    Raises:
-        ConfigError: If any accepted-but-unenforced setting is enabled.
-    """
-    enabled: list[str] = []
-
-    # TODO: each of these is removed from this list by the slice named beside it.
-    # security.auth and security.multi_tenancy both left this list — auth with TASK-0046 and
-    # tenancy with TASK-0179. Both are enforced by AuthMiddleware, which refuses to start
-    # without a usable key and refuses any request whose tenant does not match its key.
-    if settings.cost.per_query_token_budget:
-        enabled.append("  - cost.per_query_token_budget (the cost governor is not built)")
-    if settings.cost.per_tenant_token_budget:
-        enabled.append("  - cost.per_tenant_token_budget (the cost governor is not built)")
-
-    if enabled:
-        listed = "\n".join(enabled)
-        raise ConfigError(
-            "these settings are accepted by the schema but enforced by nothing yet:\n"
-            f"{listed}\n"
-            "leave them at their defaults until the slice that implements them ships — "
-            "starting with one enabled would report a protection the system does not have"
-        )
 
 
 def _require_referenced_env_vars(settings: Settings, env_file: str | Path | None) -> None:

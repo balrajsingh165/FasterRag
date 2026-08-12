@@ -62,6 +62,7 @@ from fasterrag.core.tracing import SpanRecorder, Trace, config_snapshot, record_
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import current_trace_id, get_logger
+from fasterrag.services.budget import create_governor
 from fasterrag.services.estimation import price_generation
 from fasterrag.services.querying import FULL_MODE, RetrievalService
 from fasterrag.services.traces import TraceStore, now
@@ -343,6 +344,7 @@ class GenerationService:
         # embedding pool builds its own. One service instance owns one breaker for the whole
         # of its life, which is what makes consecutive failures countable — a breaker rebuilt
         # per query counts to one forever and can never open.
+        self.governor = create_governor(settings)
         self.breaker = breaker or CircuitBreaker(
             provider="llm",
             failure_threshold=settings.reliability.circuit_breaker.failure_threshold,
@@ -485,6 +487,21 @@ class GenerationService:
             )
         )
 
+    def _charge_budget(self, prepared: _Prepared) -> None:
+        """Refuse the call when it cannot fit inside the configured token budgets (D9).
+
+        The worst case is charged, not the likely one: a completion's real length is unknown
+        until the provider has produced it, and by then the tokens are spent. ``max_tokens``
+        is the ceiling the call can reach, so prompt plus ceiling is what a cap has to be
+        checked against. Weighing only the prompt would admit a query the budget cannot pay
+        for, and a cap that does that is not a cap.
+        """
+        if not self.governor.enabled:
+            return
+
+        worst_case = self.counter.count(prepared.prompt) + self.settings.llm.max_tokens
+        self.governor.check(worst_case, tenant=self.tenant)
+
     def _record_generation(self, elapsed_ms: int, prompt: int, completion: int) -> None:
         """Record what one generation call cost, in time, in tokens, and in money.
 
@@ -493,6 +510,13 @@ class GenerationService:
         with no recorded rate contributes nothing rather than a fabricated number. The
         counter is named ``..._usd_total`` and documented as estimated for that reason.
         """
+        # CRITICAL: the tenant is charged here, at the one point both the streaming
+        # and non-streaming paths pass through, and with the *actual* counts rather
+        # than the ceiling the request was admitted against. Charging at the check
+        # would bill every short answer for a long one and exhaust a budget that was
+        # never spent.
+        self.governor.record(prompt + completion, tenant=self.tenant)
+
         provider = self.llm.provider
         metrics.STAGE_DURATION.observe(elapsed_ms / 1000, stage="generate")
         if prompt:
@@ -604,6 +628,14 @@ class GenerationService:
         timings = prepared.timings
         if vector is not None:
             timings["cache"] = cache_ms
+
+        # CRITICAL: *outside* the try below, and deliberately so. That block absorbs a
+        # retryable failure into an extractive answer, and a budget refusal must reach
+        # the caller as the 402 it is — degrading it would turn a spend control into a
+        # silent quality regression. BUDGET_EXCEEDED is non-retryable in the problem
+        # table, so it would re-raise anyway; keeping the call out here means that
+        # stays true even if the ladder's conditions are ever loosened.
+        self._charge_budget(prepared)
 
         started = time.perf_counter()
         try:
@@ -752,6 +784,11 @@ class GenerationService:
                 "degraded": prepared.mode != FULL_MODE,
             },
         )
+
+        # Outside the try for the same reason as the non-streaming path: a budget
+        # refusal is a 402 the caller must see, not an `error` event mid-stream after
+        # `meta` has already promised an answer.
+        self._charge_budget(prepared)
 
         started = time.perf_counter()
         parts: list[str] = []

@@ -44,7 +44,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `PAYLOAD_TOO_LARGE` | 413 | — | Body exceeds `security.max_request_mb` / `ingestion.max_document_mb`. |
 | `RATE_LIMITED` | 429 | — | Per-key rate limit exceeded (`Retry-After` set). |
 | `QUEUE_FULL` | 429 | `IngestionError` | Bounded queue overflow (`Retry-After` set). |
-| `BUDGET_EXCEEDED` | 402 | — | Per-query or per-tenant token budget exhausted (D9). **Defined in the taxonomy and raised by nothing** — the runtime cost governor is not built (TASK-0242), so no request can currently receive this problem. |
+| `BUDGET_EXCEEDED` | 402 | — | Per-query or per-tenant token budget exhausted (D9), raised by the runtime cost governor before the provider is called (TASK-0242 ✅). **Non-retryable**, which is deliberate: the degradation ladder absorbs retryable failures into an extractive answer, so a retryable budget error would serve a degraded answer instead of reporting the cap. The check weighs the prompt plus `llm.max_tokens`, the ceiling the call can reach. |
 | `PARSE_FAILED` | 422 | `ParseError` | Document unparseable; also the DLQ reason code. |
 | `CHUNK_FAILED` | 500 | `ChunkError` | Chunker invariant violated. |
 | `EMBED_PROVIDER_TIMEOUT` / `EMBED_PROVIDER_ERROR` | 503 | `EmbedError`/`ProviderError` | Embedding provider timeout / hard failure. |
