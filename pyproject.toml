@@ -204,6 +204,13 @@ module = [
     "reportlab.*",
     "sentence_transformers.*",
     "snowballstemmer.*",
+    # CRITICAL: torch and transformers arrive with the `huggingface` extra, which the CI
+    # quality job does not install — it installs `.[dev]`. Without these two entries mypy
+    # passes for anyone whose venv happens to carry them and fails in CI, which is exactly
+    # how it failed there unnoticed from 2026-08-04 (TASK-0261). Both are imported lazily,
+    # inside the functions that need them, so the runtime already treats them as optional.
+    "torch.*",
+    "transformers.*",
 ]
 ignore_missing_imports = true
 
