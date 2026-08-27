@@ -19,9 +19,10 @@ import psycopg
 import psycopg_pool
 import pytest
 
-from fasterrag.adapters.vectordb.pgvector import PgvectorAdapter, table_name_for
+from fasterrag.adapters.vectordb.base import Point, SparseVector
+from fasterrag.adapters.vectordb.pgvector import PgvectorAdapter, _Collection, table_name_for
 from fasterrag.config.schema import Settings
-from fasterrag.errors import ConfigError, ErrorCode, FasterRagError
+from fasterrag.errors import ConfigError, EmbedError, ErrorCode, FasterRagError
 
 DSN_VAR = "FASTERRAG_TEST_PG_DSN"
 MAXIMUM_IDENTIFIER_BYTES = 63
@@ -400,3 +401,108 @@ class TestPooledOperations:
         deleted = await pooled(adapter, FakeConnection([[]])).delete_snapshot("policies", "gone")
 
         assert deleted is False
+
+
+def collection(*, dimensions: int = 3, sparse: bool = False) -> _Collection:
+    """Return a resolved catalog row for the write-path guards to check against."""
+    return _Collection(
+        name="policies",
+        table=table_name_for("policies"),
+        dimensions=dimensions,
+        distance="cosine",
+        sparse=sparse,
+    )
+
+
+def point(
+    point_id: str = "c_1", *, vector: list[float] | None = None, sparse: SparseVector | None = None
+) -> Point:
+    """Return one point aimed at the collection above."""
+    return Point(
+        point_id=point_id,
+        collection="policies",
+        vector=vector if vector is not None else [0.1, 0.2, 0.3],
+        payload={"tenant": "acme"},
+        sparse=sparse,
+    )
+
+
+class TestWriteGuards:
+    """Refusals that run before a row is written, where accepting is the worse outcome."""
+
+    async def test_an_empty_batch_writes_nothing_and_asks_for_no_connection(
+        self, adapter: PgvectorAdapter
+    ) -> None:
+        """The early return matters: no pool is touched, so an empty flush cannot fail."""
+        result = await adapter.upsert([])
+
+        assert result.upserted == 0
+
+    def test_a_dimension_mismatch_names_both_widths(self) -> None:
+        """A dimension mismatch names both widths and refuses a retry.
+
+        The cause is a changed embedding model and the fix is a reindex, so the message
+        has to carry both numbers.
+        """
+        with pytest.raises(EmbedError) as caught:
+            PgvectorAdapter._require_matching_dimensions(
+                collection(dimensions=384), [point(vector=[0.1, 0.2, 0.3])]
+            )
+
+        assert caught.value.retryable is False
+        assert "384" in str(caught.value)
+        assert "3 dimensions" in str(caught.value)
+
+    def test_a_matching_batch_passes_the_dimension_guard(self) -> None:
+        PgvectorAdapter._require_matching_dimensions(collection(dimensions=3), [point()])
+
+    def test_the_offending_point_is_named_not_just_the_batch(self) -> None:
+        """A batch is thousands of points; "a point has the wrong width" is unactionable."""
+        batch = [point("c_ok"), point("c_bad", vector=[0.1])]
+
+        with pytest.raises(EmbedError, match="c_bad"):
+            PgvectorAdapter._require_matching_dimensions(collection(dimensions=3), batch)
+
+    def test_a_sparse_vector_is_refused_by_a_collection_without_a_sparse_index(self) -> None:
+        """A sparse vector is refused where no sparse index exists.
+
+        Accepting it would write the dense half and discard the keyword leg the caller
+        asked for, leaving a collection that answers hybrid queries with half an answer.
+        """
+        carried = point(sparse=SparseVector(indices=[1, 2], values=[0.5, 0.5]))
+
+        with pytest.raises(EmbedError, match="no sparse index"):
+            PgvectorAdapter._require_sparse_index(collection(sparse=False), [carried])
+
+    def test_a_sparse_vector_is_accepted_where_the_index_exists(self) -> None:
+        carried = point(sparse=SparseVector(indices=[1], values=[1.0]))
+
+        PgvectorAdapter._require_sparse_index(collection(sparse=True), [carried])
+
+    def test_a_dense_only_batch_passes_the_sparse_guard(self) -> None:
+        """A collection with no sparse index is the ordinary case, not an error."""
+        PgvectorAdapter._require_sparse_index(collection(sparse=False), [point()])
+
+    async def test_upserting_into_an_unknown_collection_is_not_found(
+        self, adapter: PgvectorAdapter
+    ) -> None:
+        """A typo must not read as an empty result and silently write nowhere."""
+        with pytest.raises(FasterRagError) as caught:
+            await pooled(adapter, FakeConnection([[]])).upsert([point()])
+
+        assert caught.value.code is ErrorCode.NOT_FOUND
+
+
+class TestCollectionCatalogRow:
+    """The resolved catalog row the write path works against."""
+
+    def test_the_terms_table_derives_from_the_points_table(self) -> None:
+        """The terms table derives from the points table.
+
+        Both have to follow from the collection name alone, or an operator inspecting the
+        database cannot pair them.
+        """
+        resolved = collection()
+
+        assert resolved.terms_table.startswith(resolved.table)
+        assert resolved.terms_table != resolved.table
