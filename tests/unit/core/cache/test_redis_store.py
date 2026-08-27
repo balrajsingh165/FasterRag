@@ -28,6 +28,7 @@ class FakeRedis:
     def __init__(self) -> None:
         self.values: dict[str, bytes] = {}
         self.scores: dict[str, dict[str, float]] = {}
+        self.counters: dict[str, int] = {}
         self.expiries: dict[str, int | None] = {}
         self.closed = False
 
@@ -50,6 +51,10 @@ class FakeRedis:
             if self.scores.pop(key, None) is not None:
                 removed += 1
         return removed
+
+    async def incr(self, key: str) -> int:
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
 
     async def zadd(self, index: str, mapping: dict[str, float]) -> int:
         self.scores.setdefault(index, {}).update(mapping)
@@ -78,6 +83,9 @@ class BrokenRedis(FakeRedis):
         raise ConnectionError("redis is down")
 
     async def mget(self, keys: list[str]) -> list[bytes | None]:
+        raise ConnectionError("redis is down")
+
+    async def incr(self, key: str) -> int:
         raise ConnectionError("redis is down")
 
     async def zadd(self, index: str, mapping: dict[str, float]) -> int:
@@ -380,3 +388,31 @@ def test_selecting_redis_without_the_client_names_the_extra(
 
     with pytest.raises(ConfigError, match=r"fasterrag\[redis\]"):
         create_semantic_store(settings(cache={"backend": "redis"}))
+
+
+async def test_eviction_is_least_recently_used_even_on_a_clock_that_never_ticks(
+    client: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recency must not depend on the platform's clock resolution.
+
+    The version-dependent bug this pins: `time.time()` resolves to 15.625 ms on Windows
+    before CPython 3.13 — measured, 2000 rapid calls returning two distinct values — so
+    entries touched inside one tick all scored the same and Redis broke the sorted-set tie
+    lexicographically. Eviction became alphabetical rather than least-recently-used, and
+    systematically so.
+
+    The sibling test above could not catch it on a modern interpreter, because a 100 ns clock
+    makes the ties vanish. Freezing the clock outright removes the interpreter from the
+    question, so this fails on every platform if recency ever goes back to a wall clock.
+    """
+    monkeypatch.setattr(time, "time", lambda: 1_000_000.0)
+    store = RedisStore("redis://localhost", namespace=NAMESPACE, maximum_entries=2, client=client)
+
+    await store.set("a", b"1")
+    await store.set("b", b"2")
+    await store.get("a")
+    await store.set("c", b"3")
+
+    assert await store.get("b") is None, "the least recently used entry survived"
+    assert await store.get("a") == b"1", "a recently used entry was evicted"
+    assert await store.get("c") == b"3"

@@ -33,7 +33,6 @@ failure instead.
 
 from __future__ import annotations
 
-import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Final
@@ -96,6 +95,7 @@ class RedisStore(CacheStore):
         """
         self._namespace = namespace
         self._index = f"{namespace}:index"
+        self._sequence = f"{namespace}:seq"
         self._maximum = maximum_entries
         self._failures: tuple[type[BaseException], ...] = (OSError,)
 
@@ -156,16 +156,36 @@ class RedisStore(CacheStore):
                 await self._client.zrem(self._index, key)
                 return None
 
-            await self._client.zadd(self._index, {key: time.time()})
+            await self._touch(key)
             return entry.value
 
     async def set(self, key: str, value: bytes, *, ttl: int | None = None) -> None:
         """Store ``value`` under ``key``, then evict down to the entry ceiling."""
         payload = Entry(value, deadline_for(ttl)).encode()
         async with self._guard("write an entry"):
-            await self._client.zadd(self._index, {key: time.time()})
+            await self._touch(key)
             await self._client.set(self._key(key), payload, ex=ttl or None)
             await self._evict()
+
+    async def _touch(self, key: str) -> None:
+        """Restack ``key`` as the most recently used entry.
+
+        # CRITICAL: the score is a Redis-side counter, never a client clock. `time.time()`
+        # resolves to 15.625 ms on Windows before Python 3.13 — measured, 2000 rapid calls
+        # returning two distinct values — so every entry touched inside one tick scored
+        # identically, and Redis breaks a sorted-set tie by comparing members
+        # lexicographically. Eviction was therefore alphabetical rather than
+        # least-recently-used on a supported platform, and systematically so: a hot key
+        # early in the alphabet was evicted again and again while a cold one late in it
+        # survived. The bug hid because CPython 3.13 gave Windows a 100 ns clock, so it
+        # reproduces only on the interpreter floor this package still supports.
+        #
+        # INCR also removes a hazard the wall clock always had here and nothing recorded:
+        # Redis is the backend chosen precisely because several replicas share it, and their
+        # clocks do not agree. A counter is strictly increasing, atomic, and identical for
+        # every replica, so recency no longer depends on whose clock was fast.
+        """
+        await self._client.zadd(self._index, {key: await self._client.incr(self._sequence)})
 
     async def _evict(self) -> None:
         """Drop the least recently used entries once the index exceeds the ceiling."""
