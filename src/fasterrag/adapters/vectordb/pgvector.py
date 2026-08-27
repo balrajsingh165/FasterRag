@@ -304,7 +304,12 @@ class PgvectorAdapter(VectorDBAdapter):
                 "dsn_env: PGVECTOR_DSN"
             )
 
-        dsn = os.environ.get(self._dsn_env, "")
+        # CRITICAL: stripped before the emptiness test, matching the rule the config
+        # loader already applies to every referenced variable. A half-written .env leaves
+        # `PGVECTOR_DSN=` with trailing spaces far more often than it leaves the name
+        # absent, and an unstripped blank slipped past this check to reach psycopg as a
+        # connection string, turning a clear configuration error into a driver one.
+        dsn = os.environ.get(self._dsn_env, "").strip()
         if not dsn:
             raise ConfigError(
                 f"vector_db.pgvector.dsn_env names {self._dsn_env!r} but that environment "
