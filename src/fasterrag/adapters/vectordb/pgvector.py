@@ -322,18 +322,25 @@ class PgvectorAdapter(VectorDBAdapter):
                 refuses to run at all and would otherwise surface as an opaque interface
                 error on the first statement.
         """
-        if sys.platform != "win32":  # pragma: no cover - platform-specific guard
-            return
-        loop_name = type(asyncio.get_running_loop()).__name__
-        if "Proactor" not in loop_name:
-            return
-        raise ProviderError(
-            f"psycopg's async driver cannot run on {loop_name}, which is Windows' default "
-            "event loop; run the loop with asyncio.SelectorEventLoop (Linux and macOS "
-            "deployments are unaffected)",
-            code=ErrorCode.EMBED_PROVIDER_ERROR,
-            retryable=False,
-        )
+        # CRITICAL: the whole check sits *inside* `if sys.platform == "win32"`, and that
+        # shape is load-bearing for the typecheck rather than a style choice. mypy narrows
+        # `sys.platform` to whichever platform it is checking for, so the earlier form —
+        # `if sys.platform != "win32": return`, then the work — made everything after the
+        # return unreachable on Linux, and `warn_unreachable` turns that into an error. That
+        # is exactly how the CI quality job failed for eight days while the identical command
+        # passed on every Windows machine that ran it (TASK-0261). mypy deliberately does not
+        # report unreachability for a body directly under a platform test, so this form
+        # checks clean as both platforms.
+        if sys.platform == "win32":
+            loop_name = type(asyncio.get_running_loop()).__name__
+            if "Proactor" in loop_name:
+                raise ProviderError(
+                    f"psycopg's async driver cannot run on {loop_name}, which is Windows' "
+                    "default event loop; run the loop with asyncio.SelectorEventLoop (Linux "
+                    "and macOS deployments are unaffected)",
+                    code=ErrorCode.EMBED_PROVIDER_ERROR,
+                    retryable=False,
+                )
 
     async def _ensure_pool(self) -> psycopg_pool.AsyncConnectionPool[AsyncConnection[DictRow]]:
         """Return the pool, bootstrapping the schema and opening it on first use."""

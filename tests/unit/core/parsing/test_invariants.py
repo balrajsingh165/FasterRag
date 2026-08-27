@@ -356,6 +356,11 @@ def test_a_leading_byte_order_mark_changes_nothing(parse: Parser, source: str) -
 @EVERY_TEXT_PARSER
 @given(source=LF_SOURCE)
 @SETTINGS
+# The input that caught csv.Sniffer disagreeing with itself across line endings on
+# Python 3.12: a space delimiter for the LF form, no delimiter at all for the CRLF one.
+# Pinned because generation found it once and will not reliably find it again --
+# reverting the normalisation left this file green without it.
+@example(source="# \n\n# ")
 def test_crlf_and_lf_sources_differ_only_by_the_carriage_returns(
     parse: Parser, source: str
 ) -> None:

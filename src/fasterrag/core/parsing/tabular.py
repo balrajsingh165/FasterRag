@@ -22,6 +22,10 @@ __all__ = ["parse_csv", "parse_json"]
 
 _SNIFF_BYTES: Final = 8192
 
+CR: Final = "\r"
+CRLF: Final = "\r\n"
+NEWLINE: Final = "\n"
+
 
 def _describe(row: dict[str, Any]) -> str:
     """Render one record as ``column: value`` pairs, skipping values with no content.
@@ -46,8 +50,16 @@ def _dialect(sample: str) -> type[csv.Dialect] | csv.Dialect:
     500 with no problem+json body. A sniff is a guess; an unusable one is discarded exactly
     like a failed one.
     """
+    # CRITICAL: the sample is newline-normalised before sniffing, because a dialect is a
+    # property of the delimiter and quoting, never of the line terminator. `csv.Sniffer` does
+    # not agree: on Python 3.12 it detects a space delimiter for a file with LF endings and
+    # then fails outright on the identical file with CRLF, falling back to a comma and
+    # splitting the rows differently. The result was that Windows line endings changed what a
+    # block *was* rather than only what was inside it, which the parsing invariants assert is
+    # impossible. CPython 3.13 changed the sniffer and hid it, so it reproduced only on the
+    # interpreter floor this package supports.
     try:
-        sniffed = csv.Sniffer().sniff(sample)
+        sniffed = csv.Sniffer().sniff(sample.replace(CRLF, NEWLINE).replace(CR, NEWLINE))
     except csv.Error:
         return csv.excel
 
