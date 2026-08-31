@@ -95,7 +95,6 @@ class TestErrorTranslation:
         """A rejected credential is permanent, not transient.
 
         It fails identically forever, so retrying only delays the one
-
         message that explains it.
         """
         assert adapter._translate(driver_error(sqlstate), "search").retryable is False
@@ -125,7 +124,6 @@ class TestErrorTranslation:
         """Transient SQLSTATE classes describe a server that may answer the next call.
 
         Connection, serialization, resource, operator-intervention and IO classes all
-
         describe a server that may answer the next call.
         """
         assert adapter._translate(driver_error(sqlstate), "search").retryable is True
@@ -142,9 +140,8 @@ class TestErrorTranslation:
     ) -> None:
         """An exhausted pool is a queueing problem, not an outage.
 
-        It carries no SQLSTATE, and reporting it as unreachable would be the wrong story:
-
-        the server is fine and the caller is queueing.
+        It carries no SQLSTATE, and reporting it as unreachable would be the wrong
+        story: the server is fine and the caller is queueing.
         """
         translated = adapter._translate(psycopg_pool.PoolTimeout("busy"), "search")
 
@@ -163,7 +160,6 @@ class TestErrorTranslation:
         """An auth failure with no SQLSTATE is still permanent.
 
         A connection-time rejection carries none, so the message is the only
-
         thing left to key on — and calling it retryable would hammer a server that will
         never accept the credential.
         """
@@ -183,7 +179,6 @@ class TestConfiguration:
         """The refusal names the variable to populate.
 
         config.yaml never holds credentials, so the operator has to be told which
-
         environment variable to populate.
         """
         monkeypatch.delenv(DSN_VAR, raising=False)
@@ -209,7 +204,6 @@ class TestConfiguration:
         """Both statement budgets are read from configuration.
 
         They are separate settings for a reason (TASK-0240), so a
-
         single value reaching both would be invisible here.
         """
         monkeypatch.setenv(DSN_VAR, "postgresql://user@localhost/db")
@@ -260,7 +254,6 @@ class TestFilterTranslation:
         """A range binds the key and the bound, comparing jsonb directly.
 
         Casting to numeric instead would raise on the first non-numeric value: a cast
-
         raises on the first non-numeric value stored under that key, turning one malformed
         document into a failed query.
         """
