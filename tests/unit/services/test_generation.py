@@ -927,3 +927,64 @@ async def test_the_budget_is_checked_against_the_ceiling_not_just_the_prompt() -
 
     assert caught.value.code is ErrorCode.BUDGET_EXCEEDED
     assert llm.prompts == []
+
+
+async def test_the_response_carries_the_cost_field() -> None:
+    """A caller holding one answer cannot read a process-wide counter to learn what it cost.
+
+    The figure is a list-price *estimate*, which is why the field name says so.
+    """
+    service, _ = build()
+
+    payload = (await service.answer("q")).as_dict()
+
+    assert "estimated_cost_usd" in payload["usage"]
+
+
+async def test_an_unpriced_model_reports_null_rather_than_zero() -> None:
+    """Zero would read as "this query was free", which is a fabricated bill.
+
+    The pricing tables carry dated per-entry provenance precisely so a model with no
+    recorded rate contributes nothing instead of a made-up number.
+    """
+    service, _ = build()
+
+    payload = (await service.answer("q")).as_dict()
+
+    assert payload["usage"]["estimated_cost_usd"] is None
+
+
+async def test_a_local_provider_is_genuinely_free() -> None:
+    """A local provider costs zero, and that zero is a fact rather than a guess.
+
+    It must not be confused with the unpriced case, which reports None: one says the
+    query was free, the other says nobody knows what it cost.
+    """
+
+    class LocalLLM(ScriptedLLM):
+        """The provider is the adapter's own attribute, not a settings value."""
+
+        provider = "ollama"
+
+    settings = Settings.model_validate({})
+    llm = LocalLLM(settings, text="An answer [^c_a].")
+    retrieval = ScriptedRetrieval([chunk("c_a", "Either party may terminate.")])
+    service = GenerationService(settings, retrieval, llm)  # type: ignore[arg-type]
+
+    answer = await service.answer("q")
+
+    assert answer.estimated_cost_usd == 0.0
+
+
+async def test_the_streamed_usage_event_carries_the_same_field() -> None:
+    """The streamed usage event carries the same field under the same name.
+
+    A streaming caller needs the signal too, and needs it named identically so that
+    reading it takes no second code path.
+    """
+    service, _ = build()
+
+    events = await collect(service)
+    usage = next(event for event in events if event.type == "usage")
+
+    assert "estimated_cost_usd" in usage.data["usage"]

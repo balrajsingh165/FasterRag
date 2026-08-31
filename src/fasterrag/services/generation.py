@@ -121,6 +121,19 @@ class Answer:
     emitting anything, which arrives here as an empty answer flagged truncated.
     """
 
+    estimated_cost_usd: float | None = None
+    """List-price estimate for this query's generation call, or ``None`` when unpriced.
+
+    An *estimate*, never a measurement: it multiplies the call's token counts by the dated
+    published rates in ``services.estimation``. A model with no recorded rate contributes
+    ``None`` rather than ``0.0`` — a zero would read as "this query was free", which is a
+    fabricated bill, and the whole point of the per-entry provenance in those tables is that
+    a number without a source is not published. Local providers are genuinely ``0.0``.
+
+    Emitted per response as well as counted into ``fasterrag_cost_usd_total``, because a
+    caller holding one answer cannot read a process-wide counter to find out what it cost.
+    """
+
     evidence_dropped: int = 0
     """Chunks that were retrieved and reranked but did not fit the context budget.
 
@@ -164,6 +177,7 @@ class Answer:
             "usage": {
                 "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens,
+                "estimated_cost_usd": self.estimated_cost_usd,
             },
             "timings_ms": self.timings_ms,
             "degraded": self.degraded,
@@ -729,6 +743,12 @@ class GenerationService:
             faithfulness=verdict.score,
             truncated=completion.truncated,
             evidence_dropped=prepared.context.dropped_budget,
+            estimated_cost_usd=price_generation(
+                self.llm.provider,
+                completion.model,
+                completion.prompt_tokens,
+                completion.completion_tokens,
+            ),
         )
 
         if vector is not None and self.cache is not None and prepared.mode == FULL_MODE:
@@ -851,10 +871,21 @@ class GenerationService:
             yield QueryEvent(type="token", data={"text": answer})
 
         citations = resolve_citations(answer, prepared.context.citations)
-        usage = {
+        usage: dict[str, Any] = {
             "prompt_tokens": self.counter.count(prepared.prompt),
             "completion_tokens": self.counter.count(answer),
         }
+        # CRITICAL: the streamed counts are the local counter's, not the provider's —
+        # a stream never reports usage — so the cost derived from them is an estimate
+        # of an estimate. It is emitted anyway, because the alternative is a streaming
+        # caller having no cost signal at all, and it is the same field the
+        # non-streaming path fills so a client needs no second code path.
+        usage["estimated_cost_usd"] = price_generation(
+            self.llm.provider,
+            self.llm.model,
+            int(usage["prompt_tokens"]),
+            int(usage["completion_tokens"]),
+        )
 
         yield QueryEvent(
             type="citations",

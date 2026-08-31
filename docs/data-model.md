@@ -148,7 +148,7 @@ What retrieval returns internally and what `--show-chunks` / `include_chunks` ex
 | `answer` | str\|null | `null` when grounded-or-refuse declined (D5) |
 | `citations` | list[Citation] | Mandatory and non-empty whenever `answer` is non-null and `generation.citations: true` |
 | `chunks` | list[ScoredChunk]\|null | Present only when explicitly requested |
-| `usage` | `{prompt_tokens, completion_tokens}` | `estimated_cost_usd` is **specified but not emitted** (TASK-0260); per-query cost currently reaches operators through the `fasterrag_cost_usd_total` metric, not the response body. The *enforcement* half of D9 shipped separately (TASK-0242 ✅). |
+| `usage` | `{prompt_tokens, completion_tokens, estimated_cost_usd}` | `estimated_cost_usd` is a **list-price estimate, nullable by design** (TASK-0260 ✅): a model with no recorded rate reports `null` rather than `0.0`, because a zero would read as "this query was free" and that is a fabricated bill. A local provider reports a genuine `0.0`. Also counted into `fasterrag_cost_usd_total`, but emitted per response too — a caller holding one answer cannot read a process-wide counter. |
 | `timings_ms` | object | Per stage: `embed`, `retrieve`, `fuse`, `rerank`, `assemble`, `generate`, `total` |
 | `degraded` | bool | True whenever `mode != "full"` |
 | `mode` | str | `full` \| `hybrid_only` \| `cache_only` \| `extractive` (D4) |
