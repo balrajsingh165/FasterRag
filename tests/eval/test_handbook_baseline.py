@@ -22,10 +22,11 @@ from pathlib import Path
 
 import pytest
 
+from fasterrag.config.schema import Settings
 from fasterrag.core.evals import EvalReport, GoldenRecord, load_golden_set
 from fasterrag.core.identity import document_id
 from fasterrag.errors import FasterRagError
-from fasterrag.services.regression import load_baseline
+from fasterrag.services.regression import load_baseline, write_baseline
 
 pytestmark = pytest.mark.eval
 
@@ -135,6 +136,52 @@ def test_the_baseline_is_committed_and_loads_through_the_gate() -> None:
     assert baseline.scored == 12
     assert baseline.embedding_model
     assert baseline.config_hash
+
+
+def test_the_committed_baseline_has_drifted_from_the_canonical_config() -> None:
+    """The gap this variant exists to expose, asserted so it cannot be forgotten.
+
+    ``Baseline.comparable_to`` requires the embedding model *and* ``retrieval_config_hash``
+    to match, and the handbook baseline recorded 2026-08-02 no longer matches: the hash
+    covers the whole chunking and retrieval models, so the five tunables added since —
+    ``token_counter``, ``chars_per_token``, ``semantic_percentile``, ``bm25_k1``, ``bm25_b``
+    — retired it. The D7 gate would therefore report *blocked* rather than pass or fail, and
+    a gate that cannot run protects nothing (TASK-0244).
+
+    The drift is not merely cosmetic. ``token_counter`` defaults to ``auto``, which counts
+    with the model's own tokenizer and so moves chunk boundaries, meaning the recorded
+    metrics may genuinely no longer hold. Re-recording needs a live backend.
+
+    Written as a failing promise, following the rule the disk-full case established (T13):
+    when the baseline is re-recorded this case goes red, which is the point — the re-record
+    must move this assertion and the CI wiring together, and cannot land silently.
+    """
+    baseline = load_baseline(BASELINE)
+
+    assert baseline is not None
+    assert baseline.comparable_to(Settings.model_validate({})) is False
+
+
+def test_comparability_discriminates_rather_than_always_refusing(tmp_path: Path) -> None:
+    """A baseline is comparable to the settings it was recorded under, and to nothing else.
+
+    Both directions are asserted from one freshly written baseline, because the negative
+    alone proves nothing: an implementation that always returned ``False`` would satisfy it,
+    and would also make the drift case above pass for entirely the wrong reason. Verified by
+    mutation — always-``False`` fails here.
+    """
+    settings = Settings.model_validate({})
+    report = EvalReport(k=K, scored=1, adversarial=0, recall_at_k=1.0, mrr=1.0, ndcg_at_k=1.0)
+    recorded = write_baseline(tmp_path / "baseline.json", report, settings)
+
+    assert recorded.comparable_to(settings) is True
+    assert recorded.comparable_to(Settings.model_validate({"retrieval": {"top_k": 99}})) is False
+    assert (
+        recorded.comparable_to(
+            Settings.model_validate({"embeddings": {"model": "some/other-model"}})
+        )
+        is False
+    )
 
 
 def test_the_baseline_covers_every_answerable_record() -> None:

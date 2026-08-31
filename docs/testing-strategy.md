@@ -40,7 +40,7 @@ Messy PDFs, complex tables, and scanned/OCR documents parsed → structured outp
 - Metrics: **recall@k, MRR, nDCG** (retrieval) and **faithfulness** (generation grounding).
 - Dataset fixtures committed under `tests/eval/datasets/`; golden Q&A sets generatable from a corpus (shared machinery with Autopilot, D6).
 - Runs as `pytest -m eval` and via `fasterrag benchmark --suite eval`.
-- **Regression gate (D7)**: on every config or index change, CI runs the harness and **blocks** the change if recall@k drops > `eval.recall_tolerance` or nDCG drops > `eval.ndcg_tolerance`.
+- **Regression gate (D7)**: *specified* as blocking every config or index change whose recall@k drops > `eval.recall_tolerance` or nDCG drops > `eval.ndcg_tolerance`. **Not wired into CI, and its committed baseline has drifted** (TASK-0244): the comparison is implemented in `services/regression.py` and reachable through `fasterrag benchmark --suite eval`, but nothing runs it on a push, and the handbook baseline recorded 2026-08-02 is no longer comparable to the canonical config — so the gate would report *blocked* rather than pass or fail. See §6 for the same statement in its list of what CI actually runs.
 
 **Golden-set schema** — shared by the eval harness, the regression gate (D7), and Autopilot (D6), so the three can never diverge. JSONL, one record per line:
 
