@@ -48,11 +48,17 @@ __all__ = [
 #   1  original: the raw source string was hashed
 #   2  2026-08-03: local paths are normalised first, so two spellings of one
 #      Windows file (drive-letter case, separator) now produce a single id
-IDENTITY_VERSION: Final = 2
+#   3  2026-09-13: fields are length-prefixed before hashing instead of NUL-joined,
+#      so no field can forge a boundary and the constraint is gone rather than
+#      policed. Every document and chunk id changed. Made at the release boundary,
+#      while no adopter holds an index built under version 2 (TASK-0210)
+IDENTITY_VERSION: Final = 3
 
-# Written as chr(0) rather than an escape so the byte cannot end up in this file literally,
-# which is a real hazard when a NUL is the thing being guarded against.
-_SEPARATOR: Final = chr(0)
+# Written as chr(0) rather than an escape so the byte cannot end up in this file literally.
+# Since identity version 3 this is not a separator anywhere: the digest is length-prefixed
+# and has no boundary a field could forge. It survives only as the one byte no filesystem
+# or URL scheme permits, which `normalise_source` refuses as plain input validation.
+_NUL: Final = chr(0)
 
 _DOCUMENT_PREFIX: Final = "d_"
 _CHUNK_PREFIX: Final = "c_"
@@ -68,19 +74,25 @@ _sequence = 0
 
 
 def _digest(*parts: str) -> str:
-    """Return a stable hex digest over the parts, separated so they cannot collide.
+    """Return a stable hex digest over the parts, encoded so no tuple can impersonate another.
 
-    # CRITICAL: the separator only separates while no part contains it. A part carrying one
-    # can forge a different tuple entirely — joining ("a", SEP, "b") and ("a", "b") reaches
-    # the same string — so every field arriving here must be known free of it. Three of the
-    # four call sites pass hex digests, digits, or serialized configuration; the fourth
-    # passes a source URI, which `normalise_source` refuses one in for exactly this reason.
-    #
-    # A length-prefixed encoding would remove the constraint rather than police it, but it
-    # changes every id ever minted, so it belongs at a release boundary with
-    # IDENTITY_VERSION bumped (TASK-0209).
+    # CRITICAL: each part is written as its UTF-8 byte length, a colon, and the bytes — the
+    # netstring form — and the encoded parts are concatenated before hashing. Two distinct
+    # tuples cannot produce one byte string: the length prefix fixes where every field ends,
+    # so a field may contain any byte at all, including the NUL that version 2 had to forbid.
+    # Under version 2 the parts were NUL-joined, which separated only while no part carried
+    # one — ("a" + NUL + "b", "c") and ("a", "b" + NUL + "c") reached the same digest, a real
+    # collision found by generating unrestricted text (TASK-0209). That was policed at the
+    # one call site taking user input, and an invariant held by a validator two modules away
+    # is one refactor from false. This encoding removes the constraint rather than guarding
+    # it, and the property suite proves it directly on forged tuples (TASK-0210).
     """
-    return hashlib.sha256(_SEPARATOR.join(parts).encode("utf-8")).hexdigest()
+    hasher = hashlib.sha256()
+    for part in parts:
+        encoded = part.encode("utf-8")
+        hasher.update(f"{len(encoded)}:".encode("ascii"))
+        hasher.update(encoded)
+    return hasher.hexdigest()
 
 
 def content_hash(data: bytes) -> str:
@@ -109,10 +121,9 @@ def normalise_source(source_uri: str) -> str:
     URLs are left exactly as given. Their paths are case-*sensitive* by specification, so
     folding one would merge two genuinely different resources.
     """
-    if _SEPARATOR in source_uri:
+    if _NUL in source_uri:
         raise IngestionError(
-            "a source URI cannot contain a NUL byte; no filesystem or URL scheme permits "
-            "one, and it would let a source forge another document's identity",
+            "a source URI cannot contain a NUL byte; no filesystem or URL scheme permits one",
             code=ErrorCode.VALIDATION_FAILED,
             retryable=False,
         )

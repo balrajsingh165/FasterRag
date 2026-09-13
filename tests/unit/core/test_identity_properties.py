@@ -11,6 +11,8 @@ from hypothesis import assume, given
 from hypothesis import strategies as st
 
 from fasterrag.core.identity import (
+    IDENTITY_VERSION,
+    _digest,
     chunk_id,
     content_hash,
     document_id,
@@ -19,17 +21,17 @@ from fasterrag.core.identity import (
 )
 from fasterrag.errors import IngestionError
 
-# Deliberately unrestricted: a source URI is whatever a caller passed to `ingest`, and the
-# separator these ids are built on is a control character, so a strategy that generated only
-# printable text could never reach the collision it is meant to rule out.
-SEPARATOR = chr(0)
+# Deliberately unrestricted: a source URI is whatever a caller passed to `ingest`. The byte
+# that once served as the digest's separator is a control character, so a strategy that
+# generated only printable text could never have reached the collision version 2 had.
+NUL = chr(0)
 
 # Unrestricted apart from the one byte a source may not contain — which is itself an
 # invariant, tested separately below. Restricting further would put the collision this
 # suite exists to rule out beyond reach of every generator.
-SOURCE = st.text(min_size=1, max_size=60).filter(lambda value: SEPARATOR not in value)
+SOURCE = st.text(min_size=1, max_size=60).filter(lambda value: NUL not in value)
 TENANT = st.one_of(st.none(), st.text(min_size=1, max_size=20))
-FORGED = st.text(min_size=1, max_size=40).map(lambda value: f"{value}{SEPARATOR}{value}")
+FORGED = st.text(min_size=1, max_size=40).map(lambda value: f"{value}{NUL}{value}")
 
 
 @given(source=SOURCE, tenant=TENANT)
@@ -67,18 +69,70 @@ def test_one_source_under_two_tenants_stays_two_documents(
 
 
 @given(source=FORGED, tenant=st.text(min_size=1, max_size=20))
-def test_a_source_carrying_the_separator_is_refused(source: str, tenant: str) -> None:
-    """The classic ambiguity: joining fields must not let one field impersonate two.
+def test_a_source_carrying_a_nul_is_refused_as_invalid_input(source: str, tenant: str) -> None:
+    """A NUL in a source URI is refused because no filesystem or URL permits one.
 
-    The digest separates its parts with a NUL, which separates only while no part contains
-    one. `document_id(a + NUL + b, c)` reached the same digest as
-    `document_id(a, b + NUL + c)` — a real collision, found by generating unrestricted text
-    rather than the printable range. Tenant validation made it unreachable in practice, but
-    an invariant enforced only by a validator two modules away is one refactor from being
-    false, so the source is refused at the canonicalisation point instead (TASK-0209).
+    Until identity version 3 this refusal was also the only thing standing between a NUL and
+    a forged document id — the digest NUL-joined its fields, so `document_id(a + NUL + b, c)`
+    reached the same digest as `document_id(a, b + NUL + c)`, a real collision found by
+    generating unrestricted text (TASK-0209). The digest is now length-prefixed and cannot be
+    forged by any byte (TASK-0210, the properties below), so this is plain input validation
+    and would be correct even if the identity guarantee did not exist.
     """
     with pytest.raises(IngestionError):
         document_id(source, tenant)
+
+
+# Truly unrestricted, NUL included: the point of the properties below is that the digest no
+# longer needs its inputs to avoid any byte at all.
+FIELD = st.text(min_size=0, max_size=40)
+FIELDS = st.lists(FIELD, min_size=1, max_size=4)
+
+
+@given(fields=st.lists(FIELD, min_size=2, max_size=4))
+def test_the_version_two_forgery_is_impossible_by_construction(fields: list[str]) -> None:
+    """Folding a NUL into a field to swallow its neighbour must change the digest.
+
+    The exact shape that collided under version 2: every tuple whose NUL-join equals the
+    original's reached the original's digest, so ``(x + NUL + y, z)`` hashed like
+    ``(x, y, z)`` and so did the one-field ``(x + NUL + y + NUL + z,)``. Each such forgery
+    is built here and must differ. This property was run against the version-2 digest before
+    landing and failed on its first example, which is what makes it evidence.
+    """
+    original = _digest(*fields)
+    for boundary in range(1, len(fields)):
+        merged = [*fields[: boundary - 1], NUL.join(fields[boundary - 1 : boundary + 1])]
+        forged = [*merged, *fields[boundary + 1 :]]
+        assert _digest(*forged) != original
+    assert _digest(NUL.join(fields)) != original
+
+
+@given(left=FIELDS, right=FIELDS)
+def test_distinct_tuples_never_share_a_digest(left: list[str], right: list[str]) -> None:
+    """Different tuples give different digests, whatever bytes the fields contain.
+
+    This is the guarantee the length prefix buys: a colon, a digit, or a NUL inside a field
+    cannot masquerade as a boundary, so ``("3:abc",)`` and ``("3", "abc")`` differ as surely
+    as ``("a",)`` and ``("b",)`` do.
+    """
+    assume(left != right)
+
+    assert _digest(*left) != _digest(*right)
+
+
+@given(fields=FIELDS)
+def test_the_digest_is_deterministic(fields: list[str]) -> None:
+    assert _digest(*fields) == _digest(*fields)
+
+
+def test_the_identity_version_is_three() -> None:
+    """Pinned because the lockfile records it.
+
+    An index built under version 2 must report drift rather than silently mix two id
+    schemes in one collection, so a change to the encoding that forgets the bump is caught
+    here before it is caught by an adopter.
+    """
+    assert IDENTITY_VERSION == 3
 
 
 @given(source=SOURCE)
