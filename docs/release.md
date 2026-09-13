@@ -18,7 +18,7 @@ Threshold by release type: **beta (`0.x.0-betaN`) ≥ 85** as above. **First sta
 
 **Irreversible decisions first** — these can never be amended after the first upload, because **a PyPI version number can never be reused**, even after deletion:
 
-- [ ] License ADR (TASK-0164, B1): keep GPL-3.0-or-later or move permissive; record the reasoning as ADR-0008/0009. The uploaded artifact fixes the license grant for that version forever.
+- [x] License ADR (TASK-0164) — **done 2026-09-13**: Apache-2.0, recorded in [ADR-0008](adr/ADR-0008-apache-2-license.md); `LICENSE`, `NOTICE`, and the wheel metadata agree. The uploaded artifact fixes the license grant for that version forever, which is why this was ordered first.
 - [ ] Identity encoding (TASK-0210): length-prefixed digest or keep NUL-joined + policing; either way `IDENTITY_VERSION` is frozen by the tag — after it, changing ids forces every adopter through a reindex.
 - [ ] Version number (TASK-0020): `0.1.0-beta.1` unless decided otherwise.
 

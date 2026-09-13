@@ -24,25 +24,13 @@ Rules: add nothing without a `TASK-` id; delete an entry when its blocker clears
 
 ---
 
-## B1 — The license is a default, not a decision (TASK-0164)
+## B2 — Beta version number (TASK-0020)
 
-**Costs the most to leave.** `pyproject.toml` declares `GPL-3.0-or-later`. Nothing records that as a choice.
-
-The stated adoption thesis is people embedding fasterRag inside their own products, and GPL's copyleft is what a commercial legal review blocks on. Relicensing later needs every contributor's agreement, and anyone who took the GPL grant keeps it. **A PyPI version number can never be reused**, even after a release is deleted — so the first upload fixes the license permanently for that version.
-
-**Needed:** an ADR saying GPL-3.0-or-later or a permissive license, and why. Either answer is fine; the undocumented default is not.
+`0.1.0.dev0`, classified `Development Status :: 2 - Pre-Alpha`. Needs stamping in `CHANGELOG.md` before release. The number is consumed forever on first upload — the same permanence that made the license decision urgent; that one is now made (ADR-0008), so this is the last irreversible item before PyPI.
 
 | | Task | Blocked because |
 |---|---|---|
-| **B1.1** | TASK-0087 | PyPI publish. Also needs **B2**; distribution mechanics themselves are verified (build, `twine check`, clean-venv install all pass). |
-
----
-
-## B2 — Beta version number (TASK-0020)
-
-`0.1.0.dev0`, classified `Development Status :: 2 - Pre-Alpha`. Needs stamping in `CHANGELOG.md` before release. Same permanence problem as B1: the number is consumed forever on first upload.
-
-Feeds **B1.1**.
+| **B2.1** | TASK-0087 | PyPI publish. Distribution mechanics themselves are verified (build, `twine check`, clean-venv install all pass); only the version stamp remains. |
 
 ---
 

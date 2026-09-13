@@ -123,4 +123,4 @@ Read [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) first — commit format (singl
 
 ## License
 
-See [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The decision and its reasoning are recorded in [ADR-0008](docs/adr/ADR-0008-apache-2-license.md).

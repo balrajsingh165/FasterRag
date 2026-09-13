@@ -40,7 +40,7 @@ Every item below was re-verified this session by running it, reading its impleme
 
 | Item | Why it gates | Owner |
 |---|---|---|
-| **License decision (TASK-0164, B1)** | The only irreversible item: a PyPI version permanently fixes its license. Currently an undecided default (GPL-3.0-or-later) that contradicts nothing but records no reasoning | Maintainer |
+| **License decision (TASK-0164, B1) — ✅ Apache-2.0, ADR-0008, 2026-09-13** | Was the only irreversible item: a PyPI version permanently fixes its license. Currently an undecided default (GPL-3.0-or-later) that contradicts nothing but records no reasoning | Maintainer |
 | **Version stamp (TASK-0020, B2)** | The release *is* this decision | Maintainer |
 | **Identity-encoding decision (TASK-0210)** | Changing the id scheme after the first tag forces every adopter through a reindex; "harmless now, impossible after" is exactly a release gate | Maintainer |
 | **Cost governor: build or cut (TASK-0242)** | An unbuilt spend cap is the most dangerous kind of unbuilt feature; five docs describe enforcement that does not exist. Cutting the surface is a legitimate close | Engineering |
@@ -75,7 +75,7 @@ The measurement program (TASK-0084/0085/0136, B4/B5): citable benchmarks, SLO ta
 2. **Windows-vs-Linux behavior**: two shipped defects were Windows-only; the Windows CI leg covers the fast suite only — integration behavior on Windows outside CI's sight.
 3. **Single-replica assumptions**: the rate limiter (TASK-0216) and in-process ingestion (TASK-0130) both quietly assume one replica; the docs say so, but a beta adopter scaling replicas gets N× the configured limit and journal-resume-only restart semantics.
 4. **Performance expectations**: the name is "fasterRag" and the ledger cannot yet back it. The framing everywhere is goals-not-claims — but the gap between the name and the ledger is a reputational risk the first measured release closes.
-5. **GPL default** (if kept): materially narrows the embed-in-products funnel the docs court. Deciding is the gate; either answer is defensible.
+5. **License** — resolved 2026-09-13 as Apache-2.0 (ADR-0008); the embed-in-products funnel the docs court is no longer narrowed by copyleft.
 
 ## 6. Recommendations, with reasoning
 
