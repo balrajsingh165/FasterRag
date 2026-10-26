@@ -56,6 +56,11 @@ jobs:
       - name: Blockers view matches the ledger
         run: python scripts/check_blockers.py
 
+      # The four mechanical places a version lives cannot be edited atomically by hand, and
+      # a tree halfway through a stamp ships a wheel that contradicts its own README.
+      - name: Version is coherent across the tree
+        run: python scripts/stamp_release.py --check
+
       - name: Unit tests
         run: pytest -m "not integration and not eval" --cov --cov-report=term-missing
 

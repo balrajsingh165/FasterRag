@@ -24,16 +24,6 @@ Rules: add nothing without a `TASK-` id; delete an entry when its blocker clears
 
 ---
 
-## B2 — Beta version number (TASK-0020)
-
-`0.1.0.dev0`, classified `Development Status :: 2 - Pre-Alpha`. Needs stamping in `CHANGELOG.md` before release. The number is consumed forever on first upload — the same permanence that made the license decision urgent; that one is now made (ADR-0008), so this is the last irreversible item before PyPI.
-
-| | Task | Blocked because |
-|---|---|---|
-| **B2.1** | TASK-0087 | PyPI publish. Distribution mechanics themselves are verified (build, `twine check`, clean-venv install all pass); only the version stamp remains. |
-
----
-
 ## B3 — Degradation-ladder scope (TASK-0165)
 
 `docs/reliability.md` specifies a circuit breaker and a `cache_only` rung. Neither exists; only the breaker's *configuration* does.
