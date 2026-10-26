@@ -15,7 +15,8 @@ estimator was switched off would be the way around the switch.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+import asyncio
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -31,12 +32,13 @@ from fasterrag.config.schema import Settings
 from fasterrag.core.cache import create_semantic_store
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.rerank import CrossEncoderReranker
-from fasterrag.errors import ConfigError, FasterRagError
+from fasterrag.errors import ConfigError, ErrorCode, FasterRagError
+from fasterrag.observability.logging import get_logger
 from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.evaluation import run_eval
 from fasterrag.services.generation import GenerationService
 from fasterrag.services.ingestion import IngestionService
-from fasterrag.services.journal import create_journal
+from fasterrag.services.journal import JobRecord, Journal, create_journal
 from fasterrag.services.lockfile import create_lock_store, detect_drift
 from fasterrag.services.querying import RetrievalService
 from fasterrag.services.regression import GateResult
@@ -46,6 +48,10 @@ from fasterrag.services.traces import create_trace_store
 __all__ = ["run_index", "run_ingest", "run_query"]
 
 _DISTANCES: frozenset[str] = frozenset({"cosine", "dot", "euclid"})
+
+_WATCH_POLL_SECONDS = 1.0
+
+_logger = get_logger(__name__)
 
 
 def _settings_or_none(args: argparse.Namespace, console: Console) -> Settings | None:
@@ -69,6 +75,115 @@ def _pairs(values: Sequence[str], console: Console) -> dict[str, str] | None:
     return parsed
 
 
+def _watchable(console: Console) -> bool:
+    """Report whether progress lines can be shown, saying why when they cannot.
+
+    ``--json`` and ``--quiet`` silence every human line, so a follower started under them
+    would poll the journal for output nobody receives. The refusal goes to stderr, which
+    both modes keep open, because the person who passed the flag is the one who needs to
+    know it will show them nothing.
+    """
+    if console.as_json or console.quiet:
+        console.error("--watch prints nothing under --json or --quiet; the result is unchanged")
+        return False
+    return True
+
+
+def _tally(counts: Mapping[str, int]) -> str:
+    """Render a per-status document tally as stable ``key=value`` text.
+
+    The counts are documents while the command's closing summary counts chunks, and both
+    lines would otherwise say ``indexed`` of two different numbers. Every key is therefore
+    named for what it counts, so no two lines of one run can be read as disagreeing.
+    """
+    return " ".join(f"documents_{status}={count}" for status, count in sorted(counts.items()))
+
+
+async def _follow_job(
+    journal: Journal,
+    job_id: str,
+    console: Console,
+    *,
+    interval: float = _WATCH_POLL_SECONDS,
+) -> None:
+    """Print a progress line whenever a running job's document tally changes.
+
+    Polls the journal's per-document log, which the CPU pool appends to as each document
+    settles. That log is the same state ``GET /v1/ingest/{job_id}`` reports, so following
+    an inline job shows what following a remote one would, and nothing in the pipeline has
+    to grow a second progress channel to support the flag.
+
+    One appended line per change, never a redrawn one: cursor control would reach a
+    redirected stdout as control characters, so the output is identical at a terminal and
+    in a file.
+
+    Each poll re-reads and re-parses the whole per-document log, which grows as the job
+    settles documents, so the work per poll grows with it. That read is blocking file I/O
+    and JSON parsing, so it runs in a worker thread rather than on the event loop the
+    ingest it reports on is running in.
+
+    Runs until cancelled: the caller cancels it once the job settles, and the command's own
+    summary reports the authoritative counts.
+    """
+    reported: dict[str, int] = {}
+    while True:
+        await asyncio.sleep(interval)
+        counts = await asyncio.to_thread(journal.counts, job_id)
+        if counts != reported:
+            reported = counts
+            console.emit(f"progress        {_tally(counts)}")
+
+
+async def _run_watched(
+    service: IngestionService,
+    record: JobRecord,
+    journal: Journal,
+    console: Console,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> JobRecord:
+    """Run an accepted job with a follower printing its progress until it settles.
+
+    The watched path accepts and runs in two steps rather than calling ``ingest``, because
+    a follower needs the job id before the work starts; the two steps are what ``ingest``
+    itself does.
+    """
+    follower = asyncio.create_task(
+        _follow_job(journal, record.job_id, console, interval=_WATCH_POLL_SECONDS)
+    )
+    try:
+        return await service.run(record, metadata=metadata)
+    finally:
+        await _stop_following(follower, record.job_id, console)
+
+
+async def _stop_following(follower: asyncio.Task[None], job_id: str, console: Console) -> None:
+    """Shut the progress follower down without letting its outcome replace the job's.
+
+    Cancelling a task that has already failed is a no-op, so awaiting it re-raises what it
+    failed with. Raised from the ``finally`` that stops the follower, that exception would
+    replace the job record the caller is returning: a completed ingest reported to the
+    operator as a traceback, with the result thrown away. Reporting progress is strictly
+    subordinate to the run it reports on, so the failure is caught here, logged against the
+    job id, and rendered as a typed problem on stderr, and the run's own outcome stands.
+    """
+    follower.cancel()
+    try:
+        await follower
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        _logger.warning(
+            "the --watch progress follower failed; the job itself is unaffected",
+            extra={"job_id": job_id, "error": type(exc).__name__},
+        )
+        console.problem(
+            ErrorCode.INTERNAL.value,
+            f"--watch stopped reporting progress for job {job_id}: {exc}",
+            fix="only the progress lines stopped; the job's own outcome is reported separately",
+        )
+
+
 async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
     """Ingest sources, or report what ingesting them would involve under ``--dry-run``."""
     settings = _settings_or_none(args, console)
@@ -86,8 +201,7 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
     if priority:
         metadata["priority_class"] = priority
 
-    if getattr(args, "watch", False):
-        console.error("--watch is not implemented yet; this command already runs to completion")
+    watching = bool(getattr(args, "watch", False)) and _watchable(console)
 
     sources = expand_sources(args.sources, recursive=getattr(args, "recursive", False))
     if not sources:
@@ -96,6 +210,9 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
         return ExitCode.USAGE
 
     if args.dry_run:
+        if watching:
+            console.error("--watch has nothing to follow under --dry-run; no job is created")
+
         try:
             require_estimator(settings)
         except FasterRagError as exc:
@@ -109,15 +226,21 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
         console.document({"dry_run": True, **estimate.as_dict()})
         return ExitCode.SUCCESS
 
-    service = IngestionService(
-        settings, journal=create_journal(settings), locks=create_lock_store(settings)
-    )
+    journal = create_journal(settings)
+    service = IngestionService(settings, journal=journal, locks=create_lock_store(settings))
     try:
-        record = await service.ingest(
-            sources,
-            collection=args.collection,
-            metadata=metadata or None,
-        )
+        if watching:
+            accepted = await service.accept(sources, collection=args.collection)
+            console.emit(f"job             {accepted.job_id}")
+            record = await _run_watched(
+                service, accepted, journal, console, metadata=metadata or None
+            )
+        else:
+            record = await service.ingest(
+                sources,
+                collection=args.collection,
+                metadata=metadata or None,
+            )
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
@@ -125,7 +248,8 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
         await service.close()
 
     counts = record.counts
-    console.emit(f"job             {record.job_id}")
+    if not watching:
+        console.emit(f"job             {record.job_id}")
     console.emit(f"status          {record.status}")
     console.emit(f"indexed         {counts.get('indexed', 0)} chunks")
     console.emit(f"dead-lettered   {counts.get('dead_lettered', 0)}")
@@ -463,24 +587,27 @@ async def _index_reembed(
     args: argparse.Namespace, settings: Settings, adapter: VectorDBAdapter, console: Console
 ) -> ExitCode:
     """Rebuild an index behind its alias, swapping only if the gate allows it (D2)."""
-    if getattr(args, "watch", False):
-        console.error("--watch is not implemented yet; this command already runs to completion")
+    watching = bool(getattr(args, "watch", False)) and _watchable(console)
 
     plan = await plan_reindex(args.name, settings, adapter)
     console.emit(f"building        {plan.green}")
     console.emit(f"replacing       {plan.blue or '(first build)'}")
 
+    journal = create_journal(settings)
     service = IngestionService(
         settings,
-        journal=create_journal(settings),
+        journal=journal,
         adapter=adapter,
         locks=create_lock_store(settings),
     )
+    sources = expand_sources(args.sources, recursive=getattr(args, "recursive", False))
     try:
-        record = await service.ingest(
-            expand_sources(args.sources, recursive=getattr(args, "recursive", False)),
-            collection=plan.green,
-        )
+        if watching:
+            accepted = await service.accept(sources, collection=plan.green)
+            console.emit(f"job             {accepted.job_id}")
+            record = await _run_watched(service, accepted, journal, console)
+        else:
+            record = await service.ingest(sources, collection=plan.green)
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE

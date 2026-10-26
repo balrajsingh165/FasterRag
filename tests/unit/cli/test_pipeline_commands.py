@@ -1,6 +1,9 @@
 import argparse
+import asyncio
+import contextlib
 import json
-from collections.abc import AsyncIterator
+import threading
+from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +26,7 @@ from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.parser import build_parser
 from fasterrag.config.schema import Settings
 from fasterrag.errors import FasterRagError, RetrievalError
-from fasterrag.services.journal import JobRecord
+from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.reindex import ReindexPlan
 
 CONFIG = """
@@ -373,14 +376,27 @@ class StoppedBuild:
 
     The swap, the eval gate, and the alias flip have their own tests. What is asserted here
     is the one thing only the wrapper does: what it decided the sources were.
+
+    It answers on both paths the wrapper has: ``ingest`` unwatched, and ``accept`` then
+    ``run`` under ``--watch``.
     """
 
     def __init__(self) -> None:
         self.sources: list[str] = []
+        self.journal: FakeJournal | None = None
 
     async def ingest(self, sources: Any, *, collection: str) -> JobRecord:
         self.sources = list(sources)
         return JobRecord(job_id="j", collection=collection, status="failed")
+
+    async def accept(self, sources: Any, *, collection: str | None = None) -> JobRecord:
+        self.sources = list(sources)
+        return JobRecord(job_id="j", collection=collection or "docs", status="queued")
+
+    async def run(self, record: JobRecord, *, metadata: Any = None) -> JobRecord:
+        if self.journal is not None:
+            assert await asyncio.to_thread(self.journal.drained.wait, 5)
+        return JobRecord(job_id=record.job_id, collection=record.collection, status="failed")
 
     async def close(self) -> None:
         return None
@@ -460,20 +476,233 @@ async def test_the_recursive_flag_reaches_a_reembed(
     assert "c.txt" in [Path(name).name for name in stopped_build.sources]
 
 
-async def test_a_reembed_says_watch_is_not_implemented_rather_than_ignoring_it(
+class FakeJournal(Journal):
+    """A journal whose per-document tally advances one poll at a time.
+
+    A real ``Journal`` with only ``counts`` replaced, so the follower is exercised against
+    the type it is given in production rather than against a duck that happens to fit.
+
+    ``drained`` is what makes the watch tests deterministic rather than timing-dependent.
+    It is set on the poll *after* the last tally, by which point the follower has already
+    printed that tally — so a test that waits on it and then cancels the follower is
+    asserting against the whole output and not against whatever a race produced. It is a
+    thread event because the follower polls through ``asyncio.to_thread``.
+    """
+
+    def __init__(self, tallies: Sequence[Mapping[str, int]]) -> None:
+        """Serve ``tallies`` in order, repeating the last one once they run out."""
+        super().__init__(Path("journal-root-never-read"))
+        self.tallies = [dict(tally) for tally in tallies]
+        self.polls = 0
+        self.drained = threading.Event()
+
+    def counts(self, job: str) -> dict[str, int]:
+        """Return the next tally, as ``Journal.counts`` does."""
+        tally = self.tallies[min(self.polls, len(self.tallies) - 1)]
+        self.polls += 1
+        if self.polls > len(self.tallies):
+            self.drained.set()
+        return dict(tally)
+
+
+class WatchedIngest:
+    """An ingestion service that settles once the follower has seen every tally."""
+
+    def __init__(self, journal: FakeJournal) -> None:
+        """Hold the journal whose exhaustion ends the run."""
+        self.journal = journal
+        self.accepted: list[str] = []
+        self.metadata: dict[str, Any] | None = None
+        self.ingested = False
+
+    async def accept(self, sources: Any, *, collection: str | None = None) -> JobRecord:
+        self.accepted = list(sources)
+        return JobRecord(job_id="job-1", collection=collection or "docs", status="queued")
+
+    async def run(self, record: JobRecord, *, metadata: dict[str, Any] | None = None) -> JobRecord:
+        self.metadata = metadata
+        assert await asyncio.to_thread(self.journal.drained.wait, 5)
+        return JobRecord(
+            job_id=record.job_id,
+            collection=record.collection,
+            status="completed",
+            counts={"indexed": 2, "dead_lettered": 0},
+        )
+
+    async def ingest(self, sources: Any, **kwargs: Any) -> JobRecord:
+        self.ingested = True
+        return JobRecord(
+            job_id="job-1", collection="docs", status="completed", counts={"indexed": 2}
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.fixture
+def instant_polling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Poll without waiting, so a watch test takes microseconds rather than seconds."""
+    monkeypatch.setattr(pipeline, "_WATCH_POLL_SECONDS", 0.0)
+
+
+def watched(journal: FakeJournal, monkeypatch: pytest.MonkeyPatch) -> WatchedIngest:
+    """Install the ingestion service and journal an ingest command will build."""
+    service = WatchedIngest(journal)
+    monkeypatch.setattr(pipeline, "IngestionService", lambda *args, **kwargs: service)
+    monkeypatch.setattr(pipeline, "create_journal", lambda settings: journal)
+    monkeypatch.setattr(pipeline, "create_lock_store", lambda settings: object())
+    return service
+
+
+def ingest_args(config: str, source: str, *flags: str) -> argparse.Namespace:
+    """Build an ingest namespace through the real parser."""
+    return build_parser().parse_args(["ingest", "--config", config, source, *flags])
+
+
+async def test_the_follower_prints_a_line_per_change_not_per_poll(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A tally that has not moved is not news; printing it every second would be noise."""
+    journal = FakeJournal(
+        [{"total": 1, "indexed": 1}, {"total": 1, "indexed": 1}, {"total": 2, "indexed": 2}]
+    )
+
+    follower = asyncio.create_task(pipeline._follow_job(journal, "j", Console(), interval=0.0))
+    assert await asyncio.to_thread(journal.drained.wait, 5)
+    follower.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await follower
+
+    assert [line for line in capsys.readouterr().out.splitlines() if line] == [
+        "progress        documents_indexed=1 documents_total=1",
+        "progress        documents_indexed=2 documents_total=2",
+    ]
+
+
+async def test_watching_an_ingest_prints_the_job_id_then_progress_then_the_summary(
+    config: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    instant_polling: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The point of the flag: the job is identifiable and visible while it is still running."""
+    source = tmp_path / "note.txt"
+    source.write_text("Either party may terminate on thirty days notice.", encoding="utf-8")
+    journal = FakeJournal([{"total": 1, "indexed": 1}, {"total": 2, "indexed": 2}])
+    service = watched(journal, monkeypatch)
+
+    code = await pipeline.run_ingest(ingest_args(config, str(source), "--watch"), Console())
+    printed = capsys.readouterr().out
+
+    assert code == ExitCode.SUCCESS
+    assert service.ingested is False
+    assert printed.index("job             job-1") < printed.index("progress        ")
+    assert printed.index("progress        documents_indexed=2 documents_total=2") < printed.index(
+        "status "
+    )
+    assert printed.count("job             job-1") == 1
+
+
+async def test_watching_still_carries_the_metadata_the_unwatched_path_carries(
+    config: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    instant_polling: None,
+) -> None:
+    """The watched path accepts and runs by hand, so it is the one that could drop metadata."""
+    source = tmp_path / "note.txt"
+    source.write_text("thirty days written notice", encoding="utf-8")
+    service = watched(FakeJournal([{"total": 1, "indexed": 1}]), monkeypatch)
+
+    await pipeline.run_ingest(
+        ingest_args(config, str(source), "--watch", "--metadata", "team=legal"), Console()
+    )
+
+    assert service.metadata == {"team": "legal"}
+
+
+async def test_an_unwatched_ingest_prints_no_progress_at_all(
+    config: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    instant_polling: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "note.txt"
+    source.write_text("thirty days written notice", encoding="utf-8")
+    service = watched(FakeJournal([{"total": 1, "indexed": 1}]), monkeypatch)
+
+    await pipeline.run_ingest(ingest_args(config, str(source)), Console())
+    printed = capsys.readouterr().out
+
+    assert service.ingested is True
+    assert "progress" not in printed
+    assert "job             job-1" in printed
+
+
+async def test_watching_under_json_says_so_and_leaves_one_document_on_stdout(
+    config: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    instant_polling: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Progress lines are suppressed under --json, so the flag has to admit it shows nothing."""
+    source = tmp_path / "note.txt"
+    source.write_text("thirty days written notice", encoding="utf-8")
+    service = watched(FakeJournal([{"total": 1, "indexed": 1}]), monkeypatch)
+
+    code = await pipeline.run_ingest(
+        ingest_args(config, str(source), "--watch", "--json"), Console(as_json=True)
+    )
+    captured = capsys.readouterr()
+
+    assert code == ExitCode.SUCCESS
+    assert service.ingested is True
+    assert "--watch prints nothing under --json or --quiet" in captured.err
+    assert json.loads(captured.out)["job_id"] == "job-1"
+
+
+async def test_watching_a_dry_run_says_there_is_no_job_to_follow(
+    config: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A dry run creates no job, so following nothing in silence would be the old bug again."""
+    source = tmp_path / "note.txt"
+    source.write_text("Either party may terminate on thirty days notice.", encoding="utf-8")
+
+    code = await pipeline.run_ingest(
+        ingest_args(config, str(source), "--watch", "--dry-run"), Console()
+    )
+    captured = capsys.readouterr()
+
+    assert code == ExitCode.SUCCESS
+    assert "--watch has nothing to follow under --dry-run" in captured.err
+    assert "would index" in captured.out
+
+
+async def test_watching_a_reembed_follows_the_green_build(
     config: str,
     tmp_path: Path,
     adapter: FakeAdapter,
     stopped_build: StoppedBuild,
+    monkeypatch: pytest.MonkeyPatch,
+    instant_polling: None,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Accepting a flag and doing nothing leaves the operator waiting on a finished job."""
+    """A re-embed builds by ingesting, so it follows its build the same way."""
+    journal = FakeJournal([{"total": 1, "indexed": 1}, {"total": 2, "indexed": 2}])
+    stopped_build.journal = journal
+    monkeypatch.setattr(pipeline, "create_journal", lambda settings: journal)
+
     await pipeline.run_index(reembed(config, str(tmp_path), "--watch"), Console())
+    printed = capsys.readouterr().out
 
-    assert "--watch is not implemented yet" in capsys.readouterr().err
+    assert "job             j" in printed
+    assert "progress        documents_indexed=2 documents_total=2" in printed
 
 
-async def test_a_reembed_without_watch_prints_no_such_notice(
+async def test_a_reembed_without_watch_prints_no_progress(
     config: str,
     tmp_path: Path,
     adapter: FakeAdapter,
@@ -482,4 +711,89 @@ async def test_a_reembed_without_watch_prints_no_such_notice(
 ) -> None:
     await pipeline.run_index(reembed(config, str(tmp_path)), Console())
 
-    assert "--watch" not in capsys.readouterr().err
+    assert "progress" not in capsys.readouterr().out
+
+
+class IngestWaitingOnTheFollower:
+    """An ingestion service that settles only once the follower has had its turn."""
+
+    def __init__(self, started: asyncio.Event) -> None:
+        """Hold the event the stand-in follower sets before it fails."""
+        self.started = started
+
+    async def accept(self, sources: Any, *, collection: str | None = None) -> JobRecord:
+        return JobRecord(job_id="job-1", collection=collection or "docs", status="queued")
+
+    async def run(self, record: JobRecord, *, metadata: dict[str, Any] | None = None) -> JobRecord:
+        await self.started.wait()
+        return JobRecord(
+            job_id=record.job_id,
+            collection=record.collection,
+            status="completed",
+            counts={"indexed": 2, "dead_lettered": 0},
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_a_failing_follower_cannot_destroy_a_finished_ingest(
+    config: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reporting progress is subordinate to the run: its failure must not eat the result.
+
+    The follower is stopped from the ``finally`` that returns the job record. A follower
+    that has already failed is done, so cancelling it does nothing and awaiting it raises
+    there — which discards the record and reports a completed ingest as a traceback.
+    """
+    source = tmp_path / "note.txt"
+    source.write_text("Either party may terminate on thirty days notice.", encoding="utf-8")
+    started = asyncio.Event()
+
+    async def explode(
+        journal: Any, job_id: str, console: Console, *, interval: float = 0.0
+    ) -> None:
+        started.set()
+        raise RuntimeError("the journal directory vanished")
+
+    service = IngestWaitingOnTheFollower(started)
+    monkeypatch.setattr(pipeline, "_follow_job", explode)
+    monkeypatch.setattr(pipeline, "IngestionService", lambda *args, **kwargs: service)
+    monkeypatch.setattr(pipeline, "create_journal", lambda settings: object())
+    monkeypatch.setattr(pipeline, "create_lock_store", lambda settings: object())
+
+    with caplog.at_level("WARNING", logger="fasterrag.cli.commands.pipeline"):
+        code = await pipeline.run_ingest(ingest_args(config, str(source), "--watch"), Console())
+    captured = capsys.readouterr()
+
+    assert code == ExitCode.SUCCESS
+    assert "status          completed" in captured.out
+    assert "indexed         2 chunks" in captured.out
+    assert "[INTERNAL] --watch stopped reporting progress for job job-1" in captured.err
+    assert "the journal directory vanished" in captured.err
+    assert "Traceback" not in captured.err
+    assert [getattr(record, "job_id", None) for record in caplog.records] == ["job-1"]
+
+
+async def test_the_two_indexed_numbers_of_a_watched_run_cannot_be_confused(
+    config: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    instant_polling: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Progress counts documents and the summary counts chunks; one run prints both."""
+    source = tmp_path / "note.txt"
+    source.write_text("Either party may terminate on thirty days notice.", encoding="utf-8")
+    watched(FakeJournal([{"total": 2, "indexed": 2}]), monkeypatch)
+
+    await pipeline.run_ingest(ingest_args(config, str(source), "--watch"), Console())
+    printed = capsys.readouterr().out
+
+    assert "progress        documents_indexed=2 documents_total=2" in printed
+    assert "indexed         2 chunks" in printed
+    assert "progress        indexed=" not in printed

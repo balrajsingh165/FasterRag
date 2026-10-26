@@ -67,7 +67,7 @@ Submit sources for ingestion (async job; same path as `POST /v1/ingest`).
 | `--metadata KEY=VALUE` | Repeatable; merged into chunk metadata. |
 | `--priority-class NAME` | Tiered-embedding routing class (D9). Sets `priority_class` in chunk metadata, which is what `embeddings.tiering.rules[].match` matches on. |
 | `--recursive` | Descend into subdirectories. Without it a directory source contributes only its immediate files. Hidden files and `.git`, `node_modules`, `__pycache__`, and virtualenv directories are skipped either way; files from a directory are ingested in sorted order so the same command produces the same job. |
-| `--watch` | **Not yet implemented** (TASK-0196). The CLI runs the job inline to completion, so there is nothing to follow until the queue-backed job path lands (TASK-0130). Passing it prints a notice. |
+| `--watch` | Follow the job while it runs: the job id is printed as soon as the job is accepted, then a `progress` line each time the per-document tally in the journal changes (polled once a second), then the usual summary. Progress lines are appended, never redrawn, so a terminal and a redirected file get the same output; there is nothing TTY-specific about it. Under `--json` or `--quiet` it prints a notice to stderr and is skipped, because both modes suppress every human line and the result document is unchanged either way. Under `--dry-run` it prints a notice and is skipped: a dry run creates no job. |
 | `--dry-run` | Parse + chunk only; report what would be indexed (no embedding, no writes). This is the D9 estimator, so it obeys `cost.estimator`: with the estimator off it exits `2` naming the setting instead of pricing the corpus anyway. |
 
 ## `fasterrag query "<question>"`
@@ -89,7 +89,7 @@ Run a query (same path as `POST /v1/query`).
 | `list` | Collections with vector counts, embedding model+version, drift status. |
 | `create NAME` | Create a collection (`--distance`, `--shards`, `--replicas`). |
 | `delete NAME` | Drop a collection (`--force` required if alias target). |
-| `reembed NAME` | D2 zero-downtime re-embed: blue/green build → eval gate → alias swap (`--no-eval-gate` for dev). `--recursive` expands directory sources; `--watch` is **not yet implemented** (TASK-0196) and prints a notice. |
+| `reembed NAME` | D2 zero-downtime re-embed: blue/green build → eval gate → alias swap (`--no-eval-gate` for dev). `--recursive` expands directory sources; `--watch` follows the green build the same way `ingest --watch` does, printing the build's job id and a `progress` line per tally change before the gate and the swap are reported. |
 | `rollback NAME` | Alias flip back to the retained previous collection (within `index.reindex.rollback_retention_hours`). |
 | `lock verify [NAME]` | D1: verify `index.lock` against current config/corpus; report any drift (model version, config hash, content hashes). Exit 1 on drift. |
 

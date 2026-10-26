@@ -116,12 +116,10 @@ def _add_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentParser])
     )
     parser.add_argument("--priority-class", default=None, help="tiered-embedding routing class")
     parser.add_argument("--recursive", action="store_true", help="recurse into directories")
-    # TODO: TASK-0196 implements --watch. The CLI runs the job inline to completion, so
-    # there is nothing to follow yet; it needs the queue-backed job path (TASK-0130).
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="(not yet implemented) follow an asynchronous job until it settles",
+        help="print a progress line as the job's documents settle",
     )
     parser.add_argument("--dry-run", action="store_true", help="parse and chunk only")
 
@@ -171,7 +169,7 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     reembed.add_argument(
         "--watch",
         action="store_true",
-        help="(not yet implemented) follow an asynchronous job until it settles",
+        help="print a progress line as the build's documents settle",
     )
 
     rollback = actions.add_parser("rollback", help="flip the alias back to a retained build (D2)")
