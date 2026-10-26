@@ -54,10 +54,12 @@ __all__ = [
 #      while no adopter holds an index built under version 2 (TASK-0210)
 IDENTITY_VERSION: Final = 3
 
-# Written as chr(0) rather than an escape so the byte cannot end up in this file literally.
-# Since identity version 3 this is not a separator anywhere: the digest is length-prefixed
-# and has no boundary a field could forge. It survives only as the one byte no filesystem
-# or URL scheme permits, which `normalise_source` refuses as plain input validation.
+# CRITICAL: written as chr(0) rather than as an escape so the byte cannot end up in this
+# file literally — which happened twice while the version-2 guard was being written, once
+# here and once in the test. Since identity version 3 this is not a separator anywhere: the
+# digest is length-prefixed and has no boundary a field could forge. It survives only as the
+# one byte no filesystem or URL scheme permits, which `normalise_source` refuses as plain
+# input validation.
 _NUL: Final = chr(0)
 
 _DOCUMENT_PREFIX: Final = "d_"
