@@ -14,6 +14,9 @@ because an operator who sets ``security.auth: true`` reads that as authenticatio
 on. That list is now empty — every setting on it has been claimed by the slice that
 enforces it — so the check is gone rather than kept as a no-op. The rule it embodied
 still holds: a new key ships with the code that reads it, or with a guard here.
+
+``SET_ENV_VAR`` is the environment-variable form of ``--set``, named after the flag so the
+two read as one mechanism reached two ways.
 """
 
 from __future__ import annotations
@@ -45,8 +48,6 @@ __all__ = [
 DEFAULT_CONFIG_PATH: Final = Path("config.yaml")
 DEFAULT_ENV_FILE: Final = Path(".env")
 
-# The environment-variable form of `--set`. Named after it so the two are obviously the same
-# mechanism reached two ways.
 ENV_OVERRIDE_VAR: Final = "FASTERRAG_SET"
 
 _CHUNK_SIZE_WARN_ABOVE: Final = 1024
@@ -272,8 +273,10 @@ def _warn_about_risky_settings(settings: Settings) -> None:
     """Log the documented warnings for settings that are valid but risky."""
     if settings.chunking.chunk_size > _CHUNK_SIZE_WARN_ABOVE:
         _logger.warning(
-            "chunking.chunk_size is above the practical working range; retrieval quality "
-            "degrades toward the documented context cliff near 2500 tokens",
+            "chunking.chunk_size is above 1024: check it against the embedding model's "
+            "maximum sequence length, because longer chunks are silently truncated at "
+            "embed time. The 2500 upper bound is a guardrail, not the retrieved-context "
+            "'context cliff', which bounds the total context sent to the generator",
             extra={"chunk_size": settings.chunking.chunk_size},
         )
 

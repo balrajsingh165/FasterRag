@@ -71,7 +71,7 @@ Piecemeal use works without the engine: `from fasterrag.chunking import Recursiv
 
 | Goal | Keys | Notes |
 |---|---|---|
-| Answer quality | `retrieval.rerank`, `rerank_top_n`, `chunking.strategy`, `chunk_size` (512–1024 working range), `chunking.contextual_enrichment` | Enrichment costs LLM calls at ingest — `estimate` prices it first. Changing chunking/embedding needs a reindex (§6) |
+| Answer quality | `retrieval.rerank`, `rerank_top_n`, `chunking.strategy`, `chunk_size` (default 768; tune per corpus — no published optimum), `chunking.contextual_enrichment` | Enrichment costs LLM calls at ingest — `estimate` prices it first. Changing chunking/embedding needs a reindex (§6) |
 | Honesty | `generation.grounded_or_refuse`, `faithfulness_threshold` | Below threshold you get structured `insufficient_evidence`, not a guess |
 | Latency | `rerank_top_n` (the main dial), `llm.streaming`, `cache.semantic` + `cache.backend` | `disk` persists across CLI runs; `redis` is the multi-replica backend |
 | Cost | `embeddings.provider` (local = zero token cost), `embeddings.tiering`, `cache.semantic` | The runtime budget keys refuse startup until the governor ships (TASK-0242) — the estimator is the shipped cost tool |
@@ -87,7 +87,7 @@ Ready-made profiles (air-gapped, max-accuracy, cost-optimized, multi-tenant, ret
 
 **Protect it**: `security.auth: true` (+ `FASTERRAG_API_KEY` in `.env`) turns on key auth with scopes and per-key rate limiting; `security.multi_tenancy: true` isolates collections, caches, traces, and budgets per tenant via `X-Tenant-ID`. Details and threat notes: [security.md](security.md).
 
-**Change it safely**: model or chunking changes go through `fasterrag index reembed` — blue/green, eval-gated (pass `--dataset` with your golden set), atomic swap, instant `index rollback` within the retention window. `index lock verify` tells you when the live config has drifted from what built the index. `fasterrag replay --trace <id> --config candidate.yaml` shows exactly what a config change does to a past query before you adopt it.
+**Change it safely**: model or chunking changes go through `fasterrag index reembed` — blue/green, eval-gated (pass `--dataset` with your golden set), atomic swap, and `index rollback` within the retention window, which re-points the alias at the retained old collection rather than rebuilding it. `index lock verify` tells you when the live config has drifted from what built the index. `fasterrag replay --trace <id> --config candidate.yaml` shows exactly what a config change does to a past query before you adopt it.
 
 **Tune with evidence**: `fasterrag autopilot generate-golden-set` from your corpus (review it — promote records to `source: "human"`), then `autopilot run` for suggested settings with measured deltas; it never edits your config. Lock quality in with `eval.regression_gate: true`.
 

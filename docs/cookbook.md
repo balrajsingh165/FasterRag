@@ -37,7 +37,7 @@ When being right matters more than being fast or cheap.
 ```yaml
 chunking:
   strategy: layout               # respect headings/tables/reading order
-  chunk_size: 512                # smaller chunks = more precise matches
+  chunk_size: 512                # smaller chunks narrow the span each match returns
   overlap: 128
   contextual_enrichment: true    # −49% failed retrievals; −67% with reranking (references.md R1)
   context_tokens: 100
@@ -62,7 +62,7 @@ Millions of documents, finite budget.
 ```yaml
 chunking:
   strategy: recursive
-  chunk_size: 1024               # fewer chunks = fewer embeddings and less storage
+  chunk_size: 1024               # larger chunks mean fewer chunks: fewer embeddings and less storage
   overlap: 64
   contextual_enrichment: false   # a large ingest-time cost (one LLM call per chunk, unmeasured); enable per-collection if needed
 embeddings:
