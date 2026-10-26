@@ -85,10 +85,20 @@ Golden sets are versioned files; a set edit that changes scores is reviewed like
 | Feed a corrupt/malformed document | Routed to DLQ with reason code; pipeline continues. |
 | Slow LLM (latency injection) | `reliability.timeouts.llm_ms` triggers; degradation ladder serves `extractive` mode. |
 | Disk-full during ingest | Clean halt with typed error; resumable from the journal checkpoint after space is freed. |
+| Configuration mutated under a built index | Drift is reported and the moved field is named; a legal edit the index does not depend on is **not** reported. |
+| Network partition to a provider (vector DB and LLM legs, plus a name that cannot resolve) | The call ends on *our* configured timeout rather than hanging; the failure is typed and retryable, renders as a problem document with a trace id and never a generic 500; the breaker opens and admits one probe after its reset timeout. (Closing on a healed peer is asserted in `tests/unit/core/test_breaker.py`, not here — no chaos case heals the partition and drives a real call through it.) |
 
 Every scenario is a script in the repo; observed behavior is recorded in [failure-modes.md](failure-modes.md). Reliability anyone can re-run.
 
-The five rows above inject their fault at the closest honest code seam, so they run on any machine. The two environmental rows — stop-Qdrant and disk-full — additionally have **real-fault variants** in `tests/chaos/test_real_faults.py`, marked `integration` because they need a Docker daemon and skip cleanly without one: a throwaway Qdrant really stopped with `docker stop`, and the real journal writing onto a tmpfs with a hard size limit. The seam-level cases prove how fasterRag responds to those conditions; the variants prove that what the operating system actually reports is what it responds to.
+Every row injects its fault at the closest honest code seam, so the whole table runs on any machine — the partition row included, which is why it uses a local socket that accepts the connection and then never writes, rather than a container or a firewall rule. The first five rows live in `tests/chaos/test_chaos.py`; the last two are large enough to own their modules, `tests/chaos/test_config_mutation.py` and `tests/chaos/test_network_partition.py` (both TASK-0241 ✅). The two environmental rows — stop-Qdrant and disk-full — additionally have **real-fault variants** in `tests/chaos/test_real_faults.py`, marked `integration` because they need a Docker daemon and skip cleanly without one: a throwaway Qdrant really stopped with `docker stop`, and the real journal writing onto a tmpfs with a hard size limit. The seam-level cases prove how fasterRag responds to those conditions; the variants prove that what the operating system actually reports is what it responds to.
+
+The config-mutation row is worded narrowly on purpose. Its mutation set is derived from the live schema rather than listed by hand, and it is exhaustive over **single-field** edits of the subset the lock hashes; multi-field edits are not enumerated, and drift arriving by a route other than configuration is sampled with one scenario each. It does not establish "zero false negatives" in general, and [differentiators.md](differentiators.md) D1 states the same bound.
+
+One honesty note about the suite's own audit: `test_chaos.py` carries a self-audit case
+asserting that the suite is complete against this table, and it enumerates the five
+scenarios defined in that module only. It therefore does not yet see the two newer ones, so
+it would not notice if they were deleted. The scenarios run and pass; it is the audit that
+is behind, and extending it is an open task.
 
 ### 1.10 Mutation testing (mutmut) — **NOT BUILT** (TASK-0243)
 

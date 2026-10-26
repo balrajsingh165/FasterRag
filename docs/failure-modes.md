@@ -48,14 +48,17 @@ Coverage cross-check: parser (1–3), chunker (4–5), embedding pool (6–9), j
 >
 > - **The circuit breaker is built and wired** (`core/breaker.py`, TASK-0148 ✅): three states per [reliability.md](reliability.md) §3, consulted by the embedding worker pool and by the Qdrant and pgvector adapters, and exported as `fasterrag_circuit_state`. So rows 12, 14, 16, 20 and 35 get a real breaker. **Exception: the LLM path.** A breaker named `llm` is constructed at startup and no generation code path consults it (TASK-0245), so row 20's "retries → breaker opens" is currently just retries.
 > - **`cache_only` is still not implemented** (TASK-0159). The string does not appear anywhere in `src/`. Every row whose mitigation names that rung (12, 14, 16) describes specified, unbuilt behaviour: a vector-DB outage today raises a retryable `RETRIEVAL_FAILED` instead of serving a degraded answer.
-> - **Three rows name a test that does not exist.** Rows 8 and 19 cite a soak test and a load test, and rows 16 and 35 cite "partition injection" — none of these suites has been written (TASK-0243 for load/soak, TASK-0241 for the missing chaos scenarios). Row 10's "load test" clause is the same gap.
+> - **Partition injection now exists** (TASK-0241 ✅). Rows 16 and 35 cite it and it is written: `tests/chaos/test_network_partition.py`, run with `pytest -m chaos` and needing no Docker daemon, because a partition is injected at the socket — a real listener accepts the connection on a real port and then never writes a byte, which is what separates it from the stop-the-container fault, where the kernel refuses in milliseconds. Row 35's DNS half uses a name in the RFC 2606 `.invalid` TLD. What the suite asserts for row 16 is the **built** behaviour, not the specified one: the `cache_only` rung named in that row's mitigation column is still absent, so the partition surfaces `RETRIEVAL_FAILED` and then `CIRCUIT_OPEN`.
+> - **Two rows still name a test that does not exist.** Rows 8 and 19 cite a soak test and a load test, and neither suite has been written (TASK-0243). Row 10's "load test" clause is the same gap.
 >
 > The chaos log below records what the shipped system actually does today, and is authoritative over the table wherever the two disagree.
 
 ## Observed behavior — chaos suite run
 
 D12 requires that the injected faults and their observed behavior are recorded, not merely
-asserted in a test file. The suite is `tests/chaos/test_chaos.py`, run with `pytest -m chaos`.
+asserted in a test file. The suite is `tests/chaos/test_chaos.py` plus the two scenarios large
+enough to own a module, `tests/chaos/test_config_mutation.py` and
+`tests/chaos/test_network_partition.py`, all run with `pytest -m chaos`.
 
 | Scenario (testing-strategy.md §1.9) | Observed | Date |
 |---|---|---|
@@ -64,10 +67,15 @@ asserted in a test file. The suite is `tests/chaos/test_chaos.py`, run with `pyt
 | Feed a corrupt/malformed document | Recorded in the DLQ with `reason_code: PARSE_FAILED` and its attempt count; a sibling document in the same job still reached `indexed`, so one bad file did not stop the pipeline | 2026-08-01 |
 | Slow LLM (latency injection) | Degraded to `extractive` with `degraded: true`, serving the retrieved passages and their citations rather than returning nothing | 2026-08-01 |
 | Disk-full during ingest | The journal raises rather than corrupting state; the trace store, which writes *after* a query has been answered, swallows the failure and loses the record instead of failing the request; a checkpointed job resumes from index 499 at 500 | 2026-08-01 |
+| Configuration mutated under a built index | Every single-field edit of the hashed subset — enumerated from the live schema, not listed by hand — was reported as drift *and* named at least one field; the four chunker fields the lock stores by name carried both the old and the new value. None of the legal edits outside the hashed subset reported drift, and re-validating the same configuration unchanged reported none either. Mutated corpus content, new weights behind an unchanged model name, and an index built under an older `IDENTITY_VERSION` were each reported by one sampled scenario; an absent lockfile is correctly not drift | 2026-10-25 |
+| Network partition to a provider | The call ended on `reliability.timeouts.vector_db_ms` rather than hanging — asserted as a bound in both directions, never as a latency figure, the lower bound being what distinguishes a partition from a refused connection. The failure arrived as retryable `RETRIEVAL_FAILED` rendered as a 503 problem with a trace id and never `INTERNAL`; `health()` reported unhealthy with a detail instead of raising. Failure opened the breaker, and the next query was shed with retryable `CIRCUIT_OPEN` inside a bound far below the timeout it would have paid had it been sent — that bound is what proves it was shed rather than attempted. After the reset timeout the breaker admitted exactly one probe; the probe failed against the still-partitioned peer and re-opened it rather than granting a fresh threshold of doomed calls. Closing is asserted at the breaker with a scripted success, not against a healed socket, because a listener that swallows bytes cannot be turned into a working backend; the real-container restart covers the healed half. The same partition against the generation leg was classified the same way, which is what row 35's "any provider" needs; an unresolvable `.invalid` host took the same path | 2026-10-25 |
 
 **Scope of this run.** Every scenario injects its fault at the closest honest seam — an
-adapter raising what the real failure raises, or a directory that genuinely cannot be
-written. Simulating a *symptom* is legitimate; simulating the *handling* would prove nothing.
+adapter raising what the real failure raises, a directory that genuinely cannot be written,
+a configuration the real schema validated and a lock read back from a real disk, or a real
+TCP listener that accepts and then goes silent. Simulating a *symptom* is legitimate;
+simulating the *handling* would prove nothing, and where one step of a scenario is scripted
+rather than injected — the breaker's healing — the row above says so.
 Recovery *times* per scenario are not yet recorded; that needs the isolated hardware
 TASK-0084 is blocked on.
 

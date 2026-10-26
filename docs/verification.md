@@ -23,7 +23,7 @@ Doctor failures about Docker are acceptable for tiers 0–2 (nothing below tier 
 | `mypy` | zero errors, strict, over `src`+`tests`+`scripts` *(308 files)* |
 | `uv lock --check` | lockfile current |
 | `python scripts/check_commit_message.py --range origin/main~20..origin/main` | all pass |
-| `python scripts/check_doc_truth.py` · `check_blockers.py` · `check_openapi_drift.py` | all silent/zero |
+| `python scripts/check_doc_truth.py` · `check_blockers.py` · `check_openapi_drift.py` · `stamp_release.py --check` | all silent/zero |
 | `pytest -q tests/unit/docs tests/unit/scripts` | green — the reference-parity, ledger-integrity, and blockers-numbering gates |
 
 ## Tier 2 — Unit, property, golden (no Docker, no network, no credentials)
@@ -69,6 +69,8 @@ Prereq: `fasterrag provision qdrant` after doctor passes. Run in order; each row
 | 13 | Backup/DR | `fasterrag backup` → delete collection → `restore` | §4 shortcut restores; same query, same citation id (clean-host drill remains TASK-0085) |
 | 14 | REST parity | repeat 1/3/9 over `curl` incl. SSE | Same behavior; SSE order `meta→token…→citations→usage→done`; missing `done` = incomplete |
 | 15 | Facade parity | repeat 1/3 via `FasterRag` and `fasterrag.sync` | Same results, same error codes |
+| 16 | D9 governor | set `cost.per_query_token_budget: 1`, then query | 402 `BUDGET_EXCEEDED` problem, non-retryable, refused *before* the provider is called — never absorbed into a degraded `extractive` answer |
+| 17 | `--watch` | `fasterrag ingest ./docs --recursive --watch`, then the same with `--json` | Job id printed before the work starts, then appended `progress` lines as the tally moves, final counts unchanged from a run without the flag; under `--json` a refusal on stderr and an identical JSON document |
 
 ## Tier 5 — Observability & provisioning
 
@@ -80,4 +82,4 @@ Prereq: `fasterrag provision qdrant` after doctor passes. Run in order; each row
 
 ## 7. Open-verification cross-reference (read-only; ids live in todo.md)
 
-**Cannot pass yet, by design** — measurement program blocked on isolated hardware: citable benchmarks + SLO targets (TASK-0084), chaos recovery times (TASK-0136), clean-host DR drill + RPO/RTO (TASK-0085). **Known gaps this procedure will flag until closed**: coverage reconciliation (TASK-0252), REST provisioning parity (TASK-0251), `cache_only` rung (TASK-0159) and LLM-breaker consultation (TASK-0245), cost governor build-or-cut (TASK-0242), D7 gate in CI (TASK-0244), disk-full typing (TASK-0234), missing chaos/reindex scenarios (TASK-0241), load/soak/mutation layers (TASK-0243), nightly regression comparison (TASK-0246), live-provider eval checks (TASK-0205), D11 cross-backend acceptance + facade wrap (TASK-0079), `--watch` (TASK-0196). **Release-decision items** are listed in [release.md](release.md), not here.
+**Cannot pass yet, by design** — measurement program blocked on isolated hardware: citable benchmarks + SLO targets (TASK-0084), chaos recovery times (TASK-0136), clean-host DR drill + RPO/RTO (TASK-0085). **Known gaps this procedure will flag until closed**: coverage reconciliation (TASK-0252), REST provisioning parity (TASK-0251), `cache_only` rung (TASK-0159) and LLM-breaker consultation (TASK-0245), D7 gate in CI (TASK-0244), disk-full typing (TASK-0234), the **reindex-under-query-load** scenario, which is the half of TASK-0241 still unwritten now that the config-mutation and network-partition chaos scenarios have landed, load/soak/mutation layers (TASK-0243), nightly regression comparison (TASK-0246), live-provider eval checks (TASK-0205), D11 cross-backend acceptance + facade wrap (TASK-0079). The cost governor (TASK-0242) and `ingest`/`index reembed --watch` (TASK-0196) are **no longer gaps** — both shipped, and Tier 4 rows 16 and 17 were added to exercise them rather than leave them unverified. **Release-decision items** are listed in [release.md](release.md), not here.
