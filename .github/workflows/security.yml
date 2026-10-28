@@ -1,0 +1,88 @@
+# Scheduled vulnerability surveillance.
+#
+# `ci.yml` already audits the lockfile, but only on push and pull_request — so it answers
+# "did this change introduce a vulnerable dependency?" and never "did the world publish an
+# advisory against the dependencies we already ship?". Those are different questions, and
+# the second one is the dangerous one: nothing in the repository changes, nobody pushes,
+# and the project is quietly vulnerable for as long as that lasts.
+#
+# That gap was not hypothetical. On 2026-10-28 the audit found 68 advisories across 7
+# locked packages (pillow 39, virtualenv 19, urllib3 3, filelock 3, certifi 2,
+# opentelemetry-api 1, setuptools 1), every one of them with a fix already published. They
+# accumulated because the last push that ran the audit predated them.
+#
+# Runs daily rather than weekly because a fix that exists and is not taken is a decision,
+# and a day is the longest this project is willing to make that decision by accident.
+name: security
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+  push:
+    paths:
+      - "uv.lock"
+      - "pyproject.toml"
+      - ".github/workflows/security.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  # Audits the LOCKFILE, not an installed environment. Those differ: an environment is
+  # whatever resolved on this runner today, while the lockfile is what every machine will
+  # actually install. `--no-deps` is correct precisely because the export is fully pinned —
+  # there is nothing left to resolve.
+  dependency-advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Blocking, not advisory. Measured clean over all locked packages on 2026-10-28, so a
+      # failure here means something genuinely changed rather than a pre-existing advisory
+      # nobody can act on. When it fires, the fix is `uv lock --upgrade` followed by the
+      # full suite — a refreshed lockfile moves versions that tests depend on.
+      - name: Audit the locked dependency set
+        run: |
+          uv export --format requirements-txt --all-extras --no-emit-project -o locked.txt
+          uvx --python 3.12 pip-audit -r locked.txt --no-deps --desc
+
+      # Separate step so the summary survives a failing audit and names what to do next,
+      # rather than leaving a red tick whose only content is a stack of advisory IDs.
+      - name: Explain a failure
+        if: failure()
+        run: |
+          {
+            echo "## Dependency advisories found"
+            echo
+            echo "A published advisory now affects a package in \`uv.lock\`."
+            echo
+            echo "Fix: \`uv lock --upgrade\`, then run the full unit suite — a lockfile"
+            echo "refresh moves versions the tests depend on, so it is not a rubber stamp."
+            echo
+            echo "If no fixed version exists yet, record the exposure in docs/security.md"
+            echo "with its advisory ID rather than silencing this job."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Scans full history, not the diff. A secret committed and later removed is still in the
+  # history and still compromised; checking only the tip would call it clean. Duplicated
+  # from ci.yml deliberately — a credential leaked in a commit nobody pushes afterwards
+  # would otherwise go unscanned for as long as the repository stays quiet.
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
