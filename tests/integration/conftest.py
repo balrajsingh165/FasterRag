@@ -10,7 +10,6 @@ from fasterrag.config.schema import Settings
 from fasterrag.services.provisioning import (
     container_state,
     docker_available,
-    port_is_reachable,
     provision_qdrant,
     run_docker,
 )
@@ -24,6 +23,7 @@ REDIS_CONTAINER = "fasterrag-test-redis"
 REDIS_IMAGE = "redis:7"
 REDIS_PORT = 6399
 REDIS_READY_TIMEOUT_SECONDS = 60.0
+REDIS_READY_POLL_SECONDS = 0.5
 
 
 def docker_settings() -> Settings:
@@ -61,6 +61,38 @@ def collection_name() -> str:
     return f"contract-{uuid.uuid4().hex[:12]}"
 
 
+def _wait_until_redis_serves(url: str) -> None:
+    """Block until Redis answers PING, or fail with an actionable message.
+
+    # CRITICAL: this must be a protocol round-trip, not a TCP connect. Docker publishes the
+    # port the instant the container is created, and the proxy accepts connections before
+    # redis-server is listening behind it — so a reachable port proves the container exists,
+    # which is a weaker claim than the suite goes on to make. The first test then opened a
+    # connection, sent the RESP3 handshake, and got "Connection closed by server", while
+    # every later test passed because the server had come up in the meantime. That is the
+    # F........ signature this suite failed with in CI on 2026-10-26. PING is the smallest
+    # thing that proves the server is actually serving, and it mirrors how the pgvector
+    # fixture waits (connect, then SELECT 1).
+    """
+    import redis
+
+    deadline = time.monotonic() + REDIS_READY_TIMEOUT_SECONDS
+    last: Exception | None = None
+    while time.monotonic() < deadline:
+        client = redis.Redis.from_url(url, socket_connect_timeout=3)
+        try:
+            client.ping()
+        except redis.RedisError as exc:
+            last = exc
+            time.sleep(REDIS_READY_POLL_SECONDS)
+            continue
+        finally:
+            client.close()
+        return
+
+    pytest.fail(f"redis never answered PING on port {REDIS_PORT}: {last!r}")
+
+
 @pytest.fixture(scope="session")
 def redis_url() -> Iterator[str]:
     """Run a Redis container for the session and yield its URL.
@@ -91,13 +123,10 @@ def redis_url() -> Iterator[str]:
         if not started.ok:
             pytest.skip(f"could not start the test redis container: {started.stderr}")
 
-    deadline = time.monotonic() + REDIS_READY_TIMEOUT_SECONDS
-    while not port_is_reachable("localhost", REDIS_PORT):
-        if time.monotonic() >= deadline:
-            pytest.fail(f"the redis container never answered on port {REDIS_PORT}")
-        time.sleep(0.5)
+    url = f"redis://localhost:{REDIS_PORT}/0"
+    _wait_until_redis_serves(url)
 
-    yield f"redis://localhost:{REDIS_PORT}/0"
+    yield url
 
     if not pre_existing:
         asyncio.run(run_docker(["rm", "--force", REDIS_CONTAINER]))
