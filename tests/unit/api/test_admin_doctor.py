@@ -1,4 +1,4 @@
-"""``GET /v1/admin/doctor`` reports; it must never repair (TASK-0258).
+"""``GET /v1/admin/doctor`` reports; ``POST /v1/admin/doctor/fix`` repairs (TASK-0258).
 
 The CLI's ``doctor --fix`` and the REST doctor report call into the same service module,
 and two of that module's functions differ only in whether they touch the machine:
@@ -15,9 +15,12 @@ exactly the two failures ``--fix`` is allowed to act on — and assert that noth
 touched. Only the Docker boundary is faked; the router, the dependency wiring, and
 ``run_doctor`` itself are real, so an endpoint wired to the repairing half fails here.
 
-The planned ``/v1/admin/doctor/fix`` route is pinned too, as *planned*: the reference
-carries it behind a "not yet implemented" marker, and the drift gate turns that marker
-into a failure the day the route is served. Without this the note outlives the gap.
+The repairing route is driven over the same fakes, because the two things that make it the
+same surface as the CLI are both invisible in a happy path: an attempt is classified from a
+second doctor report rather than from a repair returning without raising, and a container
+holding the configured name without the ``fasterrag.managed=true`` label is somebody
+else's. Both are asserted here, against a machine whose repairs deliberately do not take
+and against one whose container is unlabelled.
 """
 
 from typing import Any
@@ -136,16 +139,174 @@ def test_the_response_is_the_report_and_not_a_fix_outcome(client: TestClient) ->
     assert body["passed"] is False
 
 
-def test_the_rest_repair_route_is_documented_as_planned_not_as_shipped() -> None:
-    """TASK-0258's asymmetry is recorded, and recorded in the form the drift gate reads.
+def test_the_rest_repair_route_is_documented_as_shipped_not_as_planned() -> None:
+    """TASK-0258 is closed in the code, so it must read as closed in the reference.
 
     ``scripts/check_openapi_drift.py`` splits the reference into shipped and planned on the
-    "not yet implemented" marker and fails either way round, so this assertion is what ties
-    the written decision to a gate: drop the marker and the gate reports a route promised
-    but not served; build the route and leave the marker and it reports the reverse.
+    "not yet implemented" marker and fails either way round. Leaving the marker behind now
+    that the route is served would make the reference understate the system, which is the
+    direction a doc-only change would have taken this task.
     """
     shipped, planned = documented_routes()
 
-    assert "POST /v1/admin/doctor/fix" in planned
-    assert "POST /v1/admin/doctor/fix" not in shipped
+    assert "POST /v1/admin/doctor/fix" in shipped
+    assert "POST /v1/admin/doctor/fix" not in planned
     assert "GET /v1/admin/doctor" in shipped
+
+
+@pytest.fixture
+def repairing_machine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Describe the same repairable machine, with repairs that do take effect.
+
+    Returns the mutable state the fakes read and write, so a test can flip ``managed`` to
+    describe a container that is not fasterRag's before issuing the request, and read
+    ``touched`` afterwards to see which Docker primitives were reached.
+    """
+    state: dict[str, Any] = {"volume": False, "running": False, "managed": True, "touched": []}
+
+    async def docker_up() -> bool:
+        return True
+
+    async def current_state(name: str = "fasterrag-qdrant") -> ContainerState:
+        return ContainerState(
+            name=name,
+            exists=True,
+            running=bool(state["running"]),
+            image="qdrant",
+            managed=bool(state["managed"]),
+        )
+
+    async def volume_present(volume: str) -> bool:
+        return bool(state["volume"])
+
+    async def create_volume(volume: str) -> None:
+        state["touched"].append(f"ensure_volume:{volume}")
+        state["volume"] = True
+
+    async def start(name: str = "fasterrag-qdrant") -> None:
+        state["touched"].append(f"start_container:{name}")
+        state["running"] = True
+
+    async def wait(settings: Settings) -> None:
+        state["touched"].append("await_backend_ready")
+
+    class Backend:
+        """A backend that answers once the container holding it has been started."""
+
+        async def health(self) -> HealthStatus:
+            running = bool(state["running"])
+            return HealthStatus(
+                healthy=running,
+                detail=None if running else "connection refused",
+                latency_ms=1.0,
+            )
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(doctor, "docker_available", docker_up)
+    monkeypatch.setattr(doctor, "container_state", current_state)
+    monkeypatch.setattr(doctor, "volume_exists", volume_present)
+    monkeypatch.setattr(doctor, "ensure_volume", create_volume)
+    monkeypatch.setattr(doctor, "start_container", start)
+    monkeypatch.setattr(doctor, "await_backend_ready", wait)
+    monkeypatch.setattr(doctor, "port_is_free", lambda host, port: True)
+    monkeypatch.setattr(doctor, "port_is_reachable", lambda host, port: True)
+    monkeypatch.setattr(doctor, "create_vector_db_adapter", lambda settings: Backend())
+    monkeypatch.setenv("QDRANT_API_KEY", "not-a-real-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-real-key")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "not-a-real-key")
+    return state
+
+
+def fix(client: TestClient) -> dict[str, Any]:
+    """Run the repairs over REST."""
+    response = client.post("/v1/admin/doctor/fix")
+
+    assert response.status_code == 200, response.text
+    body: dict[str, Any] = response.json()
+    return body
+
+
+def attempt(body: dict[str, Any], name: str) -> dict[str, Any]:
+    """Return one fix attempt from the wire format, failing loudly when it is absent."""
+    return next(entry for entry in body["fixes"]["attempts"] if entry["check"] == name)
+
+
+def test_the_repairs_the_cli_makes_are_reachable_over_rest(
+    client: TestClient, repairing_machine: dict[str, Any]
+) -> None:
+    """Both repairable failures are repaired, and the body is the CLI's ``--json`` shape."""
+    body = fix(client)
+
+    assert f"ensure_volume:{VOLUME}" in repairing_machine["touched"]
+    assert "start_container:fasterrag-qdrant" in repairing_machine["touched"]
+    assert {"passed", "checks", "fixes"} <= set(body)
+    assert body["fixes"]["rechecked"] is True
+    assert attempt(body, "vector_db_volume")["status"] == "fixed"
+    assert attempt(body, "vector_db")["status"] == "fixed"
+    assert named(body, "vector_db_volume")["passed"] is True
+
+
+def test_a_container_without_the_managed_label_is_not_started(
+    client: TestClient, repairing_machine: dict[str, Any]
+) -> None:
+    """A container holding the configured name but not the label belongs to somebody else.
+
+    The volume repair still runs in this request, so the refusal is not an artefact of a run
+    that changed nothing: the guard has to hold check by check, not request by request.
+    """
+    repairing_machine["managed"] = False
+
+    body = fix(client)
+    refusal = attempt(body, "vector_db")
+
+    assert refusal["status"] == "manual"
+    assert "fasterrag.managed=true" in refusal["detail"]
+    assert not [entry for entry in repairing_machine["touched"] if entry.startswith("start_")]
+    assert f"ensure_volume:{VOLUME}" in repairing_machine["touched"]
+
+
+def test_a_repair_that_leaves_the_check_failing_is_not_reported_as_fixed(
+    client: TestClient, repairable_machine: list[str]
+) -> None:
+    """The status comes from the second report, never from the repair returning (T12).
+
+    Every repair primitive is reached here and returns cleanly while the machine it was
+    asked to change keeps reporting what it reported before. A surface that classified from
+    the call rather than from the re-check would answer ``fixed`` twice.
+    """
+    body = fix(client)
+
+    assert f"ensure_volume:{VOLUME}" in repairable_machine
+    assert attempt(body, "vector_db_volume")["status"] == "failed"
+    assert "still fails" in attempt(body, "vector_db_volume")["detail"]
+    assert attempt(body, "vector_db")["status"] == "failed"
+    assert body["passed"] is False
+
+
+def test_a_check_with_no_safe_repair_comes_back_as_needing_a_human(
+    client: TestClient,
+    repairing_machine: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing credential cannot be invented, and the reason travels with the refusal."""
+    monkeypatch.delenv("OPENAI_API_KEY")
+
+    body = fix(client)
+    secrets = attempt(body, "secrets")
+
+    assert secrets["status"] == "manual"
+    assert secrets["detail"]
+    assert named(body, "secrets")["passed"] is False
+    assert named(body, "secrets")["fix"]
+
+
+def test_reading_the_report_still_does_not_repair_now_that_the_fix_route_exists(
+    client: TestClient, repairing_machine: dict[str, Any]
+) -> None:
+    """The two verbs share a service module; only one of them may touch the machine."""
+    body = report(client)
+
+    assert set(body) == {"passed", "checks"}
+    assert repairing_machine["touched"] == []

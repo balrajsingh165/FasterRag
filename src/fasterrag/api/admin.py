@@ -3,7 +3,9 @@
 The REST half of what ``fasterrag doctor``, ``fasterrag provision``, and ``fasterrag
 estimate`` do, calling the same services so the two control planes report the same state.
 
-``GET /v1/admin/doctor`` returns ``200`` even when checks fail. The failing checks *are* the
+``GET /v1/admin/doctor`` is read-only and ``POST /v1/admin/doctor/fix`` is the repairing
+verb beside it, which is the same split the CLI draws between ``doctor`` and ``doctor
+--fix``. Both return ``200`` even when checks fail. The failing checks *are* the
 payload; a ``503`` would make the report unreadable to exactly the client that most needs it,
 and the endpoint's own availability is not what it is reporting on.
 """
@@ -24,7 +26,7 @@ from fasterrag.api.dependencies import (
 from fasterrag.api.schemas import EstimateRequest, ExportRequest, ImportRequest
 from fasterrag.services.archive import export_archive
 from fasterrag.services.archive_import import import_archive, open_archive
-from fasterrag.services.doctor import run_doctor
+from fasterrag.services.doctor import apply_fixes, run_doctor
 from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.lockfile import create_lock_store
 from fasterrag.services.provision_registry import provision_tool, stop_tool, tool_status
@@ -40,6 +42,26 @@ router = APIRouter(prefix="/v1", tags=["admin"])
 async def doctor_report(settings: CurrentSettings) -> dict[str, Any]:
     """Return the machine-readable preflight report (D10)."""
     return (await run_doctor(settings)).as_dict()
+
+
+@router.post("/admin/doctor/fix")
+async def doctor_fix(settings: CurrentSettings) -> dict[str, Any]:
+    """Repair what is safe to repair, then report the machine as it stands (TASK-0258).
+
+    The REST half of ``fasterrag doctor --fix``, calling ``apply_fixes`` — the same service
+    function the CLI reaches through ``diagnose_and_fix`` once it has loaded settings. The
+    repairs, the ``fasterrag.managed=true`` guard that decides whether a container may be
+    started, and the rule that every attempt is classified from a *second* doctor report
+    rather than from a repair returning without raising all live in that service, so this
+    surface cannot drift from the CLI's behaviour without the service changing underneath
+    both.
+
+    Answers ``200`` with a report that still fails, exactly as the ``GET`` does: the failing
+    checks are the payload, and the ``fixes`` member says what was attempted and what the
+    re-check then found. A repair that cannot be made safely comes back as ``manual`` with
+    the reason. ``GET /v1/admin/doctor`` stays read-only; this is where mutation lives.
+    """
+    return (await apply_fixes(settings)).as_dict()
 
 
 def _reported(result: ProvisionResult) -> dict[str, Any]:

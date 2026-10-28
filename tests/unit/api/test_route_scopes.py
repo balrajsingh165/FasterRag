@@ -31,6 +31,7 @@ EXPECTED: dict[str, tuple[str | None, list[str]]] = {
     "/openapi.json": (None, ["GET"]),
     "/metrics": ("admin", ["GET"]),
     "/v1/admin/doctor": ("admin", ["GET"]),
+    "/v1/admin/doctor/fix": ("admin", ["POST"]),
     "/v1/admin/export": ("admin", ["POST"]),
     "/v1/admin/import": ("admin", ["POST"]),
     "/v1/admin/provision/{tool}": ("admin", ["DELETE", "POST"]),
@@ -141,6 +142,16 @@ def test_reading_a_trace_needs_admin_not_query() -> None:
 def test_estimating_needs_admin_because_it_reads_server_paths() -> None:
     """`/v1/estimate` parses whatever paths it is handed on the server's filesystem."""
     assert required_scope("/v1/estimate") == "admin"
+
+
+def test_repairing_the_host_needs_admin() -> None:
+    """`POST /v1/admin/doctor/fix` creates a Docker volume and starts a container (TASK-0258).
+
+    It is a strict subset of what the provisioning verbs beside it already do, which is why
+    it is exposed at all — but it is host authority, so it may never resolve to a narrower
+    scope than they do.
+    """
+    assert required_scope("/v1/admin/doctor/fix") == "admin"
 
 
 def test_provisioning_needs_admin_in_every_verb() -> None:
