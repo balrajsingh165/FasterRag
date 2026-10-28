@@ -106,6 +106,23 @@ is behind, and extending it is an open task.
 
 *As built:* `mutmut` is not a dependency and has no configuration; the `mutation` marker is declared and unused. Mutation checking is done **by hand** today — several slices record deliberately breaking the code and confirming exactly one test fails (TASK-0193, TASK-0208, TASK-0211, TASK-0229, TASK-0232) — which is the practice this layer would automate, not a substitute for it.
 
+### 1.11 Live provider checks (credential-gated)
+
+`tests/eval/test_live_providers.py`, under the `eval` marker. Every other provider test substitutes a fake client, which proves the adapter issues the request it intends to and proves nothing about whether the vendor accepts it. [integrations.md](integrations.md) and the README advertise OpenAI, Anthropic, Cohere and Ollama; before this layer existed, exactly one of those — the OpenAI generator — had ever been exercised against the real API, by hand, once.
+
+Each advertised provider gets the smallest call that can keep the promise: one short generation, or one short embedding, asserting a well-formed typed `Completion`/`EmbeddingResult` and the token accounting the adapter claims to populate. One full run with every credential present costs **seven requests** of a few dozen tokens each — four generations (OpenAI, Anthropic, Cohere, Ollama) and three embeddings (OpenAI, Cohere, Ollama); the two Ollama checks go to a local server and cost nothing. The HuggingFace embedder is local and is covered against real weights by `tests/eval/test_real_models.py` instead.
+
+**What this layer establishes, and what it does not.**
+
+- A provider counts as verified **only** when its own check ran and recorded evidence of a response. Verification is derived from the recorded responses, not from a counter kept beside them, so no provider that was never called can be counted.
+- **A green `pytest -m eval` run with no credentials present proves nothing about any provider.** Every check skips, and a skip is not a pass. This is the misreading the trap registry calls T12, and it is the shape of the failure that hit the Redis suite on 2026-10-26 — a probe weaker than the assertion it gated, reported as green.
+- Two things make that misreading structurally hard. Each provider has its own test, so pytest's own `SKIPPED` line is the record and there is no aggregate that could launder it; and the run's summary test is green **only** when every provider was reached, skipping with the full per-provider table otherwise. Run with `-rs` to see it.
+- A missing credential never fails the suite. The maintainer can run with one key, with all of them, or with none. A credential that is *present but rejected* does fail — that is a real finding, not an absence.
+- Gating: hosted providers gate on their key variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `COHERE_API_KEY`); Ollama has no credential, so it gates on `OLLAMA_HOST` naming a running server. Gating Ollama on nothing would mean a connection attempt, and a failure rather than a skip, on every machine without it. A missing provider SDK skips the same way, naming the extra to install. Every skip reason names both the provider and the variable, so a skipped run is legible rather than invisible.
+- Model ids go stale. Each check's model can be overridden with `FASTERRAG_LIVE_MODEL_<PROVIDER>_<LLM|EMBEDDINGS>` so a retired id is a configuration change, not a code change.
+
+**Known gap recorded by this layer rather than papered over:** the Cohere and Ollama embedding adapters surface no token usage, so their checks assert `total_tokens is None` — pinning the current behaviour instead of asserting an accounting that does not exist. Cohere does return billed units that `CohereEmbedder` discards.
+
 ## 2. CI quality gates (all blocking)
 
 1. `ruff check` + `ruff format --check` clean.
@@ -113,7 +130,7 @@ is behind, and extending it is an open task.
 3. Unit tests green; coverage ≥ 85% on `core/`, `adapters/`, `workers/`.
 4. Integration tests green (testcontainers).
 5. Adapter contract suite green for all in-repo adapters.
-6. Eval harness runs (`pytest -m eval`, the `models` job). **The D7 tolerance gate is not wired into CI** — `services/regression.py` and `fasterrag benchmark --suite eval` implement it, but no CI step compares against the committed baseline, so this gate is not currently blocking (TASK-0244).
+6. Eval harness runs (`pytest -m eval`, the `models` job). CI holds no provider credentials, so the live provider checks (§1.11) skip there and this gate verifies no provider against any vendor API. **The D7 tolerance gate is not wired into CI** — `services/regression.py` and `fasterrag benchmark --suite eval` implement it, but no CI step compares against the committed baseline, so this gate is not currently blocking (TASK-0244).
 7. Secret scanning clean; dependency lockfile up to date ([security.md](security.md)).
 8. Commit-message rule enforced (single line, no trailers) via pre-commit/CI check.
 9. Docs updated in the same change for any behavior change (reviewed, not automated).
@@ -131,7 +148,7 @@ is behind, and extending it is an open task.
 |---|---|---|
 | (none) unit | every push, < 2 min | nothing external |
 | `integration` | every PR | Docker (testcontainers) |
-| `eval` | PRs touching retrieval paths + nightly | small datasets in repo |
+| `eval` | PRs touching retrieval paths + nightly | small datasets in repo; the live provider checks (§1.11) additionally need provider credentials and skip without them |
 | `chaos` | runnable now against a local stack | Docker |
 | `load`, `soak` | *planned* — no test carries either marker yet (TASK-0243); results would go to the ledger | reference hardware (TASK-0084) |
 | `mutation` | *planned* — no test carries the marker; `mutmut` is not installed (TASK-0243) | — |
