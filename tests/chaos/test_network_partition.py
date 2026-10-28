@@ -64,6 +64,14 @@ HANG_BUDGET_SECONDS: Final = 30.0
 SHED_BUDGET_SECONDS: Final = 0.5
 RESET_TIMEOUT_MS: Final = 200
 
+# CRITICAL: waiting exactly RESET_TIMEOUT_MS asserts on the clock, not on the breaker.
+# asyncio fires a timer up to one `clock_resolution` EARLY by design, and that resolution is
+# ~15.6 ms on a Windows runner — the same coarse clock behind TASK-0262. `asyncio.sleep(0.2)`
+# can therefore return while `time.monotonic()` still reads under the threshold the breaker
+# compares against, leaving the state legitimately OPEN. The same commit failed one Windows
+# CI run and passed the next on this assertion (TASK-0288).
+RESET_MARGIN_SECONDS: Final = 0.1
+
 
 class Blackhole:
     """Two TCP listeners that accept a connection and then never answer."""
@@ -355,7 +363,7 @@ async def test_the_breaker_admits_one_probe_once_its_reset_timeout_passes(
             await asyncio.wait_for(service.search("q"), HANG_BUDGET_SECONDS)
 
         assert service.breaker.is_open is True
-        await asyncio.sleep(RESET_TIMEOUT_MS / 1000)
+        await asyncio.sleep(RESET_TIMEOUT_MS / 1000 + RESET_MARGIN_SECONDS)
 
         assert service.breaker.state is CircuitState.HALF_OPEN
 
