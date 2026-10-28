@@ -10,7 +10,8 @@ import inspect
 import re
 from pathlib import Path
 
-from pydantic import BaseModel
+import pytest
+from pydantic import BaseModel, ValidationError
 
 from fasterrag.adapters.llm import base as llm_base
 from fasterrag.config.schema import Settings
@@ -109,3 +110,21 @@ def test_every_pending_setting_cites_a_task() -> None:
 
     for setting, task in PENDING.items():
         assert task in todo, f"{setting} is pending against {task}, which todo.md does not list"
+
+
+def test_a_context_budget_of_zero_is_rejected() -> None:
+    """A value that validates and then makes the system silently do nothing.
+
+    `generation.context_budget_tokens` bounds the whole assembled retrieved context.
+    Packing charges every chunk at least one token, so a budget of 0 admits no chunk at
+    all and every answer is generated with no retrieved context — a RAG system reading as
+    configured while retrieving nothing into the prompt. The bound is stated in the
+    schema so the rejection names the key instead of surfacing as empty answers.
+    """
+    with pytest.raises(ValidationError) as raised:
+        Settings.model_validate({"generation": {"context_budget_tokens": 0}})
+
+    message = str(raised.value)
+
+    assert "context_budget_tokens" in message
+    assert "greater than or equal to 1" in message

@@ -45,7 +45,7 @@ from typing import Any, Final
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
 from fasterrag.adapters.llm.base import LLMAdapter
-from fasterrag.config.schema import Settings
+from fasterrag.config.schema import GenerationSettings, Settings
 from fasterrag.core.breaker import CircuitBreaker
 from fasterrag.core.cache.semantic import MISS, CacheHit, SemanticCache
 from fasterrag.core.chunking.models import EstimatingTokenCounter, TokenCounter
@@ -80,11 +80,12 @@ EXTRACTIVE_MODE: Final = "extractive"
 
 MAXIMUM_BEST_CANDIDATES: Final = 5
 
-# CRITICAL: no configuration key carries a provider's context-window size, so this is the
-# budget used when a caller supplies none. It is deliberately conservative: overflowing a
-# window is silent truncation, and losing the passage that mattered is worse than sending
+# CRITICAL: read from the schema rather than restated, so the constant and
+# `generation.context_budget_tokens` cannot drift apart. The value itself is deliberately
+# conservative: no configuration key carries a provider's context-window size, overflowing
+# a window is silent truncation, and losing the passage that mattered is worse than sending
 # fewer chunks.
-DEFAULT_CONTEXT_BUDGET_TOKENS: Final = 4000
+DEFAULT_CONTEXT_BUDGET_TOKENS: Final = GenerationSettings().context_budget_tokens
 
 _logger = get_logger(__name__)
 
@@ -317,7 +318,7 @@ class GenerationService:
         traces: TraceStore | None = None,
         tenant: str | None = None,
         counter: TokenCounter | None = None,
-        context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
+        context_budget_tokens: int | None = None,
         breaker: CircuitBreaker | None = None,
     ) -> None:
         """Build the service.
@@ -340,7 +341,9 @@ class GenerationService:
                 and write, so a hit can never return another tenant's answer.
             counter: Token counter used for context budgeting.
             context_budget_tokens: Tokens available for context, which the caller sizes
-                from the model's window minus room for the answer.
+                from the model's window minus room for the answer. Omitted means
+                ``generation.context_budget_tokens``, so a standalone caller that passes
+                nothing still gets the documented default.
             breaker: Circuit breaker for the LLM provider. Built from
                 ``reliability.circuit_breaker`` when omitted; injected by tests.
         """
@@ -353,7 +356,11 @@ class GenerationService:
         self.traces = traces
         self.tenant = tenant
         self.counter = counter or EstimatingTokenCounter()
-        self.context_budget_tokens = context_budget_tokens
+        self.context_budget_tokens = (
+            settings.generation.context_budget_tokens
+            if context_budget_tokens is None
+            else context_budget_tokens
+        )
         # CRITICAL: built here rather than fetched from `create_breakers`, matching how the
         # embedding pool builds its own. One service instance owns one breaker for the whole
         # of its life, which is what makes consecutive failures countable — a breaker rebuilt
@@ -440,7 +447,7 @@ class GenerationService:
             budget_tokens=self.context_budget_tokens,
             counter=self.counter,
         )
-        texts = [chunk.text for chunk in retrieved.chunks[: context.used]]
+        texts = context.packed
         prompt = build_prompt(question, context, texts)
         assemble_ms = int((time.perf_counter() - started) * 1000)
         spans.record(

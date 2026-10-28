@@ -90,6 +90,7 @@ generation:
   grounded_or_refuse: false
   faithfulness_threshold: 0.7
   citations: true
+  context_budget_tokens: 4000
 
 cache:
   semantic: false

@@ -97,6 +97,7 @@ generation:
   grounded_or_refuse: false
   faithfulness_threshold: 0.7
   citations: true
+  context_budget_tokens: 4000
 
 cache:
   semantic: false
@@ -289,6 +290,44 @@ Thresholds the parsers apply before chunking sees anything. They are corpus-depe
 | `generation.grounded_or_refuse` | bool | `false` | — | D5: when `true`, answers below `faithfulness_threshold` return a structured `insufficient_evidence` response instead of guessing. |
 | `generation.faithfulness_threshold` | float | `0.7` | 0.0–1.0 | Minimum faithfulness score for an answer to be returned when `grounded_or_refuse` is on. |
 | `generation.citations` | bool | `true` | — | Attach span-level citation objects to every answer. Cannot be `false` while `grounded_or_refuse` is `true`. |
+| `generation.context_budget_tokens` | int | `4000` | ≥ 1 | Token budget for the **whole** assembled retrieved context — all packed chunks together, not any one chunk. See the note below. |
+
+
+### The assembled retrieved-context budget
+
+Retrieved chunks are packed in relevance order until `generation.context_budget_tokens` is
+spent. Packing does not stop at the first chunk that does not fit: that chunk is counted as
+dropped and the next, possibly smaller, one is still tried. Everything dropped for budget is
+reported as `evidence_dropped` on the answer, and as `dropped_budget` on the
+`context-assembly` trace span, so a budget that is doing the cutting is visible rather than
+inferred.
+
+**When the budget is smaller than a single chunk, nothing is packed.** Every chunk is charged
+at least one token, so a budget below the first chunk's cost admits no chunk at all. The query
+is still answered rather than failing, but the answer is generated with no retrieved context
+and carries no citations, with `evidence_dropped` equal to the number of chunks retrieved. A
+non-zero `evidence_dropped` alongside an empty `citations` list is the signature of a budget
+set below chunk size.
+
+**It interacts with `retrieval.top_k`.** `top_k` decides how many chunks compete for the
+budget; the budget decides how many of them reach the model. `top_k` chunks of
+`chunking.chunk_size` tokens each need roughly `top_k × chunk_size` tokens to all fit — at the
+defaults, 10 × 768 is well past 4,000, so a full result set is routinely trimmed by the budget
+and the lowest-ranked chunks never reach the prompt. That is the designed behaviour, not a
+fault: dropping the least relevant material beats letting a provider truncate the prompt from
+the middle. Raising `top_k` without raising the budget buys nothing; what it changes is the
+reranker's shortlist, not what the model sees.
+
+**On the default.** 4,000 is the value the service has shipped with since the generation slice
+landed, and no measurement of ours stands behind it or behind any other value. The introducing
+commit records only that it is deliberately conservative against silent provider-side
+truncation; no rationale for the number itself was recorded. [references.md](references.md) R3
+reports answer quality falling off beyond a ~2.5k-token retrieved context, but on a single
+setup with a single 8B generator, and its authors note the drop-off point is model-dependent —
+one preliminary preprint is not grounds to move a shipped default, which would swap one
+unmeasured number for another. What would move it: a run of the eval harness across budgets on
+a committed baseline, recorded in [benchmarks.md](benchmarks.md) (TASK-0285). Until then, treat
+4,000 as a starting point to tune per deployment, not as a measured optimum.
 
 ## `cache`
 

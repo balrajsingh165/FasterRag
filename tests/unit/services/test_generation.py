@@ -712,6 +712,73 @@ async def test_a_tight_budget_still_answers(budget: int) -> None:
     assert result.answer == "short answer"
 
 
+def build_budgeted(
+    configured: int, *, explicit: int | None = None
+) -> tuple[GenerationService, ScriptedLLM]:
+    """Build a service over two ~300-token chunks under a configured budget."""
+    settings = Settings.model_validate({"generation": {"context_budget_tokens": configured}})
+    llm = ScriptedLLM(settings, text="an answer [^c_a] [^c_b]")
+    retrieval = ScriptedRetrieval([chunk("c_a", "alpha " * 200), chunk("c_b", "bravo " * 200)])
+    service = GenerationService(
+        settings,
+        retrieval,  # type: ignore[arg-type]
+        llm,
+        context_budget_tokens=explicit,
+    )
+    return service, llm
+
+
+async def test_the_context_budget_is_taken_from_configuration() -> None:
+    """The budget was a constructor parameter no `config.yaml` key reached (TASK-0285).
+
+    An operator told to tune the assembled retrieved-context budget had no way to set it,
+    and the shipped 4,000 packed both chunks regardless of what configuration said.
+    """
+    service, llm = build_budgeted(350)
+
+    result = await service.answer("q")
+
+    assert service.context_budget_tokens == 350
+    assert [citation.chunk_id for citation in result.citations] == ["c_a"]
+    assert result.evidence_dropped == 1
+    assert "bravo" not in llm.prompts[0][0]
+
+
+async def test_a_wide_configured_budget_packs_everything_retrieved() -> None:
+    """The counterpart: the key must be able to move the outcome in both directions."""
+    service, _ = build_budgeted(4000)
+
+    result = await service.answer("q")
+
+    assert [citation.chunk_id for citation in result.citations] == ["c_a", "c_b"]
+    assert result.evidence_dropped == 0
+
+
+async def test_a_configured_budget_below_one_chunk_answers_without_context() -> None:
+    """What the reference has to say happens, rather than what a reader might assume.
+
+    Packing charges every chunk at least one token, so a budget smaller than the first
+    chunk admits nothing. The query is still answered — ungrounded, with no citations —
+    rather than failing, and `evidence_dropped` is what says why.
+    """
+    service, llm = build_budgeted(10)
+
+    result = await service.answer("q")
+
+    assert result.answer == "an answer [^c_a] [^c_b]"
+    assert result.citations == []
+    assert result.evidence_dropped == 2
+    assert "alpha" not in llm.prompts[0][0]
+
+
+async def test_an_explicit_budget_overrides_the_configured_one() -> None:
+    """Standalone use documented in python-api.md must survive the key being added."""
+    service, _ = build_budgeted(10, explicit=4000)
+
+    assert service.context_budget_tokens == 4000
+    assert len((await service.answer("q")).citations) == 2
+
+
 async def test_a_truncated_completion_is_reported() -> None:
     """Serving a cut-off answer silently means a caller cannot tell it apart from a whole one."""
     service, llm = build()

@@ -81,6 +81,16 @@ class AssembledContext:
     """The prompt context and the provenance of everything in it."""
 
     text: str = ""
+    packed: list[str] = field(default_factory=list)
+    """The chunk texts that survived packing, in prompt order.
+
+    # CRITICAL: the prompt must be built from this, never from a positional slice of the
+    # retrieved chunks. Packing skips blanks, duplicates and over-budget chunks and keeps
+    # going, so the Nth packed chunk is not the Nth retrieved one. Slicing by `used` put
+    # text in front of the model that assembly had dropped — including text dropped for
+    # exceeding the budget — while the citations described what was actually packed, so
+    # the answer was graded against evidence the model never saw (TASK-0287).
+    """
     citations: list[Citation] = field(default_factory=list)
     tokens: int = 0
     used: int = 0
@@ -206,6 +216,7 @@ def assemble_context(
 
     return AssembledContext(
         text=_SEPARATOR.join(packed),
+        packed=packed,
         citations=citations,
         tokens=used_tokens,
         used=len(packed),

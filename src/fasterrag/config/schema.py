@@ -495,11 +495,28 @@ class RetrievalSettings(Section):
 
 
 class GenerationSettings(Section):
-    """Grounding, faithfulness, and citation policy."""
+    """Grounding, faithfulness, citation policy, and the assembled-context budget.
+
+    ``context_budget_tokens`` bounds the *total* retrieved context packed into the prompt,
+    not the size of any one chunk. It was a ``GenerationService`` constructor parameter that
+    no key reached, so the budget an operator was told to tune could not be set from
+    ``config.yaml`` at all (TASK-0285).
+
+    The default stays at 4,000. Nothing in the history records why that number was chosen —
+    the introducing commit states only that it is deliberately conservative against silent
+    provider-side truncation — and no measurement of ours stands behind it or behind any
+    other value, so moving it would replace one unmeasured number with another.
+
+    There is no upper bound. Only the caller knows the provider's context window, and a
+    ceiling invented here would be a guess at it. The lower bound is 1 because packing
+    charges every chunk at least one token, so a budget of 0 admits nothing and would send
+    the model a prompt with no retrieved context at all.
+    """
 
     grounded_or_refuse: bool = False
     faithfulness_threshold: Annotated[float, Field(ge=0.0, le=1.0)] = 0.7
     citations: bool = True
+    context_budget_tokens: Annotated[int, Field(ge=1)] = 4000
 
     @model_validator(mode="after")
     def _check_citations(self) -> Self:

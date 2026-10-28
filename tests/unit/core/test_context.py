@@ -204,3 +204,35 @@ def test_every_packed_chunk_has_exactly_one_citation() -> None:
 
     assert result.used == len(result.citations)
     assert len({citation.chunk_id for citation in result.citations}) == 5
+
+
+def test_packed_holds_what_was_packed_not_the_first_n_retrieved() -> None:
+    """Skipping a chunk must not shift the prompt onto a chunk assembly rejected.
+
+    Packing skips and keeps going, so with an over-budget chunk first the second and third
+    survive while ``used`` is 2 — and the first two *retrieved* chunks are not those two.
+    """
+    big = "word " * 400
+    assembled = assemble_context(
+        [chunk("over", big), chunk("a", "alpha"), chunk("b", "beta")],
+        budget_tokens=60,
+        counter=COUNTER,
+    )
+
+    assert assembled.used == 2
+    assert assembled.packed == ["alpha", "beta"]
+    assert big.strip() not in assembled.text
+    assert [citation.chunk_id for citation in assembled.citations] == ["a", "b"]
+
+
+def test_the_prompt_text_and_the_citations_describe_the_same_chunks() -> None:
+    """The grounding guarantee: every packed text has a citation, in the same order."""
+    assembled = assemble_context(
+        [chunk("x", "alpha"), chunk("dupe", "alpha"), chunk("y", "beta")],
+        budget_tokens=500,
+        counter=COUNTER,
+    )
+
+    assert len(assembled.packed) == len(assembled.citations)
+    assert assembled.packed == ["alpha", "beta"]
+    assert [citation.chunk_id for citation in assembled.citations] == ["x", "y"]
