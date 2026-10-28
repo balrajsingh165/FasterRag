@@ -162,3 +162,24 @@ def test_the_message_names_the_file_the_line_and_the_phrase(tmp_path: Path) -> N
     assert "docs/internals.md:3" in message
     assert "does not exist" in message
     assert "TASK-0242" in message
+
+
+def test_a_denial_cell_is_paired_with_the_task_named_in_its_row(tmp_path: Path) -> None:
+    """The live false negative: the subject cell names the id, the next cell makes the claim.
+
+    release-readiness.md carried exactly this shape for weeks — "An unbuilt spend cap ...
+    enforcement that does not exist" beside a ticked TASK-0242 — and the first version of
+    this gate scored it green because the pipe was a sentence break.
+    """
+    docs = build(
+        tmp_path,
+        todo=TICKED,
+        internals=(
+            "| **Cost governor (TASK-0242)** | five docs describe enforcement that does "
+            "not exist | Engineering |\n"
+        ),
+    )
+
+    drift = check(docs)
+
+    assert any("TASK-0242" in entry for entry in drift)

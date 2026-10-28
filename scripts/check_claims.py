@@ -70,12 +70,52 @@ _FENCE: Final = re.compile(r"```.*?```", re.DOTALL)
 # exist: ... (TASK-0243)"), and breaking there would drop the id and the claim with it.
 _SENTENCE_BREAK: Final = re.compile(r"(?<=[.!?])\s+|\n|\|")
 
+# CRITICAL: a table denial is paired with its OWN cell's id, and only with the rest of
+# the row when its cell cites none. Both halves are load-bearing and pull opposite ways.
+# Splitting on the pipe alone is a false negative with a live instance:
+# release-readiness.md said an "unbuilt spend cap ... enforcement that does not exist"
+# in one cell while naming a ticked TASK-0242 in the cell beside it, and the first
+# version of this gate scored it green. Joining rows unconditionally is a false positive:
+# a row whose denial cell truthfully cites an OPEN id would be failed by a ticked id that
+# merely happens to sit in a neighbouring cell. The cell's own citation wins because a
+# writer who put an id next to the claim meant that id.
+_TABLE_ROW: Final = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_RULE: Final = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+
 
 def _ticked_ids(todo: Path) -> set[str]:
     """Return the ids the ledger marks completed."""
     if not todo.is_file():
         return set()
     return set(_TICKED.findall(todo.read_text(encoding="utf-8")))
+
+
+def _row_units(line: str) -> list[str]:
+    """Return one unit per table cell, lending the row's ids to a cell that cites none."""
+    cells = line.strip().strip("|").split("|")
+    elsewhere = sorted({task for cell in cells for task in _TASK.findall(cell)})
+    units: list[str] = []
+    for cell in cells:
+        if not cell.strip():
+            continue
+        if _TASK.search(cell) or not elsewhere:
+            units.append(cell)
+            continue
+        units.append(f"{cell} ({' '.join(elsewhere)})")
+    return units
+
+
+def _split(body: str) -> list[str]:
+    """Split into comparison units, resolving table rows cell by cell."""
+    units: list[str] = []
+    for line in body.split("\n"):
+        if _TABLE_RULE.match(line):
+            continue
+        if _TABLE_ROW.match(line):
+            units.extend(_row_units(line))
+            continue
+        units.extend(_SENTENCE_BREAK.split(line))
+    return units
 
 
 def _sentences(body: str) -> list[tuple[int, str]]:
@@ -89,7 +129,7 @@ def _sentences(body: str) -> list[tuple[int, str]]:
 
     units: list[tuple[int, str]] = []
     offset = 0
-    for piece in _SENTENCE_BREAK.split(stripped):
+    for piece in _split(stripped):
         start = stripped.find(piece, offset) if piece else offset
         if start < 0:
             start = offset

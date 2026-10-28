@@ -43,7 +43,7 @@ Every item below was re-verified this session by running it, reading its impleme
 | **License decision (TASK-0164, B1) — ✅ Apache-2.0, ADR-0008, 2026-09-13** | Was the only irreversible item: a PyPI version permanently fixes its license. Currently an undecided default (GPL-3.0-or-later) that contradicts nothing but records no reasoning | Maintainer |
 | **Version stamp (TASK-0020, B2)** | The release *is* this decision | Maintainer |
 | **Identity-encoding decision (TASK-0210) — ✅ length-prefixed, `IDENTITY_VERSION` 3, 2026-09-13** | Changing the id scheme after the first tag forces every adopter through a reindex; "harmless now, impossible after" is exactly a release gate. Taken while it was still harmless | Maintainer |
-| **Cost governor: build or cut (TASK-0242)** | An unbuilt spend cap is the most dangerous kind of unbuilt feature; five docs describe enforcement that does not exist. Cutting the surface is a legitimate close | Engineering |
+| **Cost governor (TASK-0242) — ✅ built 2026-08-11** | An unbuilt spend cap is the most dangerous kind of unbuilt feature, and five docs described enforcement that had no code behind it. Closed by building rather than cutting: `services/budget.py` refuses with `BUDGET_EXCEEDED` (402, non-retryable) before the provider is called | Engineering |
 | **D7 gate into CI (TASK-0244)** | The regression gate exists but is not in the path of a push — the one gate whose absence lets quality regress silently | Engineering |
 | **REST provisioning parity (TASK-0251, §4.1)** | api-reference promises three tools over REST; the router serves one | Engineering |
 | **Coverage-gate reconciliation (TASK-0252, §4.2)** | The documented blocking gate may not be holding | Engineering |
