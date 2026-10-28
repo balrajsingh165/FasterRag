@@ -61,14 +61,7 @@ def pytest_asyncio_loop_factories(
 
 
 def pgvector_settings() -> Settings:
-    """Return settings pointing the pgvector adapter at the test container.
-
-    ``dsn_env`` is named explicitly rather than left to a default. It has none: every
-    populated ``*_env`` field in the settings tree is collected and then required to be
-    present at startup, so defaulting it would demand a PostgreSQL DSN from every Qdrant
-    deployment in existence. Cross-field rule 11 asks for it only when the provider is
-    pgvector, which is exactly here.
-    """
+    """Return settings pointing the pgvector adapter at the test container."""
     return Settings.model_validate(
         {
             "vector_db": {

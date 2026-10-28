@@ -46,32 +46,12 @@ async def doctor_report(settings: CurrentSettings) -> dict[str, Any]:
 
 @router.post("/admin/doctor/fix")
 async def doctor_fix(settings: CurrentSettings) -> dict[str, Any]:
-    """Repair what is safe to repair, then report the machine as it stands (TASK-0258).
-
-    The REST half of ``fasterrag doctor --fix``, calling ``apply_fixes`` — the same service
-    function the CLI reaches through ``diagnose_and_fix`` once it has loaded settings. The
-    repairs, the ``fasterrag.managed=true`` guard that decides whether a container may be
-    started, and the rule that every attempt is classified from a *second* doctor report
-    rather than from a repair returning without raising all live in that service, so this
-    surface cannot drift from the CLI's behaviour without the service changing underneath
-    both.
-
-    Answers ``200`` with a report that still fails, exactly as the ``GET`` does: the failing
-    checks are the payload, and the ``fixes`` member says what was attempted and what the
-    re-check then found. A repair that cannot be made safely comes back as ``manual`` with
-    the reason. ``GET /v1/admin/doctor`` stays read-only; this is where mutation lives.
-    """
+    """Repair what is safe to repair, then report the machine as it stands (TASK-0258)."""
     return (await apply_fixes(settings)).as_dict()
 
 
 def _reported(result: ProvisionResult) -> dict[str, Any]:
-    """Render a provisioning outcome for the wire.
-
-    ``detail`` is carried on every verb, not only on status. It is where a Grafana run says
-    *why* it came back ``degraded`` and where a Langfuse run says how many secrets it
-    generated — dropping it would leave a caller with a status word and no way to act on it.
-    It never carries a secret value: the provisioners report counts and file names only.
-    """
+    """Render a provisioning outcome for the wire."""
     return {
         "tool": result.tool,
         "status": result.status,
@@ -98,28 +78,13 @@ async def provision_status(tool: str, settings: CurrentSettings) -> dict[str, An
 
 @router.delete("/admin/provision/{tool}")
 async def provision_down(tool: str, settings: CurrentSettings) -> dict[str, Any]:
-    """Stop a managed dependency's containers, the REST half of ``provision <tool> --down``.
-
-    Data volumes and generated secrets are preserved by the provisioners themselves, so this
-    is reversible by provisioning again — which is why it is a stop rather than a teardown,
-    and why the verb is safe to expose at all. Regenerating Langfuse's secrets would
-    invalidate every credential issued against them, so nothing here deletes them.
-
-    Guarded by the ``admin`` scope like the rest of the ``/v1/admin`` prefix, and not
-    tenant-scoped: a container is one process-wide resource, so scoping the request would
-    imply a per-tenant stack that does not exist.
-    """
+    """Stop a managed dependency's containers, the REST half of ``provision <tool> --down``."""
     return _reported(await stop_tool(tool, settings))
 
 
 @router.post("/estimate")
 async def estimate(body: EstimateRequest, settings: CurrentSettings) -> dict[str, Any]:
-    """Report what ingesting sources would cost, before embedding any of them (D9).
-
-    Raises:
-        FasterRagError: With ``VALIDATION_FAILED`` when ``cost.estimator`` is false, so the
-            setting reaches the REST surface it names and not only the CLI one.
-    """
+    """Report what ingesting sources would cost, before embedding any of them (D9)."""
     require_estimator(settings)
     return estimate_sources(body.sources, settings, all_providers=body.all_providers).as_dict()
 
@@ -131,12 +96,7 @@ async def export_collection(
     adapter: CurrentVectorDB,
     tenant: CurrentTenant,
 ) -> dict[str, Any]:
-    """Write a collection to a portable archive (D11).
-
-    Synchronous rather than a job id, unlike ingestion: an export reads what is already
-    indexed and writes a file, so there is no queue it could be waiting behind and no
-    partial state a caller would need to poll.
-    """
+    """Write a collection to a portable archive (D11)."""
     collection = scoped_name(body.collection or settings.vector_db.collection.default_name, tenant)
     store = create_lock_store(settings)
     lock = store.read(collection) if store is not None and store.enabled else None

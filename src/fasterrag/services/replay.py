@@ -57,17 +57,7 @@ class RetrievalDiff:
 
 
 def diff_retrieval(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> RetrievalDiff:
-    """Compare two retrieval sets by chunk id and position.
-
-    Args:
-        before: The original trace's candidates, in rank order.
-        after: The replayed candidates, in rank order.
-
-    Returns:
-        The chunks gained, lost, and moved. A chunk that merely changed score without
-        changing position is not reported: the position is what decides whether it reaches
-        the context, and a score that moved without moving anything is not a finding.
-    """
+    """Compare two retrieval sets by chunk id and position."""
     original = {str(chunk["chunk_id"]): index for index, chunk in enumerate(before)}
     replayed = {str(chunk["chunk_id"]): index for index, chunk in enumerate(after)}
 
@@ -162,22 +152,7 @@ async def replay_trace(
     candidate: Settings,
     service: GenerationService,
 ) -> ReplayResult:
-    """Re-execute ``trace``'s query under ``candidate`` and diff the outcome.
-
-    Args:
-        trace: The stored trace to re-execute.
-        candidate: The configuration to replay under.
-        service: A generation service built from ``candidate``. It must have no trace store,
-            so the replay leaves no trace of its own — an investigation that adds to the
-            evidence it is examining is worse than useless.
-
-    Returns:
-        The structured diff.
-
-    Raises:
-        FasterRagError: With ``VALIDATION_FAILED`` if the service would record a trace,
-            because that would silently corrupt the record being investigated.
-    """
+    """Re-execute ``trace``'s query under ``candidate`` and diff the outcome."""
     if service.traces is not None and service.traces.enabled:
         raise FasterRagError(
             "a replay must run against a service with tracing disabled, so investigating a "

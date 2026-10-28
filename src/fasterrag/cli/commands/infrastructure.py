@@ -26,12 +26,7 @@ __all__ = ["run_estimate", "run_provision"]
 
 
 async def run_provision(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Provision, stop, or report on a managed dependency.
-
-    ``--status`` and ``--down`` are mutually exclusive in effect; ``--status`` wins, because
-    asking for state and asking to change it in one command is a mistake worth refusing to
-    guess about.
-    """
+    """Provision, stop, or report on a managed dependency."""
     try:
         settings = settings_from(args)
     except ConfigError as exc:
@@ -71,18 +66,7 @@ async def run_provision(args: argparse.Namespace, console: Console) -> ExitCode:
 
 
 async def run_estimate(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Report what ingesting a set of sources would cost, before embedding any of it.
-
-    Refuses with a usage exit when ``cost.estimator`` is false, rather than estimating
-    anyway: the setting reads as a control over this command, so honouring it here is what
-    makes it one.
-
-    Directory arguments are expanded exactly as ``ingest`` expands them. An estimate is only
-    a preflight if it prices the same file set the ingestion it precedes would read; taking
-    a directory verbatim priced it as one unreadable document, which quoted every corpus at
-    zero. The expansion happens after the refusal, because a disabled command has no business
-    walking the filesystem.
-    """
+    """Report what ingesting a set of sources would cost, before embedding any of it."""
     try:
         settings = settings_from(args)
     except ConfigError as exc:

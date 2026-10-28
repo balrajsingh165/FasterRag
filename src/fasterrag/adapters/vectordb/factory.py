@@ -73,18 +73,7 @@ def _require_adapter_class(loaded: object, source: str) -> type[VectorDBAdapter]
 
 
 def resolve_adapter_class(provider: str) -> type[VectorDBAdapter]:
-    """Return the adapter class registered for ``provider``.
-
-    Args:
-        provider: The value of ``vector_db.provider``.
-
-    Returns:
-        The adapter class, built-in or plugin-registered.
-
-    Raises:
-        ConfigError: If the provider is unknown, is documented but not yet implemented,
-            or resolves to something that is not a ``VectorDBAdapter``.
-    """
+    """Return the adapter class registered for ``provider``."""
     builtin = _BUILTIN_ADAPTERS.get(provider)
     if builtin is not None:
         return _load_builtin(builtin)
@@ -109,17 +98,6 @@ def resolve_adapter_class(provider: str) -> type[VectorDBAdapter]:
 
 
 def create_vector_db_adapter(settings: Settings) -> VectorDBAdapter:
-    """Build the adapter named by ``vector_db.provider``.
-
-    Args:
-        settings: Validated configuration. The whole object is passed so an adapter can
-            read its connection settings and the shared reliability timeouts.
-
-    Returns:
-        A ready-to-use adapter. No connection is opened until it is first used.
-
-    Raises:
-        ConfigError: If the configured provider cannot be resolved.
-    """
+    """Build the adapter named by ``vector_db.provider``."""
     adapter_class = resolve_adapter_class(settings.vector_db.provider)
     return adapter_class(settings)

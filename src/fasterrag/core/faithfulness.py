@@ -87,19 +87,7 @@ UNGRADED: Final = FaithfulnessVerdict(score=None)
 def build_grading_prompt(
     question: str, answer: str, context: AssembledContext, texts: Sequence[str]
 ) -> str:
-    """Build the P3 user turn: context, question, and the answer under judgement.
-
-    Args:
-        question: The original question.
-        answer: The generated answer being graded.
-        context: The context that was supplied to the generator.
-        texts: The packed chunk texts, in the same order as the context's citations.
-
-    Returns:
-        The grading prompt. The context is rendered with the same markers P1 used, so the
-        grader can name the chunk that supports a claim; the answer goes last so the
-        stable context prefix stays cacheable across the P1 and P3 calls of one query.
-    """
+    """Build the P3 user turn: context, question, and the answer under judgement."""
     block = build_context_block(context, texts)
     return (
         f"<context>\n{block}\n</context>\n\nQuestion: {question}\n\n<answer>\n{answer}\n</answer>"
@@ -124,16 +112,7 @@ def _coerce_score(value: Any) -> float | None:
 
 
 def parse_verdict(text: str) -> FaithfulnessVerdict:
-    """Parse a grader response into a verdict.
-
-    Args:
-        text: Whatever the grading model returned.
-
-    Returns:
-        The parsed verdict, or an ungraded one when the response is not usable. An
-        unparseable grader response is a grader failure, and a grader failure never
-        withholds an answer.
-    """
+    """Parse a grader response into a verdict."""
     payload = _extract_object(text)
     if payload is None:
         _logger.warning("faithfulness grader returned no JSON object", extra={"length": len(text)})
@@ -172,20 +151,7 @@ async def grade(
     context: AssembledContext,
     texts: Sequence[str],
 ) -> FaithfulnessVerdict:
-    """Score how well ``context`` supports ``answer``.
-
-    Args:
-        grader: The grading provider; typically a cheaper model than the generator.
-        question: The original question.
-        answer: The generated answer.
-        context: The context the answer was generated from.
-        texts: The packed chunk texts, in the same order as the context's citations.
-
-    Returns:
-        The verdict, or an ungraded one if the grader failed. Grading is best-effort by
-        contract, so a provider failure is logged and turned into ``None`` rather than
-        propagated — the answer it was grading is still valid.
-    """
+    """Score how well ``context`` supports ``answer``."""
     prompt = build_grading_prompt(question, answer, context, texts)
     try:
         completion = await grader.complete(prompt, system=P3_SYSTEM_PROMPT)

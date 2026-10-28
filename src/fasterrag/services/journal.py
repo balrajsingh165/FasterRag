@@ -138,25 +138,7 @@ class JobRecord:
 
 
 def _write_atomically(path: Path, payload: str) -> None:
-    """Write a file atomically, keeping the previous version as a fallback.
-
-    The rename is the only step that publishes the new content, so a crash leaves either
-    the old file or the new one — never a half-written record.
-
-    # CRITICAL: the `.prev` rename happens *before* the write, and that ordering is
-    # load-bearing rather than incidental. On a filesystem with zero free bytes it frees a
-    # file the size of the one about to be written, which is why an already-running job can
-    # still checkpoint on the very disk that halted it while a new job cannot start
-    # (docs/failure-modes.md row 33, measured against a real ENOSPC). Writing first and
-    # renaming after would make "resume from the last checkpoint" unreachable exactly when
-    # it is needed.
-
-    Raises:
-        IngestionError: If the record cannot be written. The journal is what crash-resume
-            reads, so a failure here is reported rather than warned about and swallowed the
-            way a lost trace or lockfile is — losing it silently would mean losing the
-            ability to resume without anything saying so.
-    """
+    """Write a file atomically, keeping the previous version as a fallback."""
     temporary = path.with_suffix(path.suffix + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -210,16 +192,7 @@ class Journal:
         checkpoint_every: int = 100,
         enabled: bool = True,
     ) -> None:
-        """Open a journal rooted at ``root``.
-
-        Args:
-            root: Directory holding journal state. There is no configuration key for this
-                path; callers pass the deployment's data directory.
-            checkpoint_every: Documents between checkpoints, from
-                ``ingestion.journal.checkpoint_every``.
-            enabled: When false, checkpoints are skipped but job and document records are
-                still written, so status stays queryable with ``journal.enabled: false``.
-        """
+        """Open a journal rooted at ``root``."""
         self.root = Path(root)
         self.checkpoint_every = checkpoint_every
         self.enabled = enabled
@@ -275,17 +248,7 @@ class Journal:
         _write_atomically(self._job_path(record.job_id), _envelope(record.as_dict()))
 
     def load_job(self, job: str, *, tenant: str | None = None) -> JobRecord:
-        """Load a job record, falling back to the previous good copy.
-
-        # CRITICAL: another tenant's job raises the same `NOT_FOUND` an unknown id does, and
-        # deliberately so. A job record carries the source paths of the corpus it ingested,
-        # and a distinct "forbidden" would confirm the id is real — job ids sort
-        # chronologically, so a caller who has one of their own can guess at neighbours.
-
-        Raises:
-            IngestionError: If the job is unknown, belongs to another tenant, or both copies
-                are unreadable.
-        """
+        """Load a job record, falling back to the previous good copy."""
         path = self._job_path(job)
         if not path.exists():
             raise IngestionError(f"unknown ingest job {job!r}", code=ErrorCode.NOT_FOUND)
@@ -326,12 +289,7 @@ class Journal:
         return None
 
     def checkpoint(self, record: JobRecord, document_index: int) -> JobRecord:
-        """Record progress, writing only at the configured interval.
-
-        Returns the record with its checkpoint updated. Writing on every document would
-        make the journal the pipeline's bottleneck; writing never would make a crash
-        unrecoverable. The interval is the dial between those.
-        """
+        """Record progress, writing only at the configured interval."""
         if not self.enabled:
             return record
 
@@ -438,12 +396,7 @@ class Journal:
         return known
 
     def document_hashes(self, collection: str) -> dict[str, str]:
-        """Return the collection's ``document_id → content_hash`` map.
-
-        The direction the index lockfile records (D1). The dedup index is stored the other
-        way round because its own question is "have I seen this content", and inverting it
-        is lossless: a content hash maps to exactly one document by construction.
-        """
+        """Return the collection's ``document_id → content_hash`` map."""
         return {document: digest for digest, document in self.known_content(collection).items()}
 
     def is_duplicate(self, collection: str, content: str) -> bool:
@@ -460,11 +413,6 @@ class Journal:
 
 
 def create_journal(settings: Settings, root: str | Path = DEFAULT_JOURNAL_ROOT) -> Journal:
-    """Build a journal from validated configuration.
-
-    One place translates ``ingestion.journal.*`` into constructor arguments, so the CLI, the
-    API, and the library cannot disagree about the checkpoint interval a deployment runs
-    with — a journal built two ways is a journal that resumes two ways.
-    """
+    """Build a journal from validated configuration."""
     journal = settings.ingestion.journal
     return Journal(root, checkpoint_every=journal.checkpoint_every, enabled=journal.enabled)

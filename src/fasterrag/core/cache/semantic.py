@@ -75,12 +75,7 @@ MISS: dict[str, Any] = {"semantic_hit": False, "similarity": None}
 def _encode(
     question: str, vector: Sequence[float], response: dict[str, Any], tenant: str | None = None
 ) -> bytes:
-    """Pack an entry as a length-prefixed vector followed by JSON.
-
-    The vector is packed rather than serialized into the JSON because it is the part read on
-    every single lookup, and parsing a thousand JSON float arrays per query would make the
-    cache slower than the pipeline it is short-circuiting.
-    """
+    """Pack an entry as a length-prefixed vector followed by JSON."""
     packed = encode_vector(vector)
     header = json.dumps(
         {"question": question, "vector_bytes": len(packed), "tenant": tenant}
@@ -123,13 +118,7 @@ class SemanticCache:
     def __init__(
         self, settings: Settings, store: CacheStore | None = None, *, enabled: bool | None = None
     ) -> None:
-        """Build the cache.
-
-        Args:
-            settings: Validated configuration; supplies the threshold and TTL.
-            store: Backend holding entries. Defaults to in-process memory.
-            enabled: Overrides ``cache.semantic``, for callers that decide per instance.
-        """
+        """Build the cache."""
         self.settings = settings
         self.config = settings.cache
         self.store = store or MemoryStore()
@@ -144,17 +133,7 @@ class SemanticCache:
     async def lookup(
         self, vector: Sequence[float], *, tenant: str | None = None
     ) -> CacheHit | None:
-        """Return the closest stored response above the threshold, or ``None``.
-
-        A backend failure is a miss, not an error: the query runs the full pipeline and the
-        caller never learns the cache was unavailable (FMEA row 23).
-
-        # CRITICAL: entries belonging to another tenant are skipped, and the check is on the
-        # entry itself rather than on the key. Lookup compares vectors across every stored
-        # entry, so without this a sufficiently similar question from one tenant returns
-        # another tenant's answer — a cross-tenant disclosure with a cache hit's latency and
-        # no error anywhere. A key prefix alone would not help, because the scan ignores keys.
-        """
+        """Return the closest stored response above the threshold, or ``None``."""
         if not self.enabled:
             return None
 
@@ -223,13 +202,7 @@ class SemanticCache:
             )
 
     async def invalidate(self, reason: str) -> None:
-        """Drop every entry because the corpus changed.
-
-        Called on ingest, delete, and reindex. Deliberately total rather than selective:
-        deciding which cached answers a new document could have changed would mean knowing
-        what each answer was derived from *and* what the new document says, and a cache that
-        guesses wrong here serves a confidently stale answer.
-        """
+        """Drop every entry because the corpus changed."""
         if not self.enabled:
             return
 

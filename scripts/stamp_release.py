@@ -106,12 +106,7 @@ def _read(path: Path) -> str:
 
 
 def _write(path: Path, text: str) -> None:
-    """Write back with the line ending the file already used.
-
-    A Windows checkout under ``core.autocrlf`` holds CRLF; CI holds LF. ``write_text`` picks
-    the platform's ending, not the file's, which on the wrong side turns a one-line stamp
-    into a whole-file diff and a spurious modification of every other line.
-    """
+    """Write back with the line ending the file already used."""
     newline = "\r\n" if b"\r\n" in path.read_bytes() else "\n"
     with path.open("w", encoding="utf-8", newline=newline) as handle:
         handle.write(text)
@@ -232,12 +227,7 @@ def check(tree: Tree | None = None) -> list[str]:
 
 
 def stamp(semver: str, date: dt.date, tree: Tree | None = None) -> str:
-    """Write the version into every mechanical place and return its PEP 440 form.
-
-    The banners are prose and are not rewritten here — ``check`` reports them until the
-    release commit removes them by hand, which is the point: the stamp commit cannot be made
-    while a document still says the package is unpublished.
-    """
+    """Write the version into every mechanical place and return its PEP 440 form."""
     tree = tree or Tree(REPOSITORY_ROOT)
     version = pep440(semver)
 

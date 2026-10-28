@@ -76,15 +76,7 @@ def blocker(pgvector: Settings) -> Iterator[psycopg.Connection[tuple[object, ...
 
 @pytest.fixture
 def observer(pgvector: Settings) -> Iterator[psycopg.Connection[tuple[object, ...]]]:
-    """Yield an autocommit session for reading ``pg_stat_activity``.
-
-    # CRITICAL: this must not be the ``blocker`` connection, and must stay in autocommit.
-    # PostgreSQL runs with ``stats_fetch_consistency = cache``, so the statistics a
-    # transaction reads are fetched once and then frozen for its whole life. Polling from
-    # inside the transaction that holds the lock returns the snapshot taken before anything
-    # blocked, forever — the wait is never observed and the rendezvous silently degrades to a
-    # sleep. One statement per transaction is what keeps each poll a fresh read.
-    """
+    """Yield an autocommit session for reading ``pg_stat_activity``."""
     connection = psycopg.connect(PGVECTOR_DSN, connect_timeout=10, autocommit=True)
     yield connection
     connection.close()
@@ -100,13 +92,7 @@ def lock_table(blocker: psycopg.Connection[tuple[object, ...]], collection: str)
 
 
 async def wait_until_blocked(observer: psycopg.Connection[tuple[object, ...]]) -> None:
-    """Block until some backend is genuinely parked on a lock.
-
-    Without this the concurrency cases could pass by never overlapping at all — the adapter
-    operation could finish before the second one starts, and the assertion would prove
-    nothing. Asking PostgreSQL to confirm a backend is waiting is what makes the overlap a
-    fact rather than an assumption, which is why this raises instead of returning.
-    """
+    """Block until some backend is genuinely parked on a lock."""
     deadline = time.monotonic() + _LOCK_WAIT_TIMEOUT
     while time.monotonic() < deadline:
         waiting = observer.execute(
@@ -158,12 +144,7 @@ class TestConcurrency(PooledFixtures):
         blocker: psycopg.Connection[tuple[object, ...]],
         observer: psycopg.Connection[tuple[object, ...]],
     ) -> None:
-        """A blocked search must not queue a health check behind it.
-
-        Held on one serialized connection this cannot pass: ``health()`` runs ``SELECT 1``,
-        needs no lock, and still waits for the search to release the adapter's single
-        connection — which the lock guarantees it will not do.
-        """
+        """A blocked search must not queue a health check behind it."""
         lock_table(blocker, collection)
         search = asyncio.create_task(adapter.search(self.search_of(collection)))
         await wait_until_blocked(observer)
@@ -240,12 +221,7 @@ class TestMaintenanceBudget(PooledFixtures):
         blocker: psycopg.Connection[tuple[object, ...]],
         observer: psycopg.Connection[tuple[object, ...]],
     ) -> None:
-        """A blocked snapshot must still be running long after a query would have died.
-
-        This is the trap TASK-0240 names: a bound tight enough for a query aborts the index
-        builds and table copies a collection cannot be built without. Give maintenance the
-        query budget and this case fails, because the snapshot dies at 1.5s.
-        """
+        """A blocked snapshot must still be running long after a query would have died."""
         lock_table(blocker, collection)
         snapshot = asyncio.create_task(adapter.snapshot(collection))
         await wait_until_blocked(observer)
@@ -300,12 +276,7 @@ class TestBudgetDoesNotLeak(PooledFixtures):
         collection: str,
         blocker: psycopg.Connection[tuple[object, ...]],
     ) -> None:
-        """The connection that ran maintenance must go back to the query budget.
-
-        A pool of one is the point: every operation here provably reuses the same backend, so
-        a maintenance budget applied with ``SET`` instead of ``SET LOCAL`` would still be in
-        force for the search, which would then hang for a minute instead of dying at 1.5s.
-        """
+        """The connection that ran maintenance must go back to the query budget."""
         await adapter.snapshot(collection)
         lock_table(blocker, collection)
         started = time.perf_counter()

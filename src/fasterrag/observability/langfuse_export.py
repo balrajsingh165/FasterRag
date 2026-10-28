@@ -43,12 +43,7 @@ _logger = get_logger(__name__)
 
 
 def _isoformat(base: datetime, offset_ms: float) -> str:
-    """Return an absolute timestamp for a span offset.
-
-    Our spans record milliseconds relative to the query's start; Langfuse orders observations
-    by wall-clock time. Sending the raw offsets would place every trace at the epoch and stack
-    them on top of one another in the timeline.
-    """
+    """Return an absolute timestamp for a span offset."""
     return (base + timedelta(milliseconds=offset_ms)).isoformat()
 
 
@@ -65,12 +60,7 @@ def _parse_created_at(value: str) -> datetime:
 
 
 def build_batch(trace: Trace, *, release: str | None = None) -> list[dict[str, Any]]:
-    """Return the ingestion events for one trace.
-
-    Pure and side-effect free so the wire format can be asserted in a unit test without a
-    running Langfuse — the mapping is where this integration is most likely to be wrong, and
-    it is invisible until someone opens the dashboard.
-    """
+    """Return the ingestion events for one trace."""
     started = _parse_created_at(trace.created_at)
     usage = trace.result.get("usage") or {}
 
@@ -169,13 +159,7 @@ class LangfuseExporter:
         self._client: httpx.AsyncClient | None = None
 
     async def export(self, trace: Trace) -> bool:
-        """Send one trace, reporting whether it landed.
-
-        Returns:
-            ``True`` when Langfuse accepted the batch. A ``False`` is logged with the reason
-            and otherwise ignored — the query it describes was answered long before this ran,
-            and a failed export must never surface to the caller.
-        """
+        """Send one trace, reporting whether it landed."""
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout, headers=self._headers)
 
@@ -204,18 +188,7 @@ class LangfuseExporter:
 
     @staticmethod
     def _all_events_accepted(response: httpx.Response, trace: Trace) -> bool:
-        """Return whether Langfuse stored every event, not merely that it answered.
-
-        # CRITICAL: the status code alone does not say this. Langfuse answers 207 for *any*
-        # mixed outcome and lists the rejected events in the body, so treating 207 as success
-        # reports a trace exported when the server dropped part or all of it. Verified against
-        # Langfuse 3.225.1: a batch of two events, one carrying an invalid `type`, came back
-        # 207 with `successes` of length 1 and `errors` of length 1.
-        #
-        # This is exactly the failure a field-name mismatch produces, which is what made the
-        # export unverifiable against anything but a stub (blocker B7.1) — a stub accepts what
-        # the real server would reject, and the old check could not tell the difference.
-        """
+        """Return whether Langfuse stored every event, not merely that it answered."""
         try:
             body = response.json()
         except ValueError:

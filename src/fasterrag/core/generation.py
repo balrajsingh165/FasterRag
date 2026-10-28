@@ -69,15 +69,7 @@ def _describe(citation: Citation) -> str:
 
 
 def build_context_block(context: AssembledContext, texts: Sequence[str]) -> str:
-    """Render the assembled context as marked, attributed passages.
-
-    Args:
-        context: The assembled context, whose citations are in packed order.
-        texts: The packed chunk texts, in the same order.
-
-    Returns:
-        The block placed inside the prompt's ``<context>`` tags.
-    """
+    """Render the assembled context as marked, attributed passages."""
     return "\n\n".join(
         f"{citation_marker(citation.chunk_id)}{_describe(citation)}\n{text}"
         for citation, text in zip(context.citations, texts, strict=False)
@@ -94,17 +86,7 @@ def build_prompt(question: str, context: AssembledContext, texts: Sequence[str])
 
 
 def resolve_citations(answer: str, supplied: Sequence[Citation]) -> list[Citation]:
-    """Return the citations the answer actually used, in order of first appearance.
-
-    Args:
-        answer: The generated text, containing inline markers.
-        supplied: The citations that were placed in the prompt.
-
-    Returns:
-        Only citations whose markers appear in the answer and were genuinely supplied.
-        A marker naming a chunk that was never in the context is dropped and logged, so a
-        response can never cite content that was not retrieved.
-    """
+    """Return the citations the answer actually used, in order of first appearance."""
     by_id = {citation.chunk_id: citation for citation in supplied}
     resolved: list[Citation] = []
     seen: set[str] = set()

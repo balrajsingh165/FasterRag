@@ -155,13 +155,7 @@ class Answer:
         return self.answer is None
 
     def as_dict(self) -> dict[str, Any]:
-        """Return the non-streaming response body.
-
-        A refusal is a different document from an answer: it carries the machine-readable
-        code, the score and threshold that produced it, and the candidates the caller can
-        inspect. Both shapes are HTTP 200 — declining to guess is a correct outcome, not a
-        transport error.
-        """
+        """Return the non-streaming response body."""
         if self.insufficient_evidence:
             return {
                 "code": ErrorCode.INSUFFICIENT_EVIDENCE.value,
@@ -211,13 +205,7 @@ def _citation_from(payload: Mapping[str, Any]) -> Citation:
 
 
 def _cached_answer(hit: CacheHit, trace_id: str, elapsed_ms: int) -> Answer:
-    """Rebuild an ``Answer`` from a cached response body.
-
-    The stored body is replayed as-is apart from three fields: the trace id becomes this
-    query's, the timings become what this query actually spent, and ``cache`` records the hit
-    and its similarity. Replaying the original trace id would attribute this request to a
-    different one, and replaying the original timings would report a latency nobody paid.
-    """
+    """Rebuild an ``Answer`` from a cached response body."""
     stored = hit.response
     usage = stored.get("usage") or {}
     citations = stored.get("citations") or []
@@ -235,12 +223,7 @@ def _cached_answer(hit: CacheHit, trace_id: str, elapsed_ms: int) -> Answer:
 
 
 def _cached_events(answer: Answer) -> list[QueryEvent]:
-    """Return the event sequence a cache hit replays.
-
-    The same shape as a generated response — the whole answer simply arrives as one
-    ``token`` event, since there is nothing left to stream incrementally. ``meta`` carries
-    the cache member so a client learns it is being served from cache before the text.
-    """
+    """Return the event sequence a cache hit replays."""
     return [
         QueryEvent(
             type="meta",
@@ -321,32 +304,7 @@ class GenerationService:
         context_budget_tokens: int | None = None,
         breaker: CircuitBreaker | None = None,
     ) -> None:
-        """Build the service.
-
-        Args:
-            settings: Validated configuration.
-            retrieval: Supplies the chunks an answer is built from.
-            llm: The generation provider.
-            grader: The P3 faithfulness provider. Defaults to ``llm``; passing a separate
-                adapter is how a cheaper grading model is selected. It is a distinct call
-                either way, so the grader never sees P1's instructions.
-            cache: The semantic response cache. Consulted only when ``embedder`` is also
-                supplied, since a similarity cache cannot be keyed without a vector.
-            embedder: Embeds the question for the cache lookup. The same query is embedded
-                again inside retrieval, which costs nothing extra: the embedding cache is on
-                by default and the second call is a hit on the first.
-            traces: Persists each query's full trace for replay (D8). Omitted means no
-                trace is kept, which is what ``traces.store: false`` selects.
-            tenant: The tenant this service answers for. Scopes every semantic-cache read
-                and write, so a hit can never return another tenant's answer.
-            counter: Token counter used for context budgeting.
-            context_budget_tokens: Tokens available for context, which the caller sizes
-                from the model's window minus room for the answer. Omitted means
-                ``generation.context_budget_tokens``, so a standalone caller that passes
-                nothing still gets the documented default.
-            breaker: Circuit breaker for the LLM provider. Built from
-                ``reliability.circuit_breaker`` when omitted; injected by tests.
-        """
+        """Build the service."""
         self.settings = settings
         self.retrieval = retrieval
         self.llm = llm
@@ -385,12 +343,7 @@ class GenerationService:
         return self.cache is not None and self.cache.enabled and self.embedder is not None
 
     async def _cache_vector(self, question: str) -> list[float] | None:
-        """Return the question's vector for cache use, or ``None`` if caching is off.
-
-        An embedding failure here yields ``None`` rather than propagating: the cache is an
-        optimization, and refusing to answer because the *cache key* could not be computed
-        would be the cache taking down the pipeline it exists to accelerate.
-        """
+        """Return the question's vector for cache use, or ``None`` if caching is off."""
         if not self.caching or self.embedder is None:
             return None
 
@@ -509,14 +462,7 @@ class GenerationService:
         )
 
     def _charge_budget(self, prepared: _Prepared) -> None:
-        """Refuse the call when it cannot fit inside the configured token budgets (D9).
-
-        The worst case is charged, not the likely one: a completion's real length is unknown
-        until the provider has produced it, and by then the tokens are spent. ``max_tokens``
-        is the ceiling the call can reach, so prompt plus ceiling is what a cap has to be
-        checked against. Weighing only the prompt would admit a query the budget cannot pay
-        for, and a cap that does that is not a cap.
-        """
+        """Refuse the call when it cannot fit inside the configured token budgets (D9)."""
         if not self.governor.enabled:
             return
 
@@ -524,13 +470,7 @@ class GenerationService:
         self.governor.check(worst_case, tenant=self.tenant)
 
     def _record_generation(self, elapsed_ms: int, prompt: int, completion: int) -> None:
-        """Record what one generation call cost, in time, in tokens, and in money.
-
-        The dollar figure is a *list-price estimate*, not a measurement — it multiplies
-        token counts by the dated published rates in ``services.estimation``, and a model
-        with no recorded rate contributes nothing rather than a fabricated number. The
-        counter is named ``..._usd_total`` and documented as estimated for that reason.
-        """
+        """Record what one generation call cost, in time, in tokens, and in money."""
         # CRITICAL: the tenant is charged here, at the one point both the streaming
         # and non-streaming paths pass through, and with the *actual* counts rather
         # than the ceiling the request was admitted against. Charging at the check
@@ -609,12 +549,7 @@ class GenerationService:
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
     ) -> tuple[Answer, list[ScoredChunk]]:
-        """Answer a question and return the full candidate set it retrieved.
-
-        The shape replay needs: diffing retrieval against a second, separate search would
-        compare two different executions, so any nondeterminism would surface as a config
-        difference that never happened.
-        """
+        """Answer a question and return the full candidate set it retrieved."""
         self._last_candidates = []
         answer = await self.answer(question, collection=collection, top_k=top_k, filters=filters)
         return answer, self._last_candidates
@@ -627,12 +562,7 @@ class GenerationService:
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
     ) -> Answer:
-        """Answer a question completely, without streaming.
-
-        A semantic cache hit short-circuits everything below it — retrieval, assembly,
-        generation, and grading — and returns the stored answer with ``cache.semantic_hit``
-        set, so a caller can always tell a fresh answer from a reused one.
-        """
+        """Answer a question completely, without streaming."""
         trace_id = current_trace_id()
         started = time.perf_counter()
         vector = await self._cache_vector(question)
@@ -772,18 +702,7 @@ class GenerationService:
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[QueryEvent]:
-        """Answer a question as a stream of events in the documented order.
-
-        With ``generation.grounded_or_refuse`` enabled, no ``token`` event is emitted until
-        the whole answer has been graded, because a refusal after the text has left is not
-        a refusal. A withheld answer produces an ``insufficient_evidence`` event in place of
-        the token, citation, and usage events, then ``done`` — the query completed, so the
-        stream is not truncated.
-
-        A semantic cache hit still streams. The whole answer is already known, so it arrives
-        as a single ``token`` event after ``meta`` — the event contract holds and a client
-        needs no separate code path for a cached response.
-        """
+        """Answer a question as a stream of events in the documented order."""
         trace_id = current_trace_id()
         started = time.perf_counter()
         vector = await self._cache_vector(question)
@@ -927,11 +846,5 @@ class GenerationService:
             )
 
     async def close(self) -> None:
-        """Release the generation provider.
-
-        # CRITICAL: the cache is deliberately not closed here. It is shared across queries
-        # and outlives any one of them — a per-query service closing it would tear down a
-        # backend connection other in-flight queries are still using. Whoever constructed
-        # the cache closes it.
-        """
+        """Release the generation provider."""
         await self.llm.close()

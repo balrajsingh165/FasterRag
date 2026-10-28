@@ -49,12 +49,7 @@ class GoldenRecord:
         return self.source == "autopilot"
 
     def is_relevant(self, chunk_id: str, document_id: str | None) -> bool:
-        """Return whether a retrieved chunk counts as a hit.
-
-        Document-level ground truth is honored as well as chunk-level, because chunk ids
-        change whenever the chunker configuration changes; a golden set pinned only to
-        chunk ids would silently score zero after any re-chunking.
-        """
+        """Return whether a retrieved chunk counts as a hit."""
         if chunk_id in self.relevant_chunk_ids:
             return True
         return document_id is not None and document_id in self.relevant_document_ids
@@ -74,12 +69,7 @@ class GoldenRecord:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], *, where: str = "<memory>") -> GoldenRecord:
-        """Build a record from its JSONL form.
-
-        Raises:
-            FasterRagError: With ``VALIDATION_FAILED`` if a required field is missing, so a
-                malformed golden set fails loudly rather than quietly scoring nothing.
-        """
+        """Build a record from its JSONL form."""
         missing = [name for name in _REQUIRED if not payload.get(name)]
         if missing:
             raise FasterRagError(
@@ -100,12 +90,7 @@ class GoldenRecord:
 
 
 def load_golden_set(path: str | Path) -> list[GoldenRecord]:
-    """Read a golden set from JSONL.
-
-    Raises:
-        FasterRagError: If the file is missing, a line is not valid JSON, a record is
-            malformed, or two records share an id.
-    """
+    """Read a golden set from JSONL."""
     source = Path(path)
     if not source.is_file():
         raise FasterRagError(f"golden set not found: {source}", code=ErrorCode.NOT_FOUND)
@@ -144,12 +129,7 @@ def _lines(path: Path) -> Iterator[str]:
 
 
 def write_golden_set(path: str | Path, records: Sequence[GoldenRecord]) -> None:
-    """Write a golden set as JSONL.
-
-    Golden sets are versioned files reviewed like code, so records are written in the order
-    given and keys are stable — a regenerated set produces a readable diff rather than a
-    reshuffle.
-    """
+    """Write a golden set as JSONL."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     body = "\n".join(

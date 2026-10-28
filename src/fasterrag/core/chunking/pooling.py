@@ -68,26 +68,14 @@ def _windows(total: int, size: int) -> list[tuple[int, int]]:
 
 
 def _sentinels(tokenizer: Any) -> tuple[list[int], list[int]]:
-    """Return the leading and trailing special-token ids a window should be wrapped in.
-
-    Built from the tokenizer's own ids rather than through a helper method, because the
-    convenience helpers for this differ between transformers major versions while
-    ``cls_token_id`` and ``sep_token_id`` have been stable throughout. A tokenizer that
-    defines neither is wrapped in nothing, which is correct for the families that use no
-    sentinels at all.
-    """
+    """Return the leading and trailing special-token ids a window should be wrapped in."""
     start = getattr(tokenizer, "cls_token_id", None)
     end = getattr(tokenizer, "sep_token_id", None)
     return ([start] if start is not None else [], [end] if end is not None else [])
 
 
 def _token_states(model: Any, ids: Sequence[int], size: int) -> Any:
-    """Return one representation per token, taken from its most contextual window.
-
-    A token appearing in several windows is kept from the window where it sits furthest
-    from an edge: that is the copy that saw context on both sides, which is the entire
-    reason the document is embedded whole rather than in pieces.
-    """
+    """Return one representation per token, taken from its most contextual window."""
     import torch
 
     tokenizer = model.tokenizer
@@ -122,20 +110,7 @@ def _token_states(model: Any, ids: Sequence[int], size: int) -> Any:
 
 
 def pool_spans(model: Any, text: str, spans: Sequence[Segment]) -> list[list[float]]:
-    """Return one pooled, normalized vector per span of ``text``.
-
-    Args:
-        model: A loaded local embedding model exposing ``tokenizer`` and a transformer.
-        text: The whole document, embedded in one pass (or in overlapping windows).
-        spans: Character ``(start, end)`` ranges, one per chunk, in document order.
-
-    Returns:
-        One unit-length vector per span, in the same order.
-
-    Raises:
-        EmbedError: If the model cannot supply token-level output, or the document
-            produces no tokens at all.
-    """
+    """Return one pooled, normalized vector per span of ``text``."""
     if not supports_pooling(model):
         raise EmbedError(
             "late chunking needs token-level output, which this embedding model does not "

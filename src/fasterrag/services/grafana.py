@@ -132,15 +132,7 @@ class GrafanaPlan:
 
 
 def datasource_manifest() -> str:
-    """Return the datasource manifest, marked non-editable.
-
-    ``editable: false`` is what makes the repository the source of truth: a datasource
-    changed in the UI would drift from the file and be reverted without explanation on the
-    next provisioning run.
-
-    The URL is container-to-container, so it carries the *container* port. Using the host
-    publication here would point Grafana at a port nothing serves inside the network.
-    """
+    """Return the datasource manifest, marked non-editable."""
     return "\n".join(
         [
             "apiVersion: 1",
@@ -159,12 +151,7 @@ def datasource_manifest() -> str:
 
 
 def dashboard_provider() -> str:
-    """Return the dashboard provider manifest.
-
-    ``allowUiUpdates: false`` plus a polling interval is the combination that makes
-    dashboards behave like code: edits land by changing the file, and the change applies
-    without restarting Grafana.
-    """
+    """Return the dashboard provider manifest."""
     return "\n".join(
         [
             "apiVersion: 1",
@@ -211,20 +198,7 @@ def _panel(
     description: str = "",
     legend: str = "",
 ) -> dict[str, Any]:
-    """Return one dashboard panel over a PromQL expression.
-
-    The description is not decoration. A panel that is legitimately empty — because the
-    thing it measures has not happened yet — looks exactly like a panel that is empty
-    because the datasource is broken, and the only place an operator can be told where it
-    stands is on the panel itself.
-
-    # CRITICAL: every target carries a legendFormat. Without one Grafana labels each series
-    # with its whole label set, so a legend reads
-    # `fasterrag_ingest_throughput{instance="host.docker.internal:8000", job="fasterrag",
-    # unit="chu...` — truncated before the only label that distinguishes the series. The
-    # scrape labels are identical on every series in a single-instance deployment and carry
-    # no information; the one varying label is what the legend has to show.
-    """
+    """Return one dashboard panel over a PromQL expression."""
     return {
         "id": identifier,
         "title": title,
@@ -325,12 +299,7 @@ def dashboard() -> dict[str, Any]:
 
 
 def write_manifests(plan: GrafanaPlan) -> list[Path]:
-    """Write every provisioning artifact, returning what was written.
-
-    Rewritten on every run rather than written once: these files are generated from
-    configuration, so an operator who edited one by hand has made a change that the next
-    run must overwrite — which is exactly what provisioning-as-code means.
-    """
+    """Write every provisioning artifact, returning what was written."""
     datasources = plan.provisioning / "datasources"
     providers = plan.provisioning / "dashboards"
 
@@ -375,13 +344,7 @@ class Verification:
 
 
 async def verify_grafana(plan: GrafanaPlan) -> Verification:
-    """Ask Grafana whether the dashboard loaded and the datasource answers.
-
-    Started containers are not working containers. Provisioning that reports success because
-    ``docker run`` exited zero is how a stack ends up serving six empty panels while claiming
-    to be healthy, so this asks Grafana three questions it can only answer if the wiring is
-    right: is it up, did the dashboard provision, and does the datasource reach Prometheus.
-    """
+    """Ask Grafana whether the dashboard loaded and the datasource answers."""
     base = f"http://localhost:{plan.grafana_port}"
 
     try:
@@ -425,12 +388,7 @@ async def verify_grafana(plan: GrafanaPlan) -> Verification:
 
 
 async def _ensure_network() -> None:
-    """Create the shared network if it is absent.
-
-    ``docker network create`` on an existing network is an error rather than a no-op, so the
-    existence check happens first; the command's failure is not treated as fatal because a
-    concurrent run may have won the race.
-    """
+    """Create the shared network if it is absent."""
     inspect = await run_docker(["network", "inspect", NETWORK_NAME])
     if inspect.ok:
         return
@@ -452,15 +410,7 @@ async def _ensure_container(name: str, arguments: list[str]) -> str:
 
 
 async def provision_grafana(settings: Settings, *, root: Path | None = None) -> ProvisionResult:
-    """Provision Prometheus and Grafana from generated manifests.
-
-    Returns:
-        The result, carrying the URL an operator opens. Provisioning converges: a second run
-        rewrites the manifests and leaves running containers untouched.
-
-    Raises:
-        ProvisioningError: If the doctor preflight fails, before anything is created.
-    """
+    """Provision Prometheus and Grafana from generated manifests."""
     plan = GrafanaPlan(
         root=(root or DEFAULT_PROVISIONING_ROOT).resolve(),
         metrics_host="host.docker.internal",

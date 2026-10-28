@@ -91,13 +91,7 @@ class ArchiveCounts:
 
 
 def document_record(payload: dict[str, Any]) -> dict[str, Any]:
-    """Return one ``documents.jsonl`` row from a chunk's stored payload.
-
-    Documents are reconstructed from chunk payloads rather than read from the journal: the
-    journal describes an *ingestion run*, while the archive must describe the collection as
-    it stands. A collection built by three separate jobs, or restored from a snapshot, has no
-    single journal to read — but every chunk in it carries its document's identity.
-    """
+    """Return one ``documents.jsonl`` row from a chunk's stored payload."""
     return {
         "document_id": str(payload.get("document_id", "")),
         "source_uri": str(payload.get("source_uri", "")),
@@ -140,13 +134,7 @@ def build_manifest(
     tenant: str | None,
     observed_dimensions: int | None = None,
 ) -> dict[str, Any]:
-    """Return the archive's self-description.
-
-    Embedding and chunking settings come from the *lockfile* when one exists, and from live
-    configuration only as a fallback. The lock records what actually built the index; live
-    configuration records what would build it today, and importing under the second while
-    believing the first is how a vector-copy import lands vectors from the wrong model.
-    """
+    """Return the archive's self-description."""
     chunking = settings.chunking
     embeddings = settings.embeddings
 
@@ -203,25 +191,7 @@ async def export_archive(
     lock: IndexLock | None = None,
     tenant: str | None = None,
 ) -> ArchiveCounts:
-    """Write a collection to a portable archive.
-
-    Args:
-        settings: Validated configuration, supplying the manifest's fallback values.
-        adapter: The backend to read from.
-        collection: Collection to export.
-        destination: Archive path; ``.fragx`` is appended when absent.
-        include_vectors: Write ``vectors.jsonl``, enabling a vector-copy import.
-        lock: The collection's lockfile, carried for provenance and manifest accuracy.
-        tenant: Recorded in the manifest when multi-tenancy is on.
-
-    Returns:
-        The row counts written.
-
-    Raises:
-        FasterRagError: With ``NOT_FOUND`` if the collection yields no points. An empty
-            archive imports cleanly and produces an empty collection, which is a silent
-            data-loss path rather than a portable backup.
-    """
+    """Write a collection to a portable archive."""
     target = (
         destination
         if destination.suffix == ARCHIVE_SUFFIX
@@ -312,18 +282,7 @@ def _digest(path: Path) -> str:
 
 
 def _write_tar(target: Path, staging: Path, names: list[str]) -> None:
-    """Pack the staged members into the archive.
-
-    # CRITICAL: every member gets a fixed mtime and owner. Without it a backup diff reports
-    # a change on every member of every export, and nobody can tell a real one from noise.
-    #
-    # This makes the *data* members byte-identical across two exports of an unchanged
-    # collection — `chunks.jsonl`, `documents.jsonl`, `vectors.jsonl`, `index.lock`, and
-    # `checksums.sha256` all match exactly. `manifest.json` does not: it carries
-    # `created_at`, which is deliberately a wall clock, so a diff of two exports shows that
-    # one line and nothing else. Verified against a live Qdrant (TASK-0214) — the earlier
-    # wording here claimed whole archives were byte-identical, which they are not.
-    """
+    """Pack the staged members into the archive."""
     with tarfile.open(target, "w:gz") as archive:
         for name in names:
             path = staging / name

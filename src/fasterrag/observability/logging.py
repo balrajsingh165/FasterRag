@@ -131,19 +131,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging(level: str = "info") -> None:
-    """Install the JSON handler on the root logger at ``level``.
-
-    Idempotent: repeated calls replace the previously installed handler rather than
-    stacking duplicates, so an embedding application can reconfigure freely.
-
-    Args:
-        level: One of the ``app.log_level`` values (``debug``, ``info``, ``warning``,
-            ``error``).
-
-    Raises:
-        ValueError: If ``level`` is not one of the four supported values. Configuration
-            validation rejects other values long before this point.
-    """
+    """Install the JSON handler on the root logger at ``level``."""
     level_no = _LEVELS.get(level.lower())
     if level_no is None:
         supported = ", ".join(sorted(_LEVELS))

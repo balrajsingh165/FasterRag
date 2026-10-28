@@ -62,18 +62,7 @@ def collection_name() -> str:
 
 
 def _wait_until_redis_serves(url: str) -> None:
-    """Block until Redis answers PING, or fail with an actionable message.
-
-    # CRITICAL: this must be a protocol round-trip, not a TCP connect. Docker publishes the
-    # port the instant the container is created, and the proxy accepts connections before
-    # redis-server is listening behind it — so a reachable port proves the container exists,
-    # which is a weaker claim than the suite goes on to make. The first test then opened a
-    # connection, sent the RESP3 handshake, and got "Connection closed by server", while
-    # every later test passed because the server had come up in the meantime. That is the
-    # F........ signature this suite failed with in CI on 2026-10-26. PING is the smallest
-    # thing that proves the server is actually serving, and it mirrors how the pgvector
-    # fixture waits (connect, then SELECT 1).
-    """
+    """Block until Redis answers PING, or fail with an actionable message."""
     import redis
 
     deadline = time.monotonic() + REDIS_READY_TIMEOUT_SECONDS
@@ -95,12 +84,7 @@ def _wait_until_redis_serves(url: str) -> None:
 
 @pytest.fixture(scope="session")
 def redis_url() -> Iterator[str]:
-    """Run a Redis container for the session and yield its URL.
-
-    Skips rather than fails without Docker or without the optional client, for the same
-    reason the Qdrant fixture does: the suite stays runnable on a machine that has neither
-    while remaining a hard requirement in CI, where both are installed.
-    """
+    """Run a Redis container for the session and yield its URL."""
     pytest.importorskip("redis")
     if not asyncio.run(docker_available()):
         pytest.skip("docker daemon is not available")

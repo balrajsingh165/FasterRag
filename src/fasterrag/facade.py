@@ -52,19 +52,7 @@ _logger = get_logger(__name__)
 
 
 class FasterRag:
-    """An embedded fasterRag instance.
-
-    Construct with :meth:`from_config` or :meth:`from_settings`, then enter it as an async
-    context manager::
-
-        async with FasterRag.from_config("config.yaml") as rag:
-            await rag.ingest(["./docs"])
-            answer = await rag.query("What does the spec say about retries?")
-
-    Construction validates configuration and builds nothing else; entering the context is
-    what connects adapters and loads models. That split is deliberate — it means a
-    configuration mistake is reported before any model is downloaded or any socket opened.
-    """
+    """An embedded fasterRag instance."""
 
     def __init__(self, settings: Settings) -> None:
         """Build a facade over validated settings without touching any backend.
@@ -82,19 +70,7 @@ class FasterRag:
 
     @classmethod
     def from_config(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> Self:
-        """Load and validate ``config.yaml``, then build a facade over it.
-
-        Args:
-            path: Path to the configuration file.
-
-        Returns:
-            An unstarted facade. No backend has been contacted.
-
-        Raises:
-            ConfigError: If the file is missing, the YAML is malformed, a key violates the
-                schema, or a referenced environment variable is unset — the same fail-fast
-                contract the API and CLI get, naming the offending key.
-        """
+        """Load and validate ``config.yaml``, then build a facade over it."""
         return cls(load_settings(path))
 
     @classmethod
@@ -154,13 +130,7 @@ class FasterRag:
 
     @staticmethod
     async def _close_quietly(closing: Any, name: str) -> None:
-        """Await one close, logging a failure rather than aborting the rest of shutdown.
-
-        # CRITICAL: this catches broadly on purpose, and it is the one place in the codebase
-        # that does. Shutdown runs while an exception may already be propagating; letting a
-        # second one escape from here would replace the original failure with a teardown
-        # error and lose the cause. Every failure is logged with the resource that raised it.
-        """
+        """Await one close, logging a failure rather than aborting the rest of shutdown."""
         try:
             await closing
         except Exception as exc:
@@ -170,12 +140,7 @@ class FasterRag:
             )
 
     def _require_started(self) -> None:
-        """Fail with a usable message when the facade was never entered.
-
-        Raises:
-            FasterRagError: If used outside ``async with``. Reported here rather than left
-                to surface as an ``AttributeError`` on a ``None`` adapter three frames away.
-        """
+        """Fail with a usable message when the facade was never entered."""
         if not self._started:
             raise FasterRagError(
                 "this FasterRag instance has not been started; use it as an async context "
@@ -240,16 +205,7 @@ class FasterRag:
         tenant: str | None = None,
         idempotency_key: str | None = None,
     ) -> JobRecord:
-        """Ingest sources, returning the settled job record.
-
-        Identical semantics to ``POST /v1/ingest``: journaled, deduplicated, checkpointed,
-        and dead-lettering what it cannot process. Unlike the REST endpoint this *awaits*
-        completion rather than returning a job id, because a library caller already has the
-        one thing an HTTP client lacks — somewhere to wait.
-
-        Returns:
-            The settled job, carrying its status and per-stage counts.
-        """
+        """Ingest sources, returning the settled job record."""
         from fasterrag.api.dependencies import build_ingestion
 
         self._require_started()
@@ -272,14 +228,7 @@ class FasterRag:
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
     ) -> Answer:
-        """Answer a question through the full pipeline.
-
-        Returns:
-            The answer with its citations, timings, and cache status. When
-            ``generation.grounded_or_refuse`` is on and the answer scores below the
-            threshold, ``answer`` is ``None`` and ``best_candidates`` carries the retrieved
-            evidence instead — a refusal is a result, not an error (D5).
-        """
+        """Answer a question through the full pipeline."""
         self._require_started()
         return await self._generation_service().answer(
             text, collection=collection, top_k=top_k, filters=filters
@@ -293,12 +242,7 @@ class FasterRag:
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[QueryEvent]:
-        """Answer a question as a stream of typed events.
-
-        Yields ``meta``, then ``token`` events, then ``citations``, ``usage``, and ``done``,
-        mirroring the SSE contract. A missing ``done`` means the answer is incomplete and
-        must be treated as such — the absence carries meaning and is never papered over.
-        """
+        """Answer a question as a stream of typed events."""
         self._require_started()
         async for event in self._generation_service().stream(
             text, collection=collection, top_k=top_k, filters=filters
@@ -313,26 +257,14 @@ class FasterRag:
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
     ) -> list[ScoredChunk]:
-        """Retrieve without generating, for applications bringing their own LLM step.
-
-        Returns:
-            Chunks ordered best first, each carrying the rank and score every retrieval leg
-            gave it.
-        """
+        """Retrieve without generating, for applications bringing their own LLM step."""
         self._require_started()
         return await self._retrieval().retrieve(
             text, collection=collection, top_k=top_k, filters=filters
         )
 
     async def doctor(self) -> DoctorReport:
-        """Run the D10 preflight checks against this instance's configuration.
-
-        Works started or unstarted: doctor exists to diagnose an environment that may not
-        be working, so requiring a healthy one first would defeat it.
-
-        Returns:
-            The report; every failed check carries a ``fix`` string.
-        """
+        """Run the D10 preflight checks against this instance's configuration."""
         from fasterrag.services.doctor import run_doctor
 
         return await run_doctor(self.settings)
@@ -350,12 +282,7 @@ class FasterRag:
         shard_number: int = 1,
         replication_factor: int = 1,
     ) -> None:
-        """Create a collection sized for the configured embedding model.
-
-        The dimension is taken from the embedding router rather than accepted as an
-        argument: a collection whose width disagrees with the model that will write into it
-        fails on the first upsert, and there is no reason to let a caller specify it wrongly.
-        """
+        """Create a collection sized for the configured embedding model."""
         from fasterrag.adapters.vectordb.base import CollectionSpec
 
         self._require_started()
@@ -384,14 +311,7 @@ class FasterRag:
         return await self.vector_db.drop_collection(name)
 
     async def replay(self, trace_id: str, candidate: Settings | None = None) -> ReplayResult:
-        """Re-execute a stored query under a candidate configuration and diff it (D8).
-
-        The replay runs with no trace store and no cache, so investigating an incident
-        cannot alter the evidence or populate a cache with a result nobody asked for.
-
-        Raises:
-            FasterRagError: With ``NOT_FOUND`` if no trace with that id is stored.
-        """
+        """Re-execute a stored query under a candidate configuration and diff it (D8)."""
         from fasterrag.api.dependencies import build_generation
         from fasterrag.services.replay import replay_trace
         from fasterrag.services.traces import create_trace_store
@@ -413,27 +333,12 @@ class FasterRag:
             await service.close()
 
     def estimate(self, sources: Sequence[str], *, all_providers: bool = False) -> Estimate:
-        """Report what ingesting ``sources`` would cost, before embedding any of it (D9).
-
-        Synchronous and safe to call before starting: it parses and chunks for real but
-        never contacts a backend, which is the whole point of a preflight estimate.
-
-        Raises:
-            FasterRagError: With ``VALIDATION_FAILED`` when ``cost.estimator`` is false. The
-                library obeys the same switch as the CLI and the API; a control the embedded
-                surface ignored would be a control only two of the three respected.
-        """
+        """Report what ingesting ``sources`` would cost, before embedding any of it (D9)."""
         require_estimator(self.settings)
         return estimate_sources(sources, self.settings, all_providers=all_providers)
 
     def index_lock(self, collection: str | None = None) -> IndexLock | None:
-        """Return a collection's index lockfile, or ``None`` if there is none (D1).
-
-        Returns:
-            The lock recording what built the index — embedding model, dimensions, chunker
-            settings, corpus hashes — or ``None`` when ``index.lockfile`` is off or nothing
-            has been indexed into the collection yet.
-        """
+        """Return a collection's index lockfile, or ``None`` if there is none (D1)."""
         store = create_lock_store(self.settings)
         if store is None or not store.enabled:
             return None

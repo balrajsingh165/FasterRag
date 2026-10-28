@@ -77,18 +77,7 @@ def test_every_pending_setting_is_still_declared() -> None:
 
 
 def test_no_model_property_is_computed_and_never_read() -> None:
-    """The variant the flag, setting, and schema-field guards all miss.
-
-    `Completion.truncated` and `AssembledContext.truncated` were each declared, docstringed,
-    unit-tested in isolation, and read by nothing — so a model that stopped at its token
-    ceiling was served as a complete answer (TASK-0206). A property is a declaration like
-    any other, and an unread one is the same defect wearing a different shape.
-
-    # CRITICAL: this matches by attribute *name*, not by type. Two classes sharing a
-    # property name mask each other — one being read satisfies the check for both. It
-    # catches a name nothing reads anywhere, which is the common case, and cannot catch a
-    # name read only on the wrong class.
-    """
+    """The variant the flag, setting, and schema-field guards all miss."""
     source = consumers()
     dead: list[str] = []
 
@@ -113,14 +102,7 @@ def test_every_pending_setting_cites_a_task() -> None:
 
 
 def test_a_context_budget_of_zero_is_rejected() -> None:
-    """A value that validates and then makes the system silently do nothing.
-
-    `generation.context_budget_tokens` bounds the whole assembled retrieved context.
-    Packing charges every chunk at least one token, so a budget of 0 admits no chunk at
-    all and every answer is generated with no retrieved context — a RAG system reading as
-    configured while retrieving nothing into the prompt. The bound is stated in the
-    schema so the rejection names the key instead of surfacing as empty answers.
-    """
+    """A value that validates and then makes the system silently do nothing."""
     with pytest.raises(ValidationError) as raised:
         Settings.model_validate({"generation": {"context_budget_tokens": 0}})
 

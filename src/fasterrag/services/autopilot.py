@@ -210,26 +210,7 @@ async def tune(
     budget_seconds: float = 300.0,
     candidates: Sequence[Candidate] | None = None,
 ) -> Suggestion:
-    """Search query-time configurations against a golden set and suggest the best.
-
-    Args:
-        dataset: The golden set and corpus to measure against.
-        settings: The current configuration, which is also the first trial.
-        adapter: The vector database holding ``collection``.
-        router: The embedding router; shared across trials so the model loads once.
-        collection: The collection every trial searches. Never modified.
-        budget_seconds: Wall-clock ceiling. The search stops cleanly when exceeded and
-            reports how many candidates it did not reach.
-        candidates: Overrides the default grid, for tests and for a narrowed search.
-
-    Returns:
-        The suggestion, including every trial that ran.
-
-    Raises:
-        FasterRagError: With ``VALIDATION_FAILED`` when ``autopilot.enabled`` is false.
-            Tuning is a risky feature behind a flag defaulting to false, and running it
-            because someone typed the command would defeat the flag.
-    """
+    """Search query-time configurations against a golden set and suggest the best."""
     if not settings.autopilot.enabled:
         raise FasterRagError(
             "autopilot.enabled is false; set it to true to allow eval-driven tuning",

@@ -33,12 +33,7 @@ def cache() -> SemanticCache:
 
 
 async def test_a_hit_never_crosses_tenants() -> None:
-    """The disclosure this whole feature exists to prevent.
-
-    Lookup compares vectors across every stored entry, so without an ownership check a
-    sufficiently similar question from one tenant returns another tenant's answer — at a
-    cache hit's latency, with no error anywhere.
-    """
+    """The disclosure this whole feature exists to prevent."""
     store = cache()
     await store.store_response("salary policy", VECTOR, {"answer": "acme secret"}, tenant="acme")
 

@@ -37,12 +37,7 @@ SPAN_NAMES: tuple[str, ...] = ("retrieval", "reranker", "context-assembly", "gen
 
 
 def config_snapshot(settings: Settings) -> dict[str, Any]:
-    """Return the retrieval-affecting configuration a trace executed under.
-
-    The same subset the index lockfile anchors on, plus the generation settings that change
-    an answer without changing what was retrieved. Replay compares these two snapshots to
-    explain a difference, so anything omitted here is a difference replay cannot account for.
-    """
+    """Return the retrieval-affecting configuration a trace executed under."""
     return {
         "chunking": settings.chunking.model_dump(mode="json"),
         "embeddings": {
@@ -97,12 +92,7 @@ class Span:
 
 
 class SpanRecorder:
-    """Collects spans for one query, timed against a single origin.
-
-    All spans share one clock origin so their offsets are directly comparable — timing each
-    against its own start would produce four durations that cannot be laid on one timeline,
-    which is the entire point of nesting them under a root.
-    """
+    """Collects spans for one query, timed against a single origin."""
 
     def __init__(self) -> None:
         """Start a recorder at the current instant."""
@@ -184,12 +174,7 @@ class Trace:
 
 
 def record_chunk(chunk: ScoredChunk) -> dict[str, Any]:
-    """Return the full candidate record a trace keeps for one chunk.
-
-    Every leg's rank and score is kept, not just the fused number: replay's whole job is
-    explaining why an ordering changed, and a collapsed score cannot distinguish "the dense
-    leg moved it" from "the reranker did".
-    """
+    """Return the full candidate record a trace keeps for one chunk."""
     return {
         "chunk_id": chunk.chunk_id,
         "text": chunk.text,

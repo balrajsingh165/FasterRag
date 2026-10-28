@@ -93,12 +93,7 @@ class IndexLock:
         }
 
     def summary(self) -> dict[str, Any]:
-        """Return the lock without its per-document hashes.
-
-        What ``GET /v1/collections/{name}`` embeds. A million-document corpus has a million
-        hashes, and returning them from a status endpoint would make an inspection call
-        heavier than the query it is inspecting.
-        """
+        """Return the lock without its per-document hashes."""
         payload = self.as_dict()
         payload["documents"] = len(self.document_hashes)
         del payload["document_hashes"]
@@ -174,12 +169,7 @@ def build_lock(
     dimensions: int | None,
     document_hashes: dict[str, str] | None = None,
 ) -> IndexLock:
-    """Capture what produced an index, ready to be written.
-
-    The model *version* is recorded alongside the name because a provider can change the
-    weights behind a stable name; without the version, that change is undetectable and every
-    vector written afterwards silently belongs to a different embedding space.
-    """
+    """Capture what produced an index, ready to be written."""
     chunking = settings.chunking
     return IndexLock(
         collection=collection,
@@ -216,21 +206,7 @@ def detect_drift(
     embedding_model_version: str | None = None,
     document_hashes: dict[str, str] | None = None,
 ) -> DriftReport:
-    """Compare a lockfile against live configuration and corpus.
-
-    Args:
-        lock: The stored lockfile, or ``None`` when none was written.
-        settings: The live configuration.
-        collection: The collection being checked.
-        embedding_model: The live model name, when it is known without loading a model.
-        embedding_model_version: The live model version.
-        document_hashes: Live ``document_id → content_hash`` for the collection.
-
-    Returns:
-        The drift report. A missing lockfile is reported as ``missing_lock`` rather than as
-        drift: nothing has changed, there is simply nothing to compare against, and calling
-        that "drift" would make an un-locked index indistinguishable from a corrupted one.
-    """
+    """Compare a lockfile against live configuration and corpus."""
     if lock is None:
         return DriftReport(collection=collection, missing_lock=True)
 
@@ -313,13 +289,7 @@ class LockStore:
         return self.root / f"{collection}.lock.json"
 
     def write(self, lock: IndexLock) -> None:
-        """Persist a lockfile atomically.
-
-        Raises:
-            OSError: Never — a failure is logged. An index build that succeeded must not be
-                reported as failed because its lockfile could not be written; the drift
-                check will report the missing lock, which is the accurate description.
-        """
+        """Persist a lockfile atomically."""
         if not self.enabled:
             return
 

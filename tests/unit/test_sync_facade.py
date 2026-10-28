@@ -123,12 +123,7 @@ def test_streaming_returns_an_ordinary_iterator() -> None:
 
 
 def test_the_owned_loop_survives_across_calls() -> None:
-    """asyncio.run per call would tear down the connection pools between calls.
-
-    `doctor` is the one deliberate exception: it must work on an installation that cannot
-    start, so it falls back to a short-lived loop when the facade was never entered. Every
-    method that touches a backend goes through the owned loop.
-    """
+    """asyncio.run per call would tear down the connection pools between calls."""
     source = Path(inspect.getfile(sync)).read_text(encoding="utf-8")
     methods = source.split("    def ")
 

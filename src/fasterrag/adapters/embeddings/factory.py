@@ -58,12 +58,7 @@ def _require_adapter_class(loaded: object, source: str) -> type[EmbeddingAdapter
 
 
 def resolve_adapter_class(provider: str) -> type[EmbeddingAdapter]:
-    """Return the adapter class registered for ``provider``.
-
-    Raises:
-        ConfigError: If the provider is unknown or resolves to something that is not an
-            ``EmbeddingAdapter``.
-    """
+    """Return the adapter class registered for ``provider``."""
     builtin = _BUILTIN_ADAPTERS.get(provider)
     if builtin is not None:
         module_name, _, attribute = builtin.partition(":")
@@ -82,13 +77,5 @@ def resolve_adapter_class(provider: str) -> type[EmbeddingAdapter]:
 
 
 def create_embedding_adapter(settings: Settings) -> EmbeddingAdapter:
-    """Build the adapter named by ``embeddings.provider``.
-
-    Returns:
-        A ready-to-use adapter. No model is loaded and no connection opened until it is
-        first used.
-
-    Raises:
-        ConfigError: If the configured provider cannot be resolved.
-    """
+    """Build the adapter named by ``embeddings.provider``."""
     return resolve_adapter_class(settings.embeddings.provider)(settings)

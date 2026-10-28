@@ -76,13 +76,7 @@ def _pairs(values: Sequence[str], console: Console) -> dict[str, str] | None:
 
 
 def _watchable(console: Console) -> bool:
-    """Report whether progress lines can be shown, saying why when they cannot.
-
-    ``--json`` and ``--quiet`` silence every human line, so a follower started under them
-    would poll the journal for output nobody receives. The refusal goes to stderr, which
-    both modes keep open, because the person who passed the flag is the one who needs to
-    know it will show them nothing.
-    """
+    """Report whether progress lines can be shown, saying why when they cannot."""
     if console.as_json or console.quiet:
         console.error("--watch prints nothing under --json or --quiet; the result is unchanged")
         return False
@@ -90,12 +84,7 @@ def _watchable(console: Console) -> bool:
 
 
 def _tally(counts: Mapping[str, int]) -> str:
-    """Render a per-status document tally as stable ``key=value`` text.
-
-    The counts are documents while the command's closing summary counts chunks, and both
-    lines would otherwise say ``indexed`` of two different numbers. Every key is therefore
-    named for what it counts, so no two lines of one run can be read as disagreeing.
-    """
+    """Render a per-status document tally as stable ``key=value`` text."""
     return " ".join(f"documents_{status}={count}" for status, count in sorted(counts.items()))
 
 
@@ -106,25 +95,7 @@ async def _follow_job(
     *,
     interval: float = _WATCH_POLL_SECONDS,
 ) -> None:
-    """Print a progress line whenever a running job's document tally changes.
-
-    Polls the journal's per-document log, which the CPU pool appends to as each document
-    settles. That log is the same state ``GET /v1/ingest/{job_id}`` reports, so following
-    an inline job shows what following a remote one would, and nothing in the pipeline has
-    to grow a second progress channel to support the flag.
-
-    One appended line per change, never a redrawn one: cursor control would reach a
-    redirected stdout as control characters, so the output is identical at a terminal and
-    in a file.
-
-    Each poll re-reads and re-parses the whole per-document log, which grows as the job
-    settles documents, so the work per poll grows with it. That read is blocking file I/O
-    and JSON parsing, so it runs in a worker thread rather than on the event loop the
-    ingest it reports on is running in.
-
-    Runs until cancelled: the caller cancels it once the job settles, and the command's own
-    summary reports the authoritative counts.
-    """
+    """Print a progress line whenever a running job's document tally changes."""
     reported: dict[str, int] = {}
     while True:
         await asyncio.sleep(interval)
@@ -142,12 +113,7 @@ async def _run_watched(
     *,
     metadata: dict[str, Any] | None = None,
 ) -> JobRecord:
-    """Run an accepted job with a follower printing its progress until it settles.
-
-    The watched path accepts and runs in two steps rather than calling ``ingest``, because
-    a follower needs the job id before the work starts; the two steps are what ``ingest``
-    itself does.
-    """
+    """Run an accepted job with a follower printing its progress until it settles."""
     follower = asyncio.create_task(
         _follow_job(journal, record.job_id, console, interval=_WATCH_POLL_SECONDS)
     )
@@ -158,15 +124,7 @@ async def _run_watched(
 
 
 async def _stop_following(follower: asyncio.Task[None], job_id: str, console: Console) -> None:
-    """Shut the progress follower down without letting its outcome replace the job's.
-
-    Cancelling a task that has already failed is a no-op, so awaiting it re-raises what it
-    failed with. Raised from the ``finally`` that stops the follower, that exception would
-    replace the job record the caller is returning: a completed ingest reported to the
-    operator as a traceback, with the result thrown away. Reporting progress is strictly
-    subordinate to the run it reports on, so the failure is caught here, logged against the
-    job id, and rendered as a typed problem on stderr, and the run's own outcome stands.
-    """
+    """Shut the progress follower down without letting its outcome replace the job's."""
     follower.cancel()
     try:
         await follower
@@ -280,12 +238,7 @@ async def _streamed(
     filters: dict[str, Any] | None,
     console: Console,
 ) -> Any:
-    """Print tokens as they arrive and return the assembled answer.
-
-    The stream carries the same information as the non-streaming call, so the command's
-    reporting below is unchanged — this reassembles an ``Answer`` from the events rather
-    than making every later line aware of which path produced it.
-    """
+    """Print tokens as they arrive and return the assembled answer."""
     from fasterrag.core.context import Citation
     from fasterrag.services.generation import Answer
 
@@ -492,13 +445,7 @@ def _distance_for(
 
 
 async def _dimensions_of(embedder: EmbeddingAdapter) -> int | None:
-    """Return the model's vector size, embedding a probe if it is not known yet.
-
-    A local model reports no dimension until its weights are loaded, and creating a
-    collection is precisely the moment that number has to be right. One throwaway embedding
-    is cheaper than a collection created at the wrong width, which cannot be widened later
-    and forces a full re-embed to correct.
-    """
+    """Return the model's vector size, embedding a probe if it is not known yet."""
     if embedder.dimensions is not None:
         return embedder.dimensions
 

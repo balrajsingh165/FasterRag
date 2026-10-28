@@ -286,20 +286,7 @@ async def _check_vector_db_ports(settings: Settings) -> DoctorCheck:
 
 
 async def _check_vector_db_volume(settings: Settings, *, docker_ready: bool) -> DoctorCheck | None:
-    """Report whether the named volume the managed container stores its index on exists.
-
-    Returns ``None`` when the probe could not run — with the daemon down Docker cannot be
-    asked, and answering "the volume is fine" from a probe that never happened would be a
-    check passing because it could not run. The docker check already names that cause, and
-    reporting one root cause twice sends an operator after two problems that are one.
-
-    A missing volume earns a check of its own because it is otherwise invisible: nothing
-    looks wrong until the container is replaced, and then the index is silently gone. It is
-    also the failure ``--fix`` can repair outright, and a repair needs a check to hang off.
-
-    It deliberately does not block provisioning: ``fasterrag provision qdrant`` creates the
-    volume itself, so gating provisioning on it would refuse the command that fixes it.
-    """
+    """Report whether the named volume the managed container stores its index on exists."""
     vector_db = settings.vector_db
     if vector_db.mode != "docker":
         return DoctorCheck(
@@ -418,15 +405,7 @@ async def _check_vector_db_reachable(settings: Settings) -> DoctorCheck:
 
 
 async def run_doctor(settings: Settings) -> DoctorReport:
-    """Run every preflight check against validated settings.
-
-    Args:
-        settings: The configuration to diagnose.
-
-    Returns:
-        The report. Running doctor never raises for a failing environment — the failure
-        is the result.
-    """
+    """Run every preflight check against validated settings."""
     docker = await _check_docker(settings)
     checks: list[DoctorCheck] = [
         DoctorCheck(name="config", passed=True, detail="configuration is valid"),
@@ -485,12 +464,7 @@ class _Repair:
 
 @dataclass(frozen=True, slots=True)
 class FixAttempt:
-    """What ``--fix`` did about one failing check, including deciding not to touch it.
-
-    ``status`` is decided *after* the checks are run again, never from the repair
-    returning without raising: a repair that appeared to work and left the check failing
-    is reported as ``failed``, because the only evidence that counts is the re-check.
-    """
+    """What ``--fix`` did about one failing check, including deciding not to touch it."""
 
     check: str
     status: FixStatus
@@ -527,13 +501,7 @@ class FixOutcome:
         return self.after.failures
 
     def as_dict(self) -> dict[str, Any]:
-        """Return the post-fix report extended with what fixing did.
-
-        Deliberately a superset of ``DoctorReport.as_dict``: a consumer of
-        ``fasterrag doctor --json`` finds ``passed`` and ``checks`` in the same place
-        whether or not ``--fix`` was passed, and those describe the machine as it stands
-        after the repairs rather than as it was found.
-        """
+        """Return the post-fix report extended with what fixing did."""
         return {
             **self.after.as_dict(),
             "fixes": {
@@ -553,13 +521,7 @@ async def _fix_vector_db_volume(settings: Settings) -> _Repair:
 
 
 async def _fix_vector_db(settings: Settings) -> _Repair:
-    """Start fasterRag's own stopped container, and nothing else.
-
-    Every branch that is not "our container, stopped" declines with the command a human
-    should run. Creating a container is deliberately out of scope even though it would
-    make more reports go green: it pulls an image and publishes ports, which is
-    ``fasterrag provision qdrant``'s job and far more than a diagnostic should do unasked.
-    """
+    """Start fasterRag's own stopped container, and nothing else."""
     if settings.vector_db.mode != "docker":
         return _Repair(
             "declined",
@@ -615,19 +577,7 @@ async def _repair(check: DoctorCheck, settings: Settings) -> _Repair:
 
 
 async def apply_fixes(settings: Settings) -> FixOutcome:
-    """Diagnose, repair what is safe to repair, then diagnose again.
-
-    The second diagnosis is the point of the command. Without it ``--fix`` could only
-    report what it tried, and "created the volume" is not evidence that the check now
-    passes — a gate that reports success it did not verify is the defect this exists to
-    avoid.
-
-    Args:
-        settings: The configuration to diagnose and repair.
-
-    Returns:
-        Both reports and one attempt per failing check, each classified from the re-check.
-    """
+    """Diagnose, repair what is safe to repair, then diagnose again."""
     before = await run_doctor(settings)
     repairs = [(check.name, await _repair(check, settings)) for check in before.failures]
 
@@ -686,17 +636,7 @@ async def diagnose(
     env_file: str | Path | None = DEFAULT_ENV_FILE,
     overrides: Sequence[str] | None = None,
 ) -> DoctorReport:
-    """Diagnose an installation starting from its configuration file.
-
-    Invalid configuration is reported as a failed check rather than an exception, so
-    ``fasterrag doctor`` stays useful precisely when configuration is the problem.
-
-    Args:
-        config_path: The configuration file to diagnose.
-        env_file: Optional ``.env`` loaded before the presence check.
-        overrides: ``--set`` overrides, so doctor checks the configuration the operator is
-            about to run rather than the one on disk.
-    """
+    """Diagnose an installation starting from its configuration file."""
     try:
         settings = load_settings(config_path, env_file=env_file, overrides=overrides)
     except ConfigError as exc:
@@ -711,18 +651,7 @@ async def diagnose_and_fix(
     env_file: str | Path | None = DEFAULT_ENV_FILE,
     overrides: Sequence[str] | None = None,
 ) -> FixOutcome:
-    """Diagnose an installation, repair what is safe to repair, and check it again.
-
-    Configuration that will not load is answered as needing a human rather than rewritten.
-    ``config.yaml`` is hand-authored, and a diagnostic that edited it back into shape would
-    destroy the intent it was run to explain.
-
-    Args:
-        config_path: The configuration file to diagnose.
-        env_file: Optional ``.env`` loaded before the presence check.
-        overrides: ``--set`` overrides, so the repairs apply to the configuration the
-            operator is about to run rather than the one on disk.
-    """
+    """Diagnose an installation, repair what is safe to repair, and check it again."""
     try:
         settings = load_settings(config_path, env_file=env_file, overrides=overrides)
     except ConfigError as exc:
@@ -749,12 +678,7 @@ def format_report(report: DoctorReport) -> Sequence[str]:
 
 
 def format_fix_outcome(outcome: FixOutcome) -> Sequence[str]:
-    """Render what ``--fix`` did: what was wrong, what was attempted, and what is true now.
-
-    The declined attempts are printed even when nothing was repairable, because "there was
-    nothing safe to do here, and this is why" is the answer somebody who passed ``--fix``
-    ran the command for. Their concrete fix-it commands are already above, in the report.
-    """
+    """Render what ``--fix`` did: what was wrong, what was attempted, and what is true now."""
     lines: list[str] = list(format_report(outcome.before))
 
     if not outcome.attempts:

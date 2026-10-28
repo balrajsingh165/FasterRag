@@ -94,12 +94,7 @@ def test_the_line_number_is_reported(tmp_path: Path) -> None:
 
 
 def test_two_entries_sharing_a_task_id_are_caught(tmp_path: Path) -> None:
-    """An id is a reference; two entries under one id resolve to two different things.
-
-    This is what parallel sessions produce: each reads the ledger for "the next free id"
-    before the other has appended. Three such collisions reached ``main`` unnoticed, covering
-    six distinct pieces of work.
-    """
+    """An id is a reference; two entries under one id resolve to two different things."""
     root = build(
         tmp_path,
         modules=IMPLEMENTATION_THRESHOLD + 5,

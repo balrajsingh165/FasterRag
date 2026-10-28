@@ -62,16 +62,7 @@ def served_routes() -> set[str]:
 
 
 def documented_routes(reference: Path = API_REFERENCE) -> tuple[set[str], set[str]]:
-    """Return the routes the reference presents as shipped, and those marked unbuilt.
-
-    A specification legitimately describes endpoints ahead of their implementation — that is
-    what makes it a specification. The two are distinguished by an explicit **Not yet
-    implemented** marker on the line, so an unbuilt endpoint is visible to a reader rather
-    than merely tolerated by this script.
-
-    Returns:
-        The shipped set and the planned set, both as ``METHOD /path``.
-    """
+    """Return the routes the reference presents as shipped, and those marked unbuilt."""
     pattern = rf"\b({'|'.join(METHODS)})\s+(/[A-Za-z0-9_\-/{{}}.]*)"
     shipped: set[str] = set()
     planned: set[str] = set()

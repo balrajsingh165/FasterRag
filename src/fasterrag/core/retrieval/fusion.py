@@ -80,23 +80,7 @@ def rrf_fuse(
     *rankings: Ranking | Sequence[str],
     k: float = DEFAULT_RRF_K,
 ) -> list[FusedResult]:
-    """Fuse ranked id lists into one ranking.
-
-    Args:
-        *rankings: The legs to combine, each ordered best first. A bare sequence of ids is
-            accepted for standalone use; a :class:`Ranking` additionally names the leg and
-            carries its weight.
-        k: The RRF constant. Larger values flatten the advantage of top positions.
-
-    Returns:
-        Fused results ordered by descending score, ties broken by id. A document ranked by
-        several legs outranks one ranked highly by a single leg, which is the point of
-        fusing. The ids are exactly the union of the ids the weighted legs ranked, each
-        appearing once, and the result does not depend on the order the legs were passed in.
-
-    Raises:
-        ValueError: If ``k`` is not positive, which would invert or explode the weighting.
-    """
+    """Fuse ranked id lists into one ranking."""
     if k <= 0:
         raise ValueError(f"the RRF constant must be positive, got {k}")
 

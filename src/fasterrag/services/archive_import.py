@@ -80,12 +80,7 @@ class VerificationError(FasterRagError):
 
 
 def supported_major(version: str) -> bool:
-    """Return whether this build can read an archive of ``version``.
-
-    Majors are refused rather than attempted. A major bump means a field changed meaning, and
-    reading it under the old interpretation imports plausible-looking wrong data — which is
-    strictly worse than refusing, because nothing reports it.
-    """
+    """Return whether this build can read an archive of ``version``."""
     try:
         return version.split(".", 1)[0] == FORMAT_VERSION.split(".", 1)[0]
     except (AttributeError, IndexError):
@@ -132,13 +127,7 @@ class ArchiveReader:
     def require_vector_copy_compatible(
         self, *, model: str, model_version: str, dimensions: int | None
     ) -> None:
-        """Refuse a vector copy that would land vectors from a different embedding space.
-
-        Raises:
-            FasterRagError: With ``CONFLICT`` naming every field that differs. Named rather
-                than summarised, because "incompatible" leaves an operator guessing which of
-                three things to change.
-        """
+        """Refuse a vector copy that would land vectors from a different embedding space."""
         if not self.includes_vectors:
             raise FasterRagError(
                 "this archive carries no vectors, so a vector copy is impossible; "
@@ -207,14 +196,7 @@ def _read_members(path: Path) -> dict[str, bytes]:
 
 
 def open_archive(path: Path) -> ArchiveReader:
-    """Verify an archive completely and return a reader over it.
-
-    Every check runs before any caller can write: format version, required members, checksums,
-    manifest counts, and referential integrity. A failure raises and nothing has been touched.
-
-    Raises:
-        VerificationError: With ``VALIDATION_FAILED`` on any failed check, naming which.
-    """
+    """Verify an archive completely and return a reader over it."""
     members = _read_members(path)
 
     missing = _REQUIRED_MEMBERS - set(members)
@@ -325,25 +307,7 @@ async def import_archive(
     router: TieringRouter | None = None,
     batch_size: int = 64,
 ) -> ImportCounts:
-    """Write a verified archive into a collection.
-
-    Args:
-        settings: Validated configuration.
-        adapter: Backend to write into.
-        reader: An archive that has already passed :func:`open_archive`.
-        collection: Target collection, created if absent.
-        reembed: Ignore the archived vectors and embed the chunk text under the current
-            configuration. Always legal; the vector-copy path is not.
-        router: Embedding router, required when ``reembed`` is set.
-        batch_size: Points per upsert.
-
-    Returns:
-        What was written.
-
-    Raises:
-        FasterRagError: With ``CONFLICT`` when a vector copy is impossible, or with
-            ``VALIDATION_FAILED`` when re-embedding was requested without a router.
-    """
+    """Write a verified archive into a collection."""
     if reembed and router is None:
         raise FasterRagError(
             "re-embedding needs an embedding router; none was supplied",

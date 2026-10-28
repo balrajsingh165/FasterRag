@@ -29,14 +29,7 @@ _logger = get_logger(__name__)
 
 
 def load_model(name: str) -> Any:
-    """Load a sentence-transformers model.
-
-    Imported lazily so that importing fasterRag does not pull a deep-learning stack into
-    processes that never embed anything.
-
-    Raises:
-        ConfigError: If sentence-transformers is not installed.
-    """
+    """Load a sentence-transformers model."""
     try:
         from sentence_transformers import SentenceTransformer
     except ImportError as exc:
@@ -49,12 +42,7 @@ def load_model(name: str) -> Any:
 
 
 def _embedding_dimension(model: Any) -> int | None:
-    """Return a loaded model's vector size across sentence-transformers versions.
-
-    The accessor was renamed in sentence-transformers 5.x; calling the old name still works
-    but emits a deprecation warning, and it will eventually stop working. Both names are
-    tried so the adapter spans versions rather than pinning one.
-    """
+    """Return a loaded model's vector size across sentence-transformers versions."""
     for accessor in ("get_embedding_dimension", "get_sentence_embedding_dimension"):
         method = getattr(model, accessor, None)
         if callable(method):
@@ -65,16 +53,7 @@ def _embedding_dimension(model: Any) -> int | None:
 
 
 def _dimension_mismatch(model: str, configured: int, emitted: int) -> ConfigError:
-    """Return the error for a configured vector size the local model does not produce.
-
-    Raised at load time rather than left to the vector database, because the failure would
-    otherwise surface as a rejected upsert after a collection had already been created at
-    the wrong width — long after the setting that caused it, and with nothing naming it.
-
-    Truncating to the configured size is deliberately not offered. Shortening a vector is
-    only lossless for a model trained for it (Matryoshka representation learning), and
-    silently truncating one that was not degrades retrieval in a way no error reports.
-    """
+    """Return the error for a configured vector size the local model does not produce."""
     return ConfigError(
         f"embeddings.dimensions is {configured} but the local model {model!r} emits "
         f"{emitted}-dimensional vectors. Remove embeddings.dimensions to accept the "
@@ -132,14 +111,7 @@ class HuggingFaceEmbedder(EmbeddingAdapter):
         return self._model
 
     def encode(self, texts: Sequence[str]) -> list[list[float]]:
-        """Encode texts synchronously.
-
-        The path the CPU worker pool and the semantic chunker use, where there is no event
-        loop to protect.
-
-        Raises:
-            EmbedError: If the model fails to encode the batch.
-        """
+        """Encode texts synchronously."""
         model = self._loaded()
         try:
             vectors = model.encode(list(texts), batch_size=self.config.batch_size)
@@ -152,15 +124,7 @@ class HuggingFaceEmbedder(EmbeddingAdapter):
         return [[float(value) for value in vector] for vector in vectors]
 
     def pool(self, document: str, spans: Sequence[Segment]) -> list[list[float]]:
-        """Return one late-chunked vector per span, pooled from a pass over ``document``.
-
-        Synchronous for the same reason ``encode`` is: the caller decides which thread it
-        runs on.
-
-        Raises:
-            EmbedError: If the loaded model exposes no token-level output, or the pass
-                itself fails.
-        """
+        """Return one late-chunked vector per span, pooled from a pass over ``document``."""
         model = self._loaded()
         try:
             return pool_spans(model, document, spans)

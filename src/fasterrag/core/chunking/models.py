@@ -46,12 +46,7 @@ Segment = tuple[int, int]
 
 @dataclass(frozen=True, slots=True)
 class TextChunk:
-    """One chunk of a parsed document, before ids and embeddings are attached.
-
-    The ingestion service turns this into the persisted ``Chunk`` of
-    ``docs/data-model.md`` by adding the deterministic id, the document id, and the
-    embedding model that produced its vector.
-    """
+    """One chunk of a parsed document, before ids and embeddings are attached."""
 
     text: str
     start: int
@@ -78,13 +73,7 @@ class TokenCounter(Protocol):
 
 
 class EstimatingTokenCounter:
-    """Approximates token counts at roughly four characters per token.
-
-    A deliberate placeholder: it needs no model, so chunking works before any embedding
-    provider is configured. The embedding provider's real tokenizer replaces it once one
-    is available, which is why callers take a :class:`TokenCounter` rather than calling
-    this directly. Treat its counts as estimates, never as a measured claim.
-    """
+    """Approximates token counts at roughly four characters per token."""
 
     def __init__(self, chars_per_token: int = CHARS_PER_TOKEN) -> None:
         """Build the estimator."""
@@ -136,23 +125,7 @@ def assemble(
     page_at: object = None,
     section_at: object = None,
 ) -> list[TextChunk]:
-    """Turn tiling segments into chunks, applying overlap and dropping blank ones.
-
-    Args:
-        text: The parsed document text the segments index into.
-        segments: Segments that tile ``text`` exactly, in order.
-        overlap_chars: Characters each chunk reaches back into its predecessor.
-        strategy: Name recorded on every chunk.
-        counter: Token counter used for ``token_count``.
-        overlap_tokens: Ceiling on the overlap in real tokens. Omitted leaves the reach-back
-            purely character-based, which overshoots badly wherever text tokenizes denser
-            than the assumed ratio — CJK overlap runs several times the configured tokens.
-        page_at: Optional callable mapping an offset to a page number.
-        section_at: Optional callable mapping an offset to a heading path.
-
-    Returns:
-        The chunks, indexed from zero.
-    """
+    """Turn tiling segments into chunks, applying overlap and dropping blank ones."""
     merged = _merge_blank(text, segments)
     chunks: list[TextChunk] = []
 
@@ -186,12 +159,7 @@ def _reach_back(
     overlap_tokens: int | None,
     counter: TokenCounter,
 ) -> int:
-    """Return how many characters a chunk should reach into its predecessor.
-
-    The character reach is the starting point and the token budget trims it, because the
-    two disagree by several times on anything that is not English prose. Trimming halves
-    rather than stepping, so a badly wrong starting guess costs a handful of counts.
-    """
+    """Return how many characters a chunk should reach into its predecessor."""
     reach = min(overlap_chars, start)
     if overlap_tokens is None:
         return reach
@@ -243,34 +211,7 @@ def within_budget(
     limit: int,
     split: Callable[[str, int, int, int], list[Segment]],
 ) -> list[Segment]:
-    """Re-split any segment the counter says exceeds ``budget`` tokens.
-
-    Every chunker sizes its first pass in *characters*, because a character tiling is what
-    keeps chunk offsets exact and gapless. Characters per token is only an assumption
-    though, and a wrong one for code, CJK text, and long identifiers — all of which tokenize
-    far denser than prose. This pass re-splits where the assumption was wrong, so the
-    configured size means tokens rather than a guess about them.
-
-    Shared by every strategy rather than owned by one. It lived on the recursive chunker
-    alone until a property test over dense text caught `fixed` and `layout` emitting chunks
-    3.6x their budget — the same defect the pass was written to fix, in the two strategies
-    that never got it (TASK-0208).
-
-    With the estimating counter the check can never fail, since the character limit derives
-    from the same ratio the count uses; it then costs one count per segment and changes
-    nothing.
-
-    Args:
-        text: The document the segments index into.
-        segments: The character tiling to refine.
-        counter: Decides what a token is.
-        budget: Ceiling in tokens.
-        limit: The character limit the tiling was built with.
-        split: How to cut a span finer, given a smaller character limit.
-
-    Returns:
-        A tiling no coarser than the input, with every over-budget segment re-split.
-    """
+    """Re-split any segment the counter says exceeds ``budget`` tokens."""
 
     def refine(segment: Segment, current: int) -> list[Segment]:
         start, end = segment

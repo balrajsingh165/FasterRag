@@ -55,13 +55,7 @@ def _ledger_state(todo: Path) -> tuple[set[str], set[str]]:
 
 
 def _numbering_problems(body: str) -> list[str]:
-    """Return one message per broken entry in the ``B<root>.<child>`` hierarchy.
-
-    The numbering is the file's whole argument: a root is one decision that unblocks
-    several pieces of work, and grouping them says so in a way a flat list cannot. An
-    orphaned child breaks that — ``B7.2`` under no ``B7`` heading tells a reader there is a
-    root to resolve and then gives them nothing to resolve.
-    """
+    """Return one message per broken entry in the ``B<root>.<child>`` hierarchy."""
     roots: set[str] = set()
     children: list[tuple[str, str, str]] = []
     current = ""

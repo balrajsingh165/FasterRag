@@ -194,18 +194,7 @@ class VectorDBContract:
     async def test_a_closer_point_scores_higher_than_a_further_one(
         self, adapter: VectorDBAdapter, collection: str
     ) -> None:
-        """Under the default cosine distance, ``score`` must rank higher-is-better.
-
-        Nothing else in this contract looked at ``score``, only at order — and the two come
-        apart. A SQL adapter naturally orders by the distance operator itself, so returning a
-        raw cosine *distance* as the score leaves every result in the right position with the
-        sign of its score inverted. Breaking pgvector's score expression that way passed all
-        43 of its cases, which is what prompted this.
-
-        It matters because the score leaves the adapter: it reaches API responses, traces,
-        and the dashboard, and a caller comparing two backends' numbers would read one of
-        them exactly backwards.
-        """
+        """Under the default cosine distance, ``score`` must rank higher-is-better."""
         await self.seed(adapter, collection)
 
         hits = await adapter.search(

@@ -62,22 +62,7 @@ class PoolReport:
 
 
 def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
-    """Load, parse, and chunk one document.
-
-    Runs inside a worker process, so it takes only picklable arguments and returns only
-    picklable results. It is a module-level function for the same reason.
-
-    The bytes are read exactly once and both hashed and parsed from memory: reading twice
-    would double the I/O on the pipeline's hottest path.
-
-    The parser thresholds are derived from ``settings`` here, inside the worker, rather
-    than passed in alongside it: the settings already cross the process boundary, so
-    deriving on this side keeps the per-document pickle payload unchanged.
-
-    Raises:
-        ParseError: If the document cannot be read or parsed.
-        IngestionError: If the document exceeds ``ingestion.max_document_mb``.
-    """
+    """Load, parse, and chunk one document."""
     limit = settings.ingestion.max_document_mb * _MEGABYTE
     data = _read(task.readable, limit)
     document = parse_bytes(
@@ -147,18 +132,7 @@ def _read(source: str, max_bytes: int) -> bytes:
 
 
 def _unguarded_entry_point_error() -> IngestionError:
-    """Return the error for a worker pool that died before doing any work.
-
-    Parsing runs in a ``ProcessPoolExecutor``. On Windows and macOS new processes are
-    *spawned*, not forked, so each child re-imports the module that started them — and a
-    script calling ``asyncio.run(...)`` at import level runs its whole body again in every
-    child, which the pool reports only as ``BrokenProcessPool``.
-
-    That message names neither the cause nor the fix, and it is the first thing a library
-    user embedding fasterRag hits. Translating it here is worth more than the general rule
-    against catching by type, because the alternative is an opaque abort during what looks
-    like ordinary ingestion.
-    """
+    """Return the error for a worker pool that died before doing any work."""
     return IngestionError(
         "the parsing worker pool died before processing anything. On Windows and macOS "
         "child processes re-import the module that started them, so a script must guard its "
@@ -181,19 +155,7 @@ class CpuWorkerPool:
         executor_factory: Callable[[int], Executor] | None = None,
         llm: LLMAdapter | None = None,
     ) -> None:
-        """Build the pool without starting any worker.
-
-        Args:
-            settings: Validated configuration; ``workers.cpu_pool_size`` sizes the pool.
-            journal: Journal recording per-document outcomes, dedup hashes, and
-                checkpoints. Omitted only in tests that do not exercise durability.
-            executor_factory: Builds the executor from a worker count. Defaults to a
-                process pool, because parsing must escape the interpreter lock; tests
-                inject a simpler executor to stay fast and deterministic.
-            llm: Model writing the contextual-enrichment prefixes (P2). Omitted means no
-                enrichment, whatever ``chunking.contextual_enrichment`` says — the toggle
-                cannot conjure a provider.
-        """
+        """Build the pool without starting any worker."""
         self.settings = settings
         self.journal = journal
         self.llm = llm
@@ -211,19 +173,7 @@ class CpuWorkerPool:
         return self
 
     async def _warm_token_counter(self) -> None:
-        """Load the embedding tokenizer before the first document rather than during it.
-
-        ``create_token_counter`` is cheap but the tokenizer behind it loads on first use, and
-        that first use was inside the first document's chunking: a measured 5.4 s during which
-        the pool has started, accepted work, and produced nothing. It reads as a hang, it lands
-        in whatever document happens to be first, and it made a queue-backpressure test pass or
-        fail purely on whether an earlier test had already warmed the process-wide cache.
-
-        Warming here moves the cost to startup, where a slow start is expected and the log line
-        below explains it. The load is cached per process and never raises — a counter that
-        could fail configuration would make chunking depend on a model download — so this
-        cannot turn a working pool into one that will not start.
-        """
+        """Load the embedding tokenizer before the first document rather than during it."""
         counter = create_token_counter(self.settings)
         started = perf_counter()
         await asyncio.get_running_loop().run_in_executor(None, counter.count, "warm")
@@ -251,23 +201,7 @@ class CpuWorkerPool:
         resume_from: int = 0,
         on_progress: Callable[[int], None] | None = None,
     ) -> PoolReport:
-        """Parse and chunk every task, streaming chunks into ``sink``.
-
-        Args:
-            tasks: Documents to process, in job order.
-            sink: Bounded chunk queue. Enqueueing waits when it is full, which is how
-                backpressure reaches the parser.
-            job: Job id, when outcomes should be journalled.
-            collection: Collection the documents belong to, which scopes deduplication.
-            resume_from: Document index to start at, skipping everything a checkpoint
-                already covered.
-            on_progress: Called with each document's index once it has been handled,
-                whatever the outcome. The ingestion service checkpoints through this, so
-                progress is recorded as documents complete rather than only at the end.
-
-        Returns:
-            Counts for the pass.
-        """
+        """Parse and chunk every task, streaming chunks into ``sink``."""
         if self._executor is None:
             raise IngestionError(
                 "the cpu worker pool is not running; use it as an async context manager",
@@ -332,13 +266,7 @@ class CpuWorkerPool:
         )
 
     def _addressed(self, outcome: ParseOutcome) -> list[ChunkPayload]:
-        """Return the outcome's chunks, carrying the document text late chunking needs.
-
-        Attached here rather than in the worker because every chunk then references one
-        shared string object: crossing the process boundary once and being pointed at many
-        times costs a pointer per chunk, while attaching it before the return would pickle
-        a copy of the whole document for each one.
-        """
+        """Return the outcome's chunks, carrying the document text late chunking needs."""
         if self.settings.chunking.strategy != "late" or not outcome.document_text:
             return outcome.chunks
 
@@ -394,13 +322,7 @@ class CpuWorkerPool:
             self.journal.remember_content(collection, outcome.content_hash, task.document_id)
 
     async def _enriched(self, outcome: ParseOutcome) -> ParseOutcome:
-        """Prepend a situating context to each chunk, when the toggle and a model allow it.
-
-        Runs here rather than in the worker: the pool is a *process* pool and an LLM adapter
-        cannot cross that boundary. Doing it after the executor returns keeps parsing
-        parallel and CPU-bound while the provider calls stay on the event loop, which is
-        where an I/O-bound wait belongs anyway.
-        """
+        """Prepend a situating context to each chunk, when the toggle and a model allow it."""
         if self.llm is None or not self.settings.chunking.contextual_enrichment:
             return outcome
         if not outcome.chunks or not outcome.document_text:
@@ -430,16 +352,7 @@ class CpuWorkerPool:
         metadata: dict[str, object] | None = None,
         locations: Mapping[str, str] | None = None,
     ) -> list[DocumentTask]:
-        """Build ordered document tasks with deterministic ids.
-
-        Args:
-            sources: Canonical URIs, in job order. Ids derive from these.
-            tenant: Tenant the documents belong to.
-            metadata: Metadata merged into every chunk.
-            locations: Where a source's bytes actually live, when that differs from the
-                source itself — a staged URL or inline payload. Absent entries read from
-                the source directly.
-        """
+        """Build ordered document tasks with deterministic ids."""
         resolved = locations or {}
         return [
             DocumentTask(

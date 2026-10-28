@@ -36,13 +36,7 @@ _REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[3]
 
 
 def _template_text(resource: str, checkout_name: str) -> str:
-    """Return a packaged template, falling back to the repository copy.
-
-    Raises:
-        ConfigError: If neither can be read, which means the distribution was built without
-            its data files. Reported as a packaging fault rather than a user error, because
-            it is one.
-    """
+    """Return a packaged template, falling back to the repository copy."""
     package = resources.files("fasterrag").joinpath(resource)
     if package.is_file():
         return package.read_text(encoding="utf-8")
@@ -59,20 +53,10 @@ def _template_text(resource: str, checkout_name: str) -> str:
 
 
 def canonical_config_text() -> str:
-    """Return the canonical ``config.yaml`` as text.
-
-    Returns:
-        The documented default configuration, byte-identical to the repository's
-        ``config.yaml``.
-    """
+    """Return the canonical ``config.yaml`` as text."""
     return _template_text(CONFIG_TEMPLATE_RESOURCE, "config.yaml")
 
 
 def env_template_text() -> str:
-    """Return the ``.env.example`` secrets template as text.
-
-    Returns:
-        The documented variable inventory with placeholder values. Every line names a
-        variable; none carries a real secret, which is what makes it safe to ship.
-    """
+    """Return the ``.env.example`` secrets template as text."""
     return _template_text(ENV_TEMPLATE_RESOURCE, ".env.example")

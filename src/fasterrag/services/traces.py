@@ -93,20 +93,7 @@ class TraceStore:
         retention_days: int = 30,
         exporters: Sequence[TraceExporter] = (),
     ) -> None:
-        """Build a store.
-
-        Args:
-            root: Directory holding trace files. There is no configuration key for the
-                path; callers pass the deployment's data directory.
-            enabled: From ``traces.store``. When false, nothing is written and every read
-                reports the trace as absent, which is the honest answer.
-            retention_days: From ``traces.retention_days``.
-            exporters: Trace exporters to ship to, if any. Traces are written locally *and*
-                shipped; the local copy is what replay and ``GET /v1/traces/{id}`` read, so
-                an investigation never depends on the observability stack being healthy.
-                A list rather than one slot because Langfuse and OTLP answer different
-                questions and a deployment may reasonably want both.
-        """
+        """Build a store."""
         self.root = root or DEFAULT_TRACE_ROOT
         self.enabled = enabled
         self.retention_days = retention_days
@@ -119,12 +106,7 @@ class TraceStore:
         return self.root / f"{trace_id}{_SUFFIX}"
 
     def store(self, trace: Trace) -> None:
-        """Persist a trace, swallowing any storage failure.
-
-        The query has already been answered by the time this runs. Raising here would turn a
-        full disk into a failed request, so a write failure is logged and dropped — the
-        record is lost, which is the smaller harm.
-        """
+        """Persist a trace, swallowing any storage failure."""
         if not self.enabled:
             return
 
@@ -155,16 +137,7 @@ class TraceStore:
         self._export(trace)
 
     def _export(self, trace: Trace) -> None:
-        """Ship a trace to Langfuse without waiting for it.
-
-        Fire-and-forget on purpose: ``store`` is called on the query path after the answer is
-        ready, and awaiting a network round-trip here would add the exporter's latency to
-        every request that succeeds.
-
-        # CRITICAL: the task is kept in a set until it finishes. asyncio holds only a weak
-        # reference to a running task, so one that nothing retains can be garbage-collected
-        # mid-flight and the export vanishes with no error anywhere.
-        """
+        """Ship a trace to Langfuse without waiting for it."""
         if not self.exporters:
             return
 
@@ -188,13 +161,7 @@ class TraceStore:
             await exporter.close()
 
     def load(self, trace_id: str, *, tenant: str | None = None) -> Trace | None:
-        """Return a stored trace, or ``None`` if it is absent or unreadable.
-
-        # CRITICAL: a trace belonging to another tenant is reported as *absent*, not as
-        # forbidden. A trace records the query text and every retrieved chunk, so telling a
-        # caller "that exists but is not yours" confirms the id is real — and trace ids are
-        # the one identifier a caller can guess at by listing their own.
-        """
+        """Return a stored trace, or ``None`` if it is absent or unreadable."""
         path = self._path(trace_id)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -215,12 +182,7 @@ class TraceStore:
         return trace
 
     def recent(self, limit: int = 50, *, tenant: str | None = None) -> list[str]:
-        """Return the most recently written trace ids, newest first.
-
-        Filtering happens after sorting rather than by scanning until ``limit`` is reached,
-        so a tenant's newest traces are returned even when another tenant wrote more
-        recently — the alternative silently hides a tenant behind a noisier one.
-        """
+        """Return the most recently written trace ids, newest first."""
         if not self.root.exists():
             return []
 
@@ -270,17 +232,7 @@ def now() -> str:
 
 
 def create_langfuse_exporter(settings: Settings) -> LangfuseExporter | None:
-    """Build the Langfuse exporter when the toggle is on and its keys are present.
-
-    The keys are read from the environment by *name*, exactly like every other credential —
-    they are generated into ``.env`` by ``fasterrag provision langfuse`` and never appear in
-    ``config.yaml``.
-
-    Returns:
-        The exporter, or ``None`` when the toggle is off or the keys are absent. A missing key
-        is a warning rather than a failure: the toggle also provisions the stack, and refusing
-        to serve queries because a dashboard has no credentials inverts the dependency.
-    """
+    """Build the Langfuse exporter when the toggle is on and its keys are present."""
     if not settings.observability.langfuse:
         return None
 
@@ -303,14 +255,7 @@ def create_langfuse_exporter(settings: Settings) -> LangfuseExporter | None:
 
 
 def create_otel_exporter(settings: Settings) -> OtelExporter | None:
-    """Build the OTLP exporter when ``observability.otel`` is on.
-
-    Returns:
-        The exporter, or ``None`` when the toggle is off or the SDK is not installed. A
-        missing SDK is a warning rather than a failure, for the same reason a missing
-        Langfuse key is: refusing to serve queries because a trace backend is unavailable
-        inverts the dependency between the system and the thing watching it.
-    """
+    """Build the OTLP exporter when ``observability.otel`` is on."""
     if not settings.observability.otel:
         return None
 
@@ -330,16 +275,7 @@ def create_otel_exporter(settings: Settings) -> OtelExporter | None:
 
 
 def create_metric_pusher(settings: Settings) -> MetricPusher | None:
-    """Build the OTLP metric pusher when ``observability.otel`` is on.
-
-    Shares the toggle and the endpoint with trace export: a deployment pointing fasterRag
-    at a collector wants both halves of what it emits, and a second toggle would mostly
-    exist to be set inconsistently.
-
-    Returns:
-        The pusher, or ``None`` when the toggle is off or the SDK is not installed. A
-        missing SDK warns rather than failing, for the same reason it does for traces.
-    """
+    """Build the OTLP metric pusher when ``observability.otel`` is on."""
     if not settings.observability.otel:
         return None
 
@@ -359,12 +295,7 @@ def create_metric_pusher(settings: Settings) -> MetricPusher | None:
 
 
 def create_exporters(settings: Settings) -> list[TraceExporter]:
-    """Build every trace exporter the configuration turns on.
-
-    Both may be on at once: Langfuse answers "what did the model see and say", OTLP answers
-    "where did the time go across the whole system", and a deployment that wants both should
-    not have to choose.
-    """
+    """Build every trace exporter the configuration turns on."""
     candidates = (create_langfuse_exporter(settings), create_otel_exporter(settings))
     return [exporter for exporter in candidates if exporter is not None]
 

@@ -41,16 +41,7 @@ __all__ = [
 
 
 async def run_config_init(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Write the canonical ``config.yaml`` into the current directory.
-
-    The first command a ``pip install`` user has any reason to run. Without it every other
-    command fails on a missing file whose only documented source is a repository they do not
-    have.
-
-    An existing file is never overwritten without ``--force``: a config.yaml is hand-edited
-    the moment it exists, and silently replacing one would discard exactly the work the
-    operator most wants to keep.
-    """
+    """Write the canonical ``config.yaml`` into the current directory."""
     destination = Path(args.path)
 
     if destination.exists() and not args.force:
@@ -138,13 +129,7 @@ def _flatten(section: BaseModel, prefix: str = "") -> Iterator[tuple[str, Any, A
 
 
 def _redacted(name: str, value: Any) -> Any:
-    """Return the value, or a placeholder when the name suggests it carries a secret.
-
-    # CRITICAL: config.yaml holds env-var *names*, never secret values, so nothing here
-    # should be sensitive. This is a second line of defence for an operator who put a key
-    # in the file anyway — printing it would then leak it into terminal scrollback,
-    # screenshots, and pasted bug reports.
-    """
+    """Return the value, or a placeholder when the name suggests it carries a secret."""
     lowered = name.lower()
     if value and any(word in lowered for word in ("password", "secret", "token_value")):
         return "<redacted>"
@@ -152,16 +137,7 @@ def _redacted(name: str, value: Any) -> Any:
 
 
 async def run_config_show(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Print every setting with its effective value and its default.
-
-    Answers "what can I change, and what is it right now?" without reading the schema.
-    ``--changed`` narrows the listing to settings that differ from their default, which is
-    the fastest way to see what a deployment actually customised.
-
-    Missing environment variables do not stop the listing. This command is most useful on
-    the half-configured installation that ``config validate`` refuses, and an operator
-    reaching for it wants to see the settings, not be told again that a key is unset.
-    """
+    """Print every setting with its effective value and its default."""
     try:
         settings = settings_from(args, require_env=False)
     except ConfigError as exc:
@@ -187,14 +163,7 @@ async def run_config_show(args: argparse.Namespace, console: Console) -> ExitCod
 
 
 async def run_doctor_command(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Run preflight diagnostics, repairing what is safe to repair under ``--fix``.
-
-    Exits ``4`` when any check fails. Doctor gates provisioning, so this code is what stops
-    an automated setup from proceeding into an environment that cannot host it. ``--fix``
-    does not weaken that: the exit code is decided by the checks as they stand *after* the
-    repairs, so a repair that did not work still fails the gate. No new exit code is
-    introduced — an operator scripting against ``4`` keeps the meaning they had.
-    """
+    """Run preflight diagnostics, repairing what is safe to repair under ``--fix``."""
     if args.fix:
         outcome = await diagnose_and_fix(args.config, overrides=overrides_from(args))
         console.lines(format_fix_outcome(outcome))

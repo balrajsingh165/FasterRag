@@ -122,12 +122,7 @@ def test_the_ingest_suite_measures_the_files_inside_a_directory(
 def test_the_timed_work_is_the_expanded_corpus_and_not_the_directory(
     config: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The timed loop must parse the same files the report counts.
-
-    Expanding only for the report would leave the throughput measured over one failed
-    directory read while the entry beside it claimed two documents — and the throughput is
-    the number a ``--ledger`` entry publishes.
-    """
+    """The timed loop must parse the same files the report counts."""
     source = corpus(tmp_path / "corpus")
     seen: list[list[str]] = []
 

@@ -48,28 +48,7 @@ _logger = get_logger(__name__)
 
 
 def signal_endpoint(endpoint: str, signal: str) -> str:
-    """Return the OTLP/HTTP URL for one signal, derived from the configured endpoint.
-
-    # CRITICAL: ``observability.otel_endpoint`` is one setting feeding two exporters, and
-    # OTLP/HTTP puts each signal on its own path. Passing the configured value through
-    # verbatim — which is what this did until it met a real collector — means no value works
-    # for both: a bare ``http://host:4318`` 404s for traces *and* metrics, ``.../v1/traces``
-    # 400s every metric push, and ``.../v1/metrics`` 400s every trace. Every one of those is
-    # a logged warning and nothing else, so the toggle looks on and nothing arrives. The
-    # endpoint is therefore treated as the collector's base URL, exactly as the OTel
-    # specification treats ``OTEL_EXPORTER_OTLP_ENDPOINT``.
-
-    A path already naming a signal is replaced rather than appended to, so the
-    ``http://collector:4318/v1/traces`` form that earlier docs and configurations used keeps
-    working for traces and starts working for metrics.
-
-    Args:
-        endpoint: The configured collector endpoint, with or without a signal path.
-        signal: ``"traces"`` or ``"metrics"``.
-
-    Returns:
-        The absolute URL to POST that signal to.
-    """
+    """Return the OTLP/HTTP URL for one signal, derived from the configured endpoint."""
     base = endpoint.rstrip("/")
     for path in _SIGNAL_PATHS:
         if base.endswith(path):
@@ -79,15 +58,7 @@ def signal_endpoint(endpoint: str, signal: str) -> str:
 
 
 def span_id_for(trace_id: str, name: str) -> int:
-    """Return the 64-bit span id for a stage of a trace.
-
-    Derived from the trace id and the stage name rather than drawn at random, so exporting
-    the same trace twice — a retry, or a replay — produces the same span ids and the backend
-    treats it as one trace rather than two overlapping copies.
-
-    Zero is not a legal span id, so a digest that lands there is nudged to one; the odds are
-    negligible and a silently invalid span is not.
-    """
+    """Return the 64-bit span id for a stage of a trace."""
     digest = blake2b(f"{trace_id}:{name}".encode(), digest_size=_SPAN_ID_BYTES).digest()
     return int.from_bytes(digest, "big") or 1
 
@@ -111,12 +82,7 @@ def _started_at(trace: Trace) -> datetime:
 
 
 def _attribute(value: Any) -> Any:
-    """Return a value in a form OTLP accepts, stringifying anything else.
-
-    OTLP attributes are strings, numbers, booleans, or homogeneous sequences of those. A
-    dict or a None reaching the exporter is dropped by the SDK with a warning, so the
-    attribute simply vanishes — stringifying keeps the information visible.
-    """
+    """Return a value in a form OTLP accepts, stringifying anything else."""
     if isinstance(value, bool | int | float | str):
         return value
     return str(value)
@@ -144,15 +110,7 @@ def _attributes(trace: Trace) -> dict[str, Any]:
 
 
 def build_spans(trace: Trace) -> list[Any]:
-    """Return the OTLP spans for one trace: a root span with a child per stage.
-
-    Pure and side-effect free so the mapping can be asserted without a collector running.
-    This mapping is where the integration is most likely to be wrong and, like the Langfuse
-    one, it is invisible until someone opens a dashboard.
-
-    Raises:
-        ConfigError: If the OpenTelemetry SDK is not installed.
-    """
+    """Return the OTLP spans for one trace: a root span with a child per stage."""
     sdk = _sdk()
     started = _started_at(trace)
     base = _epoch_nanoseconds(started)
@@ -261,16 +219,7 @@ class OtelExporter:
     """Ships query traces to an OTLP endpoint."""
 
     def __init__(self, endpoint: str, *, timeout: int = _TIMEOUT_SECONDS) -> None:
-        """Build the exporter without connecting.
-
-        Args:
-            endpoint: The collector's OTLP/HTTP endpoint from ``observability.otel_endpoint``.
-                Taken as a base URL; the ``/v1/traces`` path is derived from it.
-            timeout: Seconds to wait for the collector.
-
-        Raises:
-            ConfigError: If the OTLP exporter is not installed.
-        """
+        """Build the exporter without connecting."""
         try:
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
         except ImportError as exc:

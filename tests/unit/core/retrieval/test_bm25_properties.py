@@ -233,13 +233,7 @@ def test_each_extra_mention_is_worth_less_than_the_last(text: str, k1: float, b:
 )
 @settings(max_examples=60)
 def test_length_normalisation_moves_monotonically_with_b(filler: int, k1: float) -> None:
-    """``b`` only ever trades short documents against long ones, around the average.
-
-    Below the average length, raising ``b`` rewards a document for being short; above it,
-    ``b`` penalises the extra length. Generating counts on both sides of
-    ``AVERAGE_DOCUMENT_LENGTH`` is the point — a strategy capped below it would assert only
-    half the behaviour and never notice the sign flip.
-    """
+    """``b`` only ever trades short documents against long ones, around the average."""
     text = " ".join([SENTINEL, *(f"w{index}" for index in range(filler))])
     length = len(tokenize(text))
     assume(length != AVERAGE_DOCUMENT_LENGTH)
@@ -277,12 +271,7 @@ def test_text_made_only_of_stopwords_encodes_to_nothing(words: list[str]) -> Non
 
 @given(text=ANY_TEXT)
 def test_no_emitted_term_is_a_stopword_or_shorter_than_the_minimum(text: str) -> None:
-    """Both filters have to survive stemming, which can shorten a token or reshape it.
-
-    Searched rather than constructed, so it covers shapes nobody thought to pin — but it is
-    the two tests below, not this one, that reliably fail when a filter stops running after
-    stemming. The tokens that expose it are too rare for generation to be depended on.
-    """
+    """Both filters have to survive stemming, which can shorten a token or reshape it."""
     for term in tokenize(text):
         assert len(term) >= 2
         assert term not in STOPWORDS

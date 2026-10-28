@@ -122,13 +122,7 @@ class BackupManifest:
 
 
 def read_manifest(destination: Path) -> BackupManifest:
-    """Return a backup's manifest.
-
-    Raises:
-        FasterRagError: With ``NOT_FOUND`` when the manifest is absent or unreadable. A
-            restore runs during an incident, which is the worst possible moment to guess
-            whether a directory is a complete backup.
-    """
+    """Return a backup's manifest."""
     path = destination / MANIFEST_NAME
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -143,13 +137,7 @@ def read_manifest(destination: Path) -> BackupManifest:
 
 
 def backup_sets(destination: Path) -> list[Path]:
-    """Return the backup sets under ``destination``, oldest first.
-
-    Ordered by directory name, which sorts chronologically because the names are UTC
-    timestamps in a fixed-width format. Reading each manifest for its ``created_at`` would
-    be more direct and would also make the ordering depend on files that may be exactly
-    what is corrupt when someone comes looking.
-    """
+    """Return the backup sets under ``destination``, oldest first."""
     if not destination.is_dir():
         return []
     return sorted(
@@ -164,21 +152,7 @@ def latest_set(destination: Path) -> Path | None:
 
 
 async def prune(destination: Path, adapter: VectorDBAdapter, *, retain: int) -> list[str]:
-    """Delete all but the newest ``retain`` backup sets, and their backend snapshots.
-
-    Args:
-        destination: The directory holding the sets.
-        adapter: The vector database whose snapshots the pruned sets reference.
-        retain: How many sets to keep. Values below one are refused rather than treated as
-            "keep nothing" — a retention policy that deletes every backup is never what
-            somebody meant to type, and the moment to find out is not the next restore.
-
-    Returns:
-        The names of the sets removed.
-
-    Raises:
-        FasterRagError: If ``retain`` is less than one.
-    """
+    """Delete all but the newest ``retain`` backup sets, and their backend snapshots."""
     if retain < 1:
         raise FasterRagError(
             f"backup retention must keep at least one set, got {retain}",
@@ -236,22 +210,7 @@ async def back_up(
     collections: list[str] | None = None,
     retain: int = DEFAULT_RETAIN,
 ) -> BackupManifest:
-    """Capture every documented artifact into a new timestamped set under ``destination``.
-
-    Args:
-        destination: Directory holding the backup sets; created if absent. The set itself
-            goes in a timestamped subdirectory, so repeated runs accumulate a history
-            instead of each one overwriting the last.
-        adapter: The vector database, which takes its own native snapshots.
-        config_path: The ``config.yaml`` in force, copied alongside. It carries no secrets,
-            which is precisely why it is safe to include.
-        collections: Which collections to snapshot; every one by default.
-        retain: How many sets to keep, pruning the oldest along with the backend snapshots
-            they reference.
-
-    Returns:
-        The manifest describing what was captured.
-    """
+    """Capture every documented artifact into a new timestamped set under ``destination``."""
     destination.mkdir(parents=True, exist_ok=True)
 
     started = datetime.now(tz=UTC)
@@ -330,25 +289,7 @@ async def restore(
     collections: list[str] | None = None,
     restore_files: bool = True,
 ) -> dict[str, Any]:
-    """Restore a deployment from a backup directory.
-
-    Args:
-        source: Either one backup set, or the destination holding several — in which case
-            the newest is used. During an incident the thing an operator has to hand is the
-            path they backed up to, and making them list its subdirectories first to find
-            the newest is an avoidable step at the worst possible moment.
-        adapter: The vector database to restore into.
-        collections: Which collections to restore; every one in the manifest by default.
-        restore_files: Whether to put the control files back. Off when restoring only a
-            single corrupted collection, which is the cheaper shortcut of
-            ``docs/disaster-recovery.md`` §4.
-
-    Returns:
-        What was restored and what was verified, including any collection whose restored
-        vector count differs from what the manifest recorded — a mismatch is reported rather
-        than raised, because a partial restore an operator can see beats one that aborts
-        halfway with no report of how far it got.
-    """
+    """Restore a deployment from a backup directory."""
     resolved = source if (source / MANIFEST_NAME).is_file() else (latest_set(source) or source)
     if resolved != source:
         _logger.info(

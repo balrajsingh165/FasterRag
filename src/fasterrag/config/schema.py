@@ -179,18 +179,7 @@ class DockerSettings(Section):
 
 
 class PgvectorSettings(Section):
-    """PostgreSQL connection and layout settings for ``vector_db.provider: pgvector``.
-
-    PostgreSQL is reached through a libpq DSN rather than ``vector_db.host`` and ``port``,
-    because a usable connection string also carries the database, the role, and the SSL
-    mode — and it carries the password, which is why it is named by environment variable
-    and never written into ``config.yaml``.
-
-    ``pool_max_size`` and ``maintenance_timeout_ms`` live here rather than under
-    ``reliability`` because both are PostgreSQL concepts — a connection pool and the
-    ``statement_timeout`` GUC — that no other adapter can honour. A shared key only pgvector
-    reads would be a setting silently ignored by every Qdrant deployment.
-    """
+    """PostgreSQL connection and layout settings for ``vector_db.provider: pgvector``."""
 
     # CRITICAL: this defaults to None, not to "PGVECTOR_DSN". Every populated `*_env` field
     # anywhere in the settings tree is collected by `referenced_env_vars` and then required
@@ -425,13 +414,7 @@ class LlmSettings(Section):
 
 
 class ParsingSettings(Section):
-    """Parser thresholds: the OCR trigger, the OCR render, headings, and row grouping.
-
-    These decide what text ever reaches chunking, so they are corpus-dependent in a way
-    a single default cannot cover. A born-digital corpus and a corpus of scans disagree
-    about when a page is a scan and about how sharp the render has to be, and tuning that
-    used to mean editing ``core/parsing`` (TASK-0218).
-    """
+    """Parser thresholds: the OCR trigger, the OCR render, headings, and row grouping."""
 
     minimum_chars_per_page: Annotated[int, Field(ge=0, le=10_000)] = 40
     ocr_resolution: Annotated[int, Field(ge=72, le=1200)] = 200
@@ -495,23 +478,7 @@ class RetrievalSettings(Section):
 
 
 class GenerationSettings(Section):
-    """Grounding, faithfulness, citation policy, and the assembled-context budget.
-
-    ``context_budget_tokens`` bounds the *total* retrieved context packed into the prompt,
-    not the size of any one chunk. It was a ``GenerationService`` constructor parameter that
-    no key reached, so the budget an operator was told to tune could not be set from
-    ``config.yaml`` at all (TASK-0285).
-
-    The default stays at 4,000. Nothing in the history records why that number was chosen —
-    the introducing commit states only that it is deliberately conservative against silent
-    provider-side truncation — and no measurement of ours stands behind it or behind any
-    other value, so moving it would replace one unmeasured number with another.
-
-    There is no upper bound. Only the caller knows the provider's context window, and a
-    ceiling invented here would be a guess at it. The lower bound is 1 because packing
-    charges every chunk at least one token, so a budget of 0 admits nothing and would send
-    the model a prompt with no retrieved context at all.
-    """
+    """Grounding, faithfulness, citation policy, and the assembled-context budget."""
 
     grounded_or_refuse: bool = False
     faithfulness_threshold: Annotated[float, Field(ge=0.0, le=1.0)] = 0.7
@@ -529,15 +496,7 @@ class GenerationSettings(Section):
 
 
 class CacheSettings(Section):
-    """Semantic response cache keyed by query-embedding similarity.
-
-    ``disk`` is accepted here as well as on the embedding cache. Without it the semantic
-    cache was unusable from the CLI: ``memory`` dies with each short-lived process, so every
-    ``fasterrag query`` paid for a query embedding, stored the answer, and threw it away —
-    strictly worse than no cache. A disk store is the only backend that survives between two
-    invocations of a command-line tool on one host (TASK-0127); ``redis`` is the only one
-    that survives across hosts, and the only one several API replicas can share (TASK-0124).
-    """
+    """Semantic response cache keyed by query-embedding similarity."""
 
     semantic: bool = False
     similarity_threshold: Annotated[float, Field(ge=0.90, le=0.99)] = 0.95
@@ -733,12 +692,7 @@ class SecuritySettings(Section):
 
 
 class Settings(BaseSettings):
-    """The validated whole of ``config.yaml``.
-
-    Values come exclusively from the YAML file: the environment supplies secrets by
-    name and never overrides behavior, which is what keeps a committed ``config.yaml``
-    an accurate description of how the system runs.
-    """
+    """The validated whole of ``config.yaml``."""
 
     model_config = SettingsConfigDict(extra="forbid", frozen=True)
 
@@ -771,12 +725,7 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Restrict configuration to the values passed in from the YAML source.
-
-        Environment variables deliberately cannot populate configuration fields: they
-        hold secrets only, referenced by name. Without this, an unrelated environment
-        variable could silently change retrieval behavior.
-        """
+        """Restrict configuration to the values passed in from the YAML source."""
         return (init_settings,)
 
     def referenced_env_vars(self) -> dict[str, str]:

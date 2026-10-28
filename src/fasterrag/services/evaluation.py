@@ -61,14 +61,7 @@ class EvalDataset:
         return self.root / CORPUS_DIR
 
     def resolved(self) -> list[GoldenRecord]:
-        r"""Return the records with filename ground truth rewritten to document ids.
-
-        # CRITICAL: the corpus path is used exactly as given, never resolved. A document id
-        # hashes the source string it was ingested under, and on Windows `d:\\...` and
-        # `D:\\...` hash differently even though they name one file — building the id from a
-        # differently-normalised path yields zero matches and a score of 0.0 that reads as a
-        # retrieval failure rather than a path mismatch (TASK-0141).
-        """
+        """Return the records with filename ground truth rewritten to document ids."""
         rewritten: list[GoldenRecord] = []
         for record in self.records:
             names = record.relevant_document_ids
@@ -92,12 +85,7 @@ class EvalDataset:
 
 
 def load_dataset(root: Path, *, default_k: int = 5) -> EvalDataset:
-    """Load a dataset directory: golden set, corpus, and any committed baseline.
-
-    Raises:
-        FasterRagError: With ``NOT_FOUND`` when the directory holds no golden set. An eval
-            run against a dataset that does not exist should say so, not score zero.
-    """
+    """Load a dataset directory: golden set, corpus, and any committed baseline."""
     golden_path = root / GOLDEN_NAME
     if not golden_path.is_file():
         raise FasterRagError(
@@ -157,14 +145,7 @@ async def run_eval(
     *,
     collection: str,
 ) -> tuple[EvalReport, GateResult]:
-    """Score a collection and judge it against the dataset's committed baseline.
-
-    Returns:
-        The report and the gate's verdict. Both are returned because they answer different
-        questions: the report says how the collection scored, and the verdict says whether
-        that is acceptable — and a caller that only saw the verdict could not say by how
-        much a run missed.
-    """
+    """Score a collection and judge it against the dataset's committed baseline."""
     dataset = load_dataset(dataset_root)
     report = await score_collection(dataset, settings, adapter, router, collection=collection)
     return report, check_regression(report, dataset.baseline, settings)
@@ -190,21 +171,7 @@ async def score_faithfulness(
     *,
     collection: str,
 ) -> dict[str, Any]:
-    """Answer every answerable golden query and grade each answer with P3.
-
-    Separate from :func:`score_collection` because the costs are not comparable. Retrieval
-    scoring is local and free; this generates and grades once per record, so a hundred-record
-    set is two hundred provider calls. Nothing calls it implicitly.
-
-    Adversarial records are excluded. They are deliberately unanswerable from the corpus, so
-    the correct behaviour is a refusal — grading one would score the system down for doing
-    exactly the right thing.
-
-    Returns:
-        The mean faithfulness over graded answers, how many were graded, and how many were
-        refused. Refusals are reported rather than folded into the mean: withholding an
-        answer is a correct outcome under D5, not a score of zero.
-    """
+    """Answer every answerable golden query and grade each answer with P3."""
     from fasterrag.api.dependencies import build_generation
 
     service = build_generation(settings, adapter, router)

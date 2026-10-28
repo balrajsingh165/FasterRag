@@ -27,17 +27,7 @@ _LOG_BASE = 2.0
 
 
 def recall_at_k(hits: Sequence[bool], total_relevant: int, k: int | None = None) -> float:
-    """Return the share of relevant items that appear in the first ``k`` results.
-
-    Args:
-        hits: Whether each retrieved result, in rank order, is relevant.
-        total_relevant: How many relevant items exist in the ground truth.
-        k: Window size; the whole result list when omitted.
-
-    Returns:
-        A value in ``[0, 1]``, or ``0.0`` when nothing is relevant, which callers should
-        exclude rather than average.
-    """
+    """Return the share of relevant items that appear in the first ``k`` results."""
     if total_relevant <= 0:
         return 0.0
 
@@ -64,12 +54,7 @@ def dcg(hits: Sequence[bool], k: int | None = None) -> float:
 
 
 def ndcg_at_k(hits: Sequence[bool], total_relevant: int, k: int | None = None) -> float:
-    """Return the normalized discounted cumulative gain.
-
-    Normalized against the best ranking actually achievable for this query — every relevant
-    item first — so a query with more ground truth than the window can hold is not penalized
-    for the window's size.
-    """
+    """Return the normalized discounted cumulative gain."""
     if total_relevant <= 0:
         return 0.0
 

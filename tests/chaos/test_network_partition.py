@@ -66,13 +66,7 @@ RESET_TIMEOUT_MS: Final = 200
 
 
 class Blackhole:
-    """Two TCP listeners that accept a connection and then never answer.
-
-    This is what a partition looks like to a client: the socket is open, the request is
-    written, and no response ever arrives. The handler holds each connection open rather
-    than closing it, because a close would be read as a reset and the client would fail
-    fast on a transport error instead of waiting for its own deadline.
-    """
+    """Two TCP listeners that accept a connection and then never answer."""
 
     def __init__(self) -> None:
         """Start with no servers; :meth:`open` binds them."""
@@ -83,12 +77,7 @@ class Blackhole:
         self.grpc_port = 0
 
     async def _swallow(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """Accept the connection and never reply to it.
-
-        The handler parks on an event nothing sets, so :meth:`close` has to cancel it. Its
-        task is recorded here rather than tracked by the server, because an abandoned
-        handler outlives the fixture and is reported as a destroyed pending task.
-        """
+        """Accept the connection and never reply to it."""
         handler = asyncio.current_task()
         if handler is not None:
             self._handlers.append(handler)
@@ -96,12 +85,7 @@ class Blackhole:
         await asyncio.Event().wait()
 
     async def open(self) -> None:
-        """Bind both listeners on ephemeral ports.
-
-        Two are bound rather than one because the schema refuses a REST port equal to the
-        gRPC port, and a partition has to be injected on whichever of the two the client
-        chooses.
-        """
+        """Bind both listeners on ephemeral ports."""
         for _ in range(2):
             server = await asyncio.start_server(self._swallow, "127.0.0.1", 0)
             self._servers.append(server)
@@ -109,12 +93,7 @@ class Blackhole:
         self.grpc_port = int(self._servers[1].sockets[0].getsockname()[1])
 
     async def close(self) -> None:
-        """Cancel every handler, drop every held connection, and stop listening.
-
-        The handlers are gathered after cancellation so the loop sees each one finish;
-        ``return_exceptions`` keeps the ``CancelledError`` each of them raises from
-        propagating into the fixture teardown that asked for the cancellation.
-        """
+        """Cancel every handler, drop every held connection, and stop listening."""
         for handler in self._handlers:
             handler.cancel()
         if self._handlers:
@@ -205,12 +184,7 @@ async def adapter(partitioned: Settings) -> AsyncIterator[QdrantAdapter]:
 
 
 async def failing_search(adapter: QdrantAdapter) -> tuple[FasterRagError, float]:
-    """Run the search that cannot succeed, returning the typed failure and its duration.
-
-    ``asyncio.wait_for`` is the outer guard rather than the thing under test: if the budget
-    the adapter configures were not honoured, this case must fail on an assertion rather
-    than hang the suite for as long as the client is willing to wait.
-    """
+    """Run the search that cannot succeed, returning the typed failure and its duration."""
     started = time.perf_counter()
     with pytest.raises(FasterRagError) as failure:
         await asyncio.wait_for(adapter.search(query()), timeout=HANG_BUDGET_SECONDS)
@@ -218,13 +192,7 @@ async def failing_search(adapter: QdrantAdapter) -> tuple[FasterRagError, float]
 
 
 async def test_a_closed_blackhole_leaves_no_handler_task_behind() -> None:
-    """Teardown has to reclaim the parked handlers rather than abandon them.
-
-    ``_swallow`` waits on an event nothing ever sets, so closing the held writers and the
-    listeners does not end it. An abandoned handler stays pending for the lifetime of the
-    loop and surfaces later as a destroyed-pending-task report in whichever unrelated test
-    happens to be running when the loop shuts down.
-    """
+    """Teardown has to reclaim the parked handlers rather than abandon them."""
     partition = Blackhole()
     await partition.open()
     _, writer = await asyncio.open_connection("127.0.0.1", partition.rest_port)
@@ -243,12 +211,7 @@ async def test_a_closed_blackhole_leaves_no_handler_task_behind() -> None:
 async def test_a_partitioned_vector_database_fails_typed_and_retryable(
     adapter: QdrantAdapter,
 ) -> None:
-    """Row 16: the failure is ``RETRIEVAL_FAILED`` and retryable, never a vendor exception.
-
-    Retryable is the load-bearing half. A partition is by definition temporary, and a
-    failure classified permanent would neither be retried nor counted by the breaker, so
-    the restored network would never be noticed.
-    """
+    """Row 16: the failure is ``RETRIEVAL_FAILED`` and retryable, never a vendor exception."""
     failure, _ = await failing_search(adapter)
 
     assert isinstance(failure, RetrievalError)
@@ -260,14 +223,7 @@ async def test_a_partitioned_vector_database_fails_typed_and_retryable(
 async def test_a_partition_fails_on_our_timeout_rather_than_hanging(
     adapter: QdrantAdapter, partitioned: Settings
 ) -> None:
-    """Row 16: ``reliability.timeouts.vector_db_ms`` is what ends the call.
-
-    Both bounds are asserted and both mean something. The upper bound says the query is
-    bounded at all — the guarantee. The lower bound says the fault injected was really a
-    partition: a refused connection returns in single-digit milliseconds, so a run that
-    came back well inside the budget would have proved the stop-the-container case over
-    again under a different name.
-    """
+    """Row 16: ``reliability.timeouts.vector_db_ms`` is what ends the call."""
     budget = partitioned.reliability.timeouts.vector_db_ms / 1000
 
     _, elapsed = await failing_search(adapter)
@@ -299,13 +255,7 @@ async def test_a_partitioned_vector_database_reports_itself_unhealthy(
 
 
 async def test_a_host_that_does_not_resolve_fails_typed_and_retryable() -> None:
-    """Row 35's DNS half: a name that cannot resolve is a retryable provider failure.
-
-    ``.invalid`` is reserved by RFC 2606 so that it never resolves. A resolver that
-    hijacks NXDOMAIN and answers with its own address would turn this into a connection
-    failure against that address instead, which is the same classification by a different
-    route — so the case asserts the taxonomy and the bound, not which syscall failed.
-    """
+    """Row 35's DNS half: a name that cannot resolve is a retryable provider failure."""
     settings = settings_for(UNRESOLVABLE_HOST, 6333, 6334)
     adapter = QdrantAdapter(settings)
     try:
@@ -322,16 +272,7 @@ async def test_a_host_that_does_not_resolve_fails_typed_and_retryable() -> None:
 async def test_a_partitioned_generation_provider_fails_typed_and_retryable(
     blackhole: Blackhole, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Row 35 per provider: the same partition against the LLM leg is classified the same.
-
-    Row 35 says "any provider", and a taxonomy that holds only where it was first written
-    is not a taxonomy. The ``openai_compatible`` provider is used because it is the one
-    whose endpoint is configurable, which is what lets a real client be pointed at the
-    blackhole. Every generation provider sits behind an optional extra, and stubbing the
-    SDK would assert the stub's exception hierarchy rather than the one the taxonomy maps,
-    so the case skips where the extra is absent — which means it gates row 35 only in an
-    environment that installs ``.[openai]``.
-    """
+    """Row 35 per provider: the same partition against the LLM leg is classified the same."""
     pytest.importorskip("openai", reason="the openai extra is not installed in this environment")
 
     monkeypatch.setenv("FASTERRAG_CHAOS_LLM_KEY", "not-a-real-key")
@@ -365,12 +306,7 @@ async def test_a_partitioned_generation_provider_fails_typed_and_retryable(
 
 
 def service_for(partitioned: Settings, breaker: CircuitBreaker) -> RetrievalService:
-    """Build a retrieval service over the partitioned backend with a breaker injected.
-
-    The breaker is injected rather than configured because ``reliability.circuit_breaker``
-    floors its reset timeout at a second and defaults the threshold to five — correct for
-    production and five partitioned queries of waiting for a scenario.
-    """
+    """Build a retrieval service over the partitioned backend with a breaker injected."""
     return RetrievalService(
         partitioned,
         QdrantAdapter(partitioned),
@@ -390,14 +326,7 @@ def chaos_breaker(**overrides: Any) -> CircuitBreaker:
 
 
 async def test_a_partition_opens_the_vector_database_breaker(partitioned: Settings) -> None:
-    """Row 16: retries first, then the breaker opens — the second query is shed, not sent.
-
-    Shedding is the behavior that matters during a partition. Without it every query pays
-    the full timeout, and those stacked-up waits are themselves the load that keeps a
-    recovering backend down. The elapsed bound is what proves the second query was refused
-    rather than attempted; without it this case would pass against a breaker that never
-    opened at all.
-    """
+    """Row 16: retries first, then the breaker opens — the second query is shed, not sent."""
     service = service_for(partitioned, chaos_breaker())
     try:
         with pytest.raises(RetrievalError):
@@ -419,17 +348,7 @@ async def test_a_partition_opens_the_vector_database_breaker(partitioned: Settin
 async def test_the_breaker_admits_one_probe_once_its_reset_timeout_passes(
     partitioned: Settings,
 ) -> None:
-    """Recovery costs one request: after the timeout the next query is tried, not shed.
-
-    The partition is still in place here, which is the honest half of the recovery story —
-    what can be proved without a live backend is that the breaker stops shedding and lets a
-    probe through, and that a failed probe re-opens it rather than granting a fresh
-    threshold's worth of doomed calls. That the probe *succeeds* once the network returns is
-    the vector-database half, covered against a real container in
-    ``test_real_faults.py::test_a_restarted_container_serves_its_indexed_data_again`` and,
-    at the breaker itself, by
-    ``tests/unit/core/test_breaker.py::test_a_successful_probe_closes_it``.
-    """
+    """Recovery costs one request: after the timeout the next query is tried, not shed."""
     service = service_for(partitioned, chaos_breaker())
     try:
         with pytest.raises(RetrievalError):

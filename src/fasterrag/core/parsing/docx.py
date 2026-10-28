@@ -25,14 +25,7 @@ _MAX_HEADING_LEVEL: Final = 6
 
 
 def _heading_level(style_name: str) -> int | None:
-    """Return the outline depth for a Word heading style, or None if it is not a heading.
-
-    The result is clamped into 1-6. A converter emitting a custom ``Heading 0`` style
-    otherwise produced depth 0, and the builder keeps only entries strictly shallower than
-    the incoming level — nothing is shallower than 0, so every real ``Heading 1`` nested
-    underneath it instead of resetting the path, and the whole document came back sectioned
-    under one bogus root.
-    """
+    """Return the outline depth for a Word heading style, or None if it is not a heading."""
     lowered = style_name.lower()
     if lowered == "title":
         return 1

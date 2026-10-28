@@ -70,15 +70,7 @@ def test_one_source_under_two_tenants_stays_two_documents(
 
 @given(source=FORGED, tenant=st.text(min_size=1, max_size=20))
 def test_a_source_carrying_a_nul_is_refused_as_invalid_input(source: str, tenant: str) -> None:
-    """A NUL in a source URI is refused because no filesystem or URL permits one.
-
-    Until identity version 3 this refusal was also the only thing standing between a NUL and
-    a forged document id — the digest NUL-joined its fields, so `document_id(a + NUL + b, c)`
-    reached the same digest as `document_id(a, b + NUL + c)`, a real collision found by
-    generating unrestricted text (TASK-0209). The digest is now length-prefixed and cannot be
-    forged by any byte (TASK-0210, the properties below), so this is plain input validation
-    and would be correct even if the identity guarantee did not exist.
-    """
+    """A NUL in a source URI is refused because no filesystem or URL permits one."""
     with pytest.raises(IngestionError):
         document_id(source, tenant)
 
@@ -91,14 +83,7 @@ FIELDS = st.lists(FIELD, min_size=1, max_size=4)
 
 @given(fields=st.lists(FIELD, min_size=2, max_size=4))
 def test_the_version_two_forgery_is_impossible_by_construction(fields: list[str]) -> None:
-    """Folding a NUL into a field to swallow its neighbour must change the digest.
-
-    The exact shape that collided under version 2: every tuple whose NUL-join equals the
-    original's reached the original's digest, so ``(x + NUL + y, z)`` hashed like
-    ``(x, y, z)`` and so did the one-field ``(x + NUL + y + NUL + z,)``. Each such forgery
-    is built here and must differ. This property was run against the version-2 digest before
-    landing and failed on its first example, which is what makes it evidence.
-    """
+    """Folding a NUL into a field to swallow its neighbour must change the digest."""
     original = _digest(*fields)
     for boundary in range(1, len(fields)):
         merged = [*fields[: boundary - 1], NUL.join(fields[boundary - 1 : boundary + 1])]
@@ -109,12 +94,7 @@ def test_the_version_two_forgery_is_impossible_by_construction(fields: list[str]
 
 @given(left=FIELDS, right=FIELDS)
 def test_distinct_tuples_never_share_a_digest(left: list[str], right: list[str]) -> None:
-    """Different tuples give different digests, whatever bytes the fields contain.
-
-    This is the guarantee the length prefix buys: a colon, a digit, or a NUL inside a field
-    cannot masquerade as a boundary, so ``("3:abc",)`` and ``("3", "abc")`` differ as surely
-    as ``("a",)`` and ``("b",)`` do.
-    """
+    """Different tuples give different digests, whatever bytes the fields contain."""
     assume(left != right)
 
     assert _digest(*left) != _digest(*right)
@@ -126,12 +106,7 @@ def test_the_digest_is_deterministic(fields: list[str]) -> None:
 
 
 def test_the_identity_version_is_three() -> None:
-    """Pinned because the lockfile records it.
-
-    An index built under version 2 must report drift rather than silently mix two id
-    schemes in one collection, so a change to the encoding that forgets the bump is caught
-    here before it is caught by an adopter.
-    """
+    """Pinned because the lockfile records it."""
     assert IDENTITY_VERSION == 3
 
 

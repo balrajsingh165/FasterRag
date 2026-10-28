@@ -36,12 +36,7 @@ COMPARED = ("tool", "status", "url")
 
 @pytest.fixture
 def fake_docker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[list[str]]:
-    """Replace every docker touchpoint of all three provisioners, recording the commands.
-
-    Everything above this boundary runs for real. The working directory moves to a temporary
-    one because the Langfuse provisioner writes generated secrets to ``./.env`` and Grafana
-    writes its manifests under ``./.fasterrag`` — a test must not put either in the tree.
-    """
+    """Replace every docker touchpoint of all three provisioners, recording the commands."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("QDRANT_API_KEY", "not-a-real-key")
     calls: list[list[str]] = []
@@ -177,13 +172,7 @@ def test_the_two_control_planes_report_the_same_thing(
     tool: str,
     verb: str,
 ) -> None:
-    """Same fakes, same settings, same answer — or the two surfaces have diverged again.
-
-    ``detail`` is compared for presence rather than equality, because the REST call here runs
-    first and provisioning converges: the second caller is truthfully told that the work was
-    already done. Requiring the two strings to match would be requiring provisioning not to
-    be idempotent.
-    """
+    """Same fakes, same settings, same answer — or the two surfaces have diverged again."""
     rest = over_rest(client, tool, verb)
     cli = over_cli(tool, verb, config, capsys)
 
@@ -197,12 +186,7 @@ def test_a_cli_run_after_a_rest_run_preserves_the_generated_secrets(
     config: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Trap T11, across surfaces: both planes converge on one ``.env``.
-
-    Rotating ``SALT``/``ENCRYPTION_KEY``/``NEXTAUTH_SECRET`` invalidates every credential the
-    stack has issued. Provisioning from REST and then from the CLI must therefore preserve,
-    not regenerate — and only a test that drives both can show that the two agree on the file.
-    """
+    """Trap T11, across surfaces: both planes converge on one ``.env``."""
     client.post("/v1/admin/provision/langfuse")
 
     second = over_cli("langfuse", "provision", config, capsys)
@@ -237,12 +221,7 @@ def test_an_unknown_tool_is_refused_with_a_problem_document(client: TestClient) 
 def test_a_provisioning_response_never_carries_a_generated_secret(
     client: TestClient, fake_docker: list[list[str]], tmp_path: Path
 ) -> None:
-    """Trap T11: the Langfuse provisioner mints nine secrets while answering this request.
-
-    They belong in ``.env`` and in the subprocess environment, nowhere else. A response body
-    is logged by proxies and printed by clients, so a value leaking into ``detail`` would be
-    a secret published to every hop between here and the operator.
-    """
+    """Trap T11: the Langfuse provisioner mints nine secrets while answering this request."""
     body = client.post("/v1/admin/provision/langfuse").json()
 
     rendered = json.dumps(body)

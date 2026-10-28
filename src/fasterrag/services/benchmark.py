@@ -154,12 +154,7 @@ def commit_hash() -> str:
 
 
 def percentile(values: Sequence[float], fraction: float) -> float:
-    """Return the nearest-rank percentile of ``values``.
-
-    Nearest-rank rather than interpolated: an interpolated p95 reports a latency no request
-    actually had, and with the small sample counts a benchmark run produces that invention
-    is large enough to matter.
-    """
+    """Return the nearest-rank percentile of ``values``."""
     if not values:
         return 0.0
 
@@ -235,19 +230,7 @@ async def measure(
     iterations: int,
     repetitions: int = REPETITIONS,
 ) -> tuple[BenchmarkRun | None, list[BenchmarkRun]]:
-    """Time an operation cold once, then warmed for each repetition.
-
-    Args:
-        operation: The awaitable being measured. Called once before the warmed runs begin,
-            and that first call is reported separately as the cold-start sample.
-        iterations: Calls per warmed repetition.
-        repetitions: How many warmed repetitions to run.
-
-    Returns:
-        The cold run and the warmed runs. The cold run holds exactly one sample by
-        construction: cold-start happens once and averaging it with itself would be
-        meaningless.
-    """
+    """Time an operation cold once, then warmed for each repetition."""
     started = time.perf_counter()
     await operation()
     cold = BenchmarkRun(
@@ -289,12 +272,7 @@ def ledger_entry(
     method: str = "",
     supersedes: str = "none",
 ) -> str:
-    """Render a ready-to-commit ledger entry.
-
-    Every one of the seven mandatory fields is emitted, populated from what was actually
-    measured. A template with a blank to fill in by hand is a template someone eventually
-    commits with the blank still in it.
-    """
+    """Render a ready-to-commit ledger entry."""
     machine = machine or fingerprint()
     median = result.median
     iterations = result.runs[0].operations if result.runs else 0

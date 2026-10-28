@@ -49,12 +49,7 @@ class CircuitOpenError(FasterRagError):
     """Raised instead of calling a provider whose breaker is open."""
 
     def __init__(self, provider: str, retry_after_seconds: float) -> None:
-        """Name the provider and when it is worth trying again.
-
-        Retryable by definition: the breaker's whole premise is that the provider is
-        expected to recover, and a caller that gives up permanently on an open circuit
-        would turn a transient outage into a lost job.
-        """
+        """Name the provider and when it is worth trying again."""
         super().__init__(
             f"the circuit breaker for {provider!r} is open after repeated failures; "
             f"it will probe again in {retry_after_seconds:.1f}s",
@@ -141,13 +136,7 @@ class CircuitBreaker:
         self._transition(CircuitState.CLOSED)
 
     def record_failure(self, error: FasterRagError | None = None) -> None:
-        """Note a call that failed, opening the breaker once the threshold is reached.
-
-        # CRITICAL: a non-retryable failure is ignored entirely. A bad API key fails the
-        # same way forever, so counting it would open the breaker, let it half-open after
-        # the timeout, fail again, and re-open — presenting a permanent misconfiguration as
-        # an intermittent outage and hiding the one error message that explains it.
-        """
+        """Note a call that failed, opening the breaker once the threshold is reached."""
         if not self.enabled:
             return
 

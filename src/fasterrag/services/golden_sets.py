@@ -33,13 +33,7 @@ _logger = get_logger(__name__)
 def candidates_from_sources(
     sources: Sequence[str], settings: Settings
 ) -> tuple[list[CandidateChunk], int]:
-    """Parse and chunk a corpus into generator candidates.
-
-    Returns:
-        The candidate chunks, and how many sources could not be read. Unreadable sources are
-        counted rather than raised: a golden set built from ninety-nine of a hundred
-        documents is useful, and failing the whole run over one corrupt file is not.
-    """
+    """Parse and chunk a corpus into generator candidates."""
     candidates: list[CandidateChunk] = []
     unreadable = 0
 
@@ -75,15 +69,7 @@ async def generate_from_sources(
     size: int,
     seed: int = 0,
 ) -> tuple[list[GoldenRecord], dict[str, int]]:
-    """Generate a golden set from a corpus and write it to ``destination``.
-
-    Returns:
-        The records and the generator's tally of what happened.
-
-    Raises:
-        FasterRagError: If the corpus yields no readable chunk, which would otherwise
-            produce an empty golden set that every later eval would score against silently.
-    """
+    """Generate a golden set from a corpus and write it to ``destination``."""
     candidates, unreadable = candidates_from_sources(sources, settings)
     if not candidates:
         raise FasterRagError(

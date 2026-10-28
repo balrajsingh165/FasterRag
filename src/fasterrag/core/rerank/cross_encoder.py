@@ -43,14 +43,7 @@ class Reranker(Protocol):
 
 
 def load_cross_encoder(model: str) -> Any:
-    """Load a cross-encoder model.
-
-    Imported lazily so that a deployment with reranking switched off never pays for the
-    dependency.
-
-    Raises:
-        ConfigError: If the reranking extra is not installed.
-    """
+    """Load a cross-encoder model."""
     try:
         from sentence_transformers import CrossEncoder
     except ImportError as exc:
@@ -71,15 +64,7 @@ class CrossEncoderReranker:
         self._model: Any | None = None
 
     def _loaded(self) -> Any:
-        """Return the model, loading it once on first use.
-
-        Raises:
-            RetrievalError: If the weights cannot be loaded. A cross-encoder is a
-                multi-gigabyte download that fails for mundane environmental reasons — no
-                disk, no memory, no page file, a half-finished download — and D4 requires
-                every one of them to degrade the response to ``hybrid_only`` rather than
-                fail the query. Loading is therefore classified exactly like scoring.
-        """
+        """Return the model, loading it once on first use."""
         if self._model is None:
             # CRITICAL: warning, not info. Nothing configures logging in a plain script or a
             # notebook, so an info line is invisible and the default reranker —
@@ -122,12 +107,7 @@ class CrossEncoderReranker:
         return self._model
 
     def score(self, query: str, chunks: Sequence[ScoredChunk]) -> list[float]:
-        """Score every query and chunk pair together.
-
-        Raises:
-            RetrievalError: If the model cannot be loaded or fails to score the batch,
-                which the caller turns into a degraded response rather than a failed query.
-        """
+        """Score every query and chunk pair together."""
         model = self._loaded()
         pairs = [(query, chunk.text) for chunk in chunks]
 

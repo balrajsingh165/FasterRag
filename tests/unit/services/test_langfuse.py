@@ -173,12 +173,7 @@ def test_the_plan_reports_the_documented_url(tmp_path: Path) -> None:
 
 
 def test_compose_is_always_told_where_the_env_file_is(tmp_path: Path) -> None:
-    """Compose looks beside the compose file; the secrets live at the project root instead.
-
-    Omitting the flag interpolates every secret to the empty string, and the stack starts
-    with blank passwords — which surfaces as a Postgres authentication error, not as a
-    missing-variable one.
-    """
+    """Compose looks beside the compose file; the secrets live at the project root instead."""
     arguments = compose_arguments(plan(tmp_path), "up", "-d")
 
     assert "--env-file" in arguments

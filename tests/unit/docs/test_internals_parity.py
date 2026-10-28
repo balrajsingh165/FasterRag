@@ -73,12 +73,7 @@ def _is_path_token(token: str) -> bool:
 
 
 def _sibling_group(token: str) -> list[str] | None:
-    """Expand the `fixed/recursive/.../late.py` shorthand for a run of sibling modules.
-
-    At least two heads are required. With one, `a/b.py` is indistinguishable in shape from
-    an ordinary relative path, so a mistyped one would pass whenever `a.py` and `b.py`
-    happen to be siblings — the shorthand this file actually carries always runs longer.
-    """
+    """Expand the `fixed/recursive/.../late.py` shorthand for a run of sibling modules."""
     if "/" not in token:
         return None
     *heads, tail = token.split("/")
@@ -105,17 +100,7 @@ def _hit(token: str, prefixes: Sequence[str], base: Path, want_dir: bool) -> str
 
 
 def _resolve_cell(cell: str, base: Path) -> list[tuple[str, str | None]]:
-    """Resolve each path token in one table cell, left to right.
-
-    A bare filename such as `models.py` is written relative to a directory the same cell
-    named earlier, so every directory already seen in the cell (plus the base itself) is a
-    candidate prefix. The cell order is not strictly nested — the observability row returns
-    to `observability/` after naming `core/tracing.py` — so any earlier prefix may match.
-
-    Returns:
-        One ``(token, resolved)`` pair per path token, in document order, where ``resolved``
-        is the path relative to ``base`` or ``None`` when nothing matched.
-    """
+    """Resolve each path token in one table cell, left to right."""
     prefixes = [""]
     found: list[tuple[str, str | None]] = []
     for token in _TOKEN.findall(cell):

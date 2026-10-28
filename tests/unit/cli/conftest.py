@@ -16,13 +16,7 @@ from fasterrag.observability.logging import _HANDLER_NAME
 
 @pytest.fixture(autouse=True)
 def no_leaked_log_handler() -> Iterator[None]:
-    """Strip the JSON log handler a command installed, before the next test runs.
-
-    ``main`` calls ``configure_logging``, which binds a handler to whatever ``sys.stderr``
-    is at that moment — under ``capsys`` that is a stream pytest closes when the test ends.
-    Left on the root logger, it turns the next log record emitted anywhere in the session
-    into a ``--- Logging error ---`` dump on an unrelated test's stderr.
-    """
+    """Strip the JSON log handler a command installed, before the next test runs."""
     yield
     root = logging.getLogger()
     for handler in list(root.handlers):

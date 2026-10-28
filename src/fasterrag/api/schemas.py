@@ -31,12 +31,7 @@ MAXIMUM_TOP_K = 100
 
 
 class Strict(BaseModel):
-    """Base model that refuses unknown fields.
-
-    A misspelled field is a silent no-op under the permissive default: a caller who sends
-    ``top-k`` instead of ``top_k`` would get the configured default and never learn their
-    override was ignored.
-    """
+    """Base model that refuses unknown fields."""
 
     model_config = ConfigDict(extra="forbid")
 

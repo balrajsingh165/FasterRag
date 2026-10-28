@@ -74,15 +74,7 @@ def leg_sets(draw: st.DrawFn, weights: st.SearchStrategy[float] = WEIGHT) -> lis
 
 @st.composite
 def leg_sets_with_a_silenced_leg(draw: st.DrawFn) -> list[Ranking]:
-    """Draw legs of which at least one is weighted zero, by construction.
-
-    ``WEIGHT`` reaches zero on its own, but only for two examples in five (measured). Reaching
-    the silenced case by drawing freely and then filtering with ``assume`` therefore discards
-    most of the budget, leaves the two tests below one unlucky seed away from Hypothesis's
-    ``filter_too_much`` health check, and — worse — makes them *vacuous* on every example it
-    does keep by accident rather than by design. Silencing a drawn leg instead means every
-    example exercises the path the test exists to check.
-    """
+    """Draw legs of which at least one is weighted zero, by construction."""
     legs = draw(leg_sets())
     silenced = draw(st.integers(min_value=0, max_value=len(legs) - 1))
     return [
@@ -131,13 +123,7 @@ def test_a_repeat_is_not_a_second_vote(leg: list[str], other: list[str], k: floa
 def test_the_order_the_legs_arrive_in_changes_nothing(
     legs: list[Ranking], k: float, data: st.DataObject
 ) -> None:
-    """Fusion is a sum, so it must be commutative in the legs — exactly, not nearly.
-
-    Exact equality is the point: a score that shifts by one ULP when the legs are reordered
-    is invisible until two documents that should have tied by id swap places. ``fsum`` makes
-    that impossible by construction; see the module docstring for why a running total would
-    also pass today, and why the guarantee is not left resting on that.
-    """
+    """Fusion is a sum, so it must be commutative in the legs — exactly, not nearly."""
     shuffled = data.draw(st.permutations(legs))
     assume([leg.name for leg in shuffled] != [leg.name for leg in legs])
 
@@ -196,12 +182,7 @@ def test_a_zero_weight_leg_still_reports_where_it_ranked_a_surviving_document(
 def test_a_document_no_leg_ranks_lower_never_scores_lower(
     legs: list[Ranking], k: float, data: st.DataObject
 ) -> None:
-    """Dominance: rank at least as well everywhere, and appear in at least as many legs.
-
-    Random legs almost never dominate one another, so the pair is constructed — ``alpha``
-    is inserted immediately ahead of ``beta`` in every leg ``beta`` appears in, and into a
-    generated subset of the rest.
-    """
+    """Dominance: rank at least as well everywhere, and appear in at least as many legs."""
     extras = data.draw(st.lists(st.booleans(), min_size=len(legs), max_size=len(legs)))
     cuts = data.draw(st.lists(st.integers(min_value=0, max_value=8), min_size=len(legs)))
     carries = data.draw(st.lists(st.booleans(), min_size=len(legs), max_size=len(legs)))
@@ -232,12 +213,7 @@ def test_a_document_no_leg_ranks_lower_never_scores_lower(
 def test_agreement_between_legs_beats_one_leg_s_favourite(
     position: int, k: float, weight: float
 ) -> None:
-    """Two legs agreeing at rank ``p`` beat a single leg's rank-1 result while ``p < k+2``.
-
-    That threshold is the whole reason ``k`` defaults to 60 rather than 0: it is derived
-    from ``2w/(k+p) > w/(k+1)``, so the property is checked against the arithmetic rather
-    than against one example that happened to work.
-    """
+    """Two legs agreeing at rank ``p`` beat a single leg's rank-1 result while ``p < k+2``."""
     assume(position < k + 2)
     dense = ["solo", *(f"d{n}" for n in range(position - 2)), "agreed"]
     sparse = [*(f"s{n}" for n in range(position - 1)), "agreed"]
@@ -301,13 +277,7 @@ def test_a_larger_constant_flattens_one_leg_s_positions(
 
 @st.composite
 def mirrored_leg_pairs(draw: st.DrawFn) -> list[Ranking]:
-    """Draw legs in mirror-image pairs, so ``alpha`` and ``beta`` must score identically.
-
-    Each pair is one generated leg plus its twin with ``alpha`` and ``beta`` swapped and the
-    same weight, so the two documents end up holding the *same multiset* of contributions —
-    only in a different order. Two pairs are the minimum that can expose the difference:
-    with a single pair each document sums two terms, and adding two floats is commutative.
-    """
+    """Draw legs in mirror-image pairs, so ``alpha`` and ``beta`` must score identically."""
     pairs = draw(st.integers(min_value=2, max_value=3))
     legs: list[Ranking] = []
     for index in range(pairs):
@@ -329,15 +299,7 @@ def mirrored_leg_pairs(draw: st.DrawFn) -> list[Ranking]:
 def test_documents_holding_the_same_contributions_score_the_same(
     legs: list[Ranking], k: float
 ) -> None:
-    """Equal sums must be equal floats, or the id tie-break silently never runs.
-
-    ``sum`` is not associative in general, so the same multiset of contributions added in two
-    orders can land one ULP apart — which looks harmless until the ordering of two documents
-    that should have tied starts depending on which leg the caller listed first.
-
-    This test does not currently distinguish ``sum`` from ``fsum``, and no input does: see the
-    module docstring. It pins the invariant, not the arithmetic.
-    """
+    """Equal sums must be equal floats, or the id tie-break silently never runs."""
     fused = rrf_fuse(*legs, k=k)
     by_id = scores(fused)
 

@@ -32,12 +32,7 @@ router = APIRouter(tags=["observability"])
 
 
 def _tenant_of(scope: Scope) -> str:
-    """Return the request's tenant label.
-
-    ``none`` covers both a single-tenant deployment and an unauthenticated request, which is
-    correct: neither belongs to a tenant, and inventing a label for them would split every
-    series in a deployment that has no tenants at all.
-    """
+    """Return the request's tenant label."""
     tenant = scope.get("state", {}).get("tenant")
     return str(tenant) if tenant else _UNKNOWN_TENANT
 

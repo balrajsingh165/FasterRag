@@ -106,25 +106,7 @@ def parse_bytes(
     max_bytes: int | None = None,
     options: ParsingOptions | None = None,
 ) -> ParsedDocument:
-    """Parse in-memory content, choosing the parser from ``filename``.
-
-    Args:
-        data: The raw document bytes.
-        filename: Name the content came from; only its extension is used.
-        max_bytes: Optional size ceiling, normally ``ingestion.max_document_mb``.
-        options: Parser thresholds, normally ``create_parsing_options(settings)``. A
-            narrow value object rather than ``Settings`` for the reason given in
-            :mod:`fasterrag.core.parsing.options`: parsing is a standalone component that
-            must stay usable without a configuration at all. ``None`` means the shipped
-            defaults, so an existing caller parses exactly as it did before.
-
-    Returns:
-        The structured document.
-
-    Raises:
-        IngestionError: With ``PAYLOAD_TOO_LARGE`` when the content exceeds ``max_bytes``.
-        ParseError: If the extension has no parser or the content cannot be parsed.
-    """
+    """Parse in-memory content, choosing the parser from ``filename``."""
     if max_bytes is not None and len(data) > max_bytes:
         raise IngestionError(
             f"{filename} is {len(data)} bytes, above the configured limit of {max_bytes}",
@@ -158,20 +140,7 @@ def parse_document(
     max_bytes: int | None = None,
     options: ParsingOptions | None = None,
 ) -> ParsedDocument:
-    """Read and parse a file from disk.
-
-    Args:
-        source: Path to the document.
-        max_bytes: Optional size ceiling, normally ``ingestion.max_document_mb``.
-        options: Parser thresholds; see :func:`parse_bytes`.
-
-    Returns:
-        The structured document.
-
-    Raises:
-        IngestionError: With ``PAYLOAD_TOO_LARGE`` when the file exceeds ``max_bytes``.
-        ParseError: If the file is missing, unreadable, or of an unsupported type.
-    """
+    """Read and parse a file from disk."""
     path = Path(source)
 
     # CRITICAL: the size is checked against the file's metadata before a byte is read.

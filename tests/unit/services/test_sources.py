@@ -19,13 +19,7 @@ def settings() -> Settings:
 def serve(
     handler: Callable[[httpx.Request], httpx.Response], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Route every AsyncClient the module builds through an in-memory transport.
-
-    The fake accepts exactly the keyword arguments production passes, by name, so a new
-    argument in ``_fetch`` fails here loudly instead of silently diverging from the suite.
-    The real class is captured before patching — ``sources.httpx`` is the global module, so
-    the patched name is also the one this helper would otherwise resolve.
-    """
+    """Route every AsyncClient the module builds through an in-memory transport."""
     real_client = httpx.AsyncClient
 
     def client(*, timeout: float, follow_redirects: bool) -> httpx.AsyncClient:
@@ -75,12 +69,7 @@ async def test_base64_inline_content_is_decoded() -> None:
 
 
 async def test_the_same_inline_payload_is_the_same_document_twice() -> None:
-    """The whole reason this was a blocker: identity must survive staging.
-
-    A canonical URI keyed on the temp path — or on the position in the request — would mint
-    a new document id on every ingest, so deduplication would never fire and the corpus
-    would grow a fresh copy each run with nothing reporting a problem.
-    """
+    """The whole reason this was a blocker: identity must survive staging."""
     first = await resolve_sources([{"type": "inline", "value": "same text"}], settings())
     second = await resolve_sources([{"type": "inline", "value": "same text"}], settings())
 

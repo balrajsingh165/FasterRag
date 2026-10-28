@@ -74,25 +74,7 @@ class RedisStore(CacheStore):
         setting: str = "cache.backend",
         client: Any | None = None,
     ) -> None:
-        """Build a store over ``url``, keeping its keys under ``namespace``.
-
-        Connecting is deferred: ``from_url`` builds a connection pool without opening a
-        socket, so a store is constructible at startup and only a real operation can fail.
-
-        Args:
-            url: Redis connection URL, from ``cache.redis_url`` or
-                ``embeddings.cache.redis_url``.
-            namespace: Key prefix isolating this cache from the other one and from anything
-                else sharing the server.
-            maximum_entries: Ceiling past which the least recently used entries are evicted.
-            setting: The configuration key that selected this backend, so an install or URL
-                error names the knob the operator set rather than the module that failed.
-            client: A pre-built client, used by tests. Supplying one skips the import, so
-                the backend is testable without the optional dependency installed.
-
-        Raises:
-            ConfigError: If the redis client is not installed, or the URL is malformed.
-        """
+        """Build a store over ``url``, keeping its keys under ``namespace``."""
         self._namespace = namespace
         self._index = f"{namespace}:index"
         self._sequence = f"{namespace}:seq"
@@ -131,13 +113,7 @@ class RedisStore(CacheStore):
 
     @asynccontextmanager
     async def _guard(self, operation: str) -> AsyncIterator[None]:
-        """Translate any backend failure inside the block into ``CacheError``.
-
-        Raises:
-            CacheError: If the wrapped operation fails. The message names the operation and
-                the exception type but never the value or the connection URL, either of
-                which can carry a credential into a log line.
-        """
+        """Translate any backend failure inside the block into ``CacheError``."""
         try:
             yield
         except self._failures as exc:
@@ -168,23 +144,7 @@ class RedisStore(CacheStore):
             await self._evict()
 
     async def _touch(self, key: str) -> None:
-        """Restack ``key`` as the most recently used entry.
-
-        # CRITICAL: the score is a Redis-side counter, never a client clock. `time.time()`
-        # resolves to 15.625 ms on Windows before Python 3.13 — measured, 2000 rapid calls
-        # returning two distinct values — so every entry touched inside one tick scored
-        # identically, and Redis breaks a sorted-set tie by comparing members
-        # lexicographically. Eviction was therefore alphabetical rather than
-        # least-recently-used on a supported platform, and systematically so: a hot key
-        # early in the alphabet was evicted again and again while a cold one late in it
-        # survived. The bug hid because CPython 3.13 gave Windows a 100 ns clock, so it
-        # reproduces only on the interpreter floor this package still supports.
-        #
-        # INCR also removes a hazard the wall clock always had here and nothing recorded:
-        # Redis is the backend chosen precisely because several replicas share it, and their
-        # clocks do not agree. A counter is strictly increasing, atomic, and identical for
-        # every replica, so recency no longer depends on whose clock was fast.
-        """
+        """Restack ``key`` as the most recently used entry."""
         await self._client.zadd(self._index, {key: await self._client.incr(self._sequence)})
 
     async def _evict(self) -> None:
@@ -214,12 +174,7 @@ class RedisStore(CacheStore):
             await self._forget([key])
 
     async def clear(self) -> None:
-        """Drop every entry this namespace owns, leaving co-tenant keys untouched.
-
-        Scoped through the index rather than ``FLUSHDB``: the server may be shared with the
-        other cache, with an unrelated application, or with a queue, and a cache that wipes
-        someone else's data on a corpus change is a fault, not an invalidation.
-        """
+        """Drop every entry this namespace owns, leaving co-tenant keys untouched."""
         async with self._guard("clear the cache"):
             members = [_member(raw) for raw in await self._client.zrange(self._index, 0, -1)]
             if members:
@@ -248,12 +203,7 @@ class RedisStore(CacheStore):
             return found
 
     async def close(self) -> None:
-        """Release the connection pool.
-
-        A failed disconnect is logged rather than raised. ``close`` runs on the shutdown
-        path, where the only thing raising achieves is turning an orderly stop into a
-        traceback over a resource the process is about to drop anyway.
-        """
+        """Release the connection pool."""
         try:
             await self._client.aclose()
         except self._failures as exc:

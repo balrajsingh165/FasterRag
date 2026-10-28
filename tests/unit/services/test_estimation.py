@@ -177,12 +177,7 @@ def test_an_enabled_estimator_passes_the_guard() -> None:
 
 
 def test_the_throughput_measurement_survives_the_estimator_being_off(corpus: list[str]) -> None:
-    """The one deliberate exemption, pinned here so it stays deliberate.
-
-    ``benchmark --suite ingest`` reuses this function to time parse-and-chunk and reports no
-    cost at all, so switching cost estimation off must not take the benchmark harness with
-    it. That is why the gate sits at the D9 entry points rather than inside this function.
-    """
+    """The one deliberate exemption, pinned here so it stays deliberate."""
     estimate = estimate_sources(corpus, settings(cost={"estimator": False}))
 
     assert estimate.documents == 2

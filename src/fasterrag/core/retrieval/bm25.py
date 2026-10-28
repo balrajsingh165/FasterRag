@@ -128,25 +128,12 @@ _stemmer = snowballstemmer.stemmer("english")
 
 @lru_cache(maxsize=100_000)
 def term_index(term: str) -> int:
-    """Return the stable numeric index for a term.
-
-    Sparse vectors are keyed by integer, so terms are hashed. The hash is stable across
-    processes and releases — changing it would silently invalidate every indexed sparse
-    vector, exactly like changing the point-id namespace.
-    """
+    """Return the stable numeric index for a term."""
     return zlib.crc32(term.encode("utf-8")) & _TERM_MASK
 
 
 def tokenize(text: str) -> list[str]:
-    """Split text into stemmed, stopword-filtered terms.
-
-    Identifiers keep their internal punctuation, so ``bge-small-en`` and ``v1.9.0`` survive
-    as single terms rather than fragmenting into meaningless pieces — those exact tokens are
-    the main reason a keyword leg exists at all.
-
-    Both filters run again after stemming, because stemming can shorten a token past the
-    minimum or turn it into a stopword: ``ueds`` stems to ``u`` and ``doing`` to ``do``.
-    """
+    """Split text into stemmed, stopword-filtered terms."""
     candidates = [
         token
         for token in _TOKEN.findall(text.lower())
@@ -160,21 +147,7 @@ def tokenize(text: str) -> list[str]:
 
 
 def encode_document(text: str, *, k1: float = K1, b: float = B) -> SparseVector:
-    """Encode a passage as saturated term frequencies.
-
-    Saturation is what stops a term repeated fifty times from dominating: the weight grows
-    quickly for the first few occurrences and then flattens. Length normalization keeps a
-    long document from outscoring a short, precise one purely by having more words.
-
-    Args:
-        text: The passage to encode.
-        k1: Saturation rate. Lower flattens sooner, so repetition counts for less.
-        b: Length-normalization strength, from ``0`` (off) to ``1`` (full).
-
-    Returns:
-        The sparse vector for the passage: one entry per distinct term index, ordered by the
-        term that first claimed the index.
-    """
+    """Encode a passage as saturated term frequencies."""
     terms = tokenize(text)
     if not terms:
         return SparseVector(indices=(), values=())

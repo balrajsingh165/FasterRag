@@ -209,13 +209,7 @@ def _digest(*parts: str) -> str:
 
 
 def table_name_for(collection: str) -> str:
-    """Return the deterministic table name a collection's points are stored in.
-
-    Collection names allow characters and lengths PostgreSQL identifiers do not, so the
-    name is slugged for readability and suffixed with a hash for uniqueness. Exported
-    because an operator inspecting a database has to map a table back to a collection, and
-    guessing is how the wrong table gets dropped.
-    """
+    """Return the deterministic table name a collection's points are stored in."""
     return f"{_TABLE_PREFIX}_{_slug(collection)}_{_digest(collection)}"
 
 
@@ -225,12 +219,7 @@ def _snapshot_table_name(collection: str, snapshot: str) -> str:
 
 
 def _distance_of(stored: str) -> Distance:
-    """Translate a catalog distance value back into the neutral literal.
-
-    Raises:
-        FasterRagError: With ``INTERNAL`` if the catalog holds a distance this build does
-            not know, which means the schema was written by a different version.
-    """
+    """Translate a catalog distance value back into the neutral literal."""
     known = _DISTANCES.get(stored)
     if known is None:
         raise FasterRagError(
@@ -261,17 +250,7 @@ class PgvectorAdapter(VectorDBAdapter):
     """PostgreSQL + pgvector implementation of the vector database contract."""
 
     def __init__(self, settings: Settings) -> None:
-        """Build the adapter. No connection is opened until an operation runs.
-
-        Args:
-            settings: Validated configuration supplying the environment variable holding
-                the DSN, the schema to own, and the shared vector-database timeout.
-
-        Raises:
-            ConfigError: If the ``pgvector`` extra is not installed. Failing here rather
-                than at first query means a misinstalled deployment cannot start and then
-                die under traffic.
-        """
+        """Build the adapter. No connection is opened until an operation runs."""
         if _DRIVER_IMPORT_ERROR is not None:
             raise ConfigError(
                 "vector_db.provider is 'pgvector' but its driver is not installed "
@@ -320,13 +299,7 @@ class PgvectorAdapter(VectorDBAdapter):
 
     @staticmethod
     def _require_compatible_event_loop() -> None:
-        """Reject Windows' default event loop before psycopg reports it as a query failure.
-
-        Raises:
-            ProviderError: On Windows under a proactor loop, where psycopg's async driver
-                refuses to run at all and would otherwise surface as an opaque interface
-                error on the first statement.
-        """
+        """Reject Windows' default event loop before psycopg reports it as a query failure."""
         # CRITICAL: the whole check sits *inside* `if sys.platform == "win32"`, and that
         # shape is load-bearing for the typecheck rather than a style choice. mypy narrows
         # `sys.platform` to whichever platform it is checking for, so the earlier form —
@@ -381,16 +354,7 @@ class PgvectorAdapter(VectorDBAdapter):
             return opened
 
     async def _bootstrap(self) -> None:
-        """Converge the schema on one standalone connection, before the pool opens.
-
-        Deliberately not pool ``configure`` work, for two independent reasons. ``CREATE TABLE
-        IF NOT EXISTS`` is not race-free — two sessions running it at the same instant still
-        collide on the catalog's unique index — and a pool opens several connections at once,
-        so putting the DDL there would manufacture the race a single connection never had.
-        And a rejected credential has to surface as the authentication failure it is: a pool
-        retries a failed connection in the background and reports only that it could not fill
-        in time, which would turn a wrong password into a retryable timeout.
-        """
+        """Converge the schema on one standalone connection, before the pool opens."""
         async with await psycopg.AsyncConnection.connect(
             self._dsn(),
             autocommit=True,
@@ -414,12 +378,7 @@ class PgvectorAdapter(VectorDBAdapter):
 
     @asynccontextmanager
     async def _maintenance(self, connection: AsyncConnection[DictRow]) -> AsyncIterator[None]:
-        """Run a transaction under the longer maintenance budget.
-
-        ``SET LOCAL`` rather than ``SET``: the setting dies with the transaction, so a
-        maintenance statement that fails cannot return a connection to the pool still
-        carrying a budget long enough to hide a hung query.
-        """
+        """Run a transaction under the longer maintenance budget."""
         async with connection.transaction():
             await connection.execute(
                 sql.SQL("SET LOCAL statement_timeout = {budget}").format(
@@ -547,13 +506,7 @@ class PgvectorAdapter(VectorDBAdapter):
 
     @asynccontextmanager
     async def _session(self, operation: str) -> AsyncIterator[AsyncConnection[DictRow]]:
-        """Borrow one pooled connection for one operation, translating vendor failures.
-
-        Nothing is serialized here. Each caller gets its own connection, so a statement
-        waiting on a lock delays only itself; the adapter used to hold a single connection
-        under an ``asyncio.Lock``, which made every operation queue behind the slowest one.
-        Discarding a connection left unusable is the pool's job now, done when it is returned.
-        """
+        """Borrow one pooled connection for one operation, translating vendor failures."""
         try:
             pool = await self._ensure_pool()
             async with pool.connection() as connection:
@@ -564,25 +517,7 @@ class PgvectorAdapter(VectorDBAdapter):
     def _filter_sql(
         self, filters: Filter | None, *, payload: sql.Composable | None = None
     ) -> tuple[sql.Composable, list[Any]]:
-        """Translate a vendor-neutral filter expression into a jsonb ``WHERE`` clause.
-
-        Equality goes through ``@>`` rather than ``->>`` so it matches Qdrant's semantics —
-        a scalar also matches an array payload containing it — and so the GIN index on the
-        payload can serve it. Range comparisons compare jsonb values directly rather than
-        casting to numeric: a cast raises on the first non-numeric value stored under that
-        key, which turns one malformed document into a failed query.
-
-        Args:
-            filters: The validated expression, or ``None`` for no filtering.
-            payload: The payload column reference, qualified by the caller when the query
-                joins more than one table and a bare name would be ambiguous.
-
-        Returns:
-            The clause and its positional parameters; ``TRUE`` when nothing is filtered.
-
-        Raises:
-            FasterRagError: With ``VALIDATION_FAILED`` if the expression is unsupported.
-        """
+        """Translate a vendor-neutral filter expression into a jsonb ``WHERE`` clause."""
         validate_filter(filters)
         if not filters:
             return sql.SQL("TRUE"), []
@@ -672,12 +607,7 @@ class PgvectorAdapter(VectorDBAdapter):
         )
 
     async def _require(self, connection: AsyncConnection[DictRow], name: str) -> _Collection:
-        """Resolve a collection, raising rather than letting a typo read an empty result.
-
-        Raises:
-            FasterRagError: With ``NOT_FOUND`` when neither a collection nor an alias
-                answers to the name.
-        """
+        """Resolve a collection, raising rather than letting a typo read an empty result."""
         found = await self._lookup(connection, name)
         if found is None:
             raise FasterRagError(
@@ -700,12 +630,7 @@ class PgvectorAdapter(VectorDBAdapter):
     async def _create_tables(
         self, connection: AsyncConnection[DictRow], spec: CollectionSpec
     ) -> None:
-        """Create one collection's tables, indexes, and catalog row.
-
-        ``shard_number`` and ``replication_factor`` are accepted and ignored: a single
-        PostgreSQL instance has no equivalent, and reinterpreting them as partitions or
-        replicas would silently give an operator something other than what was asked for.
-        """
+        """Create one collection's tables, indexes, and catalog row."""
         table = table_name_for(spec.name)
         await connection.execute(
             sql.SQL(
@@ -756,12 +681,7 @@ class PgvectorAdapter(VectorDBAdapter):
 
     @staticmethod
     def _require_compatible(spec: CollectionSpec, existing: _Collection) -> None:
-        """Reject an existing collection that cannot hold ``spec``.
-
-        Raises:
-            FasterRagError: With ``CONFLICT`` on a dimension, distance, or sparse-leg
-                mismatch.
-        """
+        """Reject an existing collection that cannot hold ``spec``."""
         if existing.dimensions != spec.dimensions:
             raise FasterRagError(
                 f"collection {spec.name!r} already exists with {existing.dimensions} "
@@ -784,12 +704,7 @@ class PgvectorAdapter(VectorDBAdapter):
             )
 
     async def list_collections(self) -> list[CollectionInfo]:
-        """Return every collection in the schema, with an exact row count.
-
-        ``count(*)`` rather than ``reltuples``: the estimate reads as ``-1`` until
-        ``ANALYZE`` has run, which is exactly the state a freshly ingested collection is in
-        when someone asks how much landed.
-        """
+        """Return every collection in the schema, with an exact row count."""
         async with self._session("list_collections") as connection:
             cursor = await connection.execute(
                 sql.SQL(
@@ -819,12 +734,7 @@ class PgvectorAdapter(VectorDBAdapter):
             return described
 
     async def drop_collection(self, name: str) -> bool:
-        """Delete a collection, its postings, its snapshots, and any alias pointing at it.
-
-        Snapshots go with it, matching Qdrant: a snapshot of a collection that no longer
-        exists is a table nothing references and nothing will ever restore, and leaving it
-        behind is how a database quietly fills up.
-        """
+        """Delete a collection, its postings, its snapshots, and any alias pointing at it."""
         async with self._session("drop_collection") as connection:
             cursor = await connection.execute(
                 sql.SQL("SELECT table_name FROM {catalog} WHERE name = %s").format(
@@ -942,22 +852,7 @@ class PgvectorAdapter(VectorDBAdapter):
             return True
 
     async def restore_snapshot(self, collection: str, snapshot: str) -> None:
-        """Replace a collection's contents with those a snapshot holds.
-
-        The whole restore is one transaction, so a failure part-way leaves the collection as
-        it was rather than emptied — an incident is the worst possible time to discover that
-        a restore truncated first and failed second.
-
-        This undoes writes; it does not resurrect a dropped collection. Dropping takes the
-        collection's snapshots with it, here and on Qdrant alike, so there is nothing left
-        to restore from — recovering a dropped collection is a ``pg_dump`` restore, and
-        pretending otherwise would be the more dangerous answer.
-
-        Raises:
-            FasterRagError: With ``NOT_FOUND`` if no such snapshot is recorded or the
-                collection is gone, or ``CONFLICT`` if the live collection cannot hold what
-                the snapshot carries.
-        """
+        """Replace a collection's contents with those a snapshot holds."""
         async with self._session("restore_snapshot") as connection:
             cursor = await connection.execute(
                 sql.SQL(
@@ -1002,13 +897,7 @@ class PgvectorAdapter(VectorDBAdapter):
                     )
 
     async def set_alias(self, alias: str, collection: str) -> None:
-        """Point an alias at a collection in one atomic catalog write.
-
-        Raises:
-            FasterRagError: With ``NOT_FOUND`` if the collection does not exist, or
-                ``CONFLICT`` if a real collection already answers to the alias name — which
-                would make the alias unreachable and hide the swap it exists to perform.
-        """
+        """Point an alias at a collection in one atomic catalog write."""
         async with self._session("set_alias") as connection:
             await self._require(connection, collection)
             clash = await connection.execute(
@@ -1097,12 +986,7 @@ class PgvectorAdapter(VectorDBAdapter):
     async def _write_terms(
         self, connection: AsyncConnection[DictRow], target: _Collection, batch: list[Point]
     ) -> None:
-        """Replace the posting list for every point in a batch.
-
-        Replaced rather than merged: a re-ingested chunk whose text lost a term must lose
-        that posting too, or the keyword leg keeps matching wording the corpus no longer
-        contains.
-        """
+        """Replace the posting list for every point in a batch."""
         await connection.execute(
             sql.SQL("DELETE FROM {terms} WHERE point_id = ANY(%s)").format(
                 terms=self._qualified(target.terms_table)
@@ -1132,12 +1016,7 @@ class PgvectorAdapter(VectorDBAdapter):
 
     @staticmethod
     def _require_sparse_index(target: _Collection, batch: list[Point]) -> None:
-        """Reject a sparse vector aimed at a collection that has no keyword index.
-
-        Raises:
-            EmbedError: Naming the point, because the alternative is accepting the write
-                and silently discarding the leg the caller asked for.
-        """
+        """Reject a sparse vector aimed at a collection that has no keyword index."""
         if target.sparse:
             return
         carried = next((point for point in batch if point.sparse is not None), None)
@@ -1150,12 +1029,7 @@ class PgvectorAdapter(VectorDBAdapter):
 
     @staticmethod
     def _require_matching_dimensions(target: _Collection, batch: list[Point]) -> None:
-        """Reject a batch whose vectors do not match the collection's declared width.
-
-        Raises:
-            EmbedError: Naming both widths, because the cause is a changed embedding model
-                and the fix is a reindex, not a retry.
-        """
+        """Reject a batch whose vectors do not match the collection's declared width."""
         for point in batch:
             actual = len(point.vector)
             if actual != target.dimensions:
@@ -1169,14 +1043,7 @@ class PgvectorAdapter(VectorDBAdapter):
     async def iterate_points(
         self, collection: str, *, with_vectors: bool = False, batch_size: int = 256
     ) -> AsyncIterator[Point]:
-        """Yield every point in a collection, one keyset page at a time.
-
-        Keyset pagination on the primary key rather than a held server-side cursor: a cursor
-        pins a transaction open for the whole walk, so exporting a large collection would
-        block autovacuum for as long as the export runs. The trade is that a concurrent
-        insert may or may not be seen, which the contract already permits — it specifies
-        neither an ordering nor a snapshot.
-        """
+        """Yield every point in a collection, one keyset page at a time."""
         after = ""
         while True:
             async with self._session("iterate_points") as connection:
@@ -1238,12 +1105,7 @@ class PgvectorAdapter(VectorDBAdapter):
 
     @staticmethod
     def _projection(query: SearchQuery, *, qualified: bool = False) -> sql.Composable:
-        """Return the payload and vector columns a search should transfer.
-
-        Nothing unrequested is selected: a payload or a full vector per hit is the largest
-        thing a search moves, and transferring it to discard it client-side is the kind of
-        waste that only shows up at corpus scale.
-        """
+        """Return the payload and vector columns a search should transfer."""
         columns: list[sql.Composable] = []
         if query.with_payload:
             columns.append(sql.SQL(", points.payload") if qualified else sql.SQL(", payload"))
@@ -1275,18 +1137,7 @@ class PgvectorAdapter(VectorDBAdapter):
     async def _search_sparse(
         self, connection: AsyncConnection[DictRow], target: _Collection, query: SearchQuery
     ) -> list[DictRow]:
-        """Run the keyword leg, computing IDF over the live corpus.
-
-        The IDF term is the Robertson/Sparck-Jones form Qdrant's ``Modifier.IDF`` applies,
-        so the same query produces the same ranking on both backends. Document frequency is
-        counted over the whole collection rather than the filtered subset, because a filter
-        decides which documents may be returned, not what the corpus is.
-
-        Raises:
-            FasterRagError: With ``VALIDATION_FAILED`` if the collection has no sparse
-                index, rather than returning the empty result a missing posting table would
-                otherwise produce.
-        """
+        """Run the keyword leg, computing IDF over the live corpus."""
         if not target.sparse:
             raise FasterRagError(
                 f"collection {target.name!r} has no sparse index, so it cannot serve a "
@@ -1350,12 +1201,7 @@ class PgvectorAdapter(VectorDBAdapter):
                     )
 
     async def delete(self, selector: PointSelector) -> None:
-        """Delete the selected points, and their postings with them.
-
-        Raises:
-            FasterRagError: With ``VALIDATION_FAILED`` for an empty filter, which would
-                otherwise read as "delete everything".
-        """
+        """Delete the selected points, and their postings with them."""
         if selector.point_ids is not None:
             clause: sql.Composable = sql.SQL("point_id = ANY(%s)")
             params: list[Any] = [list(selector.point_ids)]

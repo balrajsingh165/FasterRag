@@ -62,26 +62,7 @@ def load_settings(
     require_env: bool = True,
     overrides: Sequence[str] | None = None,
 ) -> Settings:
-    """Load and validate configuration, or fail with a ``ConfigError``.
-
-    Args:
-        path: Path to ``config.yaml``.
-        env_file: Optional ``.env`` file loaded into the environment before the
-            presence check. Existing environment variables always win; ``None`` skips
-            the file and checks the process environment as-is.
-        require_env: Whether a referenced-but-absent environment variable is an error.
-        overrides: ``dotted.key=value`` strings applied over the file's contents before
-            validation, so an override is held to exactly the same schema, range, and
-            cross-field rules a file value is.
-
-    Returns:
-        The validated, immutable settings.
-
-    Raises:
-        ConfigError: If the file is missing or unreadable, the YAML is malformed, any
-            key violates the schema or a cross-field rule, an override is malformed or
-            names an unknown key, or a referenced environment variable is absent or blank.
-    """
+    """Load and validate configuration, or fail with a ``ConfigError``."""
     config_path = Path(path)
     raw = _read_yaml(config_path)
 
@@ -106,19 +87,7 @@ def load_settings(
 
 
 def env_overrides() -> list[str]:
-    """Return the ``dotted.key=value`` overrides named by ``FASTERRAG_SET``.
-
-    The environment-variable form of ``--set``, because a container has no command line to
-    add flags to. A compose override file can set an environment variable on one service;
-    making it append a flag instead means restating the whole ``command``, which then has to
-    be kept in step with the base file by hand.
-
-    Entries are comma-separated. A value containing a comma has to use the ``--set`` flag,
-    which takes one override per occurrence and needs no separator at all.
-
-    Returns:
-        The overrides, empty when the variable is unset or blank.
-    """
+    """Return the ``dotted.key=value`` overrides named by ``FASTERRAG_SET``."""
     raw = os.environ.get(ENV_OVERRIDE_VAR, "").strip()
     if not raw:
         return []
@@ -126,29 +95,7 @@ def env_overrides() -> list[str]:
 
 
 def apply_overrides(raw: dict[str, Any], overrides: Sequence[str]) -> dict[str, Any]:
-    """Return ``raw`` with each ``dotted.key=value`` override merged in.
-
-    Values are parsed as YAML scalars, so ``true``, ``512``, ``0.75``, and ``null`` arrive
-    as the types the schema expects rather than as strings. A value that is genuinely a
-    string still works, because YAML reads a bare word as one.
-
-    Overrides are merged *before* validation rather than set on a built ``Settings``.
-    Settings are immutable and cross-field rules run at construction, so patching an
-    instance afterwards would either fail or skip the very rules that catch a bad
-    combination — ``--set retrieval.top_k=200`` must still be checked against
-    ``rerank_top_n``.
-
-    Args:
-        raw: The configuration mapping read from the file.
-        overrides: ``dotted.key=value`` strings, applied in order.
-
-    Returns:
-        A new mapping with the overrides applied.
-
-    Raises:
-        ConfigError: If an override has no ``=``, has an empty key, or traverses through
-            a key whose existing value is a scalar.
-    """
+    """Return ``raw`` with each ``dotted.key=value`` override merged in."""
     merged = deepcopy(raw)
 
     for override in overrides:
@@ -232,12 +179,7 @@ def _validate(raw: dict[str, Any], config_path: Path) -> Settings:
 
 
 def _format_violations(exc: ValidationError) -> str:
-    """Render validation failures as ``key: reason`` lines.
-
-    Only the location and the reason are included. Offending input values are
-    deliberately omitted so that a credential mistakenly pasted into ``config.yaml``
-    cannot reach the logs.
-    """
+    """Render validation failures as ``key: reason`` lines."""
     lines: list[str] = []
     for error in exc.errors():
         location = ".".join(str(part) for part in error["loc"]) or "<root>"

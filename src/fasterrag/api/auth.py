@@ -108,12 +108,7 @@ def required_scope(path: str) -> str | None:
 
 
 def _parse_scopes(raw: str) -> frozenset[str]:
-    """Parse a comma-separated scope list, rejecting anything undefined.
-
-    Raises:
-        ConfigError: If a scope is not one of the four documented ones. A typo like
-            ``collection`` would otherwise produce a key that silently permits nothing.
-    """
+    """Parse a comma-separated scope list, rejecting anything undefined."""
     scopes = {part.strip() for part in raw.split(",") if part.strip()}
     unknown = scopes - ALL_SCOPES
     if unknown:
@@ -125,23 +120,7 @@ def _parse_scopes(raw: str) -> frozenset[str]:
 
 
 def load_keys(settings: Settings) -> list[ApiKey]:
-    """Load API keys from the environment variable configuration names.
-
-    Keys are separated by ``;`` and scopes within a key by ``,``, each entry optionally
-    carrying scopes and then a tenant after a colon::
-
-        FASTERRAG_API_KEY=secret-one:query,ingest:acme; secret-two:admin
-
-    # CRITICAL: the two separators must differ. Using a comma for both makes
-    # `a:query,ingest` ambiguous — it reads equally as one key with two scopes or as two
-    # keys, and the parser would silently pick one. A bare secret with no scopes gets all
-    # four, which is the single-operator case.
-
-    Raises:
-        ConfigError: If the variable is unset or empty while auth is on. Starting with
-            authentication enabled and no keys would refuse every request, which reads as a
-            broken deployment rather than a configuration mistake.
-    """
+    """Load API keys from the environment variable configuration names."""
     name = settings.security.api_key_env
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -180,13 +159,7 @@ class KeyRegistry:
         self._keys = keys
 
     def resolve(self, presented: str) -> ApiKey | None:
-        """Return the matching key, or ``None``.
-
-        # CRITICAL: every key is compared with `secrets.compare_digest`, and the loop does
-        # not break early. A dict lookup or an early return leaks how much of a guess was
-        # correct through response timing, which is exactly what a constant-time compare
-        # exists to prevent.
-        """
+        """Return the matching key, or ``None``."""
         found: ApiKey | None = None
         for key in self._keys:
             if secrets.compare_digest(key.secret, presented):
@@ -203,13 +176,7 @@ class RateLimiter:
     _seen: dict[str, deque[float]] = field(default_factory=dict)
 
     def allow(self, identity: str, now: float | None = None) -> tuple[bool, int]:
-        """Record a request and report whether it is permitted.
-
-        Returns:
-            Whether to allow it, and the seconds a refused caller should wait — the value
-            that becomes ``Retry-After``. Telling a client to back off without saying how
-            long invites an immediate retry, which is the behaviour the limit exists to stop.
-        """
+        """Record a request and report whether it is permitted."""
         moment = time.monotonic() if now is None else now
         window = self._seen.setdefault(identity, deque())
 
@@ -228,13 +195,7 @@ class AuthMiddleware:
     """Authenticates every request, checks its scope, and applies the rate limit."""
 
     def __init__(self, app: ASGIApp, settings: Settings) -> None:
-        """Wrap the application, loading keys once at startup.
-
-        Raises:
-            ConfigError: If auth is enabled with no usable key. Failing at construction
-                means a misconfigured deployment refuses to start rather than refusing
-                every request afterwards.
-        """
+        """Wrap the application, loading keys once at startup."""
         self.app = app
         self.enabled = settings.security.auth
         self.multi_tenancy = settings.security.multi_tenancy
@@ -357,13 +318,7 @@ class AuthMiddleware:
 
 
 def _tenant_refusal(key: ApiKey, declared: str | None) -> FasterRagError | None:
-    """Return the error for a tenant mismatch, or ``None`` when the request is in bounds.
-
-    Three rules, and the third is the one that matters: a key **bound to a tenant** may only
-    act as that tenant. A key with no tenant is an operator credential and may act as any,
-    but must still say which — an unstated tenant would otherwise silently read and write
-    the untenanted namespace while multi-tenancy is supposedly on.
-    """
+    """Return the error for a tenant mismatch, or ``None`` when the request is in bounds."""
     if declared is None:
         return FasterRagError(
             "security.multi_tenancy is on, so every request must carry a tenant header",

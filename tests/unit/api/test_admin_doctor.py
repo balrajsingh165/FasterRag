@@ -49,13 +49,7 @@ class StoppedBackend:
 
 @pytest.fixture
 def repairable_machine(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Describe a machine whose two repairable failures are both present.
-
-    Returns the list every repair primitive appends to. An empty list is the assertion the
-    whole module exists to make, so the primitives are replaced by recorders rather than
-    by raisers: a recorder lets the request finish and fail on the evidence, while a raiser
-    would surface as a ``500`` and prove only that something went wrong.
-    """
+    """Describe a machine whose two repairable failures are both present."""
     touched: list[str] = []
 
     async def docker_up() -> bool:
@@ -120,12 +114,7 @@ def test_a_repairable_failure_is_reported_and_not_repaired(
 def test_a_stopped_managed_container_is_not_started_by_a_read(
     client: TestClient, repairable_machine: list[str]
 ) -> None:
-    """The label guard decides whether ``--fix`` may start a container; a read never may.
-
-    The container here carries ``fasterrag.managed=true`` and is stopped, which is the one
-    state the repair is permitted to act on — so if the endpoint ever repaired, this is the
-    case where it would.
-    """
+    """The label guard decides whether ``--fix`` may start a container; a read never may."""
     assert named(report(client), "vector_db")["passed"] is False
     assert repairable_machine == []
 
@@ -140,13 +129,7 @@ def test_the_response_is_the_report_and_not_a_fix_outcome(client: TestClient) ->
 
 
 def test_the_rest_repair_route_is_documented_as_shipped_not_as_planned() -> None:
-    """TASK-0258 is closed in the code, so it must read as closed in the reference.
-
-    ``scripts/check_openapi_drift.py`` splits the reference into shipped and planned on the
-    "not yet implemented" marker and fails either way round. Leaving the marker behind now
-    that the route is served would make the reference understate the system, which is the
-    direction a doc-only change would have taken this task.
-    """
+    """TASK-0258 is closed in the code, so it must read as closed in the reference."""
     shipped, planned = documented_routes()
 
     assert "POST /v1/admin/doctor/fix" in shipped
@@ -156,12 +139,7 @@ def test_the_rest_repair_route_is_documented_as_shipped_not_as_planned() -> None
 
 @pytest.fixture
 def repairing_machine(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Describe the same repairable machine, with repairs that do take effect.
-
-    Returns the mutable state the fakes read and write, so a test can flip ``managed`` to
-    describe a container that is not fasterRag's before issuing the request, and read
-    ``touched`` afterwards to see which Docker primitives were reached.
-    """
+    """Describe the same repairable machine, with repairs that do take effect."""
     state: dict[str, Any] = {"volume": False, "running": False, "managed": True, "touched": []}
 
     async def docker_up() -> bool:
@@ -270,12 +248,7 @@ def test_a_container_without_the_managed_label_is_not_started(
 def test_a_repair_that_leaves_the_check_failing_is_not_reported_as_fixed(
     client: TestClient, repairable_machine: list[str]
 ) -> None:
-    """The status comes from the second report, never from the repair returning (T12).
-
-    Every repair primitive is reached here and returns cleanly while the machine it was
-    asked to change keeps reporting what it reported before. A surface that classified from
-    the call rather than from the re-check would answer ``fixed`` twice.
-    """
+    """The status comes from the second report, never from the repair returning (T12)."""
     body = fix(client)
 
     assert f"ensure_volume:{VOLUME}" in repairable_machine

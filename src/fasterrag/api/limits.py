@@ -93,12 +93,7 @@ async def _empty_receive() -> Message:
 
 
 def _counted(receive: Receive, limit_bytes: int) -> Receive:
-    """Wrap ``receive`` so the body is refused the moment it passes the ceiling.
-
-    # CRITICAL: raising here rather than returning a truncated body. A handler handed a
-    # short read would parse whatever arrived and answer as though the request were
-    # complete, which turns a rejected upload into a silently partial one.
-    """
+    """Wrap ``receive`` so the body is refused the moment it passes the ceiling."""
     seen = 0
 
     async def counted() -> Message:

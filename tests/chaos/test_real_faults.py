@@ -92,12 +92,7 @@ def chaos_settings() -> Settings:
 
 
 def require_docker() -> None:
-    """Skip rather than fail when Docker cannot be used.
-
-    A daemon that is merely stopped makes ``docker info`` exit non-zero, but a machine with
-    no Docker CLI at all makes the provisioner raise instead, and both mean the same thing
-    here. The skip carries the reason so an unusable daemon in CI is still legible.
-    """
+    """Skip rather than fail when Docker cannot be used."""
     try:
         available = asyncio.run(docker_available())
     except ProvisioningError as exc:
@@ -206,12 +201,7 @@ async def adapter(real_qdrant: Settings) -> AsyncIterator[QdrantAdapter]:
 
 @pytest.fixture
 def stopped(real_qdrant: Settings) -> Iterator[Settings]:
-    """Really stop the throwaway container for one case, then bring it back.
-
-    The restart lives in teardown so a failing assertion cannot leave the container down for
-    whatever runs next, and ``docker start`` is idempotent, so a case that restarts the
-    container itself to assert recovery is free to do so.
-    """
+    """Really stop the throwaway container for one case, then bring it back."""
     asyncio.run(docker_or_fail(["stop", QDRANT_CONTAINER]))
     yield real_qdrant
     asyncio.run(docker_or_fail(["start", QDRANT_CONTAINER]))
@@ -229,25 +219,7 @@ async def test_a_real_query_against_a_running_container_succeeds(adapter: Qdrant
 async def test_a_really_stopped_container_fails_typed_retryable_and_fast(
     adapter: QdrantAdapter, stopped: Settings
 ) -> None:
-    """A container stopped by Docker fails typed and retryable inside the timeout budget.
-
-    This is the variant that exercises the operating system's reporting: the published port
-    disappears with the container, so the refusal comes from the kernel rather than from a
-    double that decided to raise. The error is still classified retryable, which is what lets
-    a breaker act on it instead of treating a restart as a permanent fault.
-
-    What is asserted is the *bound*, not a latency figure, because the latency is bimodal and
-    a pinned number would be a lie on half the runs. Four consecutive runs on the Windows +
-    WSL2 host measured 44.2 ms, 5040.9 ms, 36.1 ms, 5043.9 ms: sometimes the kernel refuses
-    the connection immediately, and sometimes Docker Desktop's port proxy accepts and hangs,
-    so the failure arrives from ``reliability.timeouts.vector_db_ms`` (5 s) instead. Both are
-    the guarantee — a bounded failure, never an unbounded hang — and only the second shows
-    that the bound is ours rather than the operating system's.
-
-    The code is ``RETRIEVAL_FAILED``, the same one the scripted suite's double raises, which
-    is what TASK-0226 corrected: a real outage now names the vector database rather than
-    sending an operator to inspect a healthy embedding provider.
-    """
+    """A container stopped by Docker fails typed and retryable inside the timeout budget."""
     started = time.perf_counter()
 
     with pytest.raises(FasterRagError) as failure:
@@ -360,14 +332,7 @@ def test_the_probe_really_ran_out_of_space(disk_quota: Mapping[str, Any]) -> Non
 def test_a_genuinely_full_filesystem_halts_the_journal_loudly(
     disk_quota: Mapping[str, Any],
 ) -> None:
-    """Starting a new job on a full filesystem raises; it never silently loses the record.
-
-    The assertion is on the operating system's own words rather than on ``errno``, so that
-    translating the failure into a typed error (TASK-0234 ✅) kept this case passing — the
-    guarantee is that the write is loud, not that it stays untyped. The one case that had to
-    go red when that landed did, and is now
-    ``test_the_journal_types_a_full_disk_without_losing_the_errno``.
-    """
+    """Starting a new job on a full filesystem raises; it never silently loses the record."""
     failure = disk_quota["create_while_full"]
 
     assert failure is not None
@@ -377,14 +342,7 @@ def test_a_genuinely_full_filesystem_halts_the_journal_loudly(
 def test_a_genuinely_full_filesystem_does_not_corrupt_the_checkpoint(
     disk_quota: Mapping[str, Any],
 ) -> None:
-    """The clean halt of failure-modes.md row 33: checkpointing survives a full disk.
-
-    Measured, a *new* job cannot be written while a *running* one can still checkpoint, and
-    the asymmetry is not luck. ``_write_atomically`` renames the current record over the
-    stale ``.previous`` copy before writing, which frees a file the same size as the one it
-    is about to write; a new job frees nothing and so has nowhere to go. That is what makes
-    "halt cleanly at a checkpoint" reachable on the very disk that caused the halt.
-    """
+    """The clean halt of failure-modes.md row 33: checkpointing survives a full disk."""
     assert disk_quota["checkpoint_while_full"] is None
 
     surviving = disk_quota["reload_while_full"]
@@ -402,19 +360,7 @@ def test_the_journal_writes_again_once_space_is_freed(disk_quota: Mapping[str, A
 def test_the_journal_types_a_full_disk_without_losing_the_errno(
     disk_quota: Mapping[str, Any],
 ) -> None:
-    """A real ``ENOSPC`` arrives as the typed error row 33 promises, errno intact.
-
-    This case previously asserted the *opposite*, deliberately: the raw ``OSError`` escaped
-    ``Journal._write_atomically`` untranslated, and only a real ``ENOSPC`` could show it,
-    because the scripted suite's unwritable-directory case accepts ``(IngestionError,
-    OSError)`` and so passed either way. Writing it as a failing promise meant TASK-0234's fix
-    could not land without moving this assertion and the FMEA row together — which is what
-    happened.
-
-    Both halves are asserted. A typed error that has forgotten it was ``ENOSPC`` would satisfy
-    the taxonomy while telling an operator less than the raw error did, so the chained cause
-    must still carry errno 28.
-    """
+    """A real ``ENOSPC`` arrives as the typed error row 33 promises, errno intact."""
     failure = disk_quota["create_while_full"]
 
     assert failure["typed"] is True

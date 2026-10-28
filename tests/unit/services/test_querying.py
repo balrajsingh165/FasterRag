@@ -435,13 +435,7 @@ class FailingAdapter(ScriptedAdapter):
 
 
 async def test_repeated_backend_failures_open_the_vector_db_breaker() -> None:
-    """Retrieval is the one outbound call on the query path with nowhere to degrade to.
-
-    A failure here means there is nothing to answer *from*, so it surfaces rather than
-    dropping a rung. That is precisely why shedding matters: without a breaker a backend that
-    is down is searched again on every request, and those retries are the load keeping it
-    down. Filed as TASK-0257 after TASK-0245 wired the LLM one.
-    """
+    """Retrieval is the one outbound call on the query path with nowhere to degrade to."""
     resolved = settings()
     adapter = FailingAdapter(resolved)
     service = RetrievalService(resolved, adapter, TieringRouter(StubEmbedder(resolved)))
@@ -462,12 +456,7 @@ async def test_repeated_backend_failures_open_the_vector_db_breaker() -> None:
 
 
 async def test_an_embedding_outage_never_opens_the_vector_db_breaker() -> None:
-    """The query embedding is a *provider* call sitting on the retrieval path.
-
-    Counting its failures against the vector database would shed reads from a backend that is
-    perfectly healthy, and hide the real provider behind the wrong gauge. Caught while writing
-    this: the embed call was originally inside the guarded region.
-    """
+    """The query embedding is a *provider* call sitting on the retrieval path."""
 
     class FailingEmbedder(StubEmbedder):
         async def embed_query(self, text: str) -> list[float]:

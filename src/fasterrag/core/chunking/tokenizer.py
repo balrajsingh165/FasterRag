@@ -35,14 +35,7 @@ _logger = get_logger(__name__)
 
 @lru_cache(maxsize=4)
 def load_tokenizer(model: str) -> Any | None:
-    """Load a tokenizer once per process, returning ``None`` when it is unavailable.
-
-    # CRITICAL: this must stay cached. A counter is built per document inside the CPU
-    # pool, and an uncached load would re-read the vocabulary from disk for every file —
-    # turning a millisecond-scale count into a hundred-millisecond one on the pipeline's
-    # hottest path. The cache also stores the failure, so a missing dependency is
-    # diagnosed and warned about once per process rather than once per document.
-    """
+    """Load a tokenizer once per process, returning ``None`` when it is unavailable."""
     try:
         from transformers import AutoTokenizer
 
@@ -69,15 +62,7 @@ class ModelTokenCounter:
     """Counts tokens with the embedding model's own tokenizer."""
 
     def __init__(self, model: str, chars_per_token: int = CHARS_PER_TOKEN) -> None:
-        """Record the model without loading anything yet.
-
-        Loading is deferred because a chunker is constructed for every document, and
-        paying the load at construction would cost it even for a run that never chunks.
-
-        Args:
-            model: The embedding model whose tokenizer to load.
-            chars_per_token: Ratio for the fallback estimate and the first split pass.
-        """
+        """Record the model without loading anything yet."""
         self.model = model
         self._estimate = EstimatingTokenCounter(chars_per_token)
 
@@ -100,32 +85,12 @@ class ModelTokenCounter:
 
     @property
     def chars_per_token(self) -> int:
-        """Return the assumed characters per token, used to size the first split pass.
-
-        Left as the estimate even when a real tokenizer is loaded. A chunker splits on
-        characters — that is what keeps chunk offsets exact — and then re-splits whatever
-        this ratio got wrong by counting for real. A per-model average would move the
-        starting guess without making it right for any particular text, because the ratio
-        varies far more between prose and CJK within one model than it does between models.
-        Tune it through ``chunking.chars_per_token`` when a corpus is uniformly dense.
-        """
+        """Return the assumed characters per token, used to size the first split pass."""
         return self._estimate.chars_per_token
 
 
 def create_token_counter(settings: Settings) -> TokenCounter:
-    """Return the token counter selected by ``chunking.token_counter``.
-
-    ``auto`` uses the model's own tokenizer when the provider ships a local one and the
-    estimate otherwise. ``estimate`` forces the ratio-based counter, which is the faster
-    choice for a corpus of English prose where the ratio is already close. ``model`` forces
-    the real tokenizer for any provider, which is how a deployment using a hosted embedding
-    model still gets exact counts — it needs the matching tokenizer cached locally, and
-    falls back to the estimate with a warning when it is not.
-
-    Returns:
-        The counter to chunk with. Never raises: a counter that could fail configuration
-        would make chunking depend on a model download.
-    """
+    """Return the token counter selected by ``chunking.token_counter``."""
     mode = settings.chunking.token_counter
     estimate = EstimatingTokenCounter(settings.chunking.chars_per_token)
 

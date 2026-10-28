@@ -79,28 +79,13 @@ def _extension_for(uri: str) -> str:
 
 
 def typed_source(value: str) -> dict[str, str]:
-    r"""Classify a bare string the way the CLI and library accept them.
-
-    ``fasterrag ingest`` documents ``<path|url>`` and a facade caller passes plain strings;
-    both arrive as untyped text. Only an explicit http(s) scheme reads as a URL — a Windows
-    drive spelling like ``C:\docs`` parses as a one-letter scheme and must stay a path.
-    """
+    """Classify a bare string the way the CLI and library accept them."""
     kind = "url" if value.startswith(("http://", "https://")) else "path"
     return {"type": kind, "value": value}
 
 
 def _decode_inline(value: str) -> bytes:
-    """Return the bytes an inline source carries.
-
-    The value is the document content itself — the ``type`` field already said it is inline,
-    so nothing is stripped from it. Base64 is tried first, falling back to UTF-8: callers
-    send both — a base64 blob for binary documents, and raw text for the common case of
-    pasting a snippet — and guessing wrong in either direction produces a document full of
-    mojibake rather than an error.
-
-    Raises:
-        ParseError: If the payload is neither decodable form.
-    """
+    """Return the bytes an inline source carries."""
     with suppress(binascii.Error, ValueError):
         return base64.b64decode(value, validate=True)
 
@@ -111,16 +96,7 @@ def _decode_inline(value: str) -> bytes:
 
 
 async def _fetch(uri: str, limit: int) -> bytes:
-    """Download a URL, refusing a body larger than the configured document limit.
-
-    The size is checked against the declared length *before* reading, and again while
-    streaming, because a server may under-report or omit ``Content-Length`` entirely — and a
-    limit enforced only on a header a peer controls is not a limit.
-
-    Raises:
-        IngestionError: If the body exceeds ``ingestion.max_document_mb``.
-        ParseError: If the URL cannot be fetched.
-    """
+    """Download a URL, refusing a body larger than the configured document limit."""
     try:
         client = httpx.AsyncClient(timeout=_FETCH_TIMEOUT_SECONDS, follow_redirects=True)
         async with client, client.stream("GET", uri) as response:
@@ -155,20 +131,7 @@ async def _fetch(uri: str, limit: int) -> bytes:
 async def resolve_sources(
     sources: Sequence[Mapping[str, Any]] | Sequence[str], settings: Settings
 ) -> ResolvedSources:
-    """Resolve typed sources into canonical URIs and readable locations.
-
-    Args:
-        sources: Either the API's ``{"type", "value"}`` mappings, or plain strings, which are
-            treated as paths — the CLI's shape.
-        settings: Validated configuration; ``ingestion.max_document_mb`` bounds every fetch.
-
-    Returns:
-        The resolution. Call :meth:`ResolvedSources.cleanup` when the job settles.
-
-    Raises:
-        IngestionError: If a source type is unrecognised, or a fetched body is too large.
-        ParseError: If a URL cannot be fetched or an inline payload cannot be decoded.
-    """
+    """Resolve typed sources into canonical URIs and readable locations."""
     limit = settings.ingestion.max_document_mb * _MEGABYTE
     resolved = ResolvedSources()
 

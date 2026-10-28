@@ -40,7 +40,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
   - Super-critical flag: `# CRITICAL: <why this must not change>`
   - Blocker/pending marker: `# TODO: <what remains>` or `# BLOCKED: <blocker + ticket/date>`
   - A marker may open a block: `#` lines immediately following a `# CRITICAL:`/`# TODO:`/`# BLOCKED:` line continue that marker and are part of it.
-- Every module, class, and public function gets a docstring. Docstrings explain what and why; code explains how.
+- Every module, class, and public function gets a docstring. Docstrings explain what and why; code explains how. **Function, method and class docstrings are at most four lines**; longer reasoning belongs in [docs/code-notes.md](docs/code-notes.md), which `scripts/trim_docstrings.py` maintains. Module docstrings are exempt.
 - Full type hints everywhere; `mypy --strict` must pass. Any `# type: ignore` requires an adjacent `# CRITICAL:` justification.
 - **Typed error taxonomy is mandatory.** No bare `except`, no silently swallowed exceptions, anywhere, ever. Every caught exception is either handled with a logged correlation/trace id or rethrown. Hierarchy in [docs/reliability.md](docs/reliability.md).
 - API errors are RFC 9457 `application/problem+json` with a stable machine-readable `code` field — never generic 500s without a problem body.
@@ -52,7 +52,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 
 - **Conventional Commits, single line only.** `<type>(<optional scope>): <description>`, max 100 chars, no body, no trailers. Types: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`. Use `<type>!:` for a breaking change. Enforced by `scripts/check_commit_message.py` (commit-msg hook + CI).
 - **Absolutely NO Claude/AI attribution in commits** — no `Co-Authored-By: Claude`, no `Generated with Claude Code`, no AI signatures.
-- **Trunk-based: all work lands on `main`.** Do NOT create feature branches (maintainer instruction, 2026-07-30). Every commit must leave `main` green — lint, types, and tests pass before it is made.
+- **Branch and open a PR for reviewable work** (maintainer instruction, 2026-10-28, superseding the trunk-only rule of 2026-07-30). Small fixes may still land directly on `main`; anything a reviewer would want to see as a unit goes through a PR, which is also what TASK-0098's branch protection will require. Every commit must leave its branch green — lint, types, and tests pass before it is made.
 - Commit frequently — small, coherent, revertable commits. Tag slice boundaries (`v0.x.0-sN`) during the build phase.
 
 ## Incremental shipping discipline

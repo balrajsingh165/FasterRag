@@ -43,19 +43,7 @@ _Result = TypeVar("_Result")
 
 
 class FasterRag:
-    """A blocking fasterRag instance.
-
-    Mirrors :class:`fasterrag.facade.FasterRag` method for method::
-
-        from fasterrag.sync import FasterRag
-
-        with FasterRag.from_config("config.yaml") as rag:
-            rag.ingest(["./docs"])
-            print(rag.query("What does the spec say about retries?").answer)
-
-    Use the async facade instead whenever the calling code already has an event loop; this
-    one exists for the code that does not.
-    """
+    """A blocking fasterRag instance."""
 
     def __init__(self, inner: AsyncFasterRag) -> None:
         """Wrap an async facade. Prefer :meth:`from_config` or :meth:`from_settings`."""
@@ -64,13 +52,7 @@ class FasterRag:
 
     @classmethod
     def from_config(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> Self:
-        """Load and validate ``config.yaml``, then build a blocking facade over it.
-
-        Raises:
-            ConfigError: On the same fail-fast contract the async facade has — missing file,
-                malformed YAML, schema violation, or an unset referenced environment
-                variable, naming the offending key.
-        """
+        """Load and validate ``config.yaml``, then build a blocking facade over it."""
         return cls(AsyncFasterRag.from_config(path))
 
     @classmethod
@@ -84,12 +66,7 @@ class FasterRag:
         return self._inner.settings
 
     def __enter__(self) -> Self:
-        """Create the private event loop and start the underlying facade.
-
-        Raises:
-            FasterRagError: If a loop is already running on this thread. Blocking on it from
-                here would deadlock, and a deadlock reports nothing at all.
-        """
+        """Create the private event loop and start the underlying facade."""
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -112,12 +89,7 @@ class FasterRag:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        """Stop the underlying facade and close the loop this instance owns.
-
-        The loop is closed in a ``finally`` so a shutdown failure cannot leak it. Leaking an
-        event loop is quiet — nothing raises, the process just holds a selector and its file
-        descriptors until it exits.
-        """
+        """Stop the underlying facade and close the loop this instance owns."""
         if self._loop is None:
             return
         try:
@@ -127,13 +99,7 @@ class FasterRag:
             self._loop = None
 
     def _run(self, awaitable: Awaitable[_Result]) -> _Result:
-        """Drive one coroutine to completion on the owned loop.
-
-        Raises:
-            FasterRagError: If the instance was never entered. Closing the coroutine before
-                raising keeps Python from also emitting an unawaited-coroutine warning that
-                would bury the real message.
-        """
+        """Drive one coroutine to completion on the owned loop."""
         if self._loop is None:
             if isinstance(awaitable, Coroutine):
                 awaitable.close()
@@ -185,13 +151,7 @@ class FasterRag:
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
     ) -> Iterator[QueryEvent]:
-        """Yield the answer's events as an ordinary iterator.
-
-        Each event is pulled with its own ``run_until_complete``, so tokens arrive as the
-        model produces them rather than after the whole answer is buffered. Buffering would
-        make the return type honest and the behavior useless — the reason to stream is to
-        see the first token early.
-        """
+        """Yield the answer's events as an ordinary iterator."""
         events = self._inner.query_stream(text, collection=collection, top_k=top_k, filters=filters)
         while True:
             try:

@@ -144,12 +144,7 @@ def problem_spec(code: ErrorCode) -> ProblemSpec:
 
 
 class FasterRagError(Exception):
-    """Root of the fasterRag exception hierarchy.
-
-    Every subclass carries the same three members the API, CLI, and library all report:
-    a stable ``code``, the ``trace_id`` that correlates logs and spans, and whether the
-    caller may retry.
-    """
+    """Root of the fasterRag exception hierarchy."""
 
     default_code: ClassVar[ErrorCode] = ErrorCode.INTERNAL
 
@@ -161,16 +156,7 @@ class FasterRagError(Exception):
         trace_id: str | None = None,
         retryable: bool | None = None,
     ) -> None:
-        """Build the error.
-
-        Args:
-            detail: Human-readable cause. Must never contain a secret value.
-            code: Stable error code; defaults to the subclass's canonical code.
-            trace_id: Correlation id; defaults to the id bound to the current context.
-            retryable: Overrides the code's default retry semantics. Adapters set this
-                at their boundary, where the provider's semantics are known (HTTP
-                429/503 are retryable, 401 is not).
-        """
+        """Build the error."""
         super().__init__(detail)
         self.detail = detail
         self.code = code if code is not None else self.default_code
@@ -204,12 +190,7 @@ class ConfigError(FasterRagError):
 
 
 class IngestionError(FasterRagError):
-    """Ingestion-pipeline failure.
-
-    Concrete call sites pass the precise code from the error table (for example
-    ``ErrorCode.QUEUE_FULL`` on bounded-queue overflow); an unclassified ingestion
-    failure keeps the inherited ``INTERNAL`` code.
-    """
+    """Ingestion-pipeline failure."""
 
 
 class ParseError(IngestionError):
@@ -274,16 +255,6 @@ class ProvisioningError(FasterRagError):
         trace_id: str | None = None,
         retryable: bool | None = None,
     ) -> None:
-        """Build the error.
-
-        Args:
-            detail: Human-readable cause. Must never contain a secret value.
-            fix: The actionable instruction shown to the operator; appended to the
-                problem document's ``detail`` so the API and the CLI report the same
-                remedy.
-            code: Stable error code; defaults to ``PROVISIONING_FAILED``.
-            trace_id: Correlation id; defaults to the id bound to the current context.
-            retryable: Overrides the code's default retry semantics.
-        """
+        """Build the error."""
         super().__init__(detail, code=code, trace_id=trace_id, retryable=retryable)
         self.fix = fix

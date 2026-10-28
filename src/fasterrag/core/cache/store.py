@@ -114,12 +114,7 @@ class CacheStore(ABC):
 
     @abstractmethod
     async def items(self) -> list[tuple[str, bytes]]:
-        """Return every live entry.
-
-        The semantic cache needs to compare a query against every candidate, which no
-        key-value backend can do for it. Bounded by ``MAXIMUM_ENTRIES``, so this scans a
-        cache-sized collection rather than an unbounded one.
-        """
+        """Return every live entry."""
 
     async def close(self) -> None:
         """Release any backend resources. The default holds none."""
@@ -127,12 +122,7 @@ class CacheStore(ABC):
 
 
 class MemoryStore(CacheStore):
-    """In-process LRU cache. The default for the semantic cache.
-
-    Contents die with the process, which is correct for a cache and is why it is not the
-    default for embeddings — re-embedding a corpus after a restart is expensive, whereas
-    re-answering a query is not.
-    """
+    """In-process LRU cache. The default for the semantic cache."""
 
     def __init__(self, maximum_entries: int = MAXIMUM_ENTRIES) -> None:
         """Build a store holding at most ``maximum_entries`` entries."""
@@ -180,15 +170,7 @@ class MemoryStore(CacheStore):
 
 
 class DiskStore(CacheStore):
-    """File-backed cache. The default for embeddings.
-
-    Entries survive a restart, which is the whole point: an embedding is expensive enough
-    that paying for it twice because a process restarted is a real cost, and the content
-    hash in the key makes a stale hit impossible.
-
-    Keys are hashed into filenames because a cache key contains a model name and a content
-    hash, neither of which is guaranteed to be a legal path component on every platform.
-    """
+    """File-backed cache. The default for embeddings."""
 
     def __init__(self, root: Path | None = None, maximum_entries: int = MAXIMUM_ENTRIES) -> None:
         """Build a store rooted at ``root``, defaulting to ``.fasterrag/cache``."""
@@ -263,12 +245,7 @@ class DiskStore(CacheStore):
         await asyncio.to_thread(self._clear)
 
     def _items(self) -> list[tuple[str, bytes]]:
-        """Return every live entry, keyed by the filename stem.
-
-        The original key is not recoverable from a hashed filename. The semantic cache
-        matches on the vector inside the value rather than on the key, so the stem is
-        identity enough for it, and the embedding cache never scans.
-        """
+        """Return every live entry, keyed by the filename stem."""
         if not self.root.exists():
             return []
 

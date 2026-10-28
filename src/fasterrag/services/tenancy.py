@@ -30,13 +30,7 @@ _TENANT_PATTERN: Final = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
 
 def _validated(tenant: str) -> str:
-    """Return the tenant id, refusing anything that could forge a prefix.
-
-    Raises:
-        FasterRagError: With ``TENANT_FORBIDDEN`` if the id is empty or contains the
-            separator. A tenant named ``acme__x`` could otherwise address ``acme``'s
-            collection ``x``.
-    """
+    """Return the tenant id, refusing anything that could forge a prefix."""
     # CRITICAL: the trailing check is not redundant with the `SEPARATOR in tenant` one. A
     # tenant may not *contain* the separator, but one ending in its first character
     # reconstructs it across the boundary with the collection name — `scoped_name("_b", "a")`
@@ -81,12 +75,7 @@ def unscoped_name(name: str, tenant: str | None) -> str:
 
 
 def visible_to(name: str, tenant: str | None) -> bool:
-    """Return whether a backend collection belongs to ``tenant``.
-
-    An untenanted caller sees everything, which is the single-operator deployment. A tenant
-    sees only its own prefix — including *not* seeing untenanted collections, because those
-    predate tenancy and belong to no one who is asking.
-    """
+    """Return whether a backend collection belongs to ``tenant``."""
     if tenant is None:
         return True
     return name.startswith(f"{_validated(tenant)}{SEPARATOR}")
