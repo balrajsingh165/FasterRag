@@ -74,19 +74,7 @@ def build_problem(
     status: int | None = None,
     extensions: dict[str, Any] | None = None,
 ) -> ProblemDocument:
-    """Render ``error`` as a problem document.
-
-    Args:
-        error: The typed error being reported.
-        instance: Request path the failure occurred on.
-        status: Overrides the HTTP status registered for the code. Used when the
-            transport status is known independently, as for handled HTTP exceptions.
-        extensions: Additional RFC 9457 extension members, such as ``errors`` for
-            field-level validation failures.
-
-    Returns:
-        The problem document ready to be serialized.
-    """
+    """Render ``error`` as a problem document."""
     spec = problem_spec(error.code)
     detail = error.detail
     if isinstance(error, ProvisioningError) and error.fix:
@@ -124,13 +112,7 @@ def problem_response(
 
 
 def route_template(request: Request) -> str:
-    """Return the route pattern a request matched, never its concrete path.
-
-    # CRITICAL: metric labels must be the template. RFC 9457's ``instance`` identifies the
-    # one occurrence, so the problem body rightly carries the concrete path — but putting
-    # that same value in a label would mint a new time series per job id or collection name,
-    # which is the textbook way to bring down a Prometheus server.
-    """
+    """Return the route pattern a request matched, never its concrete path."""
     route = request.scope.get("route")
     return str(getattr(route, "path", None) or request.url.path)
 
@@ -138,12 +120,7 @@ def route_template(request: Request) -> str:
 def _log_problem(
     document: ProblemDocument, exc: BaseException | None = None, endpoint: str | None = None
 ) -> None:
-    """Log a problem at a severity matching its status, always with the trace id.
-
-    Also the single place errors are counted. Every problem document is built here, whatever
-    raised it, so counting at this funnel cannot miss a path the way per-handler counting
-    would the first time a new handler is added.
-    """
+    """Log a problem at a severity matching its status, always with the trace id."""
     metrics.ERRORS.increment(
         endpoint=endpoint or "unknown",
         code=document.code.value,

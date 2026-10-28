@@ -92,13 +92,7 @@ class GateResult:
 
 
 def load_baseline(path: str | Path) -> Baseline | None:
-    """Read a committed baseline, or return None when none exists yet.
-
-    Raises:
-        FasterRagError: With ``VALIDATION_FAILED`` when the file exists but is not a
-            baseline. A malformed one must not read as "no baseline", because a missing
-            baseline blocks the gate while a silently-ignored one would let it pass.
-    """
+    """Read a committed baseline, or return None when none exists yet."""
     source = Path(path)
     if not source.is_file():
         return None
@@ -147,16 +141,7 @@ def check_regression(
     baseline: Baseline | None,
     settings: Settings,
 ) -> GateResult:
-    """Compare a run against its baseline and decide whether it may proceed.
-
-    Args:
-        report: The run being judged.
-        baseline: The recorded reference, or None when none is committed.
-        settings: Configuration supplying the tolerances and identifying the setup.
-
-    Returns:
-        The verdict, naming every metric that regressed.
-    """
+    """Compare a run against its baseline and decide whether it may proceed."""
     if not settings.eval.regression_gate:
         return GateResult(passed=True, report=report, baseline=baseline)
 

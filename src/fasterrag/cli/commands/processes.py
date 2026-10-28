@@ -86,12 +86,7 @@ async def run_serve(args: argparse.Namespace, console: Console) -> ExitCode:
 
 
 async def run_worker(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Run the pipeline worker pools until interrupted.
-
-    The pools are owned by the ingestion service rather than started here, so a job runs
-    identically whether it arrived through the API, the CLI, or the library. This command
-    validates the environment, reports the pool sizes it would run, and waits.
-    """
+    """Run the pipeline worker pools until interrupted."""
     try:
         settings = settings_from(args)
     except ConfigError as exc:

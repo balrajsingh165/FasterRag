@@ -41,12 +41,7 @@ P2_TEMPLATE_VERSION: Final = "p2.1.0"
 
 
 def system_prompt(context_tokens: int) -> str:
-    """Return the P2 system prompt, sized by ``chunking.context_tokens``.
-
-    The target is interpolated rather than hardcoded because the key exists and is
-    documented as valid from 25 to 150. A setting the prompt ignores is a setting that
-    silently does nothing, which is worse than not offering it.
-    """
+    """Return the P2 system prompt, sized by ``chunking.context_tokens``."""
     return (
         "You write a short situating context for a chunk of a larger document, so the "
         "chunk\ncan be retrieved and understood on its own.\n\n"
@@ -83,12 +78,7 @@ def build_enrichment_prompt(document: str, chunk: str) -> str:
 
 
 def _clean(raw: str) -> str:
-    """Strip the preamble and quoting a model adds despite being told not to.
-
-    Instructions reduce this; they do not eliminate it. An unstripped ``"Here is the
-    context:"`` becomes part of the embedded text on every chunk, which is noise added to
-    the exact field the feature exists to improve.
-    """
+    """Strip the preamble and quoting a model adds despite being told not to."""
     openers = ("Here is the context:", "Situating context:", "Context:", "context:")
     text = raw.strip()
 
@@ -114,22 +104,7 @@ async def enrich_chunks(
     llm: LLMAdapter,
     settings: Settings,
 ) -> list[TextChunk]:
-    """Return the chunks with a situating context prepended to each.
-
-    Args:
-        chunks: The document's chunks, in order.
-        document: The whole parent document, used as the cacheable prompt prefix.
-        llm: The model writing the contexts.
-        settings: Validated configuration; ``chunking.context_tokens`` sizes the output.
-
-    Returns:
-        New chunks whose ``text`` carries the prefix and whose ``metadata`` records the
-        unprefixed original plus the prefix itself. A chunk whose enrichment failed is
-        returned unchanged apart from a flag.
-
-    The calls run concurrently: enrichment is one provider round trip per chunk, and doing
-    them in sequence would make ingestion latency the sum of every chunk's call.
-    """
+    """Return the chunks with a situating context prepended to each."""
     if not chunks:
         return []
 
@@ -170,12 +145,7 @@ async def enrich_chunks(
 
 
 async def _context_for(chunk: TextChunk, document: str, llm: LLMAdapter, instructions: str) -> str:
-    """Return one chunk's context, or an empty string when the call fails.
-
-    # CRITICAL: every failure returns empty rather than raising. Enrichment improves a chunk;
-    # it must never decide whether the chunk exists. A provider outage during ingestion would
-    # otherwise dead-letter an entire corpus that would have indexed perfectly well unenriched.
-    """
+    """Return one chunk's context, or an empty string when the call fails."""
     try:
         completion = await llm.complete(
             build_enrichment_prompt(document, chunk.text), system=instructions

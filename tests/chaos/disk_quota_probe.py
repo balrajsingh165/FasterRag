@@ -37,13 +37,7 @@ DETAIL_LIMIT: Final = 200
 
 
 def describe(exc: BaseException) -> dict[str, Any]:
-    """Return the JSON-safe identity of an exception the probe caught.
-
-    The chained cause is recorded as well as the exception itself. Translating an ``OSError``
-    into the typed error the taxonomy requires is only an improvement if the original errno
-    survives the translation — a typed error that has forgotten it was ``ENOSPC`` tells an
-    operator less than the raw one did, so the test asserts both halves.
-    """
+    """Return the JSON-safe identity of an exception the probe caught."""
     code = getattr(exc, "code", None)
     cause = exc.__cause__
     return {
@@ -59,12 +53,7 @@ def describe(exc: BaseException) -> dict[str, Any]:
 
 
 def fill(path: Path) -> int:
-    """Consume every free byte of the filesystem holding ``path`` and return the count.
-
-    Unbuffered ``os.write`` rather than a file object: a buffered write surfaces the failure
-    when its buffer is flushed, which for the final partial block is at close time, and an
-    ``ENOSPC`` raised by ``close`` is far harder to attribute to the write that caused it.
-    """
+    """Consume every free byte of the filesystem holding ``path`` and return the count."""
     written = 0
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT, 0o644)
     try:

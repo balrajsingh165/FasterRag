@@ -50,16 +50,7 @@ def _create(
     redis_url: str,
     namespace: str,
 ) -> CacheStore:
-    """Return the store ``backend`` names, holding at most ``maximum_entries`` entries.
-
-    The two caches are handed different namespaces so that one Redis server can back both
-    without either one's ``clear`` reaching the other's entries.
-
-    Raises:
-        ConfigError: If the backend is Redis and the optional client is not installed, or
-            the configured URL cannot be parsed. Naming the setting keeps the error
-            actionable rather than generic.
-    """
+    """Return the store ``backend`` names, holding at most ``maximum_entries`` entries."""
     if backend == "memory":
         return MemoryStore(maximum_entries)
     if backend == "disk":

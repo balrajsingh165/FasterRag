@@ -106,18 +106,7 @@ def _vector_db_check(app: FastAPI) -> health.ReadinessCheck:
 
 
 async def provision_enabled_observability(settings: Settings) -> None:
-    """Stand up whichever observability stacks the configuration turns on.
-
-    ``docs/observability.md`` frames the toggle itself as the trigger — "``langfuse: true``
-    → doctor preflight → ``docker compose up -d``" — so requiring an operator to also run
-    ``fasterrag provision`` would make the documentation wrong rather than incomplete. Both
-    provisioners converge, so this is a no-op once the stack is up.
-
-    A provisioning failure is logged and swallowed on purpose, and this is the one place
-    that trade is right: observability is not on the request path, and refusing to serve
-    queries because a dashboard would not start inverts the dependency. The toggle's own
-    ``fasterrag provision`` command still surfaces the error in full.
-    """
+    """Stand up whichever observability stacks the configuration turns on."""
     if not (settings.observability.grafana or settings.observability.langfuse):
         return
 
@@ -204,19 +193,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    """Build the API application.
-
-    Args:
-        settings: Pre-validated settings. When omitted, the file named by
-            ``FASTERRAG_CONFIG`` is loaded, falling back to ``config.yaml``; either way it
-            is validated, which fails fast if any key or referenced secret is missing.
-
-    Returns:
-        The configured application.
-
-    Raises:
-        ConfigError: If configuration is absent or invalid and none was supplied.
-    """
+    """Build the API application."""
     resolved = settings if settings is not None else load_settings(_configured_path())
     configure_logging(resolved.app.log_level)
 

@@ -36,15 +36,7 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class DocumentTask:
-    """One source to load, parse, and chunk.
-
-    ``index`` is the document's position in its job, which is what a checkpoint records
-    and what a resumed job counts from.
-
-    ``source`` is the canonical URI — what the document *is*, and what its id derives from.
-    ``location`` is where the bytes currently sit, which differs only for a staged URL or
-    inline payload.
-    """
+    """One source to load, parse, and chunk."""
 
     document_id: str
     source: str
@@ -55,14 +47,7 @@ class DocumentTask:
 
     @property
     def readable(self) -> str:
-        """Return the path the bytes are actually read from.
-
-        # CRITICAL: identity and location are separate fields, and conflating them breaks
-        # deduplication silently. A URL or inline document is staged to a temp file whose
-        # name differs on every run, so a document id derived from that path would be new
-        # every time and the same document would be re-indexed forever. ``source`` stays the
-        # canonical URI the id is hashed from; this is only where the bytes live.
-        """
+        """Return the path the bytes are actually read from."""
         return self.location or self.source
 
 
@@ -140,15 +125,7 @@ class BoundedQueue[Item]:
     """An asyncio queue with an explicit capacity and a reject-instead-of-grow path."""
 
     def __init__(self, capacity: int, *, name: str = "chunks") -> None:
-        """Build a queue holding at most ``capacity`` items.
-
-        Args:
-            capacity: The largest number of items the queue will hold before producers
-                block or are rejected.
-            name: The ``queue`` label its depth is published under. Named rather than
-                anonymous because a single number for "the queue depth" cannot tell an
-                operator which stage is the one falling behind.
-        """
+        """Build a queue holding at most ``capacity`` items."""
         self.capacity = capacity
         self.name = name
         self._queue: asyncio.Queue[Item | None] = asyncio.Queue(maxsize=capacity)
@@ -160,12 +137,7 @@ class BoundedQueue[Item]:
         return self._queue.qsize()
 
     def _publish(self) -> None:
-        """Publish the current depth.
-
-        Called after every mutation rather than sampled on a timer: the depth this gauge
-        exists to show is a transient backlog, and a sampler is most likely to miss exactly
-        the spike an operator went looking for.
-        """
+        """Publish the current depth."""
         metrics.QUEUE_DEPTH.set(float(self._queue.qsize()), queue=self.name)
 
     @property
@@ -179,12 +151,7 @@ class BoundedQueue[Item]:
         self._publish()
 
     def offer(self, item: Item) -> None:
-        """Enqueue without waiting, rejecting the item if the queue is full.
-
-        Raises:
-            IngestionError: With ``QUEUE_FULL`` when at capacity, which the API renders as
-                ``429`` with a ``Retry-After`` header.
-        """
+        """Enqueue without waiting, rejecting the item if the queue is full."""
         try:
             self._queue.put_nowait(item)
         except asyncio.QueueFull as exc:

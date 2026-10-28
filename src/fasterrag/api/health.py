@@ -65,12 +65,7 @@ async def healthz() -> dict[str, str]:
 
 @router.get("/readyz")
 async def readyz(request: Request) -> Response:
-    """Report readiness after actually checking every registered dependency.
-
-    Returns:
-        ``200`` with the per-dependency report when all checks pass, otherwise ``503``
-        with a problem document naming the failing dependencies.
-    """
+    """Report readiness after actually checking every registered dependency."""
     registry = cast(ReadinessRegistry, request.app.state.readiness)
     statuses = await registry.run()
     report = [

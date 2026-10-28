@@ -98,17 +98,7 @@ class SemanticChunker:
         counter: TokenCounter | None = None,
         percentile: float = BREAKPOINT_PERCENTILE,
     ) -> None:
-        """Build the chunker.
-
-        Args:
-            embedder: Supplies sentence vectors.
-            chunk_size: Ceiling on chunk size in tokens; semantic boundaries are honored
-                only while they fit inside it.
-            overlap: Tokens each chunk repeats from its predecessor.
-            counter: Token counter; defaults to the estimating counter.
-            percentile: Distance percentile above which a sentence gap becomes a chunk
-                boundary. Lower splits more eagerly.
-        """
+        """Build the chunker."""
         self._percentile = percentile
         self._embedder = embedder
         self._counter = counter or EstimatingTokenCounter()

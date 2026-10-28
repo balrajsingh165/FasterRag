@@ -105,19 +105,7 @@ async def run_autopilot(args: argparse.Namespace, console: Console) -> ExitCode:
 
 
 async def run_generate_golden_set(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Generate a golden Q&A set from a corpus and write it to disk (P4).
-
-    The shared machinery behind both the eval harness and Autopilot's search. It was
-    reachable from Python but not from the terminal, which meant the one prerequisite for
-    running D6 had no supported way to produce it.
-
-    ``--size`` falls back to ``autopilot.golden_set_size`` rather than to a second hardcoded
-    number. The two happened to agree at 100, which is why the configured value being
-    ignored looked like nothing at all until somebody changed it.
-
-    Directory arguments are expanded as ``ingest`` expands them; a corpus is named by its
-    folder far more often than by every file in it.
-    """
+    """Generate a golden Q&A set from a corpus and write it to disk (P4)."""
     settings = _settings_or_none(args, console)
     if settings is None:
         return ExitCode.USAGE

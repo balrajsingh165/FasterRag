@@ -48,12 +48,7 @@ def embedding_key(text: str, model: str, model_version: str) -> str:
 
 
 def encode_vector(vector: Sequence[float]) -> bytes:
-    """Return ``vector`` packed as little-endian float32.
-
-    Not JSON: a 1536-dimension vector is roughly 6 KB packed against 30 KB as text, and the
-    cache is sized in entries, so the difference is real disk and real Redis memory. float32
-    is what every provider returns and what every vector database stores.
-    """
+    """Return ``vector`` packed as little-endian float32."""
     return b"".join(_ELEMENT.pack(value) for value in vector)
 
 
@@ -70,12 +65,7 @@ class CachingEmbeddingAdapter(EmbeddingAdapter):
     provider: ClassVar[str] = "cached"
 
     def __init__(self, inner: EmbeddingAdapter, store: CacheStore) -> None:
-        """Wrap ``inner``, resolving what it can from ``store`` first.
-
-        Args:
-            inner: The adapter that actually embeds.
-            store: Where vectors are kept between calls.
-        """
+        """Wrap ``inner``, resolving what it can from ``store`` first."""
         super().__init__(inner.settings)
         self.inner = inner
         self.store = store
@@ -124,13 +114,7 @@ class CachingEmbeddingAdapter(EmbeddingAdapter):
             )
 
     async def embed_documents(self, texts: Sequence[str]) -> EmbeddingResult:
-        """Embed ``texts``, sending only the ones the cache could not supply.
-
-        Returns:
-            Vectors in the order ``texts`` were given. ``total_tokens`` reflects only what
-            the provider actually billed for, so a cached batch reports the tokens it truly
-            spent rather than the tokens it would have spent.
-        """
+        """Embed ``texts``, sending only the ones the cache could not supply."""
         resolved: list[list[float] | None] = []
         for text in texts:
             vector = await self._lookup(text)

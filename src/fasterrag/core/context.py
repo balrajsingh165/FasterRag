@@ -158,25 +158,7 @@ def assemble_context(
     counter: TokenCounter | None = None,
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
 ) -> AssembledContext:
-    """Pack chunks into a context that fits the budget, dropping duplicates.
-
-    Chunks are consumed in the order given, which is relevance order after reranking, so a
-    budget that runs out drops the least relevant material rather than an arbitrary tail.
-
-    Args:
-        chunks: Retrieved chunks, best first.
-        budget_tokens: Tokens available for context. The caller derives this from the
-            model's window minus the space reserved for the answer; there is no
-            configuration key for a provider's window size.
-        counter: Token counter; defaults to the estimating counter.
-        similarity_threshold: Term-overlap ratio above which a chunk is considered a
-            near-duplicate of one already packed. ``1.0`` disables near-duplicate dropping
-            and keeps only exact-text deduplication.
-
-    Returns:
-        The assembled context, with a citation per included chunk and counts of what was
-        dropped and why.
-    """
+    """Pack chunks into a context that fits the budget, dropping duplicates."""
     tokens = counter or EstimatingTokenCounter()
     packed: list[str] = []
     citations: list[Citation] = []

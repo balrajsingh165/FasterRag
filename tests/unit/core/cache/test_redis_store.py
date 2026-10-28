@@ -18,12 +18,7 @@ NAMESPACE = "test:cache"
 
 
 class FakeRedis:
-    """The subset of the redis-py async client RedisStore actually uses.
-
-    Replies come back as bytes and sorted-set members as bytes, as a client built with
-    `decode_responses=False` returns them, so the store's decoding is exercised rather
-    than bypassed.
-    """
+    """The subset of the redis-py async client RedisStore actually uses."""
 
     def __init__(self) -> None:
         self.values: dict[str, bytes] = {}
@@ -393,18 +388,7 @@ def test_selecting_redis_without_the_client_names_the_extra(
 async def test_eviction_is_least_recently_used_even_on_a_clock_that_never_ticks(
     client: FakeRedis, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Recency must not depend on the platform's clock resolution.
-
-    The version-dependent bug this pins: `time.time()` resolves to 15.625 ms on Windows
-    before CPython 3.13 — measured, 2000 rapid calls returning two distinct values — so
-    entries touched inside one tick all scored the same and Redis broke the sorted-set tie
-    lexicographically. Eviction became alphabetical rather than least-recently-used, and
-    systematically so.
-
-    The sibling test above could not catch it on a modern interpreter, because a 100 ns clock
-    makes the ties vanish. Freezing the clock outright removes the interpreter from the
-    question, so this fails on every platform if recency ever goes back to a wall clock.
-    """
+    """Recency must not depend on the platform's clock resolution."""
     monkeypatch.setattr(time, "time", lambda: 1_000_000.0)
     store = RedisStore("redis://localhost", namespace=NAMESPACE, maximum_entries=2, client=client)
 

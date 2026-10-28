@@ -33,21 +33,7 @@ def _visible(path: Path, root: Path) -> bool:
 
 
 def expand_sources(sources: Sequence[str], *, recursive: bool = False) -> list[str]:
-    """Return the sources with any directory replaced by the files inside it.
-
-    Anything that is not an existing directory passes through untouched, so URLs, inline
-    payloads, and plain file paths are unaffected.
-
-    Args:
-        sources: The sources as given on the command line.
-        recursive: Whether to descend into subdirectories. Without it only a directory's
-            immediate files are taken, which is what makes ``--recursive`` mean something.
-
-    Returns:
-        The expanded sources. Files from one directory are sorted, because document ids
-        and job order derive from this list and an arbitrary filesystem order would make
-        the same command produce a different job each run.
-    """
+    """Return the sources with any directory replaced by the files inside it."""
     expanded: list[str] = []
 
     for source in sources:

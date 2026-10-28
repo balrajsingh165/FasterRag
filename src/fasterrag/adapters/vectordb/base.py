@@ -55,12 +55,7 @@ _SET_OPERATORS: Final[frozenset[str]] = frozenset({"$in", "$nin"})
 
 @dataclass(frozen=True, slots=True)
 class SparseVector:
-    """Term indices paired with their weights, for the keyword retrieval leg.
-
-    Lives in the adapter contract rather than in ``core`` because it is a transport type:
-    core produces the values (``fasterrag.core.retrieval.bm25``) and adapters translate
-    them into whatever sparse representation a backend accepts (``docs/adr/ADR-0007``).
-    """
+    """Term indices paired with their weights, for the keyword retrieval leg."""
 
     indices: Sequence[int]
     values: Sequence[float]
@@ -96,12 +91,7 @@ class CollectionSpec:
 
 @dataclass(frozen=True, slots=True)
 class CollectionInfo:
-    """What a collection contains, in vendor-neutral terms.
-
-    Deliberately not the backend's own description object: exposing that would leak a
-    vendor type past the adapter boundary, and every field here has a meaning that survives
-    a change of backend.
-    """
+    """What a collection contains, in vendor-neutral terms."""
 
     name: str
     vectors: int
@@ -122,12 +112,7 @@ class CollectionInfo:
 
 @dataclass(frozen=True, slots=True)
 class Point:
-    """One indexed vector with its metadata payload.
-
-    ``point_id`` is the deterministic chunk id from ``docs/data-model.md``. Adapters map
-    it onto whatever identifier the backend accepts, deterministically, so re-upserting
-    the same chunk overwrites rather than duplicates.
-    """
+    """One indexed vector with its metadata payload."""
 
     point_id: str
     collection: str
@@ -145,13 +130,7 @@ class UpsertResult:
 
 @dataclass(frozen=True, slots=True)
 class SearchQuery:
-    """One retrieval leg: dense similarity or sparse keyword, with optional filtering.
-
-    A query carries exactly one leg. Hybrid retrieval runs both and fuses the rankings in
-    fasterRag rather than in the backend, so ``retrieval.rrf_k`` is the constant that
-    actually applies — a backend's built-in fusion does not expose it
-    (``docs/architecture.md`` §6).
-    """
+    """One retrieval leg: dense similarity or sparse keyword, with optional filtering."""
 
     collection: str
     vector: Sequence[float] | None = None
@@ -216,15 +195,7 @@ class HealthStatus:
 
 
 def validate_filter(filters: Filter | None) -> None:
-    """Reject filter expressions outside the supported grammar.
-
-    Args:
-        filters: The expression to check; ``None`` is valid and means no filtering.
-
-    Raises:
-        FasterRagError: With ``VALIDATION_FAILED`` when a field maps to an unsupported
-            operator, to more than one operator, or to a set operator without a list.
-    """
+    """Reject filter expressions outside the supported grammar."""
     if filters is None:
         return
 
@@ -256,70 +227,27 @@ def validate_filter(filters: Filter | None) -> None:
 
 
 class VectorDBAdapter(ABC):
-    """Vendor-neutral vector database contract.
-
-    Every implementation — built-in or registered by a third party through the
-    ``fasterrag.vectordb`` entry point — must pass the shared adapter contract suite,
-    which is what makes "any vector DB" a tested promise rather than a hope
-    (``docs/testing-strategy.md`` §1.5).
-
-    Implementations translate vendor errors into the typed taxonomy: transport and
-    availability failures become retryable errors, authentication failures do not, and
-    no vendor exception type ever escapes the adapter.
-    """
+    """Vendor-neutral vector database contract."""
 
     def __init__(self, settings: Settings) -> None:
-        """Build the adapter from validated configuration.
-
-        This one-argument constructor is the registration contract: the factory builds
-        every provider, built-in or plugin, by calling it with the whole ``Settings``
-        object, so an adapter can read both its own section and the shared reliability
-        timeouts. Opening connections here is discouraged — construction must stay cheap
-        and side-effect-free.
-
-        Args:
-            settings: The validated configuration.
-        """
+        """Build the adapter from validated configuration."""
         self.settings = settings
 
     @abstractmethod
     async def create_collection(self, spec: CollectionSpec) -> None:
-        """Create a collection, or return quietly if it already matches ``spec``.
-
-        Raises:
-            FasterRagError: With ``CONFLICT`` if a collection of that name exists with
-                incompatible dimensions or distance.
-        """
+        """Create a collection, or return quietly if it already matches ``spec``."""
 
     @abstractmethod
     async def list_collections(self) -> list[CollectionInfo]:
-        """Return every collection the backend holds.
-
-        Part of the contract rather than a Qdrant convenience: ``fasterrag index list``
-        needs it, and the only alternative would be the CLI reaching into a vendor client
-        directly, which is exactly what this boundary exists to prevent.
-        """
+        """Return every collection the backend holds."""
 
     @abstractmethod
     async def drop_collection(self, name: str) -> bool:
-        """Delete a collection and everything in it.
-
-        Returns:
-            Whether a collection was actually removed. A name that does not exist is not
-            an error — dropping something already gone achieved the requested state.
-        """
+        """Delete a collection and everything in it."""
 
     @abstractmethod
     async def snapshot(self, collection: str) -> str:
-        """Take a backend-native snapshot of a collection and return its name.
-
-        Backend-native rather than a re-export of points: a snapshot restores the collection
-        configuration and index structure too, and rebuilding those from exported vectors is
-        a different operation with a different result (``docs/disaster-recovery.md`` §1).
-
-        Returns:
-            The snapshot's identifier, as the backend names it.
-        """
+        """Take a backend-native snapshot of a collection and return its name."""
 
     @abstractmethod
     async def list_snapshots(self, collection: str) -> list[str]:
@@ -327,37 +255,15 @@ class VectorDBAdapter(ABC):
 
     @abstractmethod
     async def delete_snapshot(self, collection: str, snapshot: str) -> bool:
-        """Delete one of a collection's snapshots.
-
-        Retention needs this. A snapshot lives inside the backend, not in the backup
-        directory, so pruning old backup sets without it would delete the *records* of
-        those snapshots and leave the snapshots themselves behind — orphaned, invisible to
-        every manifest, and consuming disk until someone finds them by hand.
-
-        Returns:
-            Whether a snapshot was actually removed. A name that does not exist is not an
-            error: deleting something already gone achieved the requested state, and
-            retention runs repeatedly over sets that may have been pruned already.
-        """
+        """Delete one of a collection's snapshots."""
 
     @abstractmethod
     async def restore_snapshot(self, collection: str, snapshot: str) -> None:
-        """Restore a collection from one of its snapshots.
-
-        Restoring over a live collection replaces its contents. The caller decides whether
-        that is wanted; the adapter does not second-guess a restore, because refusing one
-        during an actual incident would be the worst possible moment to be cautious.
-        """
+        """Restore a collection from one of its snapshots."""
 
     @abstractmethod
     async def set_alias(self, alias: str, collection: str) -> None:
-        """Point ``alias`` at ``collection``, atomically replacing any previous target.
-
-        The primitive zero-downtime reindexing is built on (D2). It must be atomic: a swap
-        implemented as delete-then-create leaves a window in which the alias resolves to
-        nothing, and every query arriving in that window fails — which is precisely the
-        downtime the feature exists to remove.
-        """
+        """Point ``alias`` at ``collection``, atomically replacing any previous target."""
 
     @abstractmethod
     async def alias_target(self, alias: str) -> str | None:
@@ -379,19 +285,7 @@ class VectorDBAdapter(ABC):
     def iterate_points(
         self, collection: str, *, with_vectors: bool = False, batch_size: int = 256
     ) -> AsyncIterator[Point]:
-        """Yield every point in a collection, in batches.
-
-        The read side of portability (D11): an archive carries chunk text and optionally the
-        vectors, and both live in the index rather than anywhere fasterRag owns.
-
-        An async *iterator* rather than a list, because a collection is exactly the thing
-        that does not fit in memory — the whole project targets corpora where materialising
-        every chunk to build an archive would be the one operation that cannot run on the
-        machine that holds the data.
-
-        Ordering is unspecified. No backend guarantees a stable scan order across
-        implementations, and an archive does not need one: every record carries its id.
-        """
+        """Yield every point in a collection, in batches."""
 
     @abstractmethod
     async def search(self, query: SearchQuery) -> list[ScoredPoint]:

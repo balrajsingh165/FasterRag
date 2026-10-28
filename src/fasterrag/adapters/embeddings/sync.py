@@ -30,12 +30,7 @@ class SentenceEmbedderBridge:
         self._adapter = adapter
 
     def embed(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
-        """Return one vector per text.
-
-        Raises:
-            EmbedError: If called from inside a running event loop with a remote provider,
-                which would deadlock. Chunking belongs in the CPU worker pool.
-        """
+        """Return one vector per text."""
         if isinstance(self._adapter, HuggingFaceEmbedder):
             return self._adapter.encode(texts)
 

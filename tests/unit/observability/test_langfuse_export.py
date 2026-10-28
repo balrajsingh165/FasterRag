@@ -216,16 +216,7 @@ async def test_an_unreachable_langfuse_is_reported_not_raised() -> None:
 
 
 async def test_a_partially_rejected_batch_is_not_reported_as_exported() -> None:
-    """207 is Langfuse's answer to *any* mixed outcome, not a synonym for success.
-
-    The rejected events are listed in the body, so a status-only check reports a trace
-    exported when the server dropped some or all of it. That is precisely what a wrong field
-    name looks like from here, and it is why the export could not be verified against
-    anything but a stub (blocker B7.1): a stub accepts what the real server rejects.
-
-    The shape below is what Langfuse 3.225.1 actually returned for a two-event batch with one
-    invalid ``type``.
-    """
+    """207 is Langfuse's answer to *any* mixed outcome, not a synonym for success."""
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
 

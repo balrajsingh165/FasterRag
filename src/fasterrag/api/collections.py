@@ -34,12 +34,7 @@ router = APIRouter(prefix="/v1/collections", tags=["collections"])
 
 
 async def _dimensions_of(embedder: EmbeddingAdapter) -> int:
-    """Return the model's vector size, embedding a probe if it is not known yet.
-
-    Raises:
-        FasterRagError: If the model reports no usable size, since a collection created at
-            the wrong width cannot be widened and forces a full re-embed to correct.
-    """
+    """Return the model's vector size, embedding a probe if it is not known yet."""
     known = embedder.dimensions
     if known is not None:
         return known
@@ -109,12 +104,7 @@ async def create_collection(
 async def get_collection(
     name: str, adapter: CurrentVectorDB, tenant: CurrentTenant
 ) -> dict[str, Any]:
-    """Return one collection's detail.
-
-    Another tenant's collection is reported as *absent* rather than forbidden: a distinct
-    error would confirm the name exists, which is enough to enumerate a competitor's
-    collections one guess at a time.
-    """
+    """Return one collection's detail."""
     target = scoped_name(name, tenant)
     for info in await adapter.list_collections():
         if info.name == target:

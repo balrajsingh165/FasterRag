@@ -130,12 +130,7 @@ async def _ingest_suite(
 
 
 async def _eval_suite(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Score a collection against a committed dataset and report the gate's verdict.
-
-    Reports metrics rather than latencies, so it does not produce a ledger entry: a recall
-    figure is not a performance measurement and putting it in the performance ledger would
-    invite comparing the two.
-    """
+    """Score a collection against a committed dataset and report the gate's verdict."""
     settings = _settings_or_none(args, console)
     if settings is None:
         return ExitCode.USAGE

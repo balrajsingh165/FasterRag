@@ -32,13 +32,7 @@ class FixedChunker:
         overlap: int = 64,
         counter: TokenCounter | None = None,
     ) -> None:
-        """Build the chunker.
-
-        Args:
-            chunk_size: Target chunk size in tokens.
-            overlap: Tokens each chunk repeats from its predecessor.
-            counter: Token counter; defaults to the estimating counter.
-        """
+        """Build the chunker."""
         self._counter = counter or EstimatingTokenCounter()
         self._budget = chunk_size
         self._limit = chunk_size * self._counter.chars_per_token

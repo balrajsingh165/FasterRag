@@ -72,18 +72,7 @@ def _strip_code_blocks(text: str) -> str:
 
 
 def _duplicate_task_ids(root: Path) -> list[str]:
-    """Return one message per ``TASK-`` id that defines more than one entry.
-
-    An id is how code, docs, and blockers.md point at a piece of work, so two entries sharing
-    one is a reference that resolves to two different things. Three collisions
-    (TASK-0184/0185/0186, six distinct pieces of work) reached `main` unnoticed because
-    nothing looked — parallel work picks "the next free id" by reading a ledger that a
-    sibling has already extended.
-
-    Existing collisions are reported but not repaired here: ticked entries are append-only
-    and frozen by CLAUDE.md, so renumbering history is not this gate's call. What it does is
-    stop the count from growing.
-    """
+    """Return one message per ``TASK-`` id that defines more than one entry."""
     ledger = root / "docs" / "todo.md"
     if not ledger.is_file():
         return []
@@ -103,12 +92,7 @@ def _duplicate_task_ids(root: Path) -> list[str]:
 
 
 def check(root: Path = REPOSITORY_ROOT) -> list[str]:
-    """Return one message per contradicted claim, empty when the docs are truthful.
-
-    Args:
-        root: Repository to inspect. Parameterised so the gate itself can be tested against
-            a constructed tree — a check nobody has watched fail is not a check.
-    """
+    """Return one message per contradicted claim, empty when the docs are truthful."""
     violations: list[str] = _duplicate_task_ids(root)
 
     modules = _python_modules(root)

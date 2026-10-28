@@ -134,12 +134,7 @@ class LLMAdapter(ABC):
     provider: ClassVar[str]
 
     def __init__(self, settings: Settings) -> None:
-        """Build the adapter from validated configuration, opening no connection.
-
-        The client slot lives here because every provider needs one and every provider
-        builds it lazily; keeping it in one place is what lets ``close`` mean the same
-        thing everywhere.
-        """
+        """Build the adapter from validated configuration, opening no connection."""
         self.settings = settings
         self.config = settings.llm
         self.timeout = settings.reliability.timeouts.llm_ms / 1000

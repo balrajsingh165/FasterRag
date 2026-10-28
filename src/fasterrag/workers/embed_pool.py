@@ -51,13 +51,7 @@ class ChunkSink(Protocol):
 
 @runtime_checkable
 class PoolingAdapter(Protocol):
-    """An embedding adapter that can late-chunk a document.
-
-    Kept separate from ``EmbeddingAdapter`` because only a locally loaded model can satisfy
-    it: pooling needs token-level output, and an embedding API returns one vector per input
-    with no way to ask for more. Making it part of the base contract would force every
-    hosted adapter to implement something it cannot do.
-    """
+    """An embedding adapter that can late-chunk a document."""
 
     async def embed_pooled(self, document: str, spans: Sequence[Segment]) -> EmbeddingResult:
         """Return one vector per span, pooled from a pass over the whole document."""
@@ -99,16 +93,7 @@ class EmbeddingWorkerPool:
         sink: ChunkSink,
         breaker: CircuitBreaker | None = None,
     ) -> None:
-        """Build the pool.
-
-        Args:
-            settings: Validated configuration; ``workers.embedding_pool_size`` sizes the
-                pool and ``embeddings.batch_size`` sizes each request.
-            router: Owns the adapters, so each model is loaded exactly once.
-            sink: Receives embedded batches.
-            breaker: Circuit breaker for the embedding provider. Built from
-                ``reliability.circuit_breaker`` when omitted; injected by tests.
-        """
+        """Build the pool."""
         self.settings = settings
         self.router = router
         self.sink = sink
@@ -169,15 +154,7 @@ class EmbeddingWorkerPool:
     def _pooled_documents(
         self, adapter: EmbeddingAdapter, group: Sequence[ChunkPayload]
     ) -> dict[str, list[ChunkPayload]] | None:
-        """Return the group split by document when it should be embedded by pooling.
-
-        ``None`` means embed normally, which covers every case pooling cannot serve: a
-        strategy other than ``late``, an adapter with no token-level output (any hosted
-        provider), or chunks that reached here without their document. Falling back rather
-        than failing is deliberate — a slightly worse vector beats a dead-lettered corpus,
-        and the alternative would make ``strategy: late`` unusable on a hosted model
-        instead of merely no better than ``recursive``.
-        """
+        """Return the group split by document when it should be embedded by pooling."""
         if self.settings.chunking.strategy != "late":
             return None
         if not isinstance(adapter, PoolingAdapter):
@@ -193,12 +170,7 @@ class EmbeddingWorkerPool:
     async def _embed_pooled(
         self, adapter: PoolingAdapter, documents: dict[str, list[ChunkPayload]]
     ) -> EmbeddingResult:
-        """Pool every document in the group, returning vectors in the group's own order.
-
-        One pass per document rather than one per chunk: that single pass is the whole
-        point, and it is what makes each chunk's vector carry context from beyond its own
-        boundaries.
-        """
+        """Pool every document in the group, returning vectors in the group's own order."""
         vectors: list[list[float]] = []
         model = ""
         version = ""

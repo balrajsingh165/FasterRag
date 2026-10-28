@@ -59,12 +59,7 @@ def _require_adapter_class(loaded: object, source: str) -> type[LLMAdapter]:
 
 
 def resolve_adapter_class(provider: str) -> type[LLMAdapter]:
-    """Return the adapter class registered for ``provider``.
-
-    Raises:
-        ConfigError: If the provider is unknown or resolves to something that is not an
-            ``LLMAdapter``.
-    """
+    """Return the adapter class registered for ``provider``."""
     builtin = _BUILTIN_ADAPTERS.get(provider)
     if builtin is not None:
         module_name, _, attribute = builtin.partition(":")
@@ -81,12 +76,5 @@ def resolve_adapter_class(provider: str) -> type[LLMAdapter]:
 
 
 def create_llm_adapter(settings: Settings) -> LLMAdapter:
-    """Build the adapter named by ``llm.provider``.
-
-    Returns:
-        A ready-to-use adapter. No connection is opened until it is first used.
-
-    Raises:
-        ConfigError: If the configured provider cannot be resolved.
-    """
+    """Build the adapter named by ``llm.provider``."""
     return resolve_adapter_class(settings.llm.provider)(settings)

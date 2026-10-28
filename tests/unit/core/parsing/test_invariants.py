@@ -364,12 +364,7 @@ def test_a_leading_byte_order_mark_changes_nothing(parse: Parser, source: str) -
 def test_crlf_and_lf_sources_differ_only_by_the_carriage_returns(
     parse: Parser, source: str
 ) -> None:
-    """Windows line endings must not change what a block is, only what is inside one.
-
-    Only the carriage returns are allowed to differ: markdown-it and the csv module
-    normalise them away entirely, while lxml keeps a CR inside a text node, so the shared
-    property is the weaker one.
-    """
+    """Windows line endings must not change what a block is, only what is inside one."""
     lf = parse(source.encode())
     crlf = parse(source.replace("\n", "\r\n").encode())
 
@@ -384,12 +379,7 @@ def test_crlf_and_lf_sources_differ_only_by_the_carriage_returns(
 @example(source='\x81"\x94ꦼî')
 @example(source="«Ë\x94\r\xd7ú칳")
 def test_no_parser_lets_an_untyped_error_escape(parse: Parser, source: str) -> None:
-    """Every parser failure has to arrive as a ``FasterRagError``.
-
-    Both pinned examples crashed ``parse_csv``: a sniffed delimiter equal to the quote
-    character raised ``ValueError``, and a lone CR raised ``csv.Error``. Neither is in the
-    taxonomy, so a worker would have died on a document instead of dead-lettering it.
-    """
+    """Every parser failure has to arrive as a ``FasterRagError``."""
     try:
         parse(source.encode())
     except FasterRagError:
@@ -425,12 +415,7 @@ def test_undecodable_bytes_are_flagged_rather_than_failing(data: bytes) -> None:
 @given(tail=st.binary(max_size=60))
 @settings(max_examples=80, deadline=None)
 def test_the_lenient_decode_strips_the_mark_too(tail: bytes) -> None:
-    """A file can be both BOM'd and mangled, and the fallback is a separate ``decode`` call.
-
-    Fixing only the strict path leaves the mark in place on exactly the documents that are
-    already damaged — and those are the ones whose flags say to look at them, so the stray
-    U+FEFF lands in the block a human is about to read.
-    """
+    """A file can be both BOM'd and mangled, and the fallback is a separate ``decode`` call."""
     data = b"\xef\xbb\xbf" + tail + b"\xff\xfe"
     assume(b"".join([tail, b"\xff\xfe"]))
 
@@ -443,12 +428,7 @@ def test_the_lenient_decode_strips_the_mark_too(tail: bytes) -> None:
 @given(source=SOURCE)
 @SETTINGS
 def test_plaintext_loses_no_character_of_its_source(source: str) -> None:
-    """Only whitespace is ever removed: everything else has to come out the other side.
-
-    This is the test that non-ASCII content survives. A decode that mangled CJK, dropped a
-    combining mark, or split an astral pair would change the character sequence here even
-    though every offset invariant still held.
-    """
+    """Only whitespace is ever removed: everything else has to come out the other side."""
     assume(not source.startswith(BOM))
     document = parse_plaintext(source.encode())
 
@@ -572,14 +552,7 @@ def test_docx_parsing_is_deterministic(items: Sequence[tuple[str, str, int]]) ->
 
 
 def test_a_heading_zero_style_does_not_outrank_every_real_heading() -> None:
-    """Constructed, because ``_docx_bytes`` clamps the level it is given and never emits it.
-
-    Word itself stops at ``Heading 1``, but a converter can define any style it likes, and
-    ``Heading 0`` parsed to outline depth 0. The builder keeps only entries strictly
-    shallower than the incoming level, and nothing is shallower than 0, so the entry never
-    left the stack: every later ``Heading 1`` nested underneath it and the whole document
-    came back sectioned under one bogus root.
-    """
+    """Constructed, because ``_docx_bytes`` clamps the level it is given and never emits it."""
     document = Document()
     document.styles.add_style("Heading 0", WD_STYLE_TYPE.PARAGRAPH)
     document.add_paragraph("Front Matter", style="Heading 0")
@@ -691,12 +664,7 @@ OVERSIZE = 64 * 1024
 def test_an_oversized_file_is_refused_before_it_is_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: int
 ) -> None:
-    """The limit exists to keep a document out of memory, so reading first defeats it.
-
-    ``workers.cpu_pool._read`` had always taken the size from the directory entry;
-    ``parse_document`` read the bytes and measured them afterwards, which admits a file
-    larger than memory before refusing it.
-    """
+    """The limit exists to keep a document out of memory, so reading first defeats it."""
     path = tmp_path / "big.txt"
     path.write_bytes(b"x" * OVERSIZE)
 

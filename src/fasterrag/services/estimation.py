@@ -48,27 +48,7 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class TokenPrice:
-    """One model's published list price, carrying the provenance that makes it checkable.
-
-    A rate without a source and a date is not a price, it is a rumour — last quarter's number
-    bills nothing today. Provenance therefore lives on the entry rather than on the table: a
-    single table-wide date is only ever as true as its oldest row, so re-checking one vendor
-    would silently re-date every stale row beside it. With the date on the row, a price nobody
-    has re-verified says so, and the rest of the table stays trustworthy.
-
-    ``provider`` is part of the identity, not decoration. The same model id served through a
-    different provider is a different bill, so a rate is applied only to the provider it was
-    published for; anything else is charged at a price its vendor never quoted.
-
-    Attributes:
-        provider: The configured provider value this rate was published for.
-        input_usd_per_million: USD per million input (prompt) tokens.
-        output_usd_per_million: USD per million output tokens, or ``None`` for an embedding
-            model, which produces no billable output tokens.
-        source: Where the figure came from, precisely enough to re-check it.
-        checked: ISO date the figure was last read from ``source``.
-        note: Any caveat that makes the bare number misleading on its own.
-    """
+    """One model's published list price, carrying the provenance that makes it checkable."""
 
     provider: str
     input_usd_per_million: float
@@ -253,23 +233,7 @@ _logger = get_logger(__name__)
 
 
 def require_estimator(settings: Settings) -> None:
-    """Reject preflight estimation when ``cost.estimator`` has switched it off.
-
-    Every D9 surface calls this — ``fasterrag estimate``, ``POST /v1/estimate``,
-    ``fasterrag ingest --dry-run``, and ``FasterRag.estimate`` — because a switch one entry
-    point honours and another ignores is not a switch. The ``benchmark --suite ingest``
-    harness deliberately is not one of them: it reuses the same parse-and-chunk work purely
-    to time it and reports no cost at all, so turning cost estimation off must not take the
-    benchmark suite with it.
-
-    Args:
-        settings: The configuration whose ``cost.estimator`` value decides the answer.
-
-    Raises:
-        FasterRagError: With ``VALIDATION_FAILED`` when ``cost.estimator`` is false. A
-            refusal that names the setting, never an estimate of zero — empty numbers read
-            as a corpus that costs nothing to ingest.
-    """
+    """Reject preflight estimation when ``cost.estimator`` has switched it off."""
     if not settings.cost.estimator:
         raise FasterRagError(
             "preflight cost estimation is disabled; set cost.estimator to true to enable it",
@@ -338,12 +302,7 @@ class Estimate:
 
 @dataclass(frozen=True, slots=True)
 class EnrichmentEstimate:
-    """What contextual enrichment (P2) would add to an ingest.
-
-    Reported separately from the embedding cost rather than folded into it. Enrichment is a
-    *generation* charge on a different model at different rates, and a single blended number
-    would hide which knob to turn when the total looks wrong.
-    """
+    """What contextual enrichment (P2) would add to an ingest."""
 
     calls: int
     prompt_tokens: int
@@ -367,17 +326,7 @@ class EnrichmentEstimate:
 def estimate_enrichment(
     settings: Settings, *, chunks: int, document_tokens: int, chunk_tokens: int
 ) -> EnrichmentEstimate:
-    """Return what enrichment would cost for a corpus of this shape.
-
-    One call per chunk, each sending the whole parent document plus the chunk. The document
-    dominates, which is why P2 sends it as a cacheable prefix.
-
-    # CRITICAL: this is the *uncached* figure and the basis says so. Prompt caching is what
-    # makes enrichment affordable, but the discount depends on the provider, the cache
-    # window, and how many chunks a document has — quoting a discounted number fasterRag
-    # cannot verify would understate a real bill. An over-estimate an operator can reason
-    # about beats an under-estimate they discover on an invoice.
-    """
+    """Return what enrichment would cost for a corpus of this shape."""
     completion_tokens = chunks * settings.chunking.context_tokens
     prompt_tokens = document_tokens + chunk_tokens
     model = settings.llm.model
@@ -402,13 +351,7 @@ def estimate_enrichment(
 
 
 def _rate_for(table: dict[str, TokenPrice], provider: str, model: str) -> TokenPrice | None:
-    """Return the published rate for ``model`` on ``provider``, or ``None`` if there is none.
-
-    The provider has to match. A rate published by one vendor says nothing about what another
-    charges for a model of the same name, and an OpenAI-compatible gateway sets its own prices
-    entirely — billing either at OpenAI's rate would be inventing a figure, which is the one
-    thing this module must never do.
-    """
+    """Return the published rate for ``model`` on ``provider``, or ``None`` if there is none."""
     entry = table.get(model)
     if entry is None or entry.provider != provider:
         return None
@@ -416,12 +359,7 @@ def _rate_for(table: dict[str, TokenPrice], provider: str, model: str) -> TokenP
 
 
 def price_for(provider: str, model: str, tokens: int) -> tuple[float | None, str]:
-    """Return the cost of embedding ``tokens`` and the basis for that figure.
-
-    Returns:
-        The cost in USD and a short explanation. A local provider costs nothing; an
-        unknown hosted model returns ``None`` rather than a fabricated price.
-    """
+    """Return the cost of embedding ``tokens`` and the basis for that figure."""
     if provider in LOCAL_PROVIDERS:
         return 0.0, "runs locally, so no provider charge"
 
@@ -441,16 +379,7 @@ def price_for(provider: str, model: str, tokens: int) -> tuple[float | None, str
 def price_generation(
     provider: str, model: str, prompt_tokens: int, completion_tokens: int
 ) -> float | None:
-    """Return the list-price estimate for one generation call, or ``None`` if unpriced.
-
-    Separate from :func:`price_for` because a generation model has two rates and an
-    embedding model has one. Calling the embedding pricer on a completion would charge the
-    answer at the prompt rate, which understates every query by the margin between them.
-
-    Returns:
-        The estimated cost in USD, ``0.0`` for a local provider, or ``None`` when no rate is
-        recorded for the model — never a fabricated figure.
-    """
+    """Return the list-price estimate for one generation call, or ``None`` if unpriced."""
     if provider in LOCAL_PROVIDERS:
         return 0.0
 
@@ -484,18 +413,7 @@ def estimate_sources(
     *,
     all_providers: bool = False,
 ) -> Estimate:
-    """Parse and chunk ``sources`` to report what ingesting them would involve.
-
-    Args:
-        sources: Paths to estimate.
-        settings: Validated configuration; the chunker settings decide the token count.
-        all_providers: Also price every model with a published rate, so the cost of
-            switching provider is visible before committing to one.
-
-    Returns:
-        The estimate. Documents that cannot be parsed are counted as unreadable rather
-        than raising, because an estimate over a messy corpus is still useful.
-    """
+    """Parse and chunk ``sources`` to report what ingesting them would involve."""
     tasks = CpuWorkerPool.tasks_for(list(sources))
     started = time.perf_counter()
 

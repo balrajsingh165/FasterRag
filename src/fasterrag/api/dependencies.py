@@ -76,15 +76,7 @@ def build_embedding_router(settings: Settings) -> TieringRouter:
 
 
 def shared_embedding_router(request: Request) -> TieringRouter:
-    """Return the application's long-lived embedding router.
-
-    # CRITICAL: built once per process, never per request. A local embedding model takes
-    # seconds to load, and building a router per request reloads it every time — a one-off
-    # developer-machine observation on 2026-08-01 put it at roughly 5 s added to every query
-    # against roughly 45 ms of retrieval (``docs/CHANGELOG.md``). That is an order-of-magnitude
-    # datapoint, not a benchmark-ledger entry: no isolated hardware, dataset, or repetitions.
-    # The router is closed by the application lifespan, never by a request handler.
-    """
+    """Return the application's long-lived embedding router."""
     router: TieringRouter | None = getattr(request.app.state, "embeddings", None)
     if router is None:
         router = create_embedding_router(request.app.state.settings)
@@ -93,12 +85,7 @@ def shared_embedding_router(request: Request) -> TieringRouter:
 
 
 def shared_cache(request: Request) -> SemanticCache:
-    """Return the application's long-lived semantic response cache.
-
-    # CRITICAL: process-scoped, like the router. A cache built per request starts empty on
-    # every request, so it can never hit — it would cost a query embedding per call and
-    # return nothing, which is strictly worse than having no cache at all.
-    """
+    """Return the application's long-lived semantic response cache."""
     cache: SemanticCache | None = getattr(request.app.state, "cache", None)
     if cache is None:
         settings = request.app.state.settings
@@ -141,12 +128,7 @@ def build_generation(
     traces: TraceStore | None = None,
     tenant: str | None = None,
 ) -> GenerationService:
-    """Assemble the query path the CLI also assembles, so the two cannot diverge.
-
-    ``cache`` and ``traces`` are used exactly as given, including ``None``. Replay depends
-    on that: it must run with neither, and a helper that quietly substituted a default would
-    have it populating the cache and writing traces while investigating one.
-    """
+    """Assemble the query path the CLI also assembles, so the two cannot diverge."""
     return GenerationService(
         settings,
         build_retrieval(settings, adapter, router),

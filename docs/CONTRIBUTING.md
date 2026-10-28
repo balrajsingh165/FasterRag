@@ -33,7 +33,8 @@ Optional extras, needed only for what they name: `.[huggingface]` and `.[rerank]
 
 ## 2. Comment rules (code)
 
-- **Docstrings only.** Every module, class, and public function gets a docstring explaining what and why.
+- **Docstrings only, and short.** Every module, class, and public function gets a docstring explaining what and why. A function, method or class docstring is **at most four lines**, and one is usually enough. Module docstrings are exempt: they are the file's documentation and what [internals.md](internals.md) points readers at.
+- **The reasoning goes in [code-notes.md](code-notes.md), not in the function header.** Why a thing is the way it is — the trap it avoids, the alternative rejected, the incident it came from — is worth keeping and worth reading, but a reader scanning a module should see the code, not three paragraphs before each function. `scripts/trim_docstrings.py` moves overflow there, addressed by `module::qualname`. It rewrites via the AST and refuses any file whose code structure changes, because an earlier regex pass over docstrings split sentences mid-line and had to be reverted.
 - NO inline comments and NO explanatory comments, with EXACTLY two permitted exceptions:
   - `# CRITICAL: <why this must not change>` — a super-critical requirement flagged directly in code.
   - `# TODO: <what remains>` / `# BLOCKED: <blocker + ticket/date>` — explicit pending/blocker markers.

@@ -156,21 +156,7 @@ def parse_pdf(
     mime_type: str = "application/pdf",
     options: ParsingOptions = DEFAULT_PARSING_OPTIONS,
 ) -> ParsedDocument:
-    """Parse a PDF into structural blocks.
-
-    Args:
-        data: The raw PDF bytes.
-        mime_type: MIME type recorded on the parsed document.
-        options: Parser thresholds; the shipped defaults when a caller has no
-            configuration to derive them from.
-
-    Returns:
-        The structured document.
-
-    Raises:
-        ParseError: If the file cannot be opened, or if no page yields any text even
-            after the OCR path, which sends the document to the dead-letter queue.
-    """
+    """Parse a PDF into structural blocks."""
     builder = DocumentBuilder(mime_type=mime_type, parser="pdf-layout")
 
     try:

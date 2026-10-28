@@ -76,19 +76,7 @@ class RetrievalService:
         reranker: Reranker | None = None,
         breaker: CircuitBreaker | None = None,
     ) -> None:
-        """Build the service.
-
-        Args:
-            settings: Validated configuration supplying ``retrieval.*``.
-            adapter: The vector database to search.
-            router: Supplies the query embedding through its default adapter; queries are
-                not tier-routed, because a query has no document metadata to route on and
-                must be embedded by the same model that embedded the corpus.
-            reranker: Reorders the shortlist. Omitted when ``retrieval.rerank`` is off, and
-                a failing one degrades the response rather than failing the query.
-            breaker: Circuit breaker for the vector database. Built from
-                ``reliability.circuit_breaker`` when omitted; injected by tests.
-        """
+        """Build the service."""
         self.settings = settings
         self.adapter = adapter
         self.router = router
@@ -110,17 +98,7 @@ class RetrievalService:
         top_k: int | None = None,
         filters: Filter | None = None,
     ) -> list[ScoredChunk]:
-        """Return the chunks most relevant to ``text``.
-
-        Args:
-            text: The query.
-            collection: Collection to search; defaults to the configured one.
-            top_k: Final result count; defaults to ``retrieval.top_k``.
-            filters: Metadata filter, pushed down to every leg.
-
-        Returns:
-            Chunks ordered best first, each carrying the rank and score every leg gave it.
-        """
+        """Return the chunks most relevant to ``text``."""
         return (await self.search(text, collection=collection, top_k=top_k, filters=filters)).chunks
 
     async def search(
@@ -191,17 +169,7 @@ class RetrievalService:
         candidates: int,
         filters: Filter | None,
     ) -> dict[str, list[ScoredPoint]]:
-        """Run the legs behind the vector-database breaker.
-
-        Retrieval is the one outbound call on the query path with nowhere to degrade to: a
-        failure here means there is nothing to answer *from*, so it surfaces rather than
-        dropping a rung the way a failed reranker or a failed generation does. That is
-        exactly why the breaker matters here — without it a backend that is down is retried
-        on every request, and the retries are the load keeping it down.
-
-        ``CircuitOpenError`` carries ``CIRCUIT_OPEN``, which the problem table already maps
-        to a retryable 503, so shedding is reported as the temporary condition it is.
-        """
+        """Run the legs behind the vector-database breaker."""
         # CRITICAL: the query is embedded *outside* the guarded region. It is an embedding
         # provider call sitting on the retrieval path, and counting its failures here would
         # open the vector-database breaker for an outage the vector database had no part in

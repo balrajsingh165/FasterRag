@@ -76,19 +76,7 @@ _sequence = 0
 
 
 def _digest(*parts: str) -> str:
-    """Return a stable hex digest over the parts, encoded so no tuple can impersonate another.
-
-    # CRITICAL: each part is written as its UTF-8 byte length, a colon, and the bytes — the
-    # netstring form — and the encoded parts are concatenated before hashing. Two distinct
-    # tuples cannot produce one byte string: the length prefix fixes where every field ends,
-    # so a field may contain any byte at all, including the NUL that version 2 had to forbid.
-    # Under version 2 the parts were NUL-joined, which separated only while no part carried
-    # one — ("a" + NUL + "b", "c") and ("a", "b" + NUL + "c") reached the same digest, a real
-    # collision found by generating unrestricted text (TASK-0209). That was policed at the
-    # one call site taking user input, and an invariant held by a validator two modules away
-    # is one refactor from false. This encoding removes the constraint rather than guarding
-    # it, and the property suite proves it directly on forged tuples (TASK-0210).
-    """
+    """Return a stable hex digest over the parts, encoded so no tuple can impersonate another."""
     hasher = hashlib.sha256()
     for part in parts:
         encoded = part.encode("utf-8")
@@ -112,17 +100,7 @@ def text_hash(text: str) -> str:
 
 
 def normalise_source(source_uri: str) -> str:
-    r"""Return the canonical form of a source URI for identity purposes.
-
-    Two spellings of one local file must produce one document id. On Windows the filesystem
-    is case-insensitive and the separator is interchangeable, so ``d:\docs\a.md``,
-    ``D:\docs\a.md``, and ``D:/docs/a.md`` all name the same bytes — and hashing the raw
-    string gave each its own id, which defeated deduplication and left a corpus quietly
-    holding three copies of one document (TASK-0141).
-
-    URLs are left exactly as given. Their paths are case-*sensitive* by specification, so
-    folding one would merge two genuinely different resources.
-    """
+    """Return the canonical form of a source URI for identity purposes."""
     if _NUL in source_uri:
         raise IngestionError(
             "a source URI cannot contain a NUL byte; no filesystem or URL scheme permits one",
@@ -159,13 +137,7 @@ def chunk_id(document: str, chunk_index: int, chunker_hash: str) -> str:
 
 
 def job_id() -> str:
-    """Return a fresh job id that sorts chronologically.
-
-    A timestamp alone is not enough to order ids: several jobs can be created inside one
-    clock tick, and on Windows that tick can be tens of milliseconds. A per-process
-    sequence number breaks those ties, so ids created by one process always sort in
-    creation order. Across processes, ordering falls back to the timestamp.
-    """
+    """Return a fresh job id that sorts chronologically."""
     with _SEQUENCE_LOCK:
         global _last_millis, _sequence
         millis = int(time.time() * 1000)
@@ -190,12 +162,7 @@ def _stable(payload: dict[str, Any]) -> str:
 
 
 def chunker_config_hash(settings: Settings) -> str:
-    """Return a hash of the settings that change chunk boundaries.
-
-    Only boundary-affecting keys are included. Contextual enrichment is *not* one of them:
-    it changes a chunk's embedded text but not where the chunk starts and ends, so
-    toggling it must not renumber every chunk in the corpus.
-    """
+    """Return a hash of the settings that change chunk boundaries."""
     chunking = settings.chunking
     return _digest(
         _stable(

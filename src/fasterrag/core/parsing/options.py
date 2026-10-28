@@ -31,19 +31,7 @@ __all__ = ["DEFAULT_PARSING_OPTIONS", "ParsingOptions", "create_parsing_options"
 
 @dataclass(frozen=True, slots=True)
 class ParsingOptions:
-    """The parser thresholds the ``parsing`` configuration section sets.
-
-    Attributes:
-        minimum_chars_per_page: Characters a PDF page must yield before it is accepted as
-            born-digital text; below it the page is rasterized and passed through OCR.
-            ``0`` never triggers OCR.
-        ocr_resolution: DPI the page is rendered at for OCR.
-        heading_size_ratio: How much larger than the body type a PDF line must be to be
-            inferred as a heading.
-        max_heading_chars: Length ceiling for an inferred PDF heading; longer lines are
-            prose whatever their type size.
-        rows_per_block: Delimited-text rows serialized into one block.
-    """
+    """The parser thresholds the ``parsing`` configuration section sets."""
 
     minimum_chars_per_page: int = 40
     ocr_resolution: int = 200

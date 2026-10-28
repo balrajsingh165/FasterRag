@@ -68,21 +68,7 @@ class CostGovernor:
         return self.per_query > _UNLIMITED or self.per_tenant > _UNLIMITED
 
     def check(self, tokens: int, *, tenant: str | None = None, now: float | None = None) -> None:
-        """Refuse a request that would exceed either budget.
-
-        Args:
-            tokens: The worst case this request can cost — prompt plus ``llm.max_tokens``.
-            tenant: The tenant to charge, or ``None`` for a single-tenant deployment. All
-                untenanted traffic shares one bucket, which is what a deployment with
-                ``security.multi_tenancy: false`` means by a per-tenant budget.
-            now: Monotonic clock override, for tests.
-
-        Raises:
-            FasterRagError: ``BUDGET_EXCEEDED`` when the request does not fit. The message
-                names which budget refused it and by how much, because "budget exceeded"
-                alone leaves an operator unable to tell a too-large query from an exhausted
-                account.
-        """
+        """Refuse a request that would exceed either budget."""
         if self.per_query > _UNLIMITED and tokens > self.per_query:
             raise FasterRagError(
                 f"this query needs up to {tokens} tokens, above the "
@@ -106,13 +92,7 @@ class CostGovernor:
             )
 
     def record(self, tokens: int, *, tenant: str | None = None, now: float | None = None) -> None:
-        """Charge a completed request's actual token usage to its tenant.
-
-        Recorded after the call rather than at the check, so a tenant is charged what the
-        query really cost rather than the ceiling it was admitted against. Admitting on the
-        worst case and charging the real one is the combination that neither overspends nor
-        over-refuses.
-        """
+        """Charge a completed request's actual token usage to its tenant."""
         if self.per_tenant <= _UNLIMITED or tokens <= 0:
             return
 
@@ -143,12 +123,7 @@ class CostGovernor:
 
 
 def create_governor(settings: Settings) -> CostGovernor:
-    """Build the governor from ``cost.*``.
-
-    Always returned, never ``None``: a governor with both budgets at their ``0`` default
-    permits everything, and a caller that has to decide whether it has one is a caller that
-    can forget to ask.
-    """
+    """Build the governor from ``cost.*``."""
     return CostGovernor(
         per_query=settings.cost.per_query_token_budget,
         per_tenant=settings.cost.per_tenant_token_budget,

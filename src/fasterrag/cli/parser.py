@@ -25,12 +25,7 @@ __all__ = ["PENDING_COMMANDS", "build_parser"]
 
 
 class _StoreTrueNoDefault(argparse.Action):
-    """``store_true`` that leaves the attribute alone when the flag is absent.
-
-    ``argparse.SUPPRESS`` suppresses the default but ``store_true`` insists on one, so a
-    subparser's ``--json`` would reset a root-level ``--json`` back to ``False``. This sets
-    the attribute only when the flag actually appears.
-    """
+    """``store_true`` that leaves the attribute alone when the flag is absent."""
 
     def __init__(self, option_strings: Sequence[str], dest: str, **kwargs: Any) -> None:
         """Register a zero-argument flag whose default is suppressed."""
@@ -55,16 +50,7 @@ PENDING_COMMANDS: Final[dict[str, str]] = {}
 
 
 def _add_global_flags(parser: argparse.ArgumentParser, *, root: bool = False) -> None:
-    """Attach the flags every command accepts.
-
-    Repeated on each subparser as well as the root so ``fasterrag --json query ...`` and
-    ``fasterrag query --json ...`` both work; operators write them in either position and
-    neither reading is wrong.
-
-    # CRITICAL: only the root carries real defaults. A subparser that also defaulted would
-    # overwrite whatever the root parsed — argparse applies subparser defaults after the
-    # root's values, so `fasterrag --json doctor` would silently come back with json off.
-    """
+    """Attach the flags every command accepts."""
     unset: Any = None if root else argparse.SUPPRESS
     flag: Any = "store_true" if root else _StoreTrueNoDefault
 
@@ -186,12 +172,7 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
 
 
 def _add_provision(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register ``provision``.
-
-    The tool choices come from the service registry rather than a literal list, so the CLI
-    offers exactly what the REST admin router serves. Two hand-written lists is how the two
-    control planes came to disagree about Langfuse and Grafana (TASK-0251).
-    """
+    """Register ``provision``."""
     parser = subparsers.add_parser("provision", help="config-driven provisioning")
     _add_global_flags(parser)
     parser.add_argument("tool", choices=PROVISIONABLE_TOOLS, help="tool to provision")

@@ -111,17 +111,7 @@ def _condition(key: str, operator: str, value: Any) -> models.FieldCondition:
 
 
 def to_qdrant_filter(filters: Filter | None) -> models.Filter | None:
-    """Translate a vendor-neutral filter expression into a Qdrant filter.
-
-    Args:
-        filters: The validated expression, or ``None`` for no filtering.
-
-    Returns:
-        The pushed-down Qdrant filter, or ``None``.
-
-    Raises:
-        FasterRagError: With ``VALIDATION_FAILED`` if the expression is unsupported.
-    """
+    """Translate a vendor-neutral filter expression into a Qdrant filter."""
     validate_filter(filters)
     if not filters:
         return None
@@ -148,13 +138,7 @@ class QdrantAdapter(VectorDBAdapter):
     """Qdrant implementation of the vector database contract."""
 
     def __init__(self, settings: Settings) -> None:
-        """Build the adapter. No connection is opened until an operation runs.
-
-        Args:
-            settings: Validated configuration supplying the connection details, the
-                name of the environment variable holding the API key, and the shared
-                vector-database timeout.
-        """
+        """Build the adapter. No connection is opened until an operation runs."""
         self._settings = settings.vector_db
         self._api_key_env = settings.vector_db.api_key_env
         self._timeout_seconds = max(1, round(settings.reliability.timeouts.vector_db_ms / 1000))
@@ -182,13 +166,7 @@ class QdrantAdapter(VectorDBAdapter):
         return self._client
 
     def _auth_error(self, operation: str, transport: str) -> ProviderError:
-        """Build the non-retryable error for a rejected credential.
-
-        Reported as ``VECTOR_DB_AUTH_FAILED``, not as the generic ``RETRIEVAL_FAILED`` every
-        other backend failure carries. A rejected key is not a backend that is unwell: it
-        will fail identically forever, so it must never be retried and must name
-        ``vector_db.api_key_env`` rather than send an operator looking for an outage.
-        """
+        """Build the non-retryable error for a rejected credential."""
         named = self._api_key_env or "vector_db.api_key_env"
         return ProviderError(
             f"qdrant rejected the credentials during {operation} over {transport}; "
@@ -199,12 +177,7 @@ class QdrantAdapter(VectorDBAdapter):
         )
 
     def _translate_grpc(self, exc: RpcError, operation: str) -> FasterRagError:
-        """Map a gRPC failure onto the taxonomy.
-
-        gRPC reports status codes rather than HTTP statuses, so without this an
-        authentication rejection over gRPC would be classified as a transport blip and
-        retried until the breaker opened.
-        """
+        """Map a gRPC failure onto the taxonomy."""
         code_getter = getattr(exc, "code", None)
         status = code_getter() if callable(code_getter) else None
 
@@ -229,18 +202,7 @@ class QdrantAdapter(VectorDBAdapter):
         )
 
     def _translate(self, exc: BaseException, operation: str) -> FasterRagError:
-        """Map a Qdrant client failure onto the typed error taxonomy.
-
-        A backend failure is ``RETRIEVAL_FAILED``, never ``EMBED_PROVIDER_ERROR``. The two
-        render different problem documents — "Retrieval failed" against "Embedding provider
-        failed" — and a stopped Qdrant reported as the latter sends an operator to inspect a
-        healthy embedding provider while their vector database is down, besides making a real
-        embedding outage indistinguishable from this one. Verified against a genuinely
-        unreachable instance (TASK-0226).
-
-        Authentication failures are never retried and name the environment variable
-        rather than the key, so a credential cannot reach a log line.
-        """
+        """Map a Qdrant client failure onto the typed error taxonomy."""
         if isinstance(exc, RpcError):
             return self._translate_grpc(exc, operation)
 
@@ -341,13 +303,7 @@ class QdrantAdapter(VectorDBAdapter):
             return described
 
     async def snapshot(self, collection: str) -> str:
-        """Take a Qdrant snapshot of a collection and return its name.
-
-        Raises:
-            FasterRagError: With ``INTERNAL`` if the server accepted the request but
-                described no snapshot, which would otherwise leave a backup routine
-                believing it had a restore point it does not have.
-        """
+        """Take a Qdrant snapshot of a collection and return its name."""
         async with self._mapped_errors("snapshot"):
             description = await self.client.create_snapshot(collection_name=collection)
 
@@ -500,12 +456,7 @@ class QdrantAdapter(VectorDBAdapter):
         return self._named.get(collection, False)
 
     def _vector_for(self, point: Point, *, named: bool) -> Any:
-        """Build the vector payload for a point in the collection's layout.
-
-        Raises:
-            EmbedError: If a sparse vector is supplied for a dense-only collection, which
-                would otherwise be accepted and silently dropped.
-        """
+        """Build the vector payload for a point in the collection's layout."""
         dense = list(point.vector)
         if not named:
             if point.sparse is not None:
@@ -574,13 +525,7 @@ class QdrantAdapter(VectorDBAdapter):
     async def iterate_points(
         self, collection: str, *, with_vectors: bool = False, batch_size: int = 256
     ) -> AsyncIterator[Point]:
-        """Yield every point in a collection using Qdrant's scroll cursor.
-
-        Scroll rather than a large search: search ranks against a query vector and caps at a
-        limit, while scroll is the only operation that walks a whole collection. The cursor
-        is followed until it comes back empty, so a collection larger than memory streams
-        rather than materialising.
-        """
+        """Yield every point in a collection using Qdrant's scroll cursor."""
         named = await self._uses_named_vectors(collection)
         offset: models.ExtendedPointId | None = None
 

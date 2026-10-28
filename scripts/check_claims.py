@@ -119,12 +119,7 @@ def _split(body: str) -> list[str]:
 
 
 def _sentences(body: str) -> list[tuple[int, str]]:
-    """Return each sentence of a document with the line it starts on.
-
-    Fenced blocks are dropped first: a phrase inside one is sample output or a quoted log,
-    not the document asserting anything. Table cells are split apart along with sentences,
-    since two cells of one row are two unrelated statements.
-    """
+    """Return each sentence of a document with the line it starts on."""
     stripped = _FENCE.sub(lambda match: "\n" * match.group(0).count("\n"), body)
 
     units: list[tuple[int, str]] = []
@@ -140,16 +135,7 @@ def _sentences(body: str) -> list[tuple[int, str]]:
 
 
 def check(docs: Path = DOCS) -> list[str]:
-    """Return one message per stale denial, empty when every denial cites open work.
-
-    Args:
-        docs: Documentation directory to scan. Parameterised so the gate itself can be run
-            against a constructed tree — a check nobody has watched fail is not a check.
-
-    A scan that reads no documents, or finds no denials at all, is reported as a failure
-    rather than a pass. A parser that silently matches nothing looks identical to a clean
-    repository, and the repository is never that clean.
-    """
+    """Return one message per stale denial, empty when every denial cites open work."""
     if not docs.is_dir():
         return [f"{docs} is not a directory; the claim scan read nothing"]
 

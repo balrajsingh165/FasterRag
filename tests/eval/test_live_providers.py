@@ -162,23 +162,13 @@ ALL_CHECKS: tuple[LiveCheck, ...] = LLM_CHECKS + EMBEDDING_CHECKS
 
 @dataclass(slots=True)
 class LiveLedger:
-    """What this run actually reached, and what it did not.
-
-    Verification is evidence-keyed on purpose: ``verified`` is derived from the recorded
-    responses rather than tracked alongside them, so there is no counter that can be
-    incremented by a provider that was never called.
-    """
+    """What this run actually reached, and what it did not."""
 
     evidence: dict[str, str] = field(default_factory=dict)
     unverified: dict[str, str] = field(default_factory=dict)
 
     def record_verified(self, name: str, evidence: str) -> None:
-        """Record that ``name`` returned a live response.
-
-        Raises:
-            ValueError: If no evidence is supplied, or the provider was already recorded
-                as unverified in this run.
-        """
+        """Record that ``name`` returned a live response."""
         if not evidence.strip():
             raise ValueError(f"{name} cannot be recorded verified without evidence")
         if name in self.unverified:
@@ -186,12 +176,7 @@ class LiveLedger:
         self.evidence[name] = evidence
 
     def record_unverified(self, name: str, reason: str) -> None:
-        """Record why ``name`` was not reached.
-
-        Raises:
-            ValueError: If no reason is supplied, or the provider already returned a
-                live response in this run.
-        """
+        """Record why ``name`` was not reached."""
         if not reason.strip():
             raise ValueError(f"{name} cannot be recorded unverified without a reason")
         if name in self.evidence:

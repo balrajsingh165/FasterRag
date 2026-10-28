@@ -157,12 +157,7 @@ class TestErrorTranslation:
     def test_an_auth_failure_without_a_sqlstate_is_still_recognised(
         self, adapter: PgvectorAdapter
     ) -> None:
-        """An auth failure with no SQLSTATE is still permanent.
-
-        A connection-time rejection carries none, so the message is the only
-        thing left to key on — and calling it retryable would hammer a server that will
-        never accept the credential.
-        """
+        """An auth failure with no SQLSTATE is still permanent."""
         translated = adapter._translate(
             OSError("FATAL: password authentication failed for user"), "connect"
         )
@@ -240,23 +235,13 @@ class TestFilterTranslation:
     def test_an_equality_filter_binds_a_containment_document(
         self, adapter: PgvectorAdapter
     ) -> None:
-        """Equality goes through jsonb containment rather than a scalar comparison.
-
-        That is what makes a filter match an array payload holding the value as well as a
-        scalar one, matching Qdrant's semantics, and what lets the GIN index serve it. The
-        value is bound, never interpolated: a payload value is caller-supplied.
-        """
+        """Equality goes through jsonb containment rather than a scalar comparison."""
         _, params = adapter._filter_sql({"tenant": "acme"})
 
         assert params == ['{"tenant": "acme"}']
 
     def test_a_range_filter_binds_the_key_and_the_bound(self, adapter: PgvectorAdapter) -> None:
-        """A range binds the key and the bound, comparing jsonb directly.
-
-        Casting to numeric instead would raise on the first non-numeric value: a cast
-        raises on the first non-numeric value stored under that key, turning one malformed
-        document into a failed query.
-        """
+        """A range binds the key and the bound, comparing jsonb directly."""
         _, params = adapter._filter_sql({"year": {"$gte": 2020}})
 
         assert params == ["year", "2020"]

@@ -54,18 +54,7 @@ _MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 def registered(app: FastAPI) -> dict[str, list[str]]:
-    """Return every routable path and its methods.
-
-    Walks nested routers rather than reading ``app.routes``: this FastAPI version wraps
-    included routers, so the flat list holds only what was registered on the application
-    itself — which would make this whole suite pass by inspecting almost nothing.
-
-    Methods are *merged* per path. One path can carry several operations, each registered as
-    its own route object, and assigning instead of merging kept only the last one seen — so
-    the first path to grow a second verb would have hidden the other from this table. That is
-    the direction the table exists to catch, and it went unnoticed until
-    ``DELETE /v1/admin/provision/{tool}`` landed beside the ``POST`` (TASK-0251).
-    """
+    """Return every routable path and its methods."""
     found: dict[str, set[str]] = {}
 
     def walk(router: Any, depth: int = 0) -> None:
@@ -145,12 +134,7 @@ def test_estimating_needs_admin_because_it_reads_server_paths() -> None:
 
 
 def test_repairing_the_host_needs_admin() -> None:
-    """`POST /v1/admin/doctor/fix` creates a Docker volume and starts a container (TASK-0258).
-
-    It is a strict subset of what the provisioning verbs beside it already do, which is why
-    it is exposed at all — but it is host authority, so it may never resolve to a narrower
-    scope than they do.
-    """
+    """`POST /v1/admin/doctor/fix` creates a Docker volume and starts a container (TASK-0258)."""
     assert required_scope("/v1/admin/doctor/fix") == "admin"
 
 

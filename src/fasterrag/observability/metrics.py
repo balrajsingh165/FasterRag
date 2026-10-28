@@ -83,12 +83,7 @@ def _render_labels(labels: Labels, extra: tuple[tuple[str, str], ...] = ()) -> s
 
 @dataclass(frozen=True, slots=True)
 class Sample:
-    """One instrument's series, in a form an exporter can read without parsing text.
-
-    The registry is the single source of truth for both readers. Rendering to Prometheus
-    text and then parsing it back would make the OTLP view a lossy copy of the scrape view,
-    and the two would eventually disagree about a value neither of them got wrong.
-    """
+    """One instrument's series, in a form an exporter can read without parsing text."""
 
     name: str
     kind: str
@@ -139,12 +134,7 @@ class Counter(Instrument):
         self._values: dict[Labels, float] = {}
 
     def increment(self, amount: float = 1.0, **labels: str) -> None:
-        """Add to the series identified by ``labels``.
-
-        Raises:
-            ValueError: If the amount is negative. A counter that can go down is not a
-                counter, and every rate built on it would be wrong rather than merely odd.
-        """
+        """Add to the series identified by ``labels``."""
         if amount < 0:
             raise ValueError(f"{self.name} is a counter and cannot decrease by {amount}")
 
@@ -246,13 +236,7 @@ class Histogram(Instrument):
         self._sums: dict[Labels, float] = {}
 
     def observe(self, value: float, **labels: str) -> None:
-        """Record one observation into the series identified by ``labels``.
-
-        # CRITICAL: only the *first* bucket the value fits is incremented. Counts are stored
-        # per-bucket and made cumulative once, at render. Incrementing every bucket that
-        # bounds the value would double-count it against the cumulative pass and inflate
-        # every percentile read off the result.
-        """
+        """Record one observation into the series identified by ``labels``."""
         key = _key(labels)
         with self._lock:
             counts = self._counts.setdefault(key, [0] * (len(self.buckets) + 1))
@@ -293,13 +277,7 @@ class Histogram(Instrument):
         return lines
 
     def samples(self) -> list[Sample]:
-        """Return one sample per series, with cumulative bucket counts.
-
-        Cumulative here as in the exposition format: OTLP explicit-bucket histograms take
-        *per-bucket* counts, so the exporter undoes this. Presenting the cumulative form is
-        deliberate — it is what the catalogue documents and what a reader comparing a
-        scrape against an OTLP payload will be holding.
-        """
+        """Return one sample per series, with cumulative bucket counts."""
         with self._lock:
             series = sorted(self._counts.items())
             sums = dict(self._sums)
@@ -383,12 +361,7 @@ class Registry:
         return [instrument.name for instrument in self._instruments]
 
     def series(self, name: str) -> list[tuple[str, str]]:
-        """Return one instrument's series as ``(labels, value)`` pairs.
-
-        A public accessor so a second reader — the dashboard — sees exactly what a scrape
-        sees. Two renderers over one registry cannot disagree; two renderers each walking
-        their own copy of the state eventually do.
-        """
+        """Return one instrument's series as ``(labels, value)`` pairs."""
         for instrument in self._instruments:
             if instrument.name != name:
                 continue

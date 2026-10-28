@@ -85,13 +85,7 @@ PROVISIONABLE_TOOLS: Final[tuple[str, ...]] = tuple(_TOOLS)
 
 
 def _commands_for(tool: str) -> ToolCommands:
-    """Return the verbs a tool answers.
-
-    Raises:
-        FasterRagError: With ``NOT_FOUND`` for an unknown tool, naming what is supported.
-            The list comes from the table itself, so a refusal can never advertise a
-            different set from the one that would be dispatched.
-    """
+    """Return the verbs a tool answers."""
     try:
         return _TOOLS[tool]
     except KeyError as exc:

@@ -111,21 +111,7 @@ async def run_docker(
     timeout: float = _COMMAND_TIMEOUT_SECONDS,
     env: Mapping[str, str] | None = None,
 ) -> DockerResult:
-    """Run a ``docker`` command and capture its output.
-
-    Args:
-        args: Arguments after the ``docker`` executable.
-        timeout: Seconds to wait before killing the process. Every external call is
-            bounded; no unbounded await exists in the codebase.
-        env: Extra environment for the subprocess, used to hand secrets to ``-e NAME``
-            pass-through without putting them in ``argv``.
-
-    Returns:
-        The command's exit status and captured streams.
-
-    Raises:
-        ProvisioningError: If the docker executable is absent or the command times out.
-    """
+    """Run a ``docker`` command and capture its output."""
     try:
         process = await asyncio.create_subprocess_exec(
             "docker",
@@ -227,13 +213,7 @@ async def _wait_until_ready(host: str, ports: Sequence[int]) -> None:
 
 
 async def _wait_until_answering(settings: Settings) -> None:
-    """Block until the backend actually answers an API call.
-
-    An open TCP port is not readiness. A container binds its listener before it can serve,
-    and a client misconfiguration such as the wrong transport connects at the socket level
-    and fails at the first request. Provisioning must not report success until a real call
-    succeeds, or the failure lands on whatever runs next instead of here.
-    """
+    """Block until the backend actually answers an API call."""
     from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 
     loop = asyncio.get_running_loop()
@@ -307,12 +287,7 @@ def _server_key_environment(settings: Settings) -> dict[str, str]:
 
 
 async def require_provisioning_gate(settings: Settings) -> None:
-    """Refuse to provision until the environment checks pass.
-
-    Only the checks that describe the environment gate provisioning. Backend
-    reachability deliberately does not: it is expected to fail before the backend
-    exists, and gating on it would make a cold start impossible.
-    """
+    """Refuse to provision until the environment checks pass."""
     from fasterrag.services.doctor import run_doctor
 
     report = await run_doctor(settings)
@@ -327,22 +302,7 @@ async def require_provisioning_gate(settings: Settings) -> None:
 
 
 async def provision_qdrant(settings: Settings) -> ProvisionResult:
-    """Bring the system-managed Qdrant container to its configured state.
-
-    Converges rather than reinstalls: an already-correct container is left running, a
-    stopped one is started, and one built from a different image is replaced. Data
-    survives replacement because storage lives on a named volume.
-
-    Args:
-        settings: Validated configuration.
-
-    Returns:
-        The running container's status and URL.
-
-    Raises:
-        ProvisioningError: If preflight checks fail, Docker refuses a step, or the
-            container never becomes reachable. Each carries a concrete fix.
-    """
+    """Bring the system-managed Qdrant container to its configured state."""
     if settings.vector_db.mode != "docker":
         raise ProvisioningError(
             f"vector_db.mode is {settings.vector_db.mode!r}, so Qdrant is not managed by fasterRag",
@@ -386,38 +346,13 @@ async def provision_qdrant(settings: Settings) -> ProvisionResult:
 
 
 async def volume_exists(volume: str) -> bool:
-    """Return whether a named Docker volume exists.
-
-    Args:
-        volume: The volume name from ``vector_db.docker.volume``.
-
-    Returns:
-        Whether Docker knows the volume. An absent volume is not an error here — both
-        provisioning and ``fasterrag doctor --fix`` create it.
-
-    Raises:
-        ProvisioningError: If the docker executable is missing or the command times out.
-            A daemon that answers "no such volume" returns ``False`` instead, so callers
-            must establish that Docker is up before reading this as "not created yet".
-    """
+    """Return whether a named Docker volume exists."""
     result = await run_docker(["volume", "inspect", volume], timeout=20.0)
     return result.ok
 
 
 async def ensure_volume(volume: str) -> None:
-    """Create the named storage volume if it does not exist yet.
-
-    Idempotent in the safe direction: ``docker volume create`` returns an existing volume
-    untouched, so this can neither reinitialise storage that already holds an index nor
-    detach one from its container. That is what makes it the one repair
-    ``fasterrag doctor --fix`` performs without asking.
-
-    Args:
-        volume: The volume name from ``vector_db.docker.volume``.
-
-    Raises:
-        ProvisioningError: If Docker refuses to create the volume.
-    """
+    """Create the named storage volume if it does not exist yet."""
     result = await run_docker(["volume", "create", volume], timeout=20.0)
     if not result.ok:
         raise ProvisioningError(
@@ -427,19 +362,7 @@ async def ensure_volume(volume: str) -> None:
 
 
 async def start_container(name: str = QDRANT_CONTAINER) -> None:
-    """Start an existing, stopped container.
-
-    Starting is not creating: this never pulls an image, never publishes a port that was
-    not already published, and never touches a volume. It restores a container to the
-    state whoever created it asked for, which is why ``fasterrag doctor --fix`` is allowed
-    to do it — but only after confirming the container is fasterRag's own.
-
-    Args:
-        name: The container to start.
-
-    Raises:
-        ProvisioningError: If Docker refuses to start it.
-    """
+    """Start an existing, stopped container."""
     result = await run_docker(["start", name])
     if not result.ok:
         raise ProvisioningError(

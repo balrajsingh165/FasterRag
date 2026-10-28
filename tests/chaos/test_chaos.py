@@ -210,12 +210,7 @@ def batch(count: int) -> EmbeddedBatch:
 async def test_killing_a_worker_mid_batch_leaves_no_duplicate_vectors(
     chaos_settings: Settings,
 ) -> None:
-    """Scenario 1: kill an embedding worker mid-batch; the retry writes no duplicates.
-
-    Idempotent upserts are what make this safe: the same chunk written twice carries the
-    same deterministic point id, so the second write replaces the first rather than adding
-    a second copy of the same passage to the index.
-    """
+    """Scenario 1: kill an embedding worker mid-batch; the retry writes no duplicates."""
     backend = CountingBackend(chaos_settings)
     indexer = Indexer(chaos_settings, backend)
     written = batch(3)

@@ -117,12 +117,7 @@ async def _dispatch(args: argparse.Namespace, console: Console) -> ExitCode:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Parse arguments, run the command, and return a process exit code.
-
-    ``KeyboardInterrupt`` exits 1 rather than dumping a traceback: an operator pressing
-    Ctrl-C already knows what happened, and a stack trace only obscures whatever partial
-    output they were reading.
-    """
+    """Parse arguments, run the command, and return a process exit code."""
     parser = build_parser()
     args = parser.parse_args(argv)
 

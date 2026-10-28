@@ -58,21 +58,7 @@ def create_chunker(
     counter: TokenCounter | None = None,
     embedder: SentenceEmbedder | None = None,
 ) -> Chunker:
-    """Build the chunker named by ``chunking.strategy``.
-
-    Args:
-        settings: Validated configuration.
-        counter: Token counter to use. Defaults to whatever ``chunking.token_counter``
-            selects, so the configuration decides at every call site rather than only the
-            ones that remembered to pass it. Supplied explicitly only by tests.
-        embedder: Sentence embedder, required only by the semantic strategy.
-
-    Returns:
-        The configured chunker.
-
-    Raises:
-        ConfigError: If the semantic strategy is selected without an embedder.
-    """
+    """Build the chunker named by ``chunking.strategy``."""
     size = settings.chunking.chunk_size
     overlap = settings.chunking.overlap
     strategy = settings.chunking.strategy

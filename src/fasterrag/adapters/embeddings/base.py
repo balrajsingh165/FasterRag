@@ -49,14 +49,7 @@ def require_extra(provider: str, package: str, extra: str) -> ConfigError:
 
 
 def require_key(name: str | None, provider: str) -> str:
-    """Return the credential a provider needs, or explain what is missing.
-
-    Configuration validation already guarantees the variable is present at startup, so
-    reaching this error means the environment changed underneath a running process.
-
-    Raises:
-        ConfigError: If the variable is unset or blank. The value is never included.
-    """
+    """Return the credential a provider needs, or explain what is missing."""
     if not name:
         raise ConfigError(f"embeddings.api_key_env must name a variable for provider {provider!r}")
 
@@ -73,12 +66,7 @@ def classify_provider_failure(
     operation: str,
     key_env: str | None,
 ) -> EmbedError:
-    """Translate a provider failure into a typed, correctly-classified error.
-
-    Retryability comes from what the provider actually reported: rate limits and server
-    faults are worth retrying, a rejected credential never is. Getting this wrong means
-    hammering a provider that has already refused you.
-    """
+    """Translate a provider failure into a typed, correctly-classified error."""
     status = getattr(exc, "status_code", None)
     if not isinstance(status, int):
         status = None
@@ -134,22 +122,12 @@ class EmbeddingResult:
 
 
 class EmbeddingAdapter(ABC):
-    """Vendor-neutral embedding contract.
-
-    Built-in providers and third-party ones registered through the
-    ``fasterrag.embeddings`` entry point implement this identically
-    (``docs/python-api.md`` §Extending).
-    """
+    """Vendor-neutral embedding contract."""
 
     provider: ClassVar[str]
 
     def __init__(self, settings: Settings) -> None:
-        """Build the adapter from validated configuration.
-
-        The one-argument constructor is the registration contract, matching the vector
-        database adapters. Construction stays cheap: models are loaded and connections
-        opened on first use, so a worker that never embeds never pays for a model.
-        """
+        """Build the adapter from validated configuration."""
         self.settings = settings
         self.config = settings.embeddings
 

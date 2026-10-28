@@ -60,19 +60,7 @@ class IngestionService:
         locks: LockStore | None = None,
         executor_factory: Callable[[int], Executor] | None = None,
     ) -> None:
-        """Build the service.
-
-        Args:
-            settings: Validated configuration.
-            journal: Durable job, dedup, and dead-letter state.
-            adapter: Vector database to index into; built from configuration when omitted.
-            router: Embedding router; built from configuration when omitted.
-            locks: Records what produced the index, so drift is detectable (D1).
-            cache: Semantic response cache, invalidated when a job changes the corpus. A
-                cached answer describes the corpus as it was, and this is the event that
-                makes that description potentially wrong.
-            executor_factory: Passed to the CPU pool, so tests can avoid process spawning.
-        """
+        """Build the service."""
         self.settings = settings
         self.journal = journal
         self.adapter = adapter or create_vector_db_adapter(settings)
@@ -89,21 +77,7 @@ class IngestionService:
         tenant: str | None = None,
         idempotency_key: str | None = None,
     ) -> JobRecord:
-        """Record a job without doing any work.
-
-        Returns immediately so the API can answer ``202 Accepted`` with a job id. Replaying
-        an idempotency key returns the original job rather than starting a second ingest.
-
-        Args:
-            sources: Typed ``{"type", "value"}`` mappings, or plain strings — the CLI's and
-                the facade's shape — classified by :func:`~fasterrag.services.sources.typed_source`
-                (an explicit http(s) scheme is a URL, everything else a path). Stored as
-                given; nothing is fetched or decoded until the job runs, so accepting a job
-                stays a constant-time operation whatever it points at.
-            collection: Collection to index into; defaults to the configured one.
-            tenant: Tenant the documents belong to.
-            idempotency_key: Replaying one returns the original job.
-        """
+        """Record a job without doing any work."""
         typed = [
             typed_source(source) if isinstance(source, str) else dict(source) for source in sources
         ]
@@ -120,12 +94,7 @@ class IngestionService:
         *,
         metadata: dict[str, Any] | None = None,
     ) -> JobRecord:
-        """Run an accepted job to completion and return its settled record.
-
-        Resumes from the job's checkpoint, so re-running after a crash continues rather
-        than restarting. Deduplication makes any documents that were replayed anyway into
-        no-ops (D3).
-        """
+        """Run an accepted job to completion and return its settled record."""
         resolved = await resolve_sources(record.sources, self.settings)
         tasks = CpuWorkerPool.tasks_for(
             resolved.sources,
@@ -229,16 +198,7 @@ class IngestionService:
     def _publish_metrics(
         self, record: JobRecord, counts: dict[str, int], *, elapsed: float
     ) -> None:
-        """Publish the ingestion half of the metrics catalogue for a settled job.
-
-        Published once, at settle, rather than per document: throughput measured over a
-        whole job is the number an operator can compare between runs, while a per-document
-        rate mostly reports how large the last document happened to be.
-
-        Dead-letter depth is read back from the journal rather than taken from this job's
-        counts. The gauge describes a collection's *standing* backlog, and a job that
-        dead-lettered nothing does not mean the collection has nothing waiting.
-        """
+        """Publish the ingestion half of the metrics catalogue for a settled job."""
         indexed = counts["indexed"]
         failed = counts["dead_lettered"]
         succeeded = counts["total"] - failed - counts["deduplicated"]
@@ -315,12 +275,7 @@ class _Checkpointer:
 
 
 def _status_for(counts: dict[str, int]) -> str:
-    """Return the terminal status implied by a job's counts.
-
-    ``partial`` exists so a job that indexed most of a corpus is not reported as a plain
-    failure: the difference decides whether an operator retries the dead letters or the
-    whole run.
-    """
+    """Return the terminal status implied by a job's counts."""
     failed = counts["dead_lettered"]
     succeeded = counts["indexed"] + counts["deduplicated"]
 

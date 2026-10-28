@@ -755,12 +755,7 @@ async def test_a_wide_configured_budget_packs_everything_retrieved() -> None:
 
 
 async def test_a_configured_budget_below_one_chunk_answers_without_context() -> None:
-    """What the reference has to say happens, rather than what a reader might assume.
-
-    Packing charges every chunk at least one token, so a budget smaller than the first
-    chunk admits nothing. The query is still answered — ungrounded, with no citations —
-    rather than failing, and `evidence_dropped` is what says why.
-    """
+    """What the reference has to say happens, rather than what a reader might assume."""
     service, llm = build_budgeted(10)
 
     result = await service.answer("q")
@@ -797,12 +792,7 @@ async def test_a_finished_completion_is_not_reported_as_truncated() -> None:
 
 
 async def test_an_empty_answer_at_the_ceiling_still_reports_truncation() -> None:
-    """A reasoning model can spend the whole budget before emitting anything.
-
-    Observed against a real OpenAI-compatible endpoint: 32 tokens of budget, zero completion
-    tokens, `finish_reason='length'`, empty text. Without the flag that is a 200 with an
-    empty answer and no signal at all.
-    """
+    """A reasoning model can spend the whole budget before emitting anything."""
     service, llm = build()
     llm.finish_reason = "length"
     llm.text = ""
@@ -826,17 +816,7 @@ async def test_evidence_dropped_by_the_budget_is_reported() -> None:
 async def test_repeated_provider_failures_open_the_llm_breaker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """FMEA row 20's "retries → breaker opens" was only ever retries.
-
-    ``create_breakers`` built an ``llm`` breaker that no production code called — it was
-    reachable from tests alone — so reliability.md's "one breaker per provider" overstated
-    the protection and the ``fasterrag_circuit_state`` gauge reported an ``llm`` state that
-    nothing ever transitioned. Filed as TASK-0245.
-
-    Two consecutive outages reach the threshold; the third query must be refused by the
-    breaker without the provider being called at all. Asserting on the provider's call count
-    is what distinguishes shedding from merely failing again.
-    """
+    """FMEA row 20's "retries → breaker opens" was only ever retries."""
     service, llm = build(error=GenerationError("provider is down", retryable=True))
     service.breaker.failure_threshold = 2
 
@@ -869,15 +849,7 @@ async def test_an_open_breaker_degrades_rather_than_raising() -> None:
 
 
 async def test_a_success_clears_the_failure_count_rather_than_only_the_state() -> None:
-    """A success resets the failure count, not merely the state.
-
-    Otherwise scattered blips accumulate into an open breaker that no single outage caused.
-
-    The threshold is two and the sequence is fail → succeed → fail. That is one failure since
-    the last success, so the breaker must still be closed. Asserting only "closed after a
-    success" would pass whether or not the count was cleared — the second failure is what
-    makes this test able to fail.
-    """
+    """A success resets the failure count, not merely the state."""
     service, _ = build()
     service.breaker.failure_threshold = 2
     service.breaker.record_failure(GenerationError("transient", retryable=True))
@@ -905,13 +877,7 @@ async def test_a_misconfigured_provider_never_opens_the_breaker() -> None:
 
 
 async def test_a_query_over_the_budget_is_refused_rather_than_answered() -> None:
-    """The cap must reach the caller as 402, never as a quietly degraded answer.
-
-    This is the trap the placement guards against: the degradation ladder absorbs *retryable*
-    failures into an extractive answer, so a retryable budget error would turn a spend control
-    into a quality regression nobody could see. `BUDGET_EXCEEDED` is non-retryable and the
-    check sits outside that block, so both facts have to change before this can regress.
-    """
+    """The cap must reach the caller as 402, never as a quietly degraded answer."""
     settings = Settings.model_validate(
         {"cost": {"per_query_token_budget": 10}, "llm": {"max_tokens": 1024}}
     )
@@ -954,12 +920,7 @@ async def test_an_unset_budget_permits_everything() -> None:
 
 
 async def test_actual_usage_is_charged_to_the_tenant_not_the_admitted_ceiling() -> None:
-    """Charging the ceiling would bill every short answer for a long one.
-
-    The admission check uses the worst case because a completion's length is unknown until it
-    exists; the charge uses what it really cost. Admitting on the ceiling and charging the
-    actual is the pair that neither overspends nor over-refuses.
-    """
+    """Charging the ceiling would bill every short answer for a long one."""
     settings = Settings.model_validate(
         {"cost": {"per_tenant_token_budget": 100_000}, "llm": {"max_tokens": 1024}}
     )
@@ -974,14 +935,7 @@ async def test_actual_usage_is_charged_to_the_tenant_not_the_admitted_ceiling() 
 
 
 async def test_the_budget_is_checked_against_the_ceiling_not_just_the_prompt() -> None:
-    """A cap that admits a request it cannot pay for is not a cap.
-
-    The budget here sits deliberately *between* the prompt's size and the prompt plus
-    ``llm.max_tokens``: a check that weighed only the prompt would admit this query and then
-    let the provider spend eight thousand tokens against a two-thousand-token budget. Written
-    this way because a budget below the prompt size refuses either way, and cannot tell the
-    two implementations apart — the first version of this test could not.
-    """
+    """A cap that admits a request it cannot pay for is not a cap."""
     settings = Settings.model_validate(
         {"cost": {"per_query_token_budget": 2000}, "llm": {"max_tokens": 8000}}
     )

@@ -89,13 +89,7 @@ KNOWN_UNWRITTEN: set[str] = set()
 
 
 def _writers() -> dict[str, bool]:
-    """Return, per catalogue metric, whether any module ever writes to it.
-
-    Declaration is not emission. A metric declared in the catalogue and written by nothing
-    exports zero series, so a panel over it renders "No data" forever with no error in any
-    log — which is indistinguishable from a broken datasource. This walks the source for a
-    real ``.increment(``/``.set(``/``.observe(`` call site per instrument.
-    """
+    """Return, per catalogue metric, whether any module ever writes to it."""
     catalogue = Path(metrics.__file__)
     source = "\n".join(
         path.read_text(encoding="utf-8")

@@ -65,16 +65,7 @@ def _rows(pairs: Iterable[tuple[str, str]]) -> str:
 
 
 def render_page(traces: list[dict[str, Any]]) -> str:
-    """Return the dashboard HTML.
-
-    Args:
-        traces: Recent trace summaries, newest first.
-
-    Returns:
-        A complete document. Every interpolated value is escaped; the trace list carries
-        user-supplied query text and model output, which is exactly the content that must
-        never be able to inject markup into a page an operator trusts.
-    """
+    """Return the dashboard HTML."""
     trace_rows = (
         "".join(
             "<tr>"
@@ -120,15 +111,7 @@ def render_page(traces: list[dict[str, Any]]) -> str:
 
 
 def create_dashboard(settings: Settings, store: TraceStore | None = None) -> FastAPI:
-    """Build the dashboard application.
-
-    Args:
-        settings: Validated configuration.
-        store: Trace store to read; built from configuration when omitted.
-
-    Returns:
-        An ASGI application serving the dashboard. It declares only ``GET`` routes.
-    """
+    """Build the dashboard application."""
     traces = store if store is not None else create_trace_store(settings)
     app = FastAPI(title=DASHBOARD_TITLE, docs_url=None, redoc_url=None, openapi_url=None)
     logger = get_logger(__name__)
@@ -182,11 +165,6 @@ def create_dashboard(settings: Settings, store: TraceStore | None = None) -> Fas
 
 
 def _tenant_of(request: Request) -> str | None:
-    """Return the tenant the auth middleware resolved, or ``None`` when unauthenticated.
-
-    ``None`` means "show everything", which is the single-operator deployment the dashboard
-    was built for. With ``security.multi_tenancy`` on, the middleware refuses any request
-    that does not name a tenant, so this can only be ``None`` when tenancy is off.
-    """
+    """Return the tenant the auth middleware resolved, or ``None`` when unauthenticated."""
     tenant = request.scope.get("state", {}).get("tenant")
     return str(tenant) if tenant else None

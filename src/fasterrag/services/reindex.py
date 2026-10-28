@@ -131,14 +131,7 @@ class RollbackResult:
 async def plan_reindex(
     alias: str, settings: Settings, adapter: VectorDBAdapter, *, stamp: str | None = None
 ) -> ReindexPlan:
-    """Decide what a reindex of ``alias`` would build and replace.
-
-    Raises:
-        FasterRagError: With ``CONFLICT`` when a physical collection already occupies the
-            alias name. Blue/green needs the served name to be an alias; if it is a real
-            collection, pointing an alias at it later would be ambiguous, and the operator
-            has to migrate deliberately rather than have it done implicitly.
-    """
+    """Decide what a reindex of ``alias`` would build and replace."""
     blue = await adapter.alias_target(alias)
     if blue is None:
         existing = {info.name for info in await adapter.list_collections()}
@@ -169,22 +162,7 @@ async def swap(
     eval_passed: bool | None = True,
     eval_report: dict[str, Any] | None = None,
 ) -> ReindexResult:
-    """Point the alias at the newly built collection, if the gate allows it.
-
-    Args:
-        plan: What the reindex set out to do.
-        adapter: The vector database holding both collections.
-        eval_passed: ``True`` when the gate approved the build, ``False`` when it rejected
-            it, and ``None`` when the gate could not run at all. The three are deliberately
-            distinct: a gate that could not run has established nothing, and recording that
-            as a pass would let an operator believe a build was validated when it was not.
-        eval_report: The gate's own report, carried into the result for the record.
-
-    Returns:
-        The outcome. A blocked swap is a *result*, not an exception: the reindex ran
-        correctly and the gate did its job, which is a successful outcome of a different
-        shape, and blue is still live.
-    """
+    """Point the alias at the newly built collection, if the gate allows it."""
     report = eval_report or {}
     gate_ran = plan.eval_gate and eval_passed is not None
 
@@ -233,22 +211,7 @@ async def swap(
 async def rollback(
     alias: str, adapter: VectorDBAdapter, *, to: str | None = None
 ) -> RollbackResult:
-    """Point the alias back at the previous build.
-
-    Args:
-        alias: The served name.
-        adapter: The vector database.
-        to: The collection to restore. When omitted, the most recent retained build older
-            than the current one is chosen.
-
-    Returns:
-        What was restored and what it replaced.
-
-    Raises:
-        FasterRagError: With ``NOT_FOUND`` when there is nothing to roll back to, which is
-            the honest answer for a first build or a retention window that has expired —
-            far better than silently pointing the alias at an arbitrary collection.
-    """
+    """Point the alias back at the previous build."""
     current = await adapter.alias_target(alias)
     target = to
 
@@ -290,12 +253,7 @@ async def retire(
     locks: LockStore | None = None,
     now: float | None = None,
 ) -> list[str]:
-    """Drop retained builds past the rollback window, returning what went.
-
-    The live collection is never a candidate, whatever its age: a retention window is about
-    how long a *replaced* build is kept, and dropping the one currently serving traffic
-    would be an outage rather than a cleanup.
-    """
+    """Drop retained builds past the rollback window, returning what went."""
     retention_hours = settings.index.reindex.rollback_retention_hours
     current = await adapter.alias_target(alias)
     prefix = f"{alias}{GREEN_SUFFIX}"

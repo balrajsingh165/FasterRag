@@ -17,12 +17,7 @@ def baseline() -> dict[str, float]:
 
 
 def test_the_baseline_leaves_ranking_headroom() -> None:
-    """The point of this fixture: recall saturates but ranking does not.
-
-    The handbook fixture scores 1.0 on all three, so a subtle ranking regression has nowhere
-    to show. Here recall is 1.0 while MRR and nDCG sit below it, which is what makes a change
-    that merely reorders results visible.
-    """
+    """The point of this fixture: recall saturates but ranking does not."""
     recorded = baseline()
 
     assert recorded["recall_at_k"] == 1.0

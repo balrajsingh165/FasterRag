@@ -41,12 +41,7 @@ _logger = get_logger(__name__)
 
 
 def _job_body(record: JobRecord, journal: Journal) -> dict[str, Any]:
-    """Return the documented job-status body.
-
-    Counts come from the journal rather than the record while a job is running: the record's
-    counts are only written at checkpoints, so a caller polling between two checkpoints would
-    otherwise see stale numbers and conclude the job had stalled.
-    """
+    """Return the documented job-status body."""
     counts = dict(record.counts) or journal.counts(record.job_id)
     return {
         "job_id": record.job_id,
@@ -58,12 +53,7 @@ def _job_body(record: JobRecord, journal: Journal) -> dict[str, Any]:
 
 
 async def _run_job(request: Request, record: JobRecord, metadata: dict[str, Any] | None) -> None:
-    """Execute an accepted job, recording its outcome whatever happens.
-
-    A background task has no caller to raise to, so a failure that escaped here would vanish
-    with only a stack trace in the log and a job stuck at ``queued`` forever. Every outcome
-    therefore lands in the journal.
-    """
+    """Execute an accepted job, recording its outcome whatever happens."""
     settings = request.app.state.settings
     adapter = request.app.state.vector_db
     journal = request.app.state.journal

@@ -24,19 +24,7 @@ def overrides_from(args: argparse.Namespace) -> list[str]:
 
 
 def settings_from(args: argparse.Namespace, *, require_env: bool = True) -> Settings:
-    """Load configuration named by ``--config``, with any ``--set`` overrides applied.
-
-    Args:
-        args: Parsed arguments carrying ``config`` and optionally ``overrides``.
-        require_env: Whether a referenced-but-absent environment variable is an error.
-            Left true by everything except read-only inspection.
-
-    Returns:
-        The validated settings.
-
-    Raises:
-        ConfigError: If the file or any override is invalid.
-    """
+    """Load configuration named by ``--config``, with any ``--set`` overrides applied."""
     return load_settings(
         args.config,
         require_env=require_env,

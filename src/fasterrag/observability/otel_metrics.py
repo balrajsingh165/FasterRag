@@ -40,14 +40,7 @@ def _now_ns() -> int:
 
 
 def _per_bucket(cumulative: tuple[int, ...]) -> list[int]:
-    """Return per-bucket counts from the cumulative form.
-
-    # CRITICAL: OTLP explicit-bucket histograms carry *per-bucket* counts while the
-    # Prometheus exposition format carries cumulative ones. Sending the cumulative counts
-    # unchanged would make every bucket include everything below it a second time, so a
-    # percentile read off the OTLP copy would disagree with the same percentile read off
-    # the scrape — and the OTLP one would be wrong.
-    """
+    """Return per-bucket counts from the cumulative form."""
     counts: list[int] = []
     previous = 0
     for total in cumulative:
@@ -83,24 +76,7 @@ def _histogram_point(sdk: Any, sample: Sample, start_ns: int, now_ns: int) -> An
 
 
 def build_metrics(registry: Registry, start_ns: int, now_ns: int) -> Any:
-    """Return the OTLP ``MetricsData`` for a registry snapshot.
-
-    Pure and side-effect free so the mapping can be asserted without a collector. Series
-    of one instrument are grouped into a single metric, because OTLP models labels as data
-    point attributes rather than as separate metrics.
-
-    Args:
-        registry: The catalogue to read.
-        start_ns: When this process started recording, in epoch nanoseconds. Cumulative
-            sums are meaningless without it — a backend needs the window a total covers.
-        now_ns: The moment of this snapshot, in epoch nanoseconds.
-
-    Returns:
-        The OTLP metrics payload.
-
-    Raises:
-        ConfigError: If the OpenTelemetry SDK is not installed.
-    """
+    """Return the OTLP ``MetricsData`` for a registry snapshot."""
     sdk = _sdk()
 
     grouped: dict[str, list[Sample]] = {}
@@ -209,18 +185,7 @@ class MetricPusher:
         interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
         timeout: int = _TIMEOUT_SECONDS,
     ) -> None:
-        """Build the pusher without starting it or connecting.
-
-        Args:
-            endpoint: The collector's OTLP/HTTP endpoint from ``observability.otel_endpoint``.
-                Taken as a base URL; the ``/v1/metrics`` path is derived from it.
-            registry: Catalogue to read; defaults to the process-wide one.
-            interval_seconds: How often to push.
-            timeout: Seconds to wait for the collector.
-
-        Raises:
-            ConfigError: If the OTLP exporter is not installed.
-        """
+        """Build the pusher without starting it or connecting."""
         try:
             from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
         except ImportError as exc:
@@ -263,12 +228,7 @@ class MetricPusher:
         return str(getattr(result, "name", "")) == "SUCCESS"
 
     def start(self) -> None:
-        """Begin pushing on the configured interval.
-
-        # CRITICAL: the task is retained on the instance. asyncio holds only a weak
-        # reference to a running task, so one that nothing keeps can be collected
-        # mid-flight and the pushes stop with no error anywhere.
-        """
+        """Begin pushing on the configured interval."""
         if self._task is not None:
             return
         self._task = asyncio.create_task(self._loop())

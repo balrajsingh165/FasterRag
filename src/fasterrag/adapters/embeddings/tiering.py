@@ -78,12 +78,7 @@ class TieringRouter:
         default: EmbeddingAdapter,
         tiers: Sequence[tuple[Filter, EmbeddingAdapter]] = (),
     ) -> None:
-        """Build the router.
-
-        Args:
-            default: Adapter used when no rule matches.
-            tiers: Ordered ``(filter, adapter)`` pairs; the first match wins.
-        """
+        """Build the router."""
         self.default = default
         self.tiers = list(tiers)
 
@@ -123,17 +118,7 @@ def _settings_for(settings: Settings, rule: TierRule) -> Settings:
 
 
 def create_embedding_router(settings: Settings) -> TieringRouter:
-    """Build the router described by ``embeddings.tiering``.
-
-    Returns:
-        A router holding one adapter per distinct rule plus the default. When tiering is
-        disabled the router simply always returns the default adapter, so callers need no
-        conditional.
-
-    Raises:
-        ConfigError: If a rule names an unresolvable provider, or a rule filter uses an
-            unsupported operator.
-    """
+    """Build the router described by ``embeddings.tiering``."""
     default = create_embedding_adapter(settings)
     if not settings.embeddings.tiering.enabled:
         return TieringRouter(default)

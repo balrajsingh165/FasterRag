@@ -372,14 +372,7 @@ async def test_malformed_ingest_metadata_is_refused_before_any_work(
 
 
 class StoppedBuild:
-    """An ingestion service whose build fails, so a reembed stops after handing over sources.
-
-    The swap, the eval gate, and the alias flip have their own tests. What is asserted here
-    is the one thing only the wrapper does: what it decided the sources were.
-
-    It answers on both paths the wrapper has: ``ingest`` unwatched, and ``accept`` then
-    ``run`` under ``--watch``.
-    """
+    """An ingestion service whose build fails, so a reembed stops after handing over sources."""
 
     def __init__(self) -> None:
         self.sources: list[str] = []
@@ -424,12 +417,7 @@ def stopped_build(monkeypatch: pytest.MonkeyPatch) -> StoppedBuild:
 
 
 def reembed(config: str, source: str, *flags: str) -> argparse.Namespace:
-    """Build a reembed namespace through the real parser.
-
-    Going through ``build_parser`` is the point: the handler already read ``args.recursive``
-    while the parser declared it nowhere, so a hand-built namespace would assert the flag
-    works while the command line still rejected it.
-    """
+    """Build a reembed namespace through the real parser."""
     return build_parser().parse_args(
         ["index", "--config", config, "reembed", "docs", source, "--no-eval-gate", *flags]
     )
@@ -477,17 +465,7 @@ async def test_the_recursive_flag_reaches_a_reembed(
 
 
 class FakeJournal(Journal):
-    """A journal whose per-document tally advances one poll at a time.
-
-    A real ``Journal`` with only ``counts`` replaced, so the follower is exercised against
-    the type it is given in production rather than against a duck that happens to fit.
-
-    ``drained`` is what makes the watch tests deterministic rather than timing-dependent.
-    It is set on the poll *after* the last tally, by which point the follower has already
-    printed that tally — so a test that waits on it and then cancels the follower is
-    asserting against the whole output and not against whatever a race produced. It is a
-    thread event because the follower polls through ``asyncio.to_thread``.
-    """
+    """A journal whose per-document tally advances one poll at a time."""
 
     def __init__(self, tallies: Sequence[Mapping[str, int]]) -> None:
         """Serve ``tallies`` in order, repeating the last one once they run out."""
@@ -744,12 +722,7 @@ async def test_a_failing_follower_cannot_destroy_a_finished_ingest(
     caplog: pytest.LogCaptureFixture,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Reporting progress is subordinate to the run: its failure must not eat the result.
-
-    The follower is stopped from the ``finally`` that returns the job record. A follower
-    that has already failed is done, so cancelling it does nothing and awaiting it raises
-    there — which discards the record and reports a completed ingest as a traceback.
-    """
+    """Reporting progress is subordinate to the run: its failure must not eat the result."""
     source = tmp_path / "note.txt"
     source.write_text("Either party may terminate on thirty days notice.", encoding="utf-8")
     started = asyncio.Event()

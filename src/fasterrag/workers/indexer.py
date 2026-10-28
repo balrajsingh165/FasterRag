@@ -36,16 +36,7 @@ _logger = get_logger(__name__)
 
 
 def chunk_payload(payload: ChunkPayload, *, model: str, model_version: str) -> dict[str, Any]:
-    """Build the stored metadata for one chunk.
-
-    Args:
-        payload: The chunk and its document context.
-        model: Embedding model that produced the vector.
-        model_version: Its version, the anchor drift detection compares against.
-
-    Returns:
-        The payload written alongside the vector.
-    """
+    """Build the stored metadata for one chunk."""
     chunk = payload.chunk
     stored: dict[str, Any] = {
         "document_id": payload.document_id,
@@ -81,14 +72,7 @@ class Indexer:
         *,
         collection: str | None = None,
     ) -> None:
-        """Build the indexer.
-
-        Args:
-            settings: Validated configuration. ``retrieval.hybrid`` decides whether a
-                sparse vector is produced and stored at all.
-            adapter: The vector database to write to.
-            collection: Target collection; defaults to the configured one.
-        """
+        """Build the indexer."""
         self.settings = settings
         self.adapter = adapter
         self.collection = collection or settings.vector_db.collection.default_name
@@ -98,12 +82,7 @@ class Indexer:
         self._creating = asyncio.Lock()
 
     async def ensure_collection(self, dimensions: int) -> None:
-        """Create the target collection if it does not exist yet.
-
-        The sparse index is created with the collection or not at all: Qdrant cannot add a
-        sparse vector to a dense-only collection afterwards, so a corpus indexed without
-        hybrid enabled must be rebuilt to gain a keyword leg.
-        """
+        """Create the target collection if it does not exist yet."""
         await self.adapter.create_collection(
             CollectionSpec(
                 name=self.collection,
@@ -125,12 +104,7 @@ class Indexer:
         )
 
     async def write(self, batch: EmbeddedBatch) -> None:
-        """Write one embedded batch, dense and sparse together.
-
-        The collection is created on the first batch, sized from the vectors themselves.
-        Creating it earlier would mean either asking the provider for a dimension it may
-        only know after loading a model, or spending an embedding call on a probe.
-        """
+        """Write one embedded batch, dense and sparse together."""
         if not batch.chunks:
             return
 

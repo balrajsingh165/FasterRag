@@ -160,13 +160,7 @@ async def test_payloads_survive_the_copy(
 async def test_two_exports_differ_only_by_the_manifest_timestamp(
     populated: tuple[QdrantAdapter, str, list[Point]], qdrant: Settings, tmp_path: Path
 ) -> None:
-    """Otherwise every backup diff reports changes that are only noise.
-
-    The precise property, established against a live Qdrant: every *data* member is
-    byte-identical across two exports of an unchanged collection, and ``manifest.json``
-    differs only in ``created_at``. The source comment claimed whole archives were
-    identical; they are not, because a wall clock is embedded on purpose (TASK-0214).
-    """
+    """Otherwise every backup diff reports changes that are only noise."""
     adapter, collection, _ = populated
     archive = tmp_path / "corpus.fragx"
 

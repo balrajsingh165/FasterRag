@@ -49,12 +49,7 @@ SSE_MEDIA_TYPE = "text/event-stream"
 
 
 def encode_event(event: QueryEvent) -> str:
-    """Return one SSE frame.
-
-    Two constraints from the wire format, not from taste: the data field must be a single
-    line, so the JSON is compact rather than indented, and a frame ends with a blank line,
-    without which a client buffers the event indefinitely waiting for more of it.
-    """
+    """Return one SSE frame."""
     payload = json.dumps(event.data, separators=(",", ":"), default=str)
     return f"event: {event.type}\ndata: {payload}\n\n"
 
@@ -136,12 +131,7 @@ async def run_retrieve(
     adapter: CurrentVectorDB,
     embeddings: CurrentEmbeddings,
 ) -> dict[str, Any]:
-    """Return the retrieved chunks without generating an answer.
-
-    The retrieval-only path of ``docs/python-api.md``, for callers that bring their own LLM
-    step, and the fastest way to see why a chunk ranked where it did — every leg's rank and
-    score survives into the response rather than being collapsed into the fused number.
-    """
+    """Return the retrieved chunks without generating an answer."""
     retrieval = build_retrieval(settings, adapter, embeddings)
     result = await retrieval.search(
         body.query,

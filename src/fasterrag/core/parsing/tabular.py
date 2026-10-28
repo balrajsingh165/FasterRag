@@ -28,28 +28,14 @@ NEWLINE: Final = "\n"
 
 
 def _describe(row: dict[str, Any]) -> str:
-    """Render one record as ``column: value`` pairs, skipping values with no content.
-
-    A blank value is dropped rather than labelled. ``value not in (None, "")`` let a
-    whitespace-only cell through, which renders as ``column:    `` — and since the builder
-    strips the block as a whole rather than each pair, a file of nothing but spaces and
-    commas reached the index as one block of colons and semicolons.
-    """
+    """Render one record as ``column: value`` pairs, skipping values with no content."""
     return "; ".join(
         f"{key}: {value}" for key, value in row.items() if value is not None and str(value).strip()
     )
 
 
 def _dialect(sample: str) -> type[csv.Dialect] | csv.Dialect:
-    """Return the sniffed dialect, or the Excel default when the sniff is unusable.
-
-    The sniffer validates a candidate on its own terms and can still hand back one
-    ``csv.reader`` refuses — most easily a delimiter equal to the quote character, which
-    ``"a"b"c"`` produces. The reader rejects that with a plain ``ValueError``, not a
-    ``csv.Error``, so it escaped the parsing layer untyped and reached the API as a generic
-    500 with no problem+json body. A sniff is a guess; an unusable one is discarded exactly
-    like a failed one.
-    """
+    """Return the sniffed dialect, or the Excel default when the sniff is unusable."""
     # CRITICAL: the sample is newline-normalised before sniffing, because a dialect is a
     # property of the delimiter and quoting, never of the line terminator. `csv.Sniffer` does
     # not agree: on Python 3.12 it detects a space delimiter for a file with LF endings and
@@ -77,20 +63,7 @@ def parse_csv(
     mime_type: str = "text/csv",
     options: ParsingOptions = DEFAULT_PARSING_OPTIONS,
 ) -> ParsedDocument:
-    """Parse delimited text, detecting the dialect from a sample of the file.
-
-    Args:
-        data: The raw delimited-text bytes.
-        mime_type: MIME type recorded on the parsed document.
-        options: Parser thresholds; ``rows_per_block`` decides how many records are
-            serialized into one block.
-
-    Returns:
-        The structured document.
-
-    Raises:
-        ParseError: If the delimited content cannot be read as rows.
-    """
+    """Parse delimited text, detecting the dialect from a sample of the file."""
     builder = DocumentBuilder(mime_type=mime_type, parser="csv")
     text = decode(data, builder)
 
@@ -128,13 +101,7 @@ def parse_csv(
 
 
 def _leaf(path: str, value: Any) -> str:
-    """Render one scalar with its key path, or nothing when it carries no content.
-
-    A scalar at the root has no path, and pasting one on anyway produced blocks like
-    ``": None"`` for ``null`` and a lone ``":"`` for ``""`` — chunks that get embedded and
-    retrieved while saying nothing. Empty values are dropped here for the same reason
-    :func:`_describe` drops them inside an object.
-    """
+    """Render one scalar with its key path, or nothing when it carries no content."""
     if value is None or value == "":
         return ""
     return f"{path}: {value}" if path else str(value)

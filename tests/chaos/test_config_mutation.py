@@ -118,16 +118,7 @@ def leaves(payload: dict[str, Any], prefix: tuple[str, ...] = ()) -> Iterator[tu
 
 
 def key_verdicts(settings: Settings) -> dict[str, dict[str, bool | None]]:
-    """Classify every top-level configuration key by whether the live hash reads it.
-
-    The classification comes from ``retrieval_config_hash`` itself rather than from a list
-    mirroring it: each key is moved through the schema and the digest is recomputed, so a
-    key added to a hashed section classifies itself. ``True`` means some accepted mutation
-    moved the digest, ``False`` means none did, and ``None`` means the schema accepted no
-    mutation at all — an answer of "unknown" that
-    :func:`test_no_key_of_a_hashed_section_escapes_classification` refuses to let pass as
-    ``False``.
-    """
+    """Classify every top-level configuration key by whether the live hash reads it."""
     payload = settings.model_dump(mode="json")
     baseline = retrieval_config_hash(settings)
     return {
@@ -186,12 +177,7 @@ def annotation_at(model: type[BaseModel], path: tuple[str, ...]) -> Any:
 
 
 def unset_candidate(annotation: Any) -> list[Any]:
-    """Return one value of the declared type for a unit whose current value is ``None``.
-
-    ``None`` carries no type, so the mutation has to come from the annotation instead. An
-    optional field left unset is still a field the hash may read, and skipping it would
-    leave it unclassifiable rather than proven irrelevant.
-    """
+    """Return one value of the declared type for a unit whose current value is ``None``."""
     samples: Final[dict[Any, Any]] = {str: "mutated", int: 1, float: 0.5, bool: True}
     for member in get_args(annotation):
         if member in samples:
@@ -248,12 +234,7 @@ def mutate(settings: Settings, dotted: str, value: Any) -> Settings | None:
 
 
 def lock_of(settings: Settings, root: Path, **overrides: Any) -> IndexLock:
-    """Write the lockfile for ``settings`` and read it back from disk.
-
-    The round trip is deliberate. Drift is judged against a *persisted* record, and a
-    scenario comparing an in-memory object would not notice a field that fails to survive
-    serialization — which would read as "no drift" on every run.
-    """
+    """Write the lockfile for ``settings`` and read it back from disk."""
     built = build_lock(
         COLLECTION,
         settings,
@@ -287,12 +268,7 @@ def drift(lock: IndexLock, settings: Settings, **kwargs: Any) -> DriftReport:
 def test_the_mutation_set_covers_every_leaf_of_the_hashed_subset(
     chaos_settings: Settings,
 ) -> None:
-    """Every unit has at least one mutation the schema accepts, so nothing is skipped silently.
-
-    Without this, a field whose every candidate failed validation would quietly contribute
-    no coverage while the enumeration below still reported a clean run — a false green of
-    exactly the kind the suite exists to prevent.
-    """
+    """Every unit has at least one mutation the schema accepts, so nothing is skipped silently."""
     unmutable = [
         dotted
         for dotted, value in hashed_units(chaos_settings)
@@ -317,15 +293,7 @@ def test_the_hashed_subset_is_not_empty(chaos_settings: Settings) -> None:
 
 
 def test_no_key_of_a_hashed_section_escapes_classification(chaos_settings: Settings) -> None:
-    """A key the derivation cannot move is a hole, and it fails here rather than passing quietly.
-
-    The derivation asks the hash whether it reads a key by moving that key and watching the
-    digest. A key whose every candidate the schema rejects answers nothing, and filing that
-    silence as "not hashed" would drop the key out of both halves of the proof — the
-    hand-written-list failure mode in another costume. Only the sections the hash already
-    reads are policed, because a key outside them that cannot be moved costs this suite
-    nothing.
-    """
+    """A key the derivation cannot move is a hole, and it fails here rather than passing quietly."""
     verdicts = key_verdicts(chaos_settings)
 
     unclassified = [
@@ -342,14 +310,7 @@ def test_no_key_of_a_hashed_section_escapes_classification(chaos_settings: Setti
 def test_a_field_added_to_the_hash_is_covered_without_editing_this_module(
     chaos_settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The claim this module opens with, asserted instead of argued.
-
-    A hash that starts reading one more key stands in for the field somebody adds to
-    ``retrieval_config_hash`` next. The enumeration has to pick that key up with nothing in
-    this file edited, which is exactly what the hand-written mirror this derivation
-    replaced could not do: it would have gone on reporting a clean run while covering
-    nothing new.
-    """
+    """The claim this module opens with, asserted instead of argued."""
     live = retrieval_config_hash
 
     def widened(settings: Settings) -> str:
@@ -366,15 +327,7 @@ def test_a_field_added_to_the_hash_is_covered_without_editing_this_module(
 def test_every_drift_relevant_mutation_is_reported(
     chaos_settings: Settings, tmp_path: Path
 ) -> None:
-    """Mutating any single drift-relevant setting under a built index reports drift.
-
-    This is the false-negative half of D1's proof metric, and it is exhaustive over
-    single-field edits of the hashed subset at the current schema — not sampled. Each
-    accepted candidate is applied on its own to a configuration whose lockfile was just
-    written, and the report must both detect the change and name at least one field, since
-    a report that detects drift without naming anything sends an operator back to the
-    archaeology the lockfile exists to replace.
-    """
+    """Mutating any single drift-relevant setting under a built index reports drift."""
     lock = lock_of(chaos_settings, tmp_path)
     missed: list[str] = []
     unnamed: list[str] = []
@@ -397,12 +350,7 @@ def test_every_drift_relevant_mutation_is_reported(
 def test_a_drift_irrelevant_mutation_is_never_reported(
     chaos_settings: Settings, tmp_path: Path
 ) -> None:
-    """The false-positive half: editing what the index does not depend on is not drift.
-
-    Every entry here is a legal operator edit. If any of them reported a stale index, the
-    report would stop being believed, and a detector nobody believes catches nothing — so
-    this case is as load-bearing as the enumeration above, not a nicety.
-    """
+    """The false-positive half: editing what the index does not depend on is not drift."""
     lock = lock_of(chaos_settings, tmp_path)
     false_positives: list[str] = []
 
@@ -418,12 +366,7 @@ def test_a_drift_irrelevant_mutation_is_never_reported(
 def test_no_drift_irrelevant_control_sits_inside_the_hashed_subset(
     chaos_settings: Settings,
 ) -> None:
-    """The controls must be genuinely outside the hash, or the case above proves nothing.
-
-    A control that happened to name a hashed field would make the false-positive case fail
-    loudly, but a control naming a field the hash *stops* reading would silently become a
-    second false-negative hole. Checking the membership directly answers both at once.
-    """
+    """The controls must be genuinely outside the hash, or the case above proves nothing."""
     hashed = set(dict(hashed_units(chaos_settings)))
 
     assert [dotted for dotted, _ in IRRELEVANT if dotted in hashed] == []
@@ -441,12 +384,7 @@ def test_rewriting_the_same_configuration_is_not_drift(
 def test_the_mutated_field_is_named_rather_than_only_the_hash(
     chaos_settings: Settings, tmp_path: Path
 ) -> None:
-    """The four chunker fields the lock stores by name are named individually.
-
-    ``config_hash`` tells an operator that *something* moved. These four tell them what, and
-    the drift detail carries both values, which is the difference between a report and an
-    alarm.
-    """
+    """The four chunker fields the lock stores by name are named individually."""
     lock = lock_of(chaos_settings, tmp_path)
     expected = {
         "chunk_size": ("chunking.chunk_size", 512),
@@ -490,12 +428,7 @@ def test_an_unchanged_corpus_is_not_reported(chaos_settings: Settings, tmp_path:
 def test_new_weights_behind_a_stable_model_name_are_reported(
     chaos_settings: Settings, tmp_path: Path
 ) -> None:
-    """The mutation nobody makes on purpose: a provider changing the weights under a name.
-
-    Nothing in the configuration moved here. Only the version the provider reports did, and
-    without this comparison every vector written afterwards would belong to a different
-    embedding space with no record that it happened.
-    """
+    """The mutation nobody makes on purpose: a provider changing the weights under a name."""
     report = drift(
         lock_of(chaos_settings, tmp_path),
         chaos_settings,

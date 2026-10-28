@@ -61,12 +61,7 @@ def _require_replay(settings: Settings) -> None:
 
 @router.get("/traces/{trace_id}")
 async def get_trace(trace_id: str, request: Request, tenant: CurrentTenant) -> dict[str, Any]:
-    """Return one stored trace in full.
-
-    Raises:
-        FasterRagError: With ``NOT_FOUND`` when the trace is unknown, expired past
-            ``traces.retention_days``, or never stored because ``traces.store`` is false.
-    """
+    """Return one stored trace in full."""
     trace = get_trace_store(request).load(trace_id, tenant=tenant)
     if trace is None:
         raise FasterRagError(

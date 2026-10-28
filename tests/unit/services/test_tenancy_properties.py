@@ -81,16 +81,7 @@ def test_no_pair_of_tenants_and_names_collides(first: str, second: str, one: str
     tail=st.text(min_size=1, max_size=8),
 )
 def test_a_tenant_extending_another_cannot_reach_its_collections(stem: str, tail: str) -> None:
-    """Aimed at the shape random search will not find.
-
-    The collision needs four values to line up — a tenant, a longer tenant sharing its
-    prefix, and two names that make the concatenations meet. Uniform generation reaches
-    that about never, so the pair is constructed instead: `(stem, SEP[0] + tail)` against
-    `(stem + SEP[0], tail)`. Both were `stem + SEP + SEP[0] + tail` before the fix.
-
-    Either the longer tenant is refused, or the two names differ. Both are acceptable
-    outcomes; sharing one backend name is not.
-    """
+    """Aimed at the shape random search will not find."""
     longer = f"{stem}{SEPARATOR[0]}"
     try:
         extended = scoped_name(tail, longer)

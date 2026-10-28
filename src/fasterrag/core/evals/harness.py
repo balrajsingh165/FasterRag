@@ -108,17 +108,7 @@ async def evaluate(
     k: int = 10,
     collection: str | None = None,
 ) -> EvalReport:
-    """Score a retriever against a golden set.
-
-    Args:
-        golden: The ground-truth records.
-        retriever: The retriever under test.
-        k: Window size for recall@k and nDCG@k.
-        collection: Collection to search, when the retriever supports one.
-
-    Returns:
-        The report, with per-query detail alongside the aggregates.
-    """
+    """Score a retriever against a golden set."""
     scores: list[QueryScore] = []
 
     for record in golden:

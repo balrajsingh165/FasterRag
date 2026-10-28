@@ -36,12 +36,7 @@ class Console:
     """Writes command output in the mode the global flags selected."""
 
     def __init__(self, *, as_json: bool = False, quiet: bool = False) -> None:
-        """Build a console.
-
-        Args:
-            as_json: Emit machine-readable JSON instead of human text.
-            quiet: Suppress everything but errors.
-        """
+        """Build a console."""
         self.as_json = as_json
         self.quiet = quiet
 
@@ -56,13 +51,7 @@ class Console:
         sys.stdout.write(f"{message}\n")
 
     def stream(self, text: str) -> None:
-        """Write a fragment with no newline and flush it immediately.
-
-        Streaming exists so a person sees the first words while the rest is still being
-        generated. Python buffers stdout when it is not a terminal, so without the flush a
-        piped or redirected stream would arrive in one block at the end — which is the
-        thing streaming is for, undone.
-        """
+        """Write a fragment with no newline and flush it immediately."""
         if self.quiet or self.as_json:
             return
         sys.stdout.write(text)

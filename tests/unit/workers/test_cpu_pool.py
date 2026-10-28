@@ -186,14 +186,7 @@ async def test_resuming_skips_documents_a_checkpoint_already_covered(corpus: Pat
 async def test_the_pool_loads_the_tokenizer_before_it_accepts_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Startup pays the tokenizer load, so the first document does not.
-
-    ``create_token_counter`` returns immediately and the tokenizer behind it loads on first
-    use. Left to happen inside chunking, that first use cost a measured 5.4 s in the middle
-    of the first document — the pool started, took work, and produced nothing, which reads as
-    a hang and lands on whichever document arrives first. It also made the backpressure test
-    below pass or fail on whether an earlier test had warmed the process-wide cache.
-    """
+    """Startup pays the tokenizer load, so the first document does not."""
     counted: list[str] = []
 
     class RecordingCounter:

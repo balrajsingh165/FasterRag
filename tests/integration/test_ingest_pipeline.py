@@ -322,12 +322,7 @@ async def test_a_retrieved_chunk_carries_everything_a_citation_needs(
 async def test_the_eval_harness_scores_the_real_pipeline(
     service: IngestionService, corpus: Path
 ) -> None:
-    """Prove the harness measures a live retriever.
-
-    The numbers here are a mechanism check, not a quality measurement: the embedder is a
-    deterministic stand-in, so these scores say nothing about how well fasterRag retrieves
-    and must never reach the benchmark ledger.
-    """
+    """Prove the harness measures a live retriever."""
     await service.ingest(sources(corpus))
     retrieval = await retrieval_for(service)
 

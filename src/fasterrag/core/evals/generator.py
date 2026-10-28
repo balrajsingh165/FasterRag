@@ -95,21 +95,7 @@ class CandidateChunk:
 def stratified_sample(
     chunks: Sequence[CandidateChunk], size: int, *, seed: int = 0
 ) -> list[CandidateChunk]:
-    """Return ``size`` chunks spread across documents rather than drawn uniformly.
-
-    Documents are visited round-robin, taking one chunk from each in turn, so a corpus of
-    one 900-chunk manual and ten 5-chunk memos yields a set that covers the memos instead of
-    one that is 95% manual.
-
-    Args:
-        chunks: Every candidate chunk.
-        size: How many to draw. Returns everything when the corpus is smaller.
-        seed: Makes the draw reproducible — regenerating a set with the same seed and corpus
-            gives the same questions, so a metric change means the system changed.
-
-    Returns:
-        The sampled chunks.
-    """
+    """Return ``size`` chunks spread across documents rather than drawn uniformly."""
     if size <= 0 or not chunks:
         return []
 
@@ -162,12 +148,7 @@ def _extract_object(text: str) -> str | None:
 
 
 def parse_generated(text: str) -> dict[str, Any] | None:
-    """Parse a P4 response, or return ``None`` when it is unusable.
-
-    An unparseable response drops the record rather than failing the run. Generating a
-    hundred questions and losing three is a smaller harm than losing the whole set, and the
-    count of what was dropped is reported so the loss is never silent.
-    """
+    """Parse a P4 response, or return ``None`` when it is unusable."""
     payload = _extract_object(text)
     if payload is None:
         return None
@@ -200,20 +181,7 @@ async def generate_golden_set(
     adversarial_fraction: float = ADVERSARIAL_FRACTION,
     seed: int = 0,
 ) -> tuple[list[GoldenRecord], dict[str, int]]:
-    """Generate a golden set from a corpus (P4).
-
-    Args:
-        chunks: Every candidate chunk in the corpus.
-        generator: The model writing the questions.
-        size: How many records to aim for.
-        adversarial_fraction: Share of the set generated as deliberately unanswerable.
-        seed: Makes both the sampling and the adversarial selection reproducible.
-
-    Returns:
-        The records, and a tally of what happened — generated, adversarial, and dropped.
-        The tally is returned rather than logged alone because a caller committing a golden
-        set needs to know it asked for a hundred records and got eighty-three.
-    """
+    """Generate a golden set from a corpus (P4)."""
     sampled = stratified_sample(chunks, size, seed=seed)
     if not sampled:
         return [], {"generated": 0, "adversarial": 0, "dropped": 0, "requested": size}

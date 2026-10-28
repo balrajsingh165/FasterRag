@@ -275,13 +275,7 @@ VOLUME = Settings().vector_db.docker.volume
 
 
 class FakeDocker:
-    """A daemon that remembers named volumes and one container, and records mutations.
-
-    The vector database is healthy exactly when the container is running, so a repair that
-    starts the container is visible to the re-check the same way it would be on a real
-    machine. A stub where the backend is healthy regardless would make every assertion
-    about re-checking vacuous.
-    """
+    """A daemon that remembers named volumes and one container, and records mutations."""
 
     def __init__(self, *, volumes: set[str] | None = None, container: ContainerState) -> None:
         self.volumes = volumes if volumes is not None else set()
@@ -443,12 +437,7 @@ async def test_fix_creates_the_missing_volume_and_verifies_it(
 async def test_a_repair_that_did_not_take_is_reported_not_fixed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The re-check is the only evidence that counts.
-
-    A repair that returns without raising and leaves the check failing must never be
-    reported as a success — that is precisely the "reports success without re-checking"
-    defect this command exists to avoid.
-    """
+    """The re-check is the only evidence that counts."""
     fake = wire(monkeypatch, FakeDocker(container=absent_container()))
 
     async def pretend_to_create(volume: str) -> None:
@@ -624,12 +613,7 @@ async def test_invalid_config_is_never_rewritten_by_fix(tmp_path: Path) -> None:
 async def test_fix_json_is_a_superset_of_the_plain_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--json` consumers must find `passed` and `checks` in the same place either way.
-
-    They must also describe the machine *after* the repairs. A payload reporting the
-    failures that have since been fixed would send an automated caller after work already
-    done.
-    """
+    """`--json` consumers must find `passed` and `checks` in the same place either way."""
     wire(monkeypatch, FakeDocker(container=stopped_managed_container()))
 
     payload = (await apply_fixes(Settings())).as_dict()
