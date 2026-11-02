@@ -10,7 +10,7 @@
 | Per-stage latency | embed / retrieve(dense) / retrieve(bm25) / fuse / rerank / assemble / generate, p50/p95 — the **retrieval vs generation** split | `fasterrag_stage_duration_seconds`; per-query `timings_ms` |
 | Time-to-first-token (TTFT) | request receipt → first SSE `token` event | `fasterrag_ttft_seconds` |
 | Ingestion throughput | docs/sec and tokens/sec sustained over ≥ 10 min | ingest benchmark suite; `fasterrag_ingest_throughput` |
-| Retrieval quality | recall@k, MRR, nDCG on named eval datasets | eval harness (`pytest -m eval`, `fasterrag benchmark --suite eval`) |
+| Retrieval quality | recall@k, MRR, nDCG on named eval datasets | eval harness (`pytest -m eval`, `fasterrag benchmark --suite eval`, `scripts/measure_rerank.py`) |
 | Faithfulness | grounding score distribution of generated answers | eval harness |
 | Cache hit rate | semantic + embedding cache hits / lookups | `fasterrag_cache_events_total` |
 | Cost per query | Σ provider token costs / queries | `fasterrag_cost_usd_total` |
@@ -21,9 +21,10 @@
 |---|---|---|
 | Retrieval-only p50 (10M chunks, hybrid, no rerank) | ≤ 150 ms | TBD-until-measured |
 | End-to-end p95 excl. LLM generation (with rerank) | ≤ 600 ms | TBD-until-measured |
-| Rerank stage cost | no target set — the "100–300 ms band" this row used to cite was never measured and has been withdrawn | TBD-until-measured |
+| Rerank stage cost | no target set — the "100–300 ms band" this row used to cite was never measured and has been withdrawn | TBD-until-measured (BENCH-0003 priced the stage on a **non-isolated, CPU-only** machine: 12.9 s p50 for the shipped reranker over a 12-candidate shortlist, 86.9 s at the shipped `rerank_top_n: 100`; indicative only, and no GPU was measured) |
 | Ingestion throughput (reference rig) | ≥ 50 docs/sec; ≥ 200k tokens/sec embedded | TBD-until-measured |
 | Top-20 retrieval failure rate (hybrid + contextual + rerank) | ≤ 2% | TBD-until-measured (literature anchor: 1.9% in Anthropic's Contextual Retrieval post) |
+| Retrieval-quality gain from reranking | no target set — the gain has never been measured on a dataset able to show one | TBD-until-measured (BENCH-0003 measured it on the committed golden sets and found it **inside the noise**: +0.09 MRR ± 0.05 over 16 queries, with recall@5 already 1.0 and the two candidate rerankers indistinguishable. The blocker is dataset size, not hardware) |
 | Semantic-cache hit response | ≤ 50 ms | TBD-until-measured |
 | Soak (24 h) | zero memory/fd growth trend | TBD-until-measured |
 
@@ -46,5 +47,6 @@ Every row flips from goal → claim only by landing a ledger entry with numbers,
 
 - `fasterrag benchmark --suite ingest|query|eval|all --dataset <name> --ledger` orchestrates the suites and emits ready-to-commit ledger entries. **Built.**
 - `scripts/compare_nightly.py --previous <a.json> --current <b.json> [--tolerance 0.10]` compares two `fasterrag benchmark --json` documents and exits `0` within tolerance, `1` regressed, `2` not comparable. **Built**, and usable by hand on any two artifacts, not only by the nightly job. It detects a *change* between two runs; it produces no ledger entry and makes neither run citable.
+- `scripts/measure_rerank.py [--dataset <dir>] [--model <cross-encoder>] [--chunk-size <n>] [--json <path>]` prices the rerank stage across candidate `retrieval.rerank` defaults: the harness's own recall@k / MRR / nDCG@k per configuration, plus each cross-encoder's on-disk size, cold load time, and per-query rerank latency. **Built**, and run — see BENCH-0003 in [benchmarks.md](benchmarks.md), which is **not citable**, for two separate reasons: a shared developer workstation, *and* quality deltas that fall inside the committed golden sets' own noise. It reuses `fasterrag.core.evals.evaluate` rather than defining a second notion of retrieval quality, substitutes an exact in-process store for the vector database (so the comparison between configurations holds while the absolute numbers are not a Qdrant reproduction), never downloads weights without `--allow-download`, and decides nothing: it exists to give TASK-0175 a number instead of an expectation, and its most useful finding is which number the repository still cannot produce.
 - Load generation for concurrency scenarios is specified to use k6 or Locust scripts committed under the benchmark suite ([testing-strategy.md](testing-strategy.md) §1.7). **Not built — no such script exists in this repository** (TASK-0243), so no concurrency scenario has ever been run.
 - The reference-hardware baseline run happens at build-phase slice S11; until then this document contains **no measured numbers by design**.
