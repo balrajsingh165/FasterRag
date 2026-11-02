@@ -81,6 +81,21 @@ jobs:
           --cov=src/fasterrag/core
           --cov=src/fasterrag/adapters
           --cov=src/fasterrag/workers
+          --cov-report=
+          --cov-fail-under=0
+
+      # Chroma's contract suite is marked `integration` but is the only one that needs no
+      # server and no daemon — it runs embedded against a temporary directory. Excluding it
+      # would score a 515-statement adapter at 36% while 50 contract cases actually exercise
+      # it, so the gate would measure the marker rather than the coverage. Appended here
+      # rather than un-marking the suite, because it IS an integration test by intent.
+      - name: Coverage gate (append Chroma's serverless contract suite)
+        run: >
+          pytest tests/integration/chroma -m integration -q
+          --cov=src/fasterrag/core
+          --cov=src/fasterrag/adapters
+          --cov=src/fasterrag/workers
+          --cov-append
           --cov-report=term
           --cov-fail-under=85
 
@@ -263,7 +278,12 @@ jobs:
           - 6333:6333
           - 6334:6334
     env:
+      # Config validation fails fast on any env var a config key references, so the gate
+      # needs these present before it can reach the eval at all. Placeholders: this job
+      # scores retrieval against a local Qdrant and never calls an LLM.
       QDRANT_API_KEY: ci-placeholder
+      FASTERRAG_API_KEY: ci-placeholder
+      OPENAI_API_KEY: ci-placeholder
       GATE: >-
         --config config.yaml
         --set vector_db.mode=external
