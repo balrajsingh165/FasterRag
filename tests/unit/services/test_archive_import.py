@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import tarfile
 from pathlib import Path
@@ -22,6 +23,7 @@ from fasterrag.services.archive_import import (
     open_archive,
     supported_major,
 )
+from fasterrag.services.lockfile import LockStore, build_lock
 
 
 def line(payload: dict[str, Any]) -> bytes:
@@ -218,18 +220,41 @@ def test_every_mismatch_is_named_at_once(tmp_path: Path) -> None:
 class RecordingAdapter:
     """Captures what an import writes."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, existing: list[str] | None = None, fail_after: int | None = None) -> None:
         self.created: list[Any] = []
         self.points: list[Any] = []
+        self.dropped: list[str] = []
+        self.existing = existing or []
+        self.fail_after = fail_after
+
+    async def list_collections(self) -> list[Any]:
+        from fasterrag.adapters.vectordb.base import CollectionInfo
+
+        return [CollectionInfo(name=name, vectors=0) for name in self.existing]
 
     async def create_collection(self, spec: Any) -> None:
         self.created.append(spec)
 
+    async def drop_collection(self, name: str) -> bool:
+        self.dropped.append(name)
+        return True
+
     async def upsert(self, points: list[Any]) -> Any:
-        self.points.extend(points)
         from fasterrag.adapters.vectordb.base import UpsertResult
 
+        if self.fail_after is not None and len(self.points) >= self.fail_after:
+            raise FasterRagError(
+                "the backend went away mid-import",
+                code=ErrorCode.INTERNAL,
+                retryable=True,
+            )
+        self.points.extend(points)
         return UpsertResult(upserted=len(points))
+
+
+def copy_settings() -> Settings:
+    """Settings whose embedding identity matches the archives `make` writes."""
+    return Settings.model_validate({"embeddings": {"model": "m"}})
 
 
 class StubEmbedder:
@@ -269,10 +294,11 @@ async def test_a_vector_copy_writes_the_archived_vectors(tmp_path: Path) -> None
     reader = open_archive(vectored(tmp_path))
 
     counts = await import_archive(
-        Settings.model_validate({}),
+        copy_settings(),
         adapter,  # type: ignore[arg-type]
         reader,
         collection="restored",
+        lock_root=tmp_path,
     )
 
     assert counts.chunks == 2
@@ -291,6 +317,7 @@ async def test_re_embedding_ignores_the_archived_vectors(tmp_path: Path) -> None
         collection="restored",
         reembed=True,
         router=StubRouter(),  # type: ignore[arg-type]
+        lock_root=tmp_path,
     )
 
     assert [list(point.vector) for point in adapter.points] == [[0.9, 0.9], [0.9, 0.9]]
@@ -306,6 +333,7 @@ async def test_re_embedding_records_the_new_model(tmp_path: Path) -> None:
         collection="restored",
         reembed=True,
         router=StubRouter(),  # type: ignore[arg-type]
+        lock_root=tmp_path,
     )
 
     assert adapter.points[0].payload["embedding_model"] == "new-model"
@@ -319,16 +347,18 @@ async def test_re_embedding_without_a_router_is_refused(tmp_path: Path) -> None:
             open_archive(vectored(tmp_path)),
             collection="restored",
             reembed=True,
+            lock_root=tmp_path,
         )
 
 
 async def test_a_vector_copy_from_a_vectorless_archive_is_refused(tmp_path: Path) -> None:
     with pytest.raises(FasterRagError) as caught:
         await import_archive(
-            Settings.model_validate({}),
+            copy_settings(),
             RecordingAdapter(),  # type: ignore[arg-type]
             open_archive(make(tmp_path)),
             collection="restored",
+            lock_root=tmp_path,
         )
 
     assert caught.value.code is ErrorCode.CONFLICT
@@ -338,10 +368,11 @@ async def test_archived_metadata_survives_the_round_trip(tmp_path: Path) -> None
     adapter = RecordingAdapter()
 
     await import_archive(
-        Settings.model_validate({}),
+        copy_settings(),
         adapter,  # type: ignore[arg-type]
         open_archive(vectored(tmp_path)),
         collection="restored",
+        lock_root=tmp_path,
     )
 
     assert adapter.points[0].payload["a"] == 1
@@ -364,10 +395,11 @@ async def test_metadata_cannot_shadow_a_named_field(tmp_path: Path) -> None:
     adapter = RecordingAdapter()
 
     await import_archive(
-        Settings.model_validate({}),
+        copy_settings(),
         adapter,  # type: ignore[arg-type]
         open_archive(archive),
         collection="restored",
+        lock_root=tmp_path,
     )
 
     assert adapter.points[0].payload["text"] == "real body"
@@ -378,10 +410,11 @@ async def test_the_collection_is_created_at_the_archived_width(tmp_path: Path) -
     adapter = RecordingAdapter()
 
     await import_archive(
-        Settings.model_validate({}),
+        copy_settings(),
         adapter,  # type: ignore[arg-type]
         open_archive(vectored(tmp_path)),
         collection="restored",
+        lock_root=tmp_path,
     )
 
     assert adapter.created[0].dimensions == 2
@@ -392,10 +425,242 @@ async def test_chunk_ids_are_preserved_so_import_is_idempotent(tmp_path: Path) -
     adapter = RecordingAdapter()
 
     await import_archive(
-        Settings.model_validate({}),
+        copy_settings(),
         adapter,  # type: ignore[arg-type]
         open_archive(vectored(tmp_path)),
         collection="restored",
+        lock_root=tmp_path,
     )
 
     assert [point.point_id for point in adapter.points] == ["c_1", "c_2"]
+
+
+async def test_a_vector_copy_into_a_differently_configured_deployment_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The guard compared the manifest against itself, so it could never fire."""
+    adapter = RecordingAdapter()
+
+    with pytest.raises(FasterRagError) as caught:
+        await import_archive(
+            Settings.model_validate({"embeddings": {"model": "other-model"}}),
+            adapter,  # type: ignore[arg-type]
+            open_archive(vectored(tmp_path)),
+            collection="restored",
+            lock_root=tmp_path,
+        )
+
+    assert caught.value.code is ErrorCode.CONFLICT
+    assert "model 'm' != 'other-model'" in caught.value.detail
+    assert adapter.points == []
+
+
+async def test_the_targets_own_lockfile_decides_what_a_vector_copy_must_match(
+    tmp_path: Path,
+) -> None:
+    """A collection already built by one model is the strongest statement of the target."""
+    store = LockStore(tmp_path)
+    store.write(
+        build_lock(
+            "restored",
+            copy_settings(),
+            embedding_model="m",
+            embedding_model_version="7",
+            dimensions=2,
+        )
+    )
+
+    with pytest.raises(FasterRagError, match="model_version '1' != '7'"):
+        await import_archive(
+            copy_settings(),
+            RecordingAdapter(),  # type: ignore[arg-type]
+            open_archive(vectored(tmp_path)),
+            collection="restored",
+            lock_root=tmp_path,
+        )
+
+
+def test_a_manifest_that_lies_about_its_width_is_refused(tmp_path: Path) -> None:
+    """The manifest's width is what the collection is created at; a lie builds it wrong."""
+    archive = make(tmp_path, vectors=[{"chunk_id": "c_1", "vector": [0.1, 0.2, 0.3]}])
+
+    with pytest.raises(VerificationError, match="declares 2 dimensions"):
+        open_archive(archive)
+
+
+def test_vectors_of_differing_widths_are_refused(tmp_path: Path) -> None:
+    """A hand-edited vectors member need not declare a width to be inconsistent."""
+    manifest = {
+        "format_version": "1.0.0",
+        "collection": {"name": "docs"},
+        "embedding": {"model": "m", "model_version": "1", "dimensions": 0},
+        "counts": {"documents": 1, "chunks": 2, "vectors": 2},
+        "includes_vectors": True,
+    }
+    archive = make(
+        tmp_path,
+        chunks=[
+            {"chunk_id": "c_1", "document_id": "d_1"},
+            {"chunk_id": "c_2", "document_id": "d_1"},
+        ],
+        vectors=[
+            {"chunk_id": "c_1", "vector": [0.1, 0.2]},
+            {"chunk_id": "c_2", "vector": [0.1, 0.2, 0.3]},
+        ],
+        manifest=manifest,
+    )
+
+    with pytest.raises(VerificationError, match="the manifest and the data disagree"):
+        open_archive(archive)
+
+
+async def test_document_provenance_is_restored_onto_every_chunk(tmp_path: Path) -> None:
+    """`source_uri` lives only in documents.jsonl; without the join a chunk cannot be cited."""
+    archive = make(
+        tmp_path,
+        documents=[
+            {
+                "document_id": "d_1",
+                "source_uri": "docs/policy.md",
+                "content_hash": "sha-abc",
+                "version": 1,
+                "metadata": {"team": "legal"},
+            }
+        ],
+        chunks=[{"chunk_id": "c_1", "document_id": "d_1", "text": "one", "metadata": {}}],
+        vectors=[{"chunk_id": "c_1", "vector": [0.1, 0.2]}],
+    )
+    adapter = RecordingAdapter()
+
+    await import_archive(
+        copy_settings(),
+        adapter,  # type: ignore[arg-type]
+        open_archive(archive),
+        collection="restored",
+        lock_root=tmp_path,
+    )
+
+    payload = adapter.points[0].payload
+    assert payload["source_uri"] == "docs/policy.md"
+    assert payload["content_hash"] == "sha-abc"
+    assert payload["document_metadata"] == {"team": "legal"}
+
+
+async def test_a_failed_import_drops_the_collection_it_created(tmp_path: Path) -> None:
+    """A half-written collection looks like a corpus rather than like an error."""
+    adapter = RecordingAdapter(fail_after=0)
+
+    with pytest.raises(FasterRagError, match="went away mid-import"):
+        await import_archive(
+            copy_settings(),
+            adapter,  # type: ignore[arg-type]
+            open_archive(vectored(tmp_path)),
+            collection="restored",
+            lock_root=tmp_path,
+        )
+
+    assert adapter.dropped == ["restored"]
+
+
+async def test_a_failed_import_never_drops_a_collection_it_found(tmp_path: Path) -> None:
+    """Dropping it would destroy rows the archive never carried."""
+    adapter = RecordingAdapter(existing=["restored"], fail_after=0)
+
+    with pytest.raises(FasterRagError) as caught:
+        await import_archive(
+            copy_settings(),
+            adapter,  # type: ignore[arg-type]
+            open_archive(vectored(tmp_path)),
+            collection="restored",
+            lock_root=tmp_path,
+        )
+
+    assert adapter.dropped == []
+    assert caught.value.code is ErrorCode.CONFLICT
+    assert "re-running the same import is safe" in caught.value.detail
+
+
+async def test_a_failed_import_writes_no_lockfile(tmp_path: Path) -> None:
+    """A lock for a collection that was rolled back would describe nothing."""
+    with pytest.raises(FasterRagError):
+        await import_archive(
+            copy_settings(),
+            RecordingAdapter(fail_after=0),  # type: ignore[arg-type]
+            open_archive(vectored(tmp_path)),
+            collection="restored",
+            lock_root=tmp_path,
+        )
+
+    assert not (tmp_path / "restored.lock.json").exists()
+
+
+async def test_the_import_writes_a_fresh_lockfile(tmp_path: Path) -> None:
+    """Without one the restored collection reports drift against whatever lock is lying around."""
+    await import_archive(
+        copy_settings(),
+        RecordingAdapter(),  # type: ignore[arg-type]
+        open_archive(vectored(tmp_path)),
+        collection="restored",
+        lock_root=tmp_path,
+    )
+
+    written = LockStore(tmp_path).read("restored")
+    assert written is not None
+    assert written.embedding_model == "m"
+    assert written.dimensions == 2
+    assert written.document_hashes == {"d_1": ""}
+
+
+async def test_the_archived_lockfile_is_kept_beside_the_fresh_one(tmp_path: Path) -> None:
+    """The archive's own lock is the provenance of where the collection came from."""
+    await import_archive(
+        copy_settings(),
+        RecordingAdapter(),  # type: ignore[arg-type]
+        open_archive(vectored(tmp_path)),
+        collection="restored",
+        lock_root=tmp_path,
+    )
+
+    assert (tmp_path / "restored.source.lock.json").read_bytes() == b"{}\n"
+
+
+def test_a_member_declaring_more_than_the_limit_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An over-large member is refused on its header, before any of it is read."""
+    monkeypatch.setattr("fasterrag.services.archive_import.MAXIMUM_MEMBER_BYTES", 1_000)
+
+    archive = tmp_path / "bomb.fragx"
+    payload = b"\0" * 2_000
+    with tarfile.open(archive, "w:gz") as handle:
+        info = tarfile.TarInfo(MANIFEST_NAME)
+        info.size = len(payload)
+        handle.addfile(info, io.BytesIO(payload))
+
+    with pytest.raises(VerificationError, match="above the"):
+        open_archive(archive)
+
+
+def test_a_decompression_bomb_is_refused_before_it_exhausts_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Members each under the per-member ceiling must still be refused in aggregate.
+
+    The limits are lowered rather than writing a real multi-gigabyte bomb; the expansion
+    ratio under test is the one gzip gives an attacker for free.
+    """
+    monkeypatch.setattr("fasterrag.services.archive_import.MAXIMUM_MEMBER_BYTES", 1_000_000)
+    monkeypatch.setattr("fasterrag.services.archive_import.MAXIMUM_TOTAL_BYTES", 300_000)
+
+    archive = tmp_path / "bomb.fragx"
+    payload = b"\0" * 200_000
+    with tarfile.open(archive, "w:gz") as handle:
+        for name in (MANIFEST_NAME, CHUNKS_NAME, DOCUMENTS_NAME):
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            handle.addfile(info, io.BytesIO(payload))
+
+    assert archive.stat().st_size < 4_096
+
+    with pytest.raises(VerificationError, match="expands beyond"):
+        open_archive(archive)

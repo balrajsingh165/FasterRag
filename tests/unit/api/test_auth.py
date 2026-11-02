@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from fastapi.testclient import TestClient
 from starlette.types import Receive, Scope, Send
@@ -260,3 +262,35 @@ def test_shutdown_releases_the_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
         assert not recorder.closed
 
     assert recorder.closed
+
+
+def test_an_unbound_key_is_announced_when_multi_tenancy_is_on(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A key that omitted its tenant is an operator credential; say so at startup."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "alpha-secret:query;beta-secret:query:acme")
+    settings = Settings.model_validate(
+        {"security": {"auth": True, "multi_tenancy": True, "api_key_env": "FASTERRAG_API_KEY"}}
+    )
+
+    with caplog.at_level(logging.WARNING):
+        AuthMiddleware(_unreached, settings)
+
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert any("may act for any tenant" in record.getMessage() for record in warnings)
+    assert not any("alpha-secret" in record.getMessage() for record in warnings)
+
+
+def test_a_fully_bound_key_set_is_announced_quietly(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The warning must discriminate, or it is noise everyone learns to ignore."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "alpha-secret:query:acme")
+    settings = Settings.model_validate(
+        {"security": {"auth": True, "multi_tenancy": True, "api_key_env": "FASTERRAG_API_KEY"}}
+    )
+
+    with caplog.at_level(logging.WARNING):
+        AuthMiddleware(_unreached, settings)
+
+    assert not any("may act for any tenant" in record.getMessage() for record in caplog.records)

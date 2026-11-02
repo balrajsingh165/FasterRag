@@ -219,12 +219,14 @@ D11 portability: export documents, chunks, metadata, and the index manifest to a
 
 ## `fasterrag import <archive>`
 
-D11: import a previously exported archive.
+D11: import a previously exported archive. The archive is verified whole — checksums, manifest counts, referential integrity, vector width — before anything is written, so a refused archive leaves the target untouched (exit 2). A write that fails partway drops the collection the import created; one that already existed is left alone and named in the error, because re-running the same import completes it. The restored collection gets a fresh `index.lock`, and the archive's own lock is kept beside it as `<collection>.source.lock.json`. See [archive-format.md](archive-format.md) §Import semantics.
 
 | Flag | Description |
 |---|---|
-| `--reembed` | Re-embed with the currently configured model instead of copying vectors. |
+| `--reembed` | Re-embed with the currently configured model instead of copying vectors. Always legal, because it derives the vectors it stores. |
 | `--target-collection NAME` | Import into a specific collection. |
+
+Without `--reembed` the archived vectors are copied, and that is refused unless the target's embedding identity matches the manifest — from the target collection's own lockfile when it has one, otherwise from `embeddings.model` and `embeddings.dimensions`. Copying vectors produced by another model builds a collection that answers every query confidently and wrongly, with nothing in the index to say why, so the refusal names each mismatched field rather than summarising.
 
 ## `fasterrag config init`
 

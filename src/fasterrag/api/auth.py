@@ -190,6 +190,18 @@ class AuthMiddleware:
                     "rate_limit_backend": settings.security.rate_limit_backend,
                 },
             )
+            # CRITICAL: a key whose entry omits the third field parses as `tenant=None`,
+            # which `_tenant_refusal` treats as an operator credential free to act for ANY
+            # tenant. That is deliberate (docs/security.md), but the dangerous state is the
+            # one you get by leaving a field off, so it is announced rather than inferred.
+            # Never log the secret — only the positional name the parser assigned.
+            unbound = [key.name for key in keys if key.tenant is None]
+            if self.multi_tenancy and unbound:
+                _logger.warning(
+                    "keys with no tenant may act for any tenant; bind them or drop the "
+                    "operator capability",
+                    extra={"keys": ", ".join(unbound), "count": len(unbound)},
+                )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Authenticate an HTTP request, or pass it through when auth is off."""

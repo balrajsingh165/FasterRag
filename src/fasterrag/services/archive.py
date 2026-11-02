@@ -102,7 +102,11 @@ def document_record(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def chunk_record(point: Point) -> dict[str, Any]:
-    """Return one ``chunks.jsonl`` row."""
+    """Return one ``chunks.jsonl`` row.
+
+    Everything the indexer stored that is not promoted to a named field travels in
+    ``metadata``, so a round trip loses nothing the backend was holding.
+    """
     payload = dict(point.payload)
     span = payload.get("span") or {}
 
@@ -112,8 +116,6 @@ def chunk_record(point: Point) -> dict[str, Any]:
         "text": str(payload.get("text", "")),
         "span": {"start": int(span.get("start", 0)), "end": int(span.get("end", 0))},
         "page": payload.get("page"),
-        # Everything the indexer stored that is not promoted to a named field travels in
-        # metadata, so a round trip loses nothing the backend was holding.
         "metadata": {key: value for key, value in payload.items() if key not in _CHUNK_RESERVED},
         "context_prefix": payload.get("context_prefix"),
     }

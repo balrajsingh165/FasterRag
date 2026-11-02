@@ -27,6 +27,7 @@ from fasterrag.services.archive_import import (
     import_archive,
     open_archive,
 )
+from fasterrag.services.lockfile import LockStore
 
 pytestmark = pytest.mark.integration
 
@@ -50,9 +51,9 @@ def points(collection: str, count: int) -> list[Point]:
             payload={
                 "text": f"chunk number {index} about expense policy",
                 "document_id": f"d_{index // 3:04d}",
-                "source": f"/docs/policy-{index // 3}.md",
+                "source_uri": f"/docs/policy-{index // 3}.md",
                 "chunk_index": index % 3,
-                "content_hash": f"hash{index:04d}",
+                "content_hash": f"hash{index // 3:04d}",
             },
         )
         for index in range(count)
@@ -153,8 +154,15 @@ async def test_payloads_survive_the_copy(
     for original in written:
         payload = recovered[original.point_id].payload
         assert payload["text"] == original.payload["text"]
-        assert payload["source"] == original.payload["source"]
         assert payload["document_id"] == original.payload["document_id"]
+        assert payload["chunk_index"] == original.payload["chunk_index"]
+        # CRITICAL: source_uri and content_hash are the two fields the exporter lifts out
+        # of the chunk payload into documents.jsonl. Nothing but this assertion notices
+        # when import stops joining them back on, and a chunk without a source_uri cannot
+        # be cited. The fixture used the key `source` until 2026-11-02, which is exactly
+        # why the live run passed while the loss was real.
+        assert payload["source_uri"] == original.payload["source_uri"]
+        assert payload["content_hash"] == original.payload["content_hash"]
 
 
 async def test_two_exports_differ_only_by_the_manifest_timestamp(
@@ -230,3 +238,51 @@ async def test_a_dimension_mismatch_refuses_the_vector_copy(
         await import_archive(qdrant, adapter, open_archive(archive), collection=restored)
 
     assert "dimension" in caught.value.detail.lower()
+
+
+async def test_a_differently_configured_model_refuses_the_copy_before_writing(
+    populated: tuple[QdrantAdapter, str, list[Point]], qdrant: Settings, tmp_path: Path
+) -> None:
+    """Vectors from one model in a deployment querying with another answer wrongly."""
+    adapter, collection, _ = populated
+    archive = tmp_path / "corpus.fragx"
+    restored = f"{collection}-restored"
+
+    await export_archive(
+        qdrant, adapter, collection=collection, destination=archive, include_vectors=True
+    )
+    elsewhere = qdrant.model_copy(
+        update={"embeddings": qdrant.embeddings.model_copy(update={"model": "another/model"})}
+    )
+
+    with pytest.raises(FasterRagError, match="different embedding configuration"):
+        await import_archive(
+            elsewhere,
+            adapter,
+            open_archive(archive),
+            collection=restored,
+            lock_root=tmp_path,
+        )
+
+    assert restored not in [info.name for info in await adapter.list_collections()]
+
+
+async def test_the_import_leaves_a_lockfile_describing_the_restored_collection(
+    populated: tuple[QdrantAdapter, str, list[Point]], qdrant: Settings, tmp_path: Path
+) -> None:
+    """Without one, reindex and drift detection have nothing to compare the copy against."""
+    adapter, collection, _ = populated
+    archive = tmp_path / "corpus.fragx"
+    restored = f"{collection}-restored"
+
+    await export_archive(
+        qdrant, adapter, collection=collection, destination=archive, include_vectors=True
+    )
+    await import_archive(
+        qdrant, adapter, open_archive(archive), collection=restored, lock_root=tmp_path
+    )
+
+    lock = LockStore(tmp_path).read(restored)
+    assert lock is not None
+    assert lock.dimensions == DIMENSIONS
+    assert set(lock.document_hashes) == {f"d_{index:04d}" for index in range(4)}

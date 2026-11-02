@@ -68,11 +68,18 @@ archive.fragx
 
 ## Import semantics
 
-1. **Verify first**: checksums, manifest counts, referential integrity (every chunk's `document_id` resolves; every vector's `chunk_id` resolves). Any failure → `VALIDATION_FAILED` problem, nothing written.
-2. **Vector copy path** (no `--reembed`): allowed **iff** `includes_vectors` and the target collection's model, model version, and dimensions all match the manifest — otherwise import refuses and names the mismatch (`CONFLICT`).
+1. **Verify first**: checksums, manifest counts, referential integrity (every chunk's `document_id` resolves; every vector's `chunk_id` resolves), and vector width (every row in `vectors.jsonl` is `embedding.dimensions` long, since that is the width the target collection is created at). Any failure → `VALIDATION_FAILED` problem, nothing written.
+2. **Vector copy path** (no `--reembed`): allowed **iff** `includes_vectors` and the target collection's model, model version, and dimensions all match the manifest — otherwise import refuses and names every mismatch at once (`CONFLICT`). The target's identity is read from its own `index.lock` when it already has one, because that is what actually built it; otherwise from `embeddings.model` and `embeddings.dimensions`, because that is what will query it next. A target with no lockfile declares no model version, and a value nobody declares is not compared.
 3. **Re-embed path** (`--reembed`): ignores `vectors.jsonl`; chunks flow through the normal embedding pool under the current config; the manifest's chunking settings are preserved as chunk metadata.
-4. **Idempotent**: import uses the same content-hash dedup as ingestion (D3) — importing the same archive twice is a no-op.
-5. **Lockfile**: the imported collection writes a fresh `index.lock`; the archived one is retained alongside for provenance.
+4. **Provenance is rejoined**: `source_uri`, `content_hash`, and the document's `metadata` live in `documents.jsonl`, not on the chunk row. Import joins them back onto every chunk payload — a restored chunk without a `source_uri` cannot be cited, and one without a `content_hash` cannot be deduplicated.
+5. **Idempotent**: chunk ids are deterministic, so importing the same archive twice upserts over itself rather than duplicating. This is also the recovery path for a partial import.
+6. **Nothing half-written survives**: if a write fails partway, a collection the import created is dropped and the original error is raised; a collection that already existed is left alone — dropping it would destroy rows the archive never carried — and the refusal names the mixed state and says that re-running completes it. A process killed outright cannot roll anything back; re-running the import is what repairs it.
+7. **Lockfile**: the imported collection writes a fresh `index.lock` (model, dimensions, and the archive's per-document content hashes); the archive's own lock is retained beside it as `<collection>.source.lock.json` for provenance.
+
+## Known gaps
+
+- **`golden-set.jsonl` is specified but never written.** The exporter emits no golden set, and the reader neither expects nor reads one. It stays in the container listing as an optional member the format reserves. Tracked by TASK-0079.
+- **Sparse vectors are not carried.** `vectors.jsonl` holds the dense vector only; the vendor-neutral read side (`VectorDBAdapter.iterate_points`) does not return a point's sparse vector at all. Import recomputes BM25 sparse vectors from chunk text under the target's `retrieval.bm25_k1`/`bm25_b` when `retrieval.hybrid` is on, which re-derives them under the target's parameters rather than transplanting the source's. Tracked by TASK-0079.
 
 ## Compatibility rules
 
