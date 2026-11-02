@@ -171,4 +171,6 @@ security:
   multi_tenancy: false
   tenant_header: X-Tenant-ID
   rate_limit_per_minute: 600
+  rate_limit_backend: memory
+  rate_limit_redis_url: redis://localhost:6379/0
   max_request_mb: 25

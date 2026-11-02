@@ -178,6 +178,8 @@ security:
   multi_tenancy: false
   tenant_header: X-Tenant-ID
   rate_limit_per_minute: 600
+  rate_limit_backend: memory
+  rate_limit_redis_url: redis://localhost:6379/0
   max_request_mb: 25
 ```
 
@@ -453,7 +455,9 @@ All integration toggles default `false`.
 | `security.api_key_env` | str | `FASTERRAG_API_KEY` | valid env-var name | Env var holding the API key material (never the key itself in YAML). |
 | `security.multi_tenancy` | bool | `false` | — | Tenant-scoped collections and API keys; isolation enforced at the service layer; tenant tag on every trace/metric. |
 | `security.tenant_header` | str | `X-Tenant-ID` | valid HTTP header name | Header carrying the tenant identifier when multi-tenancy is on. |
-| `security.rate_limit_per_minute` | int | `600` | ≥ 1 | Per-key request rate limit (on by default once `auth` is enabled). |
+| `security.rate_limit_per_minute` | int | `600` | ≥ 1 | Per-key request rate limit (on by default once `auth` is enabled). Counted in the window named by `security.rate_limit_backend`. |
+| `security.rate_limit_backend` | str | `memory` | `memory`, `redis` | Where the per-key window is counted. `memory` is per process: with N API workers or replicas the effective ceiling is `rate_limit_per_minute × N`, which is correct only for a single-process deployment. `redis` counts every replica into one shared fixed window (`INCR` + `EXPIRE` in one transaction, keyed by a SHA-256 fingerprint of the API key, never the key). Needs `pip install fasterrag[redis]`. **The Redis backend has never been exercised against a live Redis server** — only against an in-memory double (TASK-0216); see [security.md](security.md) §2. |
+| `security.rate_limit_redis_url` | str | `redis://localhost:6379/0` | starts with `redis://`, `rediss://`, or `unix://` | Connection URL, read only when `security.rate_limit_backend` is `redis`. Counters are namespaced under `fasterrag:ratelimit`, so the same server can also back the caches. **A URL containing a password is a secret and must not be written here** — supply it through the environment instead (`FASTERRAG_SET=security.rate_limit_redis_url=...`). |
 | `security.max_request_mb` | int | `25` | 1–1024 | Input size limit for API request bodies (ingestion uploads are governed by `ingestion.max_document_mb`). |
 
 ---

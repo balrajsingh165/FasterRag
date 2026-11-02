@@ -39,7 +39,22 @@ Key comparison uses `secrets.compare_digest` against every configured key with n
 
 Enabling auth with no usable key **refuses to start**. Starting would refuse every request afterwards, which reads as a broken deployment rather than a configuration mistake.
 - **Keys carry scopes**: `ingest`, `query`, `collections`, `admin`. Admin endpoints (provisioning, export/import, collection delete) require `admin`.
-- **Rate limiting is on by default once auth is enabled** (`security.rate_limit_per_minute`, per key), returning `429` + `Retry-After`. Keyed per API key, not per IP — a limit keyed on something the caller chooses is not a limit. It is an in-process fixed window, correct for a single server and **not claimed to hold across replicas**: a distributed limiter needs shared state this limiter does not use. Shared state now exists — the `redis` cache backend (TASK-0124) — but the limiter is not wired to it (TASK-0216).
+- **Rate limiting is on by default once auth is enabled** (`security.rate_limit_per_minute`, per key), returning `429` + `Retry-After`. Keyed per API key, not per IP — a limit keyed on something the caller chooses is not a limit.
+
+**Where the window is counted is a deployment choice** (`security.rate_limit_backend`, TASK-0216).
+
+| Backend | Window | Correct for |
+|---|---|---|
+| `memory` (default) | One dictionary per process | A single process. With N Gunicorn workers or N replicas the effective ceiling is `rate_limit_per_minute × N`. |
+| `redis` | One fixed window per API key, counted in Redis (`security.rate_limit_redis_url`) | Any multi-worker or multi-replica deployment — including the Gunicorn topology [deployment.md](deployment.md) documents as production. |
+
+`memory` remains the default because it is correct for a single process and a default that opens a network connection is a default that can fail to start. An operator running more than one worker has to choose `redis` deliberately; nothing detects the mismatch for them, which is the remaining sharp edge here.
+
+**How the shared window works.** The key is `fasterrag:ratelimit:<fingerprint>:<window index>`, so a new minute is a new key rather than a counter something has to reset — no replica can disagree about when the window began and no sweep is needed. The counter and its expiry (`INCR` + `EXPIRE`) are issued inside one `MULTI`/`EXEC` transaction; issued separately, a process dying between the two leaves a counter with no expiry, and an immortal counter sitting at its ceiling refuses that key forever. The `<fingerprint>` is a SHA-256 digest of the API key, never the key: Redis is shared and frequently co-tenanted, and a credential written there in plain text is a disclosure wearing a counter's clothes. The window index comes from each host's wall clock, so hosts with skewed clocks step between windows at slightly different moments and a caller may receive part of an extra window's allowance around a boundary; the alternative, asking Redis for its own `TIME`, costs a second round trip on every authenticated request. Run NTP.
+
+**A Redis outage fails open: the request is served and the limit is not enforced for it.** Failing closed was the alternative and it was rejected. By the time the limiter runs, the request has already been authenticated and scope-checked — the limiter is an abuse control, not an authorization control, so letting one through degrades throttling rather than access. Failing closed would convert a Redis outage into a total control-plane outage for every authenticated caller, including `/metrics` and the admin endpoints an operator needs during exactly that incident, and it is the same posture FMEA row 23 already takes for this same dependency (a cache failure degrades to cache-off, never to a query failure). The trade is explicit: during a Redis outage a hostile key is unthrottled, which is why this is written down rather than discovered. **The failure is never swallowed** — each occurrence logs a `WARNING` from `fasterrag.core.rate_limit` carrying the request's `trace_id`, so the degradation is visible in the same stream as everything else the request did.
+
+**Untested against a live server.** The `redis` backend has never run against a real Redis. Its tests drive an in-memory double, which can prove which commands are issued, that they travel in one transaction, what the keys are made of, and what an outage does — and cannot prove that redis-py and a real server agree with the double about any of it. Treat `security.rate_limit_backend: redis` as unproven in production until an integration test against a real server lands (TASK-0216).
 - Failed auth returns RFC 9457 problems (`AUTH_MISSING`/`AUTH_INVALID`/`AUTH_SCOPE`) with no information about whether a key exists.
 - TLS terminates at a reverse proxy in front of the API ([deployment.md](deployment.md)); plain HTTP is acceptable only on loopback/dev.
 
@@ -68,7 +83,7 @@ With this, every tenant-visible surface is scoped: queries, the semantic cache, 
 
 `POST /v1/replay` is scoped for the same reason the read endpoints are, and it is the easier one to overlook: replay re-executes the stored question and returns a diff, so an unscoped lookup discloses another tenant's query and retrieved chunks through a write-shaped endpoint rather than a read-shaped one. It looked its trace up unscoped until 2026-08-06 (TASK-0194).
 - Semantic-cache entries are tenant-scoped — a cache hit can never leak another tenant's answer.
-- Per-tenant token budgets (D9, `cost.per_tenant_token_budget`) are **enforced** (TASK-0242 ✅) over a rolling 24-hour window, per tenant, checked before the provider is called. **The counter is in-process**, exactly like the per-key rate limiter (TASK-0216): N replicas grant N times the configured budget, and for a spend cap that error permits more than was asked for rather than less. Size the value accordingly, or run one replica, until a shared counter lands.
+- Per-tenant token budgets (D9, `cost.per_tenant_token_budget`) are **enforced** (TASK-0242 ✅) over a rolling 24-hour window, per tenant, checked before the provider is called. **The counter is in-process**, exactly like the per-key rate limiter's default `memory` backend: N replicas grant N times the configured budget, and for a spend cap that error permits more than was asked for rather than less. Size the value accordingly, or run one replica, until a shared counter lands — the limiter has one (`security.rate_limit_backend: redis`); the budget does not.
 
 ## 4. Vector DB security (Qdrant reference)
 

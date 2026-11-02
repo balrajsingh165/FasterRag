@@ -14,26 +14,26 @@ arrived, ``AUTH_INVALID`` means one did and was refused — an unknown key and a
 are indistinguishable, so the endpoint cannot be used to enumerate valid keys.
 
 Rate limiting is per key and turns on with auth, because a limit keyed on something the
-caller chooses is not a limit. It is an in-process fixed window: correct for a single
-server, and deliberately not claimed to work across replicas — a distributed limiter needs
-shared state this limiter does not use. Shared state now exists (the ``redis`` cache
-backend, TASK-0124), but wiring the limiter to it is a separate change (TASK-0216).
+caller chooses is not a limit. **Where the window lives is a deployment choice**, made by
+``security.rate_limit_backend`` and implemented in :mod:`fasterrag.core.rate_limit`: the
+default ``memory`` window is per process, which is correct for one replica and grants
+``limit`` x N across N of them, and ``redis`` counts every replica into one shared window.
+This module holds no limiting logic of its own; it owns the limiter's lifetime and asks it.
 """
 
 from __future__ import annotations
 
 import os
 import secrets
-import time
-from collections import deque
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Final
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from fasterrag.api.problems import problem_response
 from fasterrag.config.schema import Settings
+from fasterrag.core.rate_limit import RateLimiter, create_rate_limiter
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
 
@@ -43,7 +43,6 @@ __all__ = [
     "ApiKey",
     "AuthMiddleware",
     "KeyRegistry",
-    "RateLimiter",
     "load_keys",
     "required_scope",
 ]
@@ -167,30 +166,6 @@ class KeyRegistry:
         return found
 
 
-@dataclass
-class RateLimiter:
-    """A fixed-window, per-key request limiter."""
-
-    limit: int
-    window_seconds: float = 60.0
-    _seen: dict[str, deque[float]] = field(default_factory=dict)
-
-    def allow(self, identity: str, now: float | None = None) -> tuple[bool, int]:
-        """Record a request and report whether it is permitted."""
-        moment = time.monotonic() if now is None else now
-        window = self._seen.setdefault(identity, deque())
-
-        while window and moment - window[0] >= self.window_seconds:
-            window.popleft()
-
-        if len(window) >= self.limit:
-            retry_after = self.window_seconds - (moment - window[0])
-            return False, max(1, int(retry_after) + 1)
-
-        window.append(moment)
-        return True, 0
-
-
 class AuthMiddleware:
     """Authenticates every request, checks its scope, and applies the rate limit."""
 
@@ -206,17 +181,31 @@ class AuthMiddleware:
         if self.enabled:
             keys = load_keys(settings)
             self._registry = KeyRegistry(keys)
-            self._limiter = RateLimiter(settings.security.rate_limit_per_minute)
+            self._limiter = create_rate_limiter(settings)
             _logger.info(
                 "control-plane authentication enabled",
                 extra={
                     "keys": len(keys),
                     "rate_limit_per_minute": settings.security.rate_limit_per_minute,
+                    "rate_limit_backend": settings.security.rate_limit_backend,
                 },
             )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Authenticate an HTTP request, or pass it through when auth is off."""
+        if scope["type"] == "lifespan":
+            # CRITICAL: the limiter may hold a connection pool, and this middleware is the
+            # only thing that owns one. The lifespan scope traverses the whole middleware
+            # stack and this call returns on shutdown, so it is the one place a limiter
+            # built in `__init__` can be released without the application factory knowing
+            # that a limiter has resources at all.
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                if self._limiter is not None:
+                    await self._limiter.close()
+            return
+
         if not self.enabled or scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -269,8 +258,8 @@ class AuthMiddleware:
             return
 
         assert self._limiter is not None
-        allowed, retry_after = self._limiter.allow(key.secret)
-        if not allowed:
+        decision = await self._limiter.allow(key.secret)
+        if not decision.allowed:
             await self._refuse(
                 scope,
                 receive,
@@ -280,7 +269,7 @@ class AuthMiddleware:
                     code=ErrorCode.RATE_LIMITED,
                 ),
                 path,
-                headers={"Retry-After": str(retry_after)},
+                headers={"Retry-After": str(decision.retry_after)},
             )
             return
 

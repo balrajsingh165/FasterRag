@@ -1,22 +1,44 @@
 import pytest
 from fastapi.testclient import TestClient
+from starlette.types import Receive, Scope, Send
 
 from fasterrag.api.auth import (
     ALL_SCOPES,
     PUBLIC_PATHS,
     ApiKey,
+    AuthMiddleware,
     KeyRegistry,
-    RateLimiter,
     load_keys,
     required_scope,
 )
 from fasterrag.api.main import create_app
 from fasterrag.api.problems import PROBLEM_MEDIA_TYPE
 from fasterrag.config.schema import Settings
+from fasterrag.core.rate_limit import (
+    InProcessRateLimiter,
+    RateLimitDecision,
+    RateLimiter,
+    RedisRateLimiter,
+)
 from fasterrag.errors import ConfigError, ErrorCode
 from tests.unit.api.conftest import StubVectorDB
 
 SECRET = "secret-key-value"
+
+
+async def _unreached(scope: Scope, receive: Receive, send: Send) -> None:
+    raise AssertionError("the wrapped application should not be called")
+
+
+class _RecordingLimiter(RateLimiter):
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def allow(self, identity: str) -> RateLimitDecision:
+        return RateLimitDecision(True, 0)
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 def secured(monkeypatch: pytest.MonkeyPatch, keys: str = SECRET) -> TestClient:
@@ -176,33 +198,6 @@ def test_the_registry_matches_the_right_key() -> None:
     assert registry.resolve("ccc") is None
 
 
-def test_the_rate_limit_refuses_past_the_ceiling() -> None:
-    limiter = RateLimiter(limit=2)
-
-    assert limiter.allow("k", now=0.0)[0]
-    assert limiter.allow("k", now=0.1)[0]
-    allowed, retry_after = limiter.allow("k", now=0.2)
-
-    assert not allowed
-    assert retry_after >= 1
-
-
-def test_the_window_rolls_forward() -> None:
-    limiter = RateLimiter(limit=1)
-    limiter.allow("k", now=0.0)
-
-    assert not limiter.allow("k", now=30.0)[0]
-    assert limiter.allow("k", now=61.0)[0]
-
-
-def test_the_limit_is_per_key_not_global() -> None:
-    """One noisy caller must not exhaust everyone else's budget."""
-    limiter = RateLimiter(limit=1)
-    limiter.allow("first", now=0.0)
-
-    assert limiter.allow("second", now=0.0)[0]
-
-
 def test_exceeding_the_limit_returns_429_with_retry_after(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -227,3 +222,41 @@ def test_a_malformed_authorization_header_is_treated_as_missing(
         response = client.get("/metrics", headers={"Authorization": SECRET})
 
     assert response.json()["code"] == ErrorCode.AUTH_MISSING.value
+
+
+def test_the_default_backend_is_still_the_in_process_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single-process deployment must not start paying for a network round trip."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", SECRET)
+    settings = Settings.model_validate({"security": {"auth": True}})
+
+    middleware = AuthMiddleware(_unreached, settings)
+
+    assert isinstance(middleware._limiter, InProcessRateLimiter)
+    assert middleware._limiter.limit == settings.security.rate_limit_per_minute
+
+
+def test_selecting_redis_builds_the_shared_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole point of TASK-0216: the backend key has to reach the middleware."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", SECRET)
+    settings = Settings.model_validate({"security": {"auth": True, "rate_limit_backend": "redis"}})
+
+    middleware = AuthMiddleware(_unreached, settings)
+
+    assert isinstance(middleware._limiter, RedisRateLimiter)
+
+
+def test_shutdown_releases_the_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A limiter holding a connection pool is leaked unless something closes it."""
+    recorder = _RecordingLimiter()
+    monkeypatch.setattr("fasterrag.api.auth.create_rate_limiter", lambda _settings: recorder)
+    monkeypatch.setenv("FASTERRAG_API_KEY", SECRET)
+    app = create_app(Settings.model_validate({"security": {"auth": True}}))
+    app.state.vector_db = StubVectorDB()
+
+    with TestClient(app) as client:
+        client.get("/metrics", headers=bearer())
+        assert not recorder.closed
+
+    assert recorder.closed

@@ -671,7 +671,15 @@ class SecuritySettings(Section):
     multi_tenancy: bool = False
     tenant_header: str = "X-Tenant-ID"
     rate_limit_per_minute: Annotated[int, Field(ge=1)] = 600
+    rate_limit_backend: Literal["memory", "redis"] = "memory"
+    rate_limit_redis_url: str = DEFAULT_REDIS_URL
     max_request_mb: Annotated[int, Field(ge=1, le=1024)] = 25
+
+    @field_validator("rate_limit_redis_url")
+    @classmethod
+    def _check_rate_limit_redis_url(cls, value: str) -> str:
+        """Require a parseable Redis URL; only read when the backend is ``redis``."""
+        return _validate_redis_url(value)
 
     @field_validator("api_key_env")
     @classmethod
