@@ -1,4 +1,8 @@
-"""The scripted chaos suite (D12), one scenario per row of testing-strategy.md §1.9.
+"""The scripted chaos suite (D12): the first five rows of testing-strategy.md §1.9.
+
+The two later rows own their own modules, ``test_config_mutation.py`` and
+``test_network_partition.py``, and ``test_reindex_under_load.py`` holds D2's
+reindex-under-query-load acceptance scenario, which §1.9 does not list as a row.
 
 Each scenario injects a real fault at a real seam and asserts the behavior the docs promise.
 The point is not that these pass today; it is that anyone can re-run them and see for
@@ -370,12 +374,15 @@ async def test_the_journal_resumes_from_its_checkpoint(chaos_journal: Journal) -
     assert chaos_journal.resume_index(resumed) == 500
 
 
-async def test_every_scenario_in_the_suite_is_scripted() -> None:
-    """The suite is complete against testing-strategy.md §1.9.
+async def test_every_scenario_defined_in_this_module_is_scripted() -> None:
+    """Five scenarios live in this module and all five are scripted — all this can check.
 
-    A chaos suite that quietly covers four of five rows is worse than one that covers four
-    and says so, because only the second tells a reader what is unproven.
+    It used to claim the suite was complete against §1.9. That is false and is withdrawn:
+    the dict below is hand-written, so a scenario in another module is invisible to it.
     """
+    # TODO: derive the scenario set from the §1.9 table and from every module under
+    # tests/chaos/, so that deleting test_config_mutation.py, test_network_partition.py or
+    # test_reindex_under_load.py fails this audit. Today it would not notice.
     scenarios = {
         "kill-worker": test_killing_a_worker_mid_batch_leaves_no_duplicate_vectors,
         "stop-qdrant": test_a_stopped_vector_database_raises_a_retryable_error,

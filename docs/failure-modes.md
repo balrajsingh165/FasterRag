@@ -49,7 +49,8 @@ Coverage cross-check: parser (1–3), chunker (4–5), embedding pool (6–9), j
 > - **The circuit breaker is built and wired** (`core/breaker.py`, TASK-0148 ✅): three states per [reliability.md](reliability.md) §3, consulted by the embedding worker pool and by the Qdrant and pgvector adapters, and exported as `fasterrag_circuit_state`. So rows 12, 14, 16, 20 and 35 get a real breaker. **Exception: the LLM path.** A breaker named `llm` is constructed at startup and no generation code path consults it (TASK-0245), so row 20's "retries → breaker opens" is currently just retries.
 > - **`cache_only` is still not implemented** (TASK-0159). The string does not appear anywhere in `src/`. Every row whose mitigation names that rung (12, 14, 16) describes specified, unbuilt behaviour: a vector-DB outage today raises a retryable `RETRIEVAL_FAILED` instead of serving a degraded answer.
 > - **Partition injection now exists** (TASK-0241 ✅). Rows 16 and 35 cite it and it is written: `tests/chaos/test_network_partition.py`, run with `pytest -m chaos` and needing no Docker daemon, because a partition is injected at the socket — a real listener accepts the connection on a real port and then never writes a byte, which is what separates it from the stop-the-container fault, where the kernel refuses in milliseconds. Row 35's DNS half uses a name in the RFC 2606 `.invalid` TLD. What the suite asserts for row 16 is the **built** behaviour, not the specified one: the `cache_only` rung named in that row's mitigation column is still absent, so the partition surfaces `RETRIEVAL_FAILED` and then `CIRCUIT_OPEN`.
-> - **Two rows still name a test that does not exist.** Rows 8 and 19 cite a soak test and a load test, and neither suite has been written (TASK-0243). Row 10's "load test" clause is the same gap.
+> - **Reindex under continuous query load now exists** (TASK-0241, the last of its three scenarios). No row of this table cites it, because it is not a failure mode — it is D2's acceptance scenario, and it is logged in its own section below so that a landed chaos suite is not one this table silently ignores. `tests/chaos/test_reindex_under_load.py`, run with `pytest -m chaos`, no Docker daemon needed.
+> - **Rows still naming a test that does not exist.** Rows 8 and 19 cite a soak test and a load test, and neither suite has been written (TASK-0243); row 10's "load test" clause is the same gap. Row 18's "Chaos: reranker-down rung" is a third: no scenario under `tests/chaos/` loads or fails a reranker, and the `hybrid_only` degradation it names is proven only by unit tests (`tests/unit/services/test_querying.py`). It has no ledger entry of its own yet. Rows 20 and 21 both rest on the one slow-LLM scenario, which raises a retryable `GENERATION_FAILED` — the shape a hard outage takes — so row 20's rung is proven, but by latency injection rather than by a separate LLM-down case.
 >
 > The chaos log below records what the shipped system actually does today, and is authoritative over the table wherever the two disagree.
 
@@ -58,7 +59,9 @@ Coverage cross-check: parser (1–3), chunker (4–5), embedding pool (6–9), j
 D12 requires that the injected faults and their observed behavior are recorded, not merely
 asserted in a test file. The suite is `tests/chaos/test_chaos.py` plus the two scenarios large
 enough to own a module, `tests/chaos/test_config_mutation.py` and
-`tests/chaos/test_network_partition.py`, all run with `pytest -m chaos`.
+`tests/chaos/test_network_partition.py`, all run with `pytest -m chaos`. D2's
+reindex-under-query-load drill, `tests/chaos/test_reindex_under_load.py`, runs under the same
+marker but is not a §1.9 row and is logged separately below.
 
 | Scenario (testing-strategy.md §1.9) | Observed | Date |
 |---|---|---|
@@ -78,6 +81,33 @@ simulating the *handling* would prove nothing, and where one step of a scenario 
 rather than injected — the breaker's healing — the row above says so.
 Recovery *times* per scenario are not yet recorded; that needs the isolated hardware
 TASK-0084 is blocked on.
+
+## Observed behavior — reindex under continuous query load
+
+Not a failure mode and not a §1.9 row, but D2's acceptance scenario, logged here for the same
+reason the rows above are: a promise that "re-embedding never takes queries down" is prose
+until a query has actually been *inside* the rebuild. The suite is
+`tests/chaos/test_reindex_under_load.py` (8 cases, `pytest -m chaos`). It drives the real
+`RetrievalService` and the real `plan_reindex`/`swap` against a double that resolves the
+alias on every search, the way Qdrant's server does, and the drill asserts the window was
+genuinely crossed rather than hoping the scheduler crossed it.
+
+| Scenario | Observed | Date |
+|---|---|---|
+| Queries running continuously across a blue/green rebuild and swap | Every observation carried exactly one generation and the *complete* id set of that generation, so no query was served a half-built collection; both generations were observed across the drill, and at least one query resolved the alias strictly between the first write into the new collection and the swap, which is what makes the run non-vacuous | 2026-10-29 |
+| The same drill, counting dropped queries | Zero typed failures and more observations than the three the drill waits for after the swap: the load was served throughout rather than the loop having stalled | 2026-10-29 |
+| Where the alias pointed during the rebuild | The served name resolved to the old collection at every batch boundary of the build and moved only at the swap — the mechanism behind the row above, asserted separately so a change can break one without hiding the other | 2026-10-29 |
+| The eval gate rejecting the new build | No swap, no dropped query, and every query still answered from the old collection: the gate runs before the swap, so a regression is never detected by serving it | 2026-10-29 |
+| A served name that resolves to nothing | Raised typed `NOT_FOUND` rather than returning an empty hit list, and rendered as a problem document with a trace id, never a generic 500 — an empty context is the failure that reaches the caller as a confident empty answer | 2026-10-29 |
+| A **hybrid** query straddling the swap | **A limit, not a guarantee.** Each retrieval leg resolves the served name independently, so a swap landing between the dense and sparse legs returns one result assembled from both generations. This is the built behaviour, pinned so that it is measured rather than assumed; it bounds D2's "a query sees either the old collection or the new one" to a single leg | 2026-10-29 |
+
+**What this does not prove.** Nothing here runs a live backend, so it is evidence about *our*
+orchestration — that no code path points the alias at a collection still being filled, and
+that the query path reads through the alias rather than pinning a physical name — and not
+about Qdrant's own server-side behaviour under concurrent writes. No timing figure above is a
+latency measurement and none backs a benchmark claim. The suite's one wall-clock constant is
+a deadlock backstop so a hang fails loudly; the pacing itself is an event handshake with no
+clock in it.
 
 ## Observed behavior — real-fault run
 
