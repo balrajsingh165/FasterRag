@@ -145,7 +145,20 @@ async def run_docker(
 
 async def docker_available() -> bool:
     """Return whether the Docker daemon is reachable."""
-    result = await run_docker(["info", "--format", "{{.ServerVersion}}"], timeout=20.0)
+    # CRITICAL: an unreachable daemon is the answer `False`, never an exception. `run_docker`
+    # raises when the executable is missing or the daemon hangs past the timeout, which is
+    # right for provisioning — a caller asking to START something must hear why it could
+    # not. It is wrong here: `doctor` calls this to DIAGNOSE a machine, so propagating would
+    # crash the one command a user runs precisely when Docker is broken. Absorbed, not
+    # swallowed: the reason is logged with the error's own trace id.
+    try:
+        result = await run_docker(["info", "--format", "{{.ServerVersion}}"], timeout=20.0)
+    except ProvisioningError as exc:
+        _logger.info(
+            "the docker daemon could not be reached",
+            extra={"detail": exc.detail, "code": exc.code.value, "trace_id": exc.trace_id},
+        )
+        return False
     return result.ok
 
 

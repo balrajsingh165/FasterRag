@@ -14,6 +14,7 @@ from fasterrag.services.provisioning import (
     QDRANT_SERVER_KEY_VAR,
     ContainerState,
     DockerResult,
+    docker_available,
     provision_qdrant,
     qdrant_status,
     stop_qdrant,
@@ -336,3 +337,29 @@ async def test_a_missing_docker_executable_is_actionable(monkeypatch: pytest.Mon
     with pytest.raises(ProvisioningError, match="docker executable was not found") as caught:
         await provisioning.run_docker(["info"])
     assert "PATH" in (caught.value.fix or "")
+
+
+async def test_an_absent_docker_executable_reports_unavailable_rather_than_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`doctor` runs when Docker is broken; that is the whole point of running it."""
+
+    async def missing(*args: object, **kwargs: object) -> DockerResult:
+        raise ProvisioningError("the docker executable was not found")
+
+    monkeypatch.setattr("fasterrag.services.provisioning.run_docker", missing)
+
+    assert await docker_available() is False
+
+
+async def test_a_hung_docker_daemon_reports_unavailable_rather_than_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Windows CI failure: a daemon that never answers crashed the whole report."""
+
+    async def hangs(*args: object, **kwargs: object) -> DockerResult:
+        raise ProvisioningError("docker info did not finish within 20s")
+
+    monkeypatch.setattr("fasterrag.services.provisioning.run_docker", hangs)
+
+    assert await docker_available() is False
