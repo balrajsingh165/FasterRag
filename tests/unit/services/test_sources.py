@@ -37,6 +37,15 @@ def serve(
 
     monkeypatch.setattr("fasterrag.services.sources.httpx.AsyncClient", client)
 
+    # CRITICAL: the SSRF guard resolves every host for real, so without this a unit
+    # test naming a domain would do a live DNS lookup — slow, offline-hostile, and
+    # flaky when resolution is rate-limited. Tests that exercise the guard itself use
+    # literal addresses or set their own table, so stubbing here weakens nothing.
+    async def addresses(host: str) -> list[IPv4Address | IPv6Address]:
+        return [ip_address("93.184.216.34")]
+
+    monkeypatch.setattr("fasterrag.services.sources._addresses", addresses)
+
 
 async def test_a_path_source_is_passed_through_untouched(tmp_path: Path) -> None:
     """Nothing is staged for a file that can already be read where it stands."""
@@ -259,7 +268,6 @@ async def test_a_non_http_scheme_is_refused(uri: str) -> None:
 
 async def test_a_redirect_into_the_perimeter_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """The hop is guarded, not just the first URL — otherwise the guard is decoration."""
-    resolve_as(monkeypatch, {"example.com": "93.184.216.34"})
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "example.com":
@@ -267,6 +275,7 @@ async def test_a_redirect_into_the_perimeter_is_refused(monkeypatch: pytest.Monk
         return httpx.Response(200, content=b"metadata")
 
     serve(handler, monkeypatch)
+    resolve_as(monkeypatch, {"example.com": "93.184.216.34"})
 
     with pytest.raises(IngestionError, match="non-public address"):
         await resolve_sources([{"type": "url", "value": "http://example.com/doc.md"}], settings())
@@ -276,8 +285,8 @@ async def test_a_public_url_is_still_fetched(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Control case: the guard must not break the feature it protects."""
-    resolve_as(monkeypatch, {"example.com": "93.184.216.34"})
     serve(lambda request: httpx.Response(200, content=b"# hello"), monkeypatch)
+    resolve_as(monkeypatch, {"example.com": "93.184.216.34"})
 
     resolved = await resolve_sources(
         [{"type": "url", "value": "http://example.com/doc.md"}], settings()
@@ -292,11 +301,11 @@ async def test_a_public_url_is_still_fetched(
 
 async def test_a_redirect_chain_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     """An endless redirect must end as a parse error, not as a hang."""
-    resolve_as(monkeypatch, {"example.com": "93.184.216.34"})
     serve(
         lambda request: httpx.Response(302, headers={"location": "http://example.com/next"}),
         monkeypatch,
     )
+    resolve_as(monkeypatch, {"example.com": "93.184.216.34"})
 
     with pytest.raises(ParseError, match="redirects"):
         await resolve_sources([{"type": "url", "value": "http://example.com/a"}], settings())
