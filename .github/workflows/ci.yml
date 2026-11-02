@@ -233,6 +233,102 @@ jobs:
       - name: Verify against real embedding and reranking models
         run: pytest -m eval
 
+  # The D7 retrieval regression gate (docs/testing-strategy.md §2 gate 6). Its own job
+  # rather than a step on `models`: that job runs the eval-marked tests, while this one
+  # builds a real collection in a real Qdrant with real embeddings and scores it, which is
+  # a different environment and a different cost.
+  #
+  # Every setting below is pinned rather than inherited, and each one is a value the
+  # committed baseline records field by field in tests/eval/datasets/handbook/baseline.json:
+  #
+  #   retrieval.rerank=false            the shipped default reranks, and the cross-encoder
+  #                                     it names is a 2.2 GB download on every push. The
+  #                                     baseline was measured without it, so this gate
+  #                                     covers retrieval and fusion and NOT the reranker.
+  #   retrieval.top_k=5                 the baseline measured recall@5.
+  #   chunking.token_counter=estimate   `auto` uses the embedding model's tokenizer when it
+  #                                     is cached on the machine and silently estimates
+  #                                     when it is not, so chunk boundaries would depend on
+  #                                     the runner's cache state. A gate has to chunk the
+  #                                     same way every time.
+  #
+  # The collection is created by the ingest itself (the indexer sizes it from the first
+  # batch), so there is no separate `index create` step to disagree with it.
+  eval-gate:
+    runs-on: ubuntu-latest
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.18.1
+        ports:
+          - 6333:6333
+          - 6334:6334
+    env:
+      QDRANT_API_KEY: ci-placeholder
+      GATE: >-
+        --config config.yaml
+        --set vector_db.mode=external
+        --set chunking.token_counter=estimate
+        --set retrieval.top_k=5
+        --set retrieval.rerank=false
+        --set eval.regression_gate=true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,huggingface]"
+
+      # The image declares no HEALTHCHECK, so GitHub cannot wait on the service and the
+      # first request would race its start-up.
+      - name: Wait for Qdrant
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -sf http://localhost:6333/readyz > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Qdrant did not become ready within 120 seconds"
+          exit 1
+
+      - name: Build the collection the gate scores
+        run: fasterrag $GATE ingest tests/eval/datasets/handbook/corpus --collection handbook
+
+      # `--suite eval` exits 5 on anything the gate refuses, so the run is allowed to fail
+      # and the verdict is read from the document rather than from the exit code: 5 alone
+      # cannot tell "recall fell" from "nothing was comparable", and those need different
+      # answers from a human.
+      - name: Retrieval regression gate (D7)
+        run: |
+          set +e
+          fasterrag $GATE --json benchmark --suite eval \
+            --dataset tests/eval/datasets/handbook --collection handbook > gate.json
+          code=$?
+          set -e
+          cat gate.json
+          read_gate="import json,sys;g=(json.load(open('gate.json')).get('gate') or {})"
+          verdict=$(python -c "${read_gate};print(g.get('verdict','crashed'))" || echo crashed)
+          python -c "${read_gate};sys.stdout.writelines('  %s\n' % r for r in [*g.get('failures',[]),*g.get('obstacles',[])])" || true
+          case "${verdict}" in
+            within-tolerance)
+              echo "the gate compared this build against the committed baseline and found no drop beyond tolerance" ;;
+            regressed)
+              echo "::error::retrieval quality fell beyond eval.recall_tolerance or eval.ndcg_tolerance against tests/eval/datasets/handbook/baseline.json"
+              exit 1 ;;
+            not-comparable)
+              echo "::error::the gate compared nothing, so no regression was ruled out; re-record the baseline from the measured report printed above rather than relaxing the gate"
+              exit 1 ;;
+            *)
+              echo "::error::fasterrag benchmark --suite eval exited ${code} without a verdict this gate defines"
+              exit 1 ;;
+          esac
+
   commit-messages:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'

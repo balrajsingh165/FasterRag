@@ -73,7 +73,7 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 
 ## D7 — Continuous Retrieval Regression Gate
 
-- **What it is.** Every config or index change runs the eval harness; a recall/nDCG regression beyond tolerance blocks the change (CI-integrated and enforced on `reindex` via the eval gate). You cannot accidentally ship a worse RAG.
+- **What it is.** Every config or index change runs the eval harness; a recall/nDCG regression beyond tolerance blocks the change (the `eval-gate` CI job, and enforced on `reindex` via the eval gate). **Scope bound:** the CI job pins the configuration the committed baseline was recorded under — `top_k=5`, `rerank=false`, `token_counter=estimate` — so it does not cover the reranker, and the `policies` dataset is not scored by it. A baseline it cannot compare fails the job rather than passing it.
 - **Pain point it kills.** #10 evaluation difficulty, #2 retrieval accuracy (protects it over time).
 - **Why it is unique.** Retrieval quality elsewhere is measured ad hoc, if ever; here it is a blocking CI gate like type checks.
 - **Config keys.** `eval.regression_gate` (default `false`), `eval.recall_tolerance` (default `0.02`), `eval.ndcg_tolerance` (default `0.02`).

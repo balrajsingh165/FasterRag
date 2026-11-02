@@ -6,9 +6,13 @@ import pytest
 from fasterrag.config.schema import Settings
 from fasterrag.core.evals.harness import EvalReport
 from fasterrag.core.identity import retrieval_config_hash
+from fasterrag.errors import FasterRagError
 from fasterrag.services.regression import (
+    COMPARABILITY_VERSION,
     Baseline,
+    Verdict,
     check_regression,
+    comparability_fingerprint,
     load_baseline,
     write_baseline,
 )
@@ -36,6 +40,8 @@ def baseline_for(
         scored=20,
         embedding_model=configured.embeddings.model,
         config_hash=retrieval_config_hash(configured),
+        fingerprint_version=COMPARABILITY_VERSION,
+        fingerprint=comparability_fingerprint(configured),
     )
 
 
@@ -47,13 +53,23 @@ def test_a_disabled_gate_never_blocks() -> None:
     assert result.passed is True
 
 
+def test_a_disabled_gate_reports_that_it_established_nothing() -> None:
+    """Passing and having compared something are different claims, and CI reads the second."""
+    result = check_regression(report(), None, settings(gate=False))
+
+    assert result.verdict is Verdict.NOT_COMPARABLE
+    assert any("eval.regression_gate is false" in reason for reason in result.obstacles)
+
+
 def test_identical_results_pass() -> None:
     configured = settings()
 
     result = check_regression(report(), baseline_for(configured), configured)
 
     assert result.passed is True
+    assert result.verdict is Verdict.WITHIN_TOLERANCE
     assert result.failures == []
+    assert result.obstacles == []
     assert "passed" in result.summary()
 
 
@@ -82,8 +98,9 @@ def test_a_recall_drop_beyond_tolerance_blocks() -> None:
     result = check_regression(report(recall=0.80), base, configured)
 
     assert result.passed is False
+    assert result.verdict is Verdict.REGRESSED
     assert any("recall@k fell from 0.9000 to 0.8000" in message for message in result.failures)
-    assert "BLOCKED" in result.summary()
+    assert "REGRESSED" in result.summary()
 
 
 def test_an_ndcg_drop_beyond_tolerance_blocks() -> None:
@@ -116,26 +133,27 @@ def test_a_missing_baseline_blocks_rather_than_passing_vacuously() -> None:
     result = check_regression(report(), None, settings())
 
     assert result.passed is False
-    assert any("no baseline is committed" in message for message in result.failures)
+    assert result.verdict is Verdict.NOT_COMPARABLE
+    assert any("no baseline is committed" in message for message in result.obstacles)
+
+
+def test_a_missing_baseline_is_not_reported_as_a_regression() -> None:
+    """The distinction CI acts on: nothing was measured against, nothing regressed."""
+    result = check_regression(report(), None, settings())
+
+    assert result.failures == []
+    assert "NOT COMPARABLE" in result.summary()
 
 
 def test_a_baseline_from_another_embedding_model_is_refused() -> None:
     configured = settings()
-    stale = Baseline(
-        recorded_at="2026-07-30T00:00:00+00:00",
-        k=10,
-        recall_at_k=0.9,
-        mrr=0.8,
-        ndcg_at_k=0.85,
-        scored=20,
-        embedding_model="some-other-model",
-        config_hash=retrieval_config_hash(configured),
-    )
+    stale = baseline_for(settings(embeddings={"model": "some-other-model"}))
 
     result = check_regression(report(), stale, configured)
 
     assert result.passed is False
-    assert any("different embedding model" in message for message in result.failures)
+    assert result.verdict is Verdict.NOT_COMPARABLE
+    assert any("some-other-model" in message for message in result.obstacles)
 
 
 def test_a_baseline_from_another_retrieval_config_is_refused() -> None:
@@ -145,7 +163,8 @@ def test_a_baseline_from_another_retrieval_config_is_refused() -> None:
     result = check_regression(report(), baseline_for(changed), configured)
 
     assert result.passed is False
-    assert any("retrieval\nconfiguration" in m or "configuration" in m for m in result.failures)
+    assert result.verdict is Verdict.NOT_COMPARABLE
+    assert any("chunking.chunk_size was 256 and is 768" in m for m in result.obstacles)
 
 
 def test_an_unrelated_config_change_does_not_invalidate_a_baseline() -> None:
@@ -161,7 +180,8 @@ def test_a_baseline_measured_at_another_k_is_refused() -> None:
     result = check_regression(report(k=5), baseline_for(configured, k=10), configured)
 
     assert result.passed is False
-    assert any("not comparable" in message for message in result.failures)
+    assert result.verdict is Verdict.NOT_COMPARABLE
+    assert any("not comparable" in message for message in result.obstacles)
 
 
 def test_a_baseline_round_trips_through_its_file(tmp_path: Path) -> None:
@@ -183,6 +203,8 @@ def test_a_baseline_records_what_produced_it(tmp_path: Path) -> None:
 
     assert written.embedding_model == configured.embeddings.model
     assert written.config_hash == retrieval_config_hash(configured)
+    assert written.fingerprint_version == COMPARABILITY_VERSION
+    assert written.fingerprint == comparability_fingerprint(configured)
     assert written.recorded_at.endswith("+00:00")
 
 
@@ -190,14 +212,38 @@ def test_no_baseline_file_loads_as_none(tmp_path: Path) -> None:
     assert load_baseline(tmp_path / "absent.json") is None
 
 
+def test_a_fingerprint_of_the_wrong_shape_is_refused(tmp_path: Path) -> None:
+    """A hand-edited fingerprint that is not field-to-value would compare nothing silently."""
+    broken = tmp_path / "baseline.json"
+    broken.write_text(
+        '{"recorded_at": "x", "k": 5, "recall_at_k": 1.0, "mrr": 1.0, "ndcg_at_k": 1.0, '
+        '"scored": 1, "embedding_model": "m", "config_hash": "h", "fingerprint": ["a"]}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FasterRagError):
+        load_baseline(broken)
+
+
 def test_the_result_serializes_for_ci() -> None:
     configured = settings()
     payload = check_regression(report(recall=0.5), baseline_for(configured), configured).as_dict()
 
     assert payload["passed"] is False
+    assert payload["verdict"] == "regressed"
     assert payload["failures"]
+    assert payload["obstacles"] == []
     assert payload["report"]["recall_at_k"] == 0.5
     assert payload["baseline"]["embedding_model"] == configured.embeddings.model
+
+
+def test_an_uncomparable_result_serializes_as_its_own_verdict() -> None:
+    """CI must never read "could not compare" off the same field as "nothing regressed"."""
+    payload = check_regression(report(), None, settings()).as_dict()
+
+    assert payload["verdict"] == "not-comparable"
+    assert payload["failures"] == []
+    assert payload["obstacles"]
 
 
 def test_a_freshly_written_baseline_passes_its_own_run(tmp_path: Path) -> None:
