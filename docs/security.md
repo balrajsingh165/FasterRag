@@ -97,6 +97,77 @@ With this, every tenant-visible surface is scoped: queries, the semantic cache, 
 - Uploaded documents are parsed with hardened parsers in worker processes (crash containment: a parser crash dead-letters the document, never kills the API).
 - Metadata filter expressions are validated against the collection's schema — no raw query pass-through to backends.
 
+### 5.1 Ingestion sources are an authorization boundary (audit, 2026-11-03)
+
+`POST /v1/ingest` accepts three source types and two of them name something on the
+**server's** side of the trust boundary. Both were unconstrained until this audit; both are
+now refused by default, and each refusal is mutation-tested in both directions.
+
+**`type: "path"` — arbitrary server-side file read.** The value named any file the process
+could open, and the parsed content came back to the caller through an ordinary query. A key
+holding only the `ingest` scope could therefore read `.env`, `config.yaml`, an SSH key, or
+another tenant's archive. `ingestion.allowed_source_roots` now confines it. Paths are
+`resolve()`d before comparison, so `..` is collapsed and a symlink planted inside a root
+cannot point out of it. An empty list means unconfined, and unconfined is **refused outright
+once `security.auth` is on** — forgetting the setting breaks a served deployment loudly, at
+the request, naming the setting, rather than exposing it quietly. With auth off the
+deployment is single-operator (the CLI case) and local paths work as before.
+
+**`type: "url"` — SSRF, with exfiltration.** The fetcher followed redirects with no scheme
+check and no address check, so a caller could reach cloud instance metadata
+(`169.254.169.254` — IAM credentials), loopback services an operator believes are
+unreachable (Qdrant 6333, Redis 6379, `/metrics`), and anything else inside the perimeter —
+and then read the response body back out with a query. Now: only `http`/`https`, and every
+host is resolved and refused unless **every** address it answers with is global and
+non-multicast. Redirects are followed by hand, at most five, with the same guard applied to
+each hop — `follow_redirects=True` would have sent later hops unchecked, which makes any
+first-URL-only check decorative.
+
+**Known limit, not closed: DNS rebinding.** The guard resolves the host and then connects,
+so a record with a near-zero TTL that answers public on the check and private on the
+connection is not stopped. Closing it means pinning the resolved address into the
+connection, which needs a custom transport (TASK-0294). An operator who needs the guarantee
+today should egress-filter the service rather than rely on this check.
+
+### 5.2 Archive import is bounded (audit, 2026-11-03)
+
+`.fragx` import reads members into memory before verifying checksums, and gzip reaches
+expansion ratios past 1000:1, so a small archive could exhaust memory. Two ceilings now
+apply: `MAXIMUM_MEMBER_BYTES` (1 GiB) per member, refused on the header, and
+`MAXIMUM_TOTAL_BYTES` (4 GiB) across the archive, which is what catches many members that
+are individually legal. Tar member names were already validated against traversal.
+
+These are ceilings, not a design. Import materialises every member at once while export
+goes to some trouble to stream; the real fix is to stream the import (TASK-0293).
+
+### 5.3 An unbound key is now announced
+
+A key entry is `<secret>[:<scopes>[:<tenant>]]`, so omitting the third field yields
+`tenant=None`, which §3 defines as an operator credential free to act for any tenant. That
+is deliberate, but it means the broader capability is what you get by leaving a field off.
+Startup now logs a `WARNING` naming each unbound key — by its positional name, never its
+secret — whenever `security.multi_tenancy` is on. The underlying grant is unchanged;
+requiring an explicit marker instead would break every existing key file (TASK-0295).
+
+### 5.4 Still open after this audit
+
+- `POST /v1/admin/export` writes to a caller-supplied path and `POST /v1/admin/import`
+  reads one, with no confinement. Both require the `admin` scope, which is already trusted
+  to drop collections and drive provisioning — but in a tenant-operator deployment that is
+  not the same as filesystem access on the host (TASK-0296).
+- Prompt injection through retrieved content is inherent to RAG and is bounded by the P1–P4
+  call-site contracts, not eliminated. The library never executes model output.
+
+### 5.5 Checked and sound
+
+Recorded so a future audit need not re-derive them: API keys compare with
+`secrets.compare_digest` and the loop does not return early, so timing cannot reveal which
+key matched; `required_scope` fails **closed** on an unmapped path, making a forgotten
+router a 403 rather than an open endpoint; the unhandled-exception handler returns a generic
+problem document and keeps the traceback in logs behind a trace id; and there is no
+`pickle`, `eval`/`exec`, `yaml.load`, `shell=True`, or disabled TLS verification anywhere in
+`src/`.
+
 ## 6. Supply chain
 
 - **Pinned, hash-locked dependencies** — `uv.lock` is committed: 135 packages, 1577 `sha256` hashes. CI runs `uv lock --check`, which re-resolves `pyproject.toml` and fails when the result differs, so a dependency added without relocking is caught at the gate rather than discovered when two machines install different versions.
