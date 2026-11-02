@@ -229,7 +229,7 @@ Run the API and workers as separate processes (`fasterrag serve` / `fasterrag wo
 
 Minimal, fast, no external dependencies — for a fair look on your own data.
 
-> ⚠️ This recipe previously suggested `provider: chroma`. **Chroma is not built** (TASK-0049) and the loader refuses it by name, so the recipe most likely to be a reader's first config could not start. It now uses the reference backend, which `fasterrag provision qdrant` brings up for you.
+> Chroma shipped on 2026-11-03 and is now a genuine zero-install option: it runs embedded against a local directory, with no server and no Docker. Install it with `pip install "fasterrag[chroma]"` and set `provider: chroma`. The keyword (BM25) leg is computed in-process, so it reads every posting a query's terms match — fine for a first look at your own data, not for a large corpus; see [integrations.md](integrations.md). The reference backend below stays the recommendation for anything beyond an evaluation.
 
 ```yaml
 vector_db:

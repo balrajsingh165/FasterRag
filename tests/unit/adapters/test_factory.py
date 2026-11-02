@@ -29,16 +29,16 @@ def test_construction_opens_no_connection() -> None:
     assert adapter._client is None
 
 
-@pytest.mark.parametrize("provider", ["milvus", "weaviate", "pinecone", "chroma"])
+@pytest.mark.parametrize("provider", ["milvus", "weaviate", "pinecone"])
 def test_documented_but_unbuilt_providers_fail_clearly(provider: str) -> None:
     with pytest.raises(ConfigError, match="not built") as caught:
         resolve_adapter_class(provider)
     assert ENTRY_POINT_GROUP in caught.value.detail
 
 
-@pytest.mark.parametrize("provider", ["qdrant", "pgvector"])
+@pytest.mark.parametrize("provider", ["qdrant", "pgvector", "chroma"])
 def test_a_built_provider_resolves_to_its_adapter(provider: str) -> None:
-    """The two backends the shared contract suite is actually run against."""
+    """The three backends the shared contract suite is actually run against."""
     assert issubclass(resolve_adapter_class(provider), VectorDBAdapter)
 
 
