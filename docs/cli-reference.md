@@ -156,8 +156,12 @@ D8 trace inspection. A trace id is a 32-character hex string nobody retains betw
 
 | Subcommand | Description |
 |---|---|
-| `list` | Recent trace ids, newest first (`--limit N`). |
-| `show <trace_id>` | One trace in full: query, collection, candidate count, and each span with its duration and attributes. |
+| `list` | Recent trace ids, newest first, one per line. `--limit N` caps the count (default `20`). |
+| `show <trace_id>` | One trace in full: id, query, collection, creation time, candidate count, and each span with its duration in milliseconds and its attributes. `trace_id` is positional and required. |
+
+Both subcommands take the global flags (`--config`, `--collection`, `--set`, `--json`, `--quiet`, `--verbose`); there are no others. Under `--json`, `list` writes `{"traces": [<id>, ...]}` — an empty array when there are none — and `show` writes the whole trace document.
+
+**Exit codes**: `0` for a successful `list` *including* an empty one, and for a `show` that found its trace; `1` when `show` names a trace that is not stored (expired past `traces.retention_days`, or never written); `2` when the configuration itself fails to load. An empty `list` is a success because "no traces yet" is a true answer, not a failure — in plain output it says so, and adds `(traces.store is false)` when storage is switched off, so an empty result can never be mistaken for a broken store.
 
 ## `fasterrag replay --trace <id>`
 

@@ -2,14 +2,15 @@
 
 Every other provider test in this suite substitutes a fake client, which proves the adapter
 issues the request it intends to and proves nothing about whether the vendor accepts it.
-``docs/integrations.md`` and the README advertise OpenAI, Anthropic, Cohere and Ollama; a
-provider list is a promise, so each entry gets the smallest call that can keep it — one tiny
-generation, or one tiny embedding — asserting a well-formed typed response and the token
-accounting the adapter claims to populate.
+``docs/integrations.md`` advertises five generation providers and four embedding providers;
+a provider list is a promise, so each entry gets the smallest call that can keep it — one
+tiny generation, or one tiny embedding — asserting a well-formed typed response and the
+token accounting the adapter claims to populate.
 
-Cost of one full run with every credential present: **seven requests**, each of a few dozen
-tokens — four generations (OpenAI, Anthropic, Cohere, Ollama) and three embeddings (OpenAI,
-Cohere, Ollama). The two Ollama checks go to a local server and cost nothing.
+Cost of one full run with every credential present: **eight requests**, each of a few dozen
+tokens — five generations (OpenAI, Anthropic, Cohere, Ollama, ``openai_compatible``) and
+three embeddings (OpenAI, Cohere, Ollama). The two Ollama checks go to a local server and
+cost nothing, and ``openai_compatible`` costs whatever the gateway it is pointed at charges.
 
 What a green run does and does not establish:
 
@@ -28,8 +29,17 @@ reasons, which is where the report lives.
 
 Ollama has no credential, so its gate is an explicit opt-in: ``OLLAMA_HOST`` pointing at a
 running server. Gating it on nothing would mean a connection attempt on every run and a
-failure, not a skip, on every machine without Ollama. The HuggingFace embedder is local and
-already exercised against real weights in ``test_real_models.py``.
+failure, not a skip, on every machine without Ollama. ``openai_compatible`` names no vendor
+at all, so it is gated on all three of the things only its operator knows —
+``FASTERRAG_LIVE_OPENAI_COMPATIBLE_URL``, ``FASTERRAG_LIVE_OPENAI_COMPATIBLE_KEY`` and
+``FASTERRAG_LIVE_MODEL_OPENAI_COMPATIBLE_LLM`` — because a gateway has no default model id
+anyone else could guess. The HuggingFace embedder is local and already exercised against
+real weights in ``test_real_models.py``; it is the one advertised provider with no entry
+here, and it needs none.
+
+The gating helpers themselves are proved by ``test_live_provider_gating.py``, which carries
+no ``eval`` marker and therefore runs in the ordinary CI job: without it, the only evidence
+that a skip is a real gate rather than a silent bug would come from a job that skips.
 """
 
 from __future__ import annotations
@@ -70,6 +80,8 @@ class LiveCheck:
     extra: str
     default_model: str
     reports_token_usage: bool
+    base_url_env: str | None = None
+    keyless: bool = False
 
     @property
     def name(self) -> str:
@@ -77,10 +89,14 @@ class LiveCheck:
         return f"{self.provider} {self.kind}"
 
     @property
+    def model_env(self) -> str:
+        """Return the variable that overrides the model id this provider is probed with."""
+        return f"FASTERRAG_LIVE_MODEL_{self.provider.upper()}_{self.kind.upper()}"
+
+    @property
     def model(self) -> str:
         """Return the model to probe, overridable so a retired id can be replaced."""
-        override = f"FASTERRAG_LIVE_MODEL_{self.provider.upper()}_{self.kind.upper()}"
-        configured = os.environ.get(override, "").strip()
+        configured = os.environ.get(self.model_env, "").strip()
         return configured or self.default_model
 
 
@@ -120,6 +136,18 @@ LLM_CHECKS: tuple[LiveCheck, ...] = (
         extra="ollama",
         default_model="llama3.2",
         reports_token_usage=True,
+        base_url_env="OLLAMA_HOST",
+        keyless=True,
+    ),
+    LiveCheck(
+        kind="llm",
+        provider="openai_compatible",
+        env_var="FASTERRAG_LIVE_OPENAI_COMPATIBLE_KEY",
+        package="openai",
+        extra="openai",
+        default_model="",
+        reports_token_usage=True,
+        base_url_env="FASTERRAG_LIVE_OPENAI_COMPATIBLE_URL",
     ),
 )
 
@@ -154,6 +182,8 @@ EMBEDDING_CHECKS: tuple[LiveCheck, ...] = (
         extra="ollama",
         default_model="nomic-embed-text",
         reports_token_usage=False,
+        base_url_env="OLLAMA_HOST",
+        keyless=True,
     ),
 )
 
@@ -207,18 +237,44 @@ class LiveLedger:
 LEDGER = LiveLedger()
 
 
-def _credential(check: LiveCheck) -> str:
-    """Return the gating environment value, recording and skipping when it is absent.
+def _gate(check: LiveCheck, variable: str) -> str:
+    """Return a gating environment value, recording and skipping when it is absent.
 
     Raises:
         Skipped: If the variable is unset or blank, naming the provider and the variable.
     """
-    value = os.environ.get(check.env_var, "").strip()
+    value = os.environ.get(variable, "").strip()
     if not value:
-        reason = f"{check.env_var} is not set, so {check.name} was not contacted"
+        reason = f"{variable} is not set, so {check.name} was not contacted"
         LEDGER.record_unverified(check.name, reason)
         pytest.skip(reason)
     return value
+
+
+def _credential(check: LiveCheck) -> str:
+    """Return the provider's credential, recording and skipping when it is absent.
+
+    Raises:
+        Skipped: If the credential variable is unset or blank. The value is never logged.
+    """
+    return _gate(check, check.env_var)
+
+
+def _model(check: LiveCheck) -> str:
+    """Return the model id to probe, recording and skipping when none is configured.
+
+    Raises:
+        Skipped: If the provider has no default model and no override is set.
+    """
+    model = check.model
+    if not model:
+        reason = (
+            f"{check.model_env} is not set and {check.name} has no default model, because a "
+            f"gateway names its own models, so {check.name} was not contacted"
+        )
+        LEDGER.record_unverified(check.name, reason)
+        pytest.skip(reason)
+    return model
 
 
 def _require_package(check: LiveCheck) -> None:
@@ -237,19 +293,19 @@ def _require_package(check: LiveCheck) -> None:
 
 
 def _endpoint(check: LiveCheck) -> str | None:
-    """Return the Ollama endpoint for a local provider, or None for a hosted one.
+    """Return the base URL a self-hosted provider is reached at, or None for a hosted one.
 
     Raises:
-        Skipped: If the endpoint is set to something that is not an absolute URL.
+        Skipped: If the endpoint is unset, or set to something that is not an absolute URL.
     """
-    if check.provider != "ollama":
+    if check.base_url_env is None:
         return None
 
-    host = _credential(check)
+    host = _gate(check, check.base_url_env)
     if not host.startswith(("http://", "https://")):
         reason = (
-            f"{check.env_var} is set to a value with no http:// or https:// scheme, which "
-            f"the configuration contract rejects, so {check.name} was not contacted"
+            f"{check.base_url_env} is set to a value with no http:// or https:// scheme, "
+            f"which the configuration contract rejects, so {check.name} was not contacted"
         )
         LEDGER.record_unverified(check.name, reason)
         pytest.skip(reason)
@@ -260,15 +316,15 @@ def llm_settings(check: LiveCheck) -> Settings:
     """Build configuration pointing generation at the provider under check."""
     _require_package(check)
     base_url = _endpoint(check)
-    if check.provider != "ollama":
+    if not check.keyless:
         _credential(check)
 
     return Settings.model_validate(
         {
             "llm": {
                 "provider": check.provider,
-                "model": check.model,
-                "api_key_env": None if check.provider == "ollama" else check.env_var,
+                "model": _model(check),
+                "api_key_env": None if check.keyless else check.env_var,
                 "base_url": base_url,
                 "temperature": 0.0,
                 "max_tokens": MAX_TOKENS,
@@ -285,14 +341,14 @@ def embedding_settings(check: LiveCheck) -> Settings:
     """
     _require_package(check)
     base_url = _endpoint(check)
-    if check.provider != "ollama":
+    if not check.keyless:
         _credential(check)
 
     payload: dict[str, object] = {
         "embeddings": {
             "provider": check.provider,
-            "model": check.model,
-            "api_key_env": None if check.provider == "ollama" else check.env_var,
+            "model": _model(check),
+            "api_key_env": None if check.keyless else check.env_var,
         }
     }
     if base_url is not None:

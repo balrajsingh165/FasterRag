@@ -62,6 +62,34 @@ All five LLM providers below are **shipped**, with streaming.
 
 **Cost coverage.** OpenAI, Anthropic, and part of the Cohere lineup have dated list prices recorded, so their traffic reaches `fasterrag_cost_usd_total`; Ollama is priced at zero because it is local. `openai_compatible` never is — a gateway sets its own prices, and charging its traffic at the upstream vendor's rate would be a fabricated bill. Unpriced traffic is counted by `fasterrag_unpriced_tokens_total` rather than silently dropped. The exact per-model coverage and its check dates are in [config-reference.md](config-reference.md#which-models-carry-a-price).
 
+## 3a. Live provider verification — what `pytest -m eval` does and does not prove
+
+Every other provider test in this repository substitutes a fake client. That proves the adapter issues the request it meant to; it proves nothing about whether the vendor still accepts it, which is the drift that actually breaks a release — a renamed response field, a changed usage block, a retired model id. `tests/eval/test_live_providers.py` closes that gap with one real call per advertised provider, through the adapter and the factory rather than through the vendor SDK, so our own integration is what is under test.
+
+Each provider is gated on its own credential and skips, never fails, when it is absent. A full run with everything present is **eight requests** of a few dozen tokens each — five generations and three embeddings:
+
+| Check | Gate | Notes |
+|---|---|---|
+| `openai llm`, `openai embeddings` | `OPENAI_API_KEY` | |
+| `anthropic llm` | `ANTHROPIC_API_KEY` | |
+| `cohere llm`, `cohere embeddings` | `COHERE_API_KEY` | |
+| `ollama llm`, `ollama embeddings` | `OLLAMA_HOST` (an absolute `http(s)://` URL) | Local server; costs nothing. Gated on an explicit opt-in because gating it on nothing would mean a connection *failure*, not a skip, on every machine without Ollama. |
+| `openai_compatible llm` | `FASTERRAG_LIVE_OPENAI_COMPATIBLE_URL` + `FASTERRAG_LIVE_OPENAI_COMPATIBLE_KEY` + `FASTERRAG_LIVE_MODEL_OPENAI_COMPATIBLE_LLM` | A gateway names its own models, so there is no default model id to guess; without all three the check skips and says which one is missing. |
+
+`FASTERRAG_LIVE_MODEL_<PROVIDER>_<KIND>` overrides any provider's probe model, so a retired id is replaced by an environment variable rather than a code change. A missing provider SDK skips the same way, naming the extra to install.
+
+**What a green `pytest -m eval` proves: only the providers whose own checks ran.** Read the skip lines — `pytest -m eval -rs` — not the exit code.
+
+**What it does not prove: anything at all about a provider that skipped.** On a machine with no credentials every probe skips and the file is green while having contacted nobody. A skipped probe counted as a passed one is trap T12 ([rebuild-playbook.md](rebuild-playbook.md) §Traps). Three things keep the two readings apart:
+
+- Every provider has its own test, so pytest's own `SKIPPED` line naming the missing variable is the record, and no aggregate can launder it.
+- A summary test at the end of the module is green only when *every* provider was reached; otherwise it skips carrying a per-provider table marking each one `VERIFIED`, `NOT CHECKED` (with the reason) or `NOT RUN`. The honest outcome of a keyless run is a skip, not a pass.
+- The gating helpers are proved by `tests/eval/test_live_provider_gating.py`, which carries **no** `eval` marker and so runs in the ordinary `pytest -m "not integration and not eval"` CI job — the job that cannot skip. Without it, the only evidence that a skip is a real gate rather than a silent bug would come from the job that skips.
+
+**Status, as of 2026-10-29.** The gating logic is verified on every commit. The live call bodies have **never been executed against a real provider**, in CI or by hand, because no credentials have been available to any run — so no row in the table above is backed by a recorded response today (TASK-0205). The HuggingFace embedder is the one advertised provider with no entry here and needs none: it is local, and `tests/eval/test_real_models.py` exercises it against real downloaded weights.
+
+[testing-strategy.md](testing-strategy.md) §1.11 holds the fuller treatment of this layer, including the known gap that the Cohere and Ollama embedding adapters surface no token usage.
+
 ## 4. Rerankers (`retrieval.reranker_model`)
 
 Cross-encoder models loaded locally in the query path (e.g. `BAAI/bge-reranker-v2-m3`, `cross-encoder/ms-marco-MiniLM-L-6-v2`). Selected by model id; toggle with `retrieval.rerank`. Stage latency is unmeasured (TASK-0084) — the "~100–300 ms" this row previously quoted had no source and has been withdrawn.
