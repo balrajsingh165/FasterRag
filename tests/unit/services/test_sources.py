@@ -1,5 +1,6 @@
 import base64
 from collections.abc import AsyncIterator, Callable
+from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
 
 import httpx
@@ -8,7 +9,12 @@ import pytest
 from fasterrag.config.schema import Settings
 from fasterrag.core.identity import document_id
 from fasterrag.errors import IngestionError, ParseError
-from fasterrag.services.sources import INLINE_SCHEME, resolve_sources, typed_source
+from fasterrag.services.sources import (
+    INLINE_SCHEME,
+    _addresses,
+    resolve_sources,
+    typed_source,
+)
 from fasterrag.workers.cpu_pool import CpuWorkerPool
 
 
@@ -212,3 +218,147 @@ def test_a_windows_drive_spelling_stays_a_path() -> None:
     r"""``C:\docs`` parses as a one-letter URL scheme; it must classify as a path anyway."""
     assert typed_source("C:\\docs\\a.md")["type"] == "path"
     assert typed_source("docs/a.md")["type"] == "path"
+
+
+def resolve_as(monkeypatch: pytest.MonkeyPatch, mapping: dict[str, str]) -> None:
+    """Resolve hosts from a table, so the guard can be exercised without a network."""
+
+    async def addresses(host: str) -> list[IPv4Address | IPv6Address]:
+        return [ip_address(mapping.get(host, host))]
+
+    monkeypatch.setattr("fasterrag.services.sources._addresses", addresses)
+
+
+async def test_a_literal_address_resolves_without_a_network() -> None:
+    """The guard's resolver must handle a bare IP, or every literal check is untested."""
+    assert await _addresses("127.0.0.1") == [ip_address("127.0.0.1")]
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+        "http://127.0.0.1:6333/collections",
+        "http://10.0.0.5/internal",
+        "http://192.168.1.1/admin",
+        "http://[::1]:6379/",
+    ],
+)
+async def test_a_non_public_address_is_refused(uri: str) -> None:
+    """The SSRF boundary: cloud metadata and anything inside the perimeter are unreachable."""
+    with pytest.raises(IngestionError, match="non-public address"):
+        await resolve_sources([{"type": "url", "value": uri}], settings())
+
+
+@pytest.mark.parametrize("uri", ["file:///etc/passwd", "gopher://x/", "ftp://host/f"])
+async def test_a_non_http_scheme_is_refused(uri: str) -> None:
+    """Only http(s) is fetched; a file:// source would read the server's disk."""
+    with pytest.raises(IngestionError, match="is not supported"):
+        await resolve_sources([{"type": "url", "value": uri}], settings())
+
+
+async def test_a_redirect_into_the_perimeter_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hop is guarded, not just the first URL — otherwise the guard is decoration."""
+    resolve_as(monkeypatch, {"example.com": "93.184.216.34"})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "example.com":
+            return httpx.Response(302, headers={"location": "http://169.254.169.254/"})
+        return httpx.Response(200, content=b"metadata")
+
+    serve(handler, monkeypatch)
+
+    with pytest.raises(IngestionError, match="non-public address"):
+        await resolve_sources([{"type": "url", "value": "http://example.com/doc.md"}], settings())
+
+
+async def test_a_public_url_is_still_fetched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Control case: the guard must not break the feature it protects."""
+    resolve_as(monkeypatch, {"example.com": "93.184.216.34"})
+    serve(lambda request: httpx.Response(200, content=b"# hello"), monkeypatch)
+
+    resolved = await resolve_sources(
+        [{"type": "url", "value": "http://example.com/doc.md"}], settings()
+    )
+
+    try:
+        location = resolved.locations["http://example.com/doc.md"]
+        assert Path(location).read_bytes() == b"# hello"
+    finally:
+        resolved.cleanup()
+
+
+async def test_a_redirect_chain_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An endless redirect must end as a parse error, not as a hang."""
+    resolve_as(monkeypatch, {"example.com": "93.184.216.34"})
+    serve(
+        lambda request: httpx.Response(302, headers={"location": "http://example.com/next"}),
+        monkeypatch,
+    )
+
+    with pytest.raises(ParseError, match="redirects"):
+        await resolve_sources([{"type": "url", "value": "http://example.com/a"}], settings())
+
+
+def served() -> Settings:
+    """A deployment that authenticates callers, i.e. one serving parties who are not you."""
+    return Settings.model_validate({"security": {"auth": True}})
+
+
+async def test_an_unconfined_path_source_is_refused_on_a_served_deployment() -> None:
+    """Arbitrary server-side file read: the caller names the path, the query reads it back."""
+    with pytest.raises(IngestionError, match="allowed_source_roots is empty"):
+        await resolve_sources([{"type": "path", "value": "/etc/passwd"}], served())
+
+
+async def test_a_path_outside_every_configured_root_is_refused(tmp_path: Path) -> None:
+    """A configured root is a boundary, not a hint."""
+    allowed = tmp_path / "corpus"
+    allowed.mkdir()
+    settings = Settings.model_validate(
+        {"security": {"auth": True}, "ingestion": {"allowed_source_roots": [str(allowed)]}}
+    )
+
+    with pytest.raises(IngestionError, match="outside every directory"):
+        await resolve_sources([{"type": "path", "value": "/etc/passwd"}], settings)
+
+
+async def test_traversal_out_of_an_allowed_root_is_refused(tmp_path: Path) -> None:
+    """`..` must be collapsed before the comparison, or the root is decorative."""
+    allowed = tmp_path / "corpus"
+    allowed.mkdir()
+    (tmp_path / "secret.env").write_text("TOKEN=x", encoding="utf-8")
+    settings = Settings.model_validate(
+        {"security": {"auth": True}, "ingestion": {"allowed_source_roots": [str(allowed)]}}
+    )
+
+    escape = str(allowed / ".." / "secret.env")
+    with pytest.raises(IngestionError, match="outside every directory"):
+        await resolve_sources([{"type": "path", "value": escape}], settings)
+
+
+async def test_a_path_inside_an_allowed_root_is_accepted(tmp_path: Path) -> None:
+    """Control case: confinement must not break the feature it protects."""
+    allowed = tmp_path / "corpus"
+    allowed.mkdir()
+    document = allowed / "a.md"
+    document.write_text("hello", encoding="utf-8")
+    settings = Settings.model_validate(
+        {"security": {"auth": True}, "ingestion": {"allowed_source_roots": [str(allowed)]}}
+    )
+
+    resolved = await resolve_sources([{"type": "path", "value": str(document)}], settings)
+
+    assert resolved.sources == [str(document)]
+
+
+async def test_an_unauthenticated_deployment_still_ingests_local_paths(tmp_path: Path) -> None:
+    """The CLI case. Auth off means nobody but the operator can reach it."""
+    document = tmp_path / "a.md"
+    document.write_text("hello", encoding="utf-8")
+
+    resolved = await resolve_sources([{"type": "path", "value": str(document)}], settings())
+
+    assert resolved.sources == [str(document)]

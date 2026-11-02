@@ -24,6 +24,7 @@ __all__ = [
     "AppSettings",
     "AutopilotSettings",
     "CacheSettings",
+    "ChromaSettings",
     "ChunkingSettings",
     "CostSettings",
     "EmbeddingsSettings",
@@ -214,6 +215,21 @@ class PgvectorSettings(Section):
         return value
 
 
+class ChromaSettings(Section):
+    """Embedded-store settings for ``vector_db.provider: chroma``."""
+
+    path: str = ".fasterrag/chroma"
+    batch_size: Annotated[int, Field(ge=1, le=5000)] = 1000
+
+    @field_validator("path")
+    @classmethod
+    def _check_path(cls, value: str) -> str:
+        """Require a non-empty directory path; Chroma runs in-process, not over a socket."""
+        if not value.strip():
+            raise ValueError("must not be empty")
+        return value
+
+
 class CollectionSettings(Section):
     """Defaults applied when a collection is created through an adapter."""
 
@@ -244,6 +260,7 @@ class VectorDbSettings(Section):
     api_key_env: str | None = "QDRANT_API_KEY"
     docker: DockerSettings = DockerSettings()
     pgvector: PgvectorSettings = PgvectorSettings()
+    chroma: ChromaSettings = ChromaSettings()
     collection: CollectionSettings = CollectionSettings()
 
     @field_validator("host")
@@ -541,6 +558,15 @@ class IngestionSettings(Section):
     journal: JournalSettings = JournalSettings()
     dlq: DlqSettings = DlqSettings()
     max_document_mb: Annotated[int, Field(ge=1, le=1024)] = 100
+
+    # CRITICAL: this is an authorization boundary, not a convenience. A `path` source names
+    # a file on the SERVER, so without confinement any caller holding the `ingest` scope can
+    # ingest `.env`, `config.yaml` or an SSH key and read it back out with an ordinary query.
+    # Empty means "unconfined", which is safe only when nobody but the operator can reach the
+    # API — so `resolve_sources` refuses path sources outright when the list is empty AND
+    # `security.auth` is on. Leaving it empty therefore cannot silently expose a served
+    # deployment; it can only break one loudly, at the request, naming this setting.
+    allowed_source_roots: list[str] = []
 
 
 class ReindexSettings(Section):

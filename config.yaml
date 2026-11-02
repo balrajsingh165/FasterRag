@@ -32,6 +32,9 @@ vector_db:
     db_schema: fasterrag
     pool_max_size: 8
     maintenance_timeout_ms: 600000
+  chroma:
+    path: .fasterrag/chroma
+    batch_size: 1000
 
 embeddings:
   provider: huggingface
@@ -114,6 +117,9 @@ ingestion:
     enabled: true
     max_retries: 3
   max_document_mb: 100
+  # Directories a `path` source may read from. Empty is unconfined, which is
+  # refused outright once security.auth is on -- see docs/security.md.
+  allowed_source_roots: []
 
 index:
   lockfile: true

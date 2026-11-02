@@ -34,6 +34,9 @@ vector_db:
     db_schema: fasterrag
     pool_max_size: 8
     maintenance_timeout_ms: 600000
+  chroma:
+    path: .fasterrag/chroma
+    batch_size: 1000
   collection:
     default_name: default
     distance: cosine
@@ -121,6 +124,9 @@ ingestion:
     enabled: true
     max_retries: 3
   max_document_mb: 100
+  # Directories a `path` source may read from. Empty is unconfined, which is
+  # refused outright once security.auth is on -- see docs/security.md.
+  allowed_source_roots: []
 
 index:
   lockfile: true
@@ -212,6 +218,8 @@ security:
 | `vector_db.pgvector.db_schema` | str | `fasterrag` | `^[a-z_][a-z0-9_]{0,62}$` | PostgreSQL schema the adapter owns. It holds the three catalog tables (`fasterrag_collections`, `fasterrag_aliases`, `fasterrag_snapshots`) plus one table per collection, so pointing two deployments at one database with different schemas keeps them isolated. Created on first use if absent. |
 | `vector_db.pgvector.pool_max_size` | int | `8` | 1–256 | Maximum connections the adapter's pool opens. It held a single connection before TASK-0239, which serialized every operation on it — one blocked statement stalled every other caller, including a health check needing no lock at all. Size it to the concurrency the API and worker pools actually offer; PostgreSQL's own `max_connections` is the ceiling, and this is per process, so N replicas open N times this many. |
 | `vector_db.pgvector.maintenance_timeout_ms` | int | `600000` | ≥ 1000 | Statement budget for schema changes, snapshot copies, and restores, applied with `SET LOCAL` so it cannot leak back to the pool. Deliberately separate from `reliability.timeouts.vector_db_ms`, which bounds ordinary queries: a bound tight enough for a query aborts the HNSW build on any collection large enough to need one, so the two budgets exist to be told apart. It is a longer bound, not the absence of one. |
+| `vector_db.chroma.path` | str | `.fasterrag/chroma` | non-empty path | Directory the embedded Chroma store persists into, created on first use. Chroma runs in the fasterRag process rather than over a socket, so `mode`, `host`, `port`, `grpc_port`, and `api_key_env` are all ignored by this provider — this path is the entire connection. Two deployments sharing one path share one store; give them separate directories to isolate them. A path that already exists and is not a directory is rejected at first use rather than reported later as a store failure. |
+| `vector_db.chroma.batch_size` | int | `1000` | 1–5000 | Records the adapter writes per Chroma call, for upserts, metadata updates, and snapshot copies. It is capped at whatever the client reports as its own maximum batch, so raising it past that has no effect. Lower it if a single batch of large payloads is using more memory than the process has to spare. |
 | `vector_db.collection.default_name` | str | `default` | `^[a-zA-Z0-9_-]{1,64}$` | Default collection name. |
 | `vector_db.collection.distance` | str | `cosine` | one of `cosine`, `dot`, `euclid` | Distance metric for dense vectors. |
 | `vector_db.collection.shard_number` | int | `1` | ≥ 1 | Shards per collection (scaling knob; passed through the adapter). |
@@ -362,6 +370,7 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | `ingestion.dlq.enabled` | bool | `true` | — | Failed documents go to a dead-letter queue with machine-readable reason codes and per-document status. |
 | `ingestion.dlq.max_retries` | int | `3` | 0–10 | Retries before a document is dead-lettered. |
 | `ingestion.max_document_mb` | int | `100` | 1–1024 | Input size limit per document (security + stability). |
+| `ingestion.allowed_source_roots` | list[str] | `[]` | paths | Directories a `path` source may be read from. **Authorization boundary**: a `path` source names a file on the server, so an unconfined one lets any caller with the `ingest` scope read `.env` or an SSH key back out through a query. Paths are resolved before comparison, so `..` and symlinks cannot escape a root. Empty means unconfined, which is refused outright when `security.auth` is on — so forgetting it breaks a served deployment loudly instead of exposing it quietly. |
 
 ## `index`
 
