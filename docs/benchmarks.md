@@ -11,6 +11,12 @@
 5. Entries are produced by `fasterrag benchmark --ledger` (hardware fingerprint + commit hash auto-captured) and reviewed like code.
 6. Docs are periodically grepped for superlatives ("fastest", "best", "most"); each hit must link here or it is filed as a bug.
 
+### The nightly comparison is not a source of entries
+
+`.github/workflows/nightly.yml` compares each night's `fasterrag benchmark --json` with the previous night's using `scripts/compare_nightly.py`, and fails when a tracked metric moves more than 10% in the worse direction ([performance.md](performance.md) §3.7). **This changes nothing about what qualifies for this ledger.** Those runs happen on a shared GitHub runner and fail the same isolation requirement that makes BENCH-0001 and BENCH-0002 non-citable, and a comparison is a change detector rather than a measurement: it reports whether two non-citable numbers moved relative to each other, which is a reason to go and measure, not a measurement.
+
+The job therefore never writes to this file. Appending an entry stays a human act performed against a run on documented, isolated hardware (TASK-0084), and the one mechanism that produces entries is still `fasterrag benchmark --ledger` under rule 5.
+
 ## Entry template
 
 ```markdown

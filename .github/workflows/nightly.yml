@@ -11,12 +11,29 @@
 # shared GitHub runner has neighbours, and docs/performance.md requires an isolated,
 # documented machine. They are a regression signal — a large night-over-night move means
 # something changed — and TASK-0084 remains the entry that needs real hardware.
+#
+# Uploading those numbers made a move recordable and left it undetected, because nobody
+# diffs thirty JSON files by eye. The run therefore fetches the previous night's artifact
+# and compares the two with scripts/compare_nightly.py, which reports three outcomes and
+# never collapses "nothing to compare against" into a pass.
+#
+# It does NOT file a bug. docs/todo.md is the only task file in this repository, and a job
+# that opened an issue — or appended to the ledger — every night would be a second task list
+# written by a machine from numbers the header above says are not citable. A regression here
+# fails the job, which is already a notification, and a human decides whether it is worth an
+# entry.
 name: nightly
 
 on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
+
+# `actions: read` is what lets the default token list this workflow's earlier runs and pull
+# an artifact from one of them; nothing here writes.
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   measure:
@@ -41,6 +58,7 @@ jobs:
       # halfway is itself a result worth keeping, and losing it means re-running to find out
       # what happened.
       - name: Benchmark suite
+        if: ${{ !cancelled() }}
         continue-on-error: true
         env:
           FASTERRAG_API_KEY: ci-placeholder
@@ -51,7 +69,58 @@ jobs:
           fasterrag config init --path artifacts/config.yaml
           fasterrag --config artifacts/config.yaml benchmark --json > artifacts/benchmark.json || true
 
+      # The newest completed run of this workflow other than this one. Empty on the very
+      # first run, which the comparison reports as not-comparable rather than as a pass.
+      - name: Locate the previous nightly run
+        id: previous
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          THIS_RUN: ${{ github.run_id }}
+        run: |
+          run_id=$(gh api \
+            "repos/${REPOSITORY}/actions/workflows/nightly.yml/runs?status=completed&per_page=30" \
+            --jq "[.workflow_runs[].id | select(. != ${THIS_RUN})] | first // empty")
+          echo "run-id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "previous nightly run: ${run_id:-none found}"
+
+      # Artifacts expire after 30 days and a run that died before uploading has none, so a
+      # failure here is an ordinary outcome: the comparison then finds no baseline and says
+      # so, instead of the job dying on a missing file.
+      - name: Download the previous night's measurements
+        if: ${{ !cancelled() && steps.previous.outputs.run-id != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-measurements
+          path: previous/
+          run-id: ${{ steps.previous.outputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - name: Compare against the previous night
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p artifacts
+          set +e
+          python scripts/compare_nightly.py \
+            --previous previous/benchmark.json \
+            --current artifacts/benchmark.json \
+            --json-out artifacts/comparison.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+          verdict=$?
+          set -e
+          case "${verdict}" in
+            0) ;;
+            1) echo "::error::a tracked benchmark metric regressed beyond the tolerance against the previous nightly run; investigate on isolated hardware before trusting it"
+               exit 1 ;;
+            2) echo "::warning::tonight's run could not be compared with the previous one, so no regression was ruled out" ;;
+            *) echo "::error::scripts/compare_nightly.py exited ${verdict}, which is not a verdict it defines"
+               exit 1 ;;
+          esac
+
       - name: Upload ledger-format artifacts
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: nightly-measurements
