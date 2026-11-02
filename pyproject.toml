@@ -79,6 +79,10 @@ all = [
     "sentence-transformers>=3.0",
 ]
 dev = [
+    # CRITICAL: docs/release.md step 5 and scripts/check_package.py both shell out to
+    # `python -m build`. Without it here, `pip install -e ".[dev]"` leaves a releaser and the
+    # packaging gate with a tool neither of them can run.
+    "build>=1.2",
     "hypothesis>=6.100",
     "mypy>=1.11",
     "opentelemetry-exporter-otlp-proto-http>=1.27",

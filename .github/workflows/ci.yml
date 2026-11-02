@@ -56,6 +56,12 @@ jobs:
       - name: Blockers view matches the ledger
         run: python scripts/check_blockers.py
 
+      # Three separate rounds shipped documents asserting that already-built work did not
+      # exist, each caught by eye. A denial that cites a task the ledger has ticked is stale
+      # by the ledger's own account, and that much is machine-checkable.
+      - name: Denials still cite open work
+        run: python scripts/check_claims.py
+
       # The four mechanical places a version lives cannot be edited atomically by hand, and
       # a tree halfway through a stamp ships a wheel that contradicts its own README.
       - name: Version is coherent across the tree
@@ -117,6 +123,35 @@ jobs:
 
       - name: Unit tests
         run: pytest -m "not integration and not eval"
+
+  # The only job that exercises what a `pip install fasterrag` user actually receives.
+  # Nothing else can: pytest puts src/ on sys.path, so the whole suite imports the checkout
+  # and would stay green through a wheel that ships no `fasterrag.data/config.yaml`, no
+  # console script, or a packages list that quietly drops a subpackage.
+  #
+  # Its own job rather than a step on quality, because it builds a wheel and a clean venv
+  # (~95s measured locally on 2026-10-29) and that cost belongs beside the test run rather
+  # than in front of it — on the push path either way, since a broken wheel is a release
+  # blocker and finding it at tag time is finding it too late. Installing `.[dev]` rather
+  # than bare `build` is deliberate: it also fails if `build` is ever dropped from the dev
+  # extra, which is the defect that sent a releaser to a tool they did not have.
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Wheel installs and imports as a consumer gets it
+        run: python scripts/check_package.py
 
   # security.md §6. Split from the quality job so a dependency advisory published overnight
   # does not read as "the tests broke".
