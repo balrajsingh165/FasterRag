@@ -4,6 +4,8 @@ Everything is selected purely through `config.yaml`; secrets by env-var name onl
 
 ## 1. Vector databases (`vector_db.provider`)
 
+> **Security note (2026-11-04).** `chromadb` 1.5.9 — the latest release — carries four unfixed advisories (PYSEC-2026-311, -3813, -3814, -3815). All four are in Chroma's HTTP server, which fasterRag never starts; the adapter runs embedded against a local directory. See [security.md](security.md) §6 for the reasoning and its limits. If you run a Chroma server of your own, those advisories apply to it regardless of fasterRag.
+
 | Provider | Value | Status | Modes | Secret (env var) | Notes |
 |---|---|---|---|---|---|
 | **Qdrant** (reference) | `qdrant` | **Shipped** — contract suite passes in all three modes | docker (system-managed) · external local · remote host:port | `QDRANT_API_KEY` | Reference implementation. REST 6333 + gRPC 6334 (both must be reachable; `prefer_grpc` default `false`). Named Docker volume mandatory on Windows/WSL. |

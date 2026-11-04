@@ -170,6 +170,25 @@ problem document and keeps the traceback in logs behind a trace id; and there is
 
 ## 6. Supply chain
 
+**Known accepted advisories (`chromadb`, reviewed 2026-11-03).** `pip-audit` runs over all
+extras and blocks the build, with exactly four ignores — all against `chromadb`, all
+reviewed rather than waved through. There is **no fixed version**: 1.5.9 is the latest
+release. Every one of the four is in Chroma's **server**, which fasterRag never starts:
+`PYSEC-2026-311` and `PYSEC-2026-3814` are code injection through `trust_remote_code` on
+the HTTP collections endpoints, `PYSEC-2026-3813` and `PYSEC-2026-3815` are cross-tenant
+authorization failures in its HTTP auth and `SimpleRBACAuthorizationProvider`. The adapter
+uses an embedded `PersistentClient` against a local directory — no HTTP API is served, that
+RBAC provider is never constructed, and the adapter passes vectors itself rather than
+configuring a Chroma-side embedding function, which is the path `trust_remote_code` travels.
+Chroma's own multi-tenancy is also unused: fasterRag isolates tenants by collection name at
+its own layer (§3), so Chroma's tenant checks are not what stands between two tenants here.
+
+That reasoning is ours, derived from the shipped code, not a vendor statement — and it holds
+only for embedded use. **An operator who also runs a Chroma server in the same deployment is
+exposed by these advisories independently of fasterRag**, and should treat `fasterrag[chroma]`
+as unsuitable until upstream ships a fix. TASK-0299 re-checks for one; the ignores are
+deleted the moment it exists.
+
 - **Pinned, hash-locked dependencies** — `uv.lock` is committed: 135 packages, 1577 `sha256` hashes. CI runs `uv lock --check`, which re-resolves `pyproject.toml` and fails when the result differs, so a dependency added without relocking is caught at the gate rather than discovered when two machines install different versions.
 - **Dependency audit is blocking**, and runs against the *lockfile* rather than an installed environment — an environment is whatever resolved on that runner today, the lockfile is what everyone actually installs. It reported no advisories across all 135 packages on 2026-08-03 — a result that CI re-establishes on every push rather than a figure quoted from a one-off run.
 - **Secret scanning in CI** (gitleaks, full history — a credential committed and later removed is still compromised, so scanning only the tip would call it clean). A detected credential fails the build.
