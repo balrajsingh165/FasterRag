@@ -96,8 +96,13 @@ dev = [
     # CRITICAL: the unit and integration CI jobs install only `.[dev]`, so the redis,
     # PostgreSQL, and Chroma clients belong here as well as in their own extras — without
     # them the RedisStore, pgvector, and Chroma suites would skip in exactly the
-    # environment that is supposed to be gating them.
+    # environment that is supposed to be gating them. fakeredis extends that reasoning to
+    # a suite with no server to point at: it speaks the Redis protocol in-process to the
+    # real redis-py client, so the rate-limiter integration tests run on a machine and in
+    # a CI job that has no Redis. It stays dev-only and gets no extra of its own — it is a
+    # test server, never something a deployment should be able to install by accident.
     "chromadb>=1.5",
+    "fakeredis>=2.26",
     "pgvector>=0.3",
     "psycopg[binary,pool]>=3.2",
     "redis>=5.0",
