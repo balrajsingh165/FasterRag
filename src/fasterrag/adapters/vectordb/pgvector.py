@@ -46,7 +46,10 @@ so one query would hit different terms here than on Qdrant — and the adapter n
 query text anyway, only the encoded sparse vector (``docs/adr/ADR-0007``). Postings live in
 a term table and IDF is computed per query over the live corpus, which is exactly the split
 the ADR mandates. ``sparsevec`` cannot serve this: its dimension ceiling is far below the
-32-bit term-hash space, and its operators offer no way to weight by corpus rarity.
+32-bit term-hash space, and its operators offer no way to weight by corpus rarity. Because
+the postings are rows rather than a column of the point, ``iterate_points`` has to join them
+back on — one statement per page, and only when vectors were asked for, so a payload-only
+walk still reads one table (TASK-0291).
 
 **Connections are pooled, and every statement is time-bounded twice over.** Operations run
 on a ``psycopg_pool.AsyncConnectionPool`` sized by ``vector_db.pgvector.pool_max_size``, so
@@ -97,6 +100,7 @@ from fasterrag.adapters.vectordb.base import (
     PointUpdate,
     ScoredPoint,
     SearchQuery,
+    SparseVector,
     UpsertResult,
     VectorDBAdapter,
     validate_filter,
@@ -1062,6 +1066,11 @@ class PgvectorAdapter(VectorDBAdapter):
                     (after, batch_size),
                 )
                 rows = await cursor.fetchall()
+                postings: dict[str, SparseVector] = {}
+                if rows and with_vectors and target.sparse:
+                    postings = await self._postings_for(
+                        connection, target, [str(row["point_id"]) for row in rows]
+                    )
 
             for row in rows:
                 after = str(row["point_id"])
@@ -1070,10 +1079,38 @@ class PgvectorAdapter(VectorDBAdapter):
                     collection=collection,
                     vector=self._to_vector(row.get("embedding")),
                     payload=dict(row["payload"] or {}),
+                    sparse=postings.get(after),
                 )
 
             if len(rows) < batch_size:
                 return
+
+    async def _postings_for(
+        self, connection: AsyncConnection[DictRow], target: _Collection, point_ids: list[str]
+    ) -> dict[str, SparseVector]:
+        """Read one page's posting lists back as vendor-neutral sparse vectors.
+
+        One statement per page rather than per point: a posting list is small, a page is
+        not, and a query per row turns a walk into a round trip per chunk.
+        """
+        cursor = await connection.execute(
+            sql.SQL(
+                "SELECT point_id, term, weight FROM {terms} WHERE point_id = ANY(%s) "
+                "ORDER BY point_id, term"
+            ).format(terms=self._qualified(target.terms_table)),
+            (point_ids,),
+        )
+
+        collected: dict[str, tuple[list[int], list[float]]] = {}
+        for row in await cursor.fetchall():
+            indices, values = collected.setdefault(str(row["point_id"]), ([], []))
+            indices.append(int(row["term"]))
+            values.append(float(row["weight"]))
+
+        return {
+            point_id: SparseVector(indices=indices, values=values)
+            for point_id, (indices, values) in collected.items()
+        }
 
     @staticmethod
     def _to_vector(stored: Any) -> list[float]:

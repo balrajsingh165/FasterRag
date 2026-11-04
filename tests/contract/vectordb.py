@@ -458,6 +458,116 @@ class VectorDBContract:
 
         assert [hit.point_id for hit in hits] == ["c_finance"]
 
+    async def test_a_walk_carries_the_stored_sparse_vector(
+        self, adapter: VectorDBAdapter, hybrid_collection: str
+    ) -> None:
+        """What the keyword leg needs is the terms and their weights; IDF is the corpus'."""
+        written = encode_document("Either party may terminate with written notice.")
+        await adapter.upsert(
+            [
+                Point(
+                    point_id="c_notice",
+                    collection=hybrid_collection,
+                    vector=VECTORS["a"],
+                    sparse=written,
+                )
+            ]
+        )
+
+        walked = [
+            found async for found in adapter.iterate_points(hybrid_collection, with_vectors=True)
+        ]
+
+        assert len(walked) == 1
+        carried = walked[0].sparse
+        assert carried is not None
+        assert dict(zip(carried.indices, carried.values, strict=True)) == pytest.approx(
+            dict(zip(written.indices, written.values, strict=True))
+        )
+        assert list(carried.indices) == sorted(carried.indices)
+
+    async def test_a_walked_sparse_vector_scores_the_same_in_a_copy(
+        self, adapter: VectorDBAdapter, hybrid_collection: str
+    ) -> None:
+        """Fidelity is the ranking, not the bytes: a leg that survives but rescores is lost."""
+        await adapter.upsert(
+            [
+                Point(
+                    point_id="c_notice",
+                    collection=hybrid_collection,
+                    vector=VECTORS["a"],
+                    payload={"department": "legal"},
+                    sparse=encode_document("Either party may terminate with written notice."),
+                ),
+                Point(
+                    point_id="c_payment",
+                    collection=hybrid_collection,
+                    vector=VECTORS["b"],
+                    payload={"department": "finance"},
+                    sparse=encode_document("Invoices are payable within thirty days of notice."),
+                ),
+            ]
+        )
+        query = encode_query("terminate notice")
+        before = await adapter.search(
+            SearchQuery(collection=hybrid_collection, sparse=query, limit=5)
+        )
+
+        copy = f"{hybrid_collection}-copy"
+        await adapter.create_collection(
+            CollectionSpec(name=copy, dimensions=DIMENSIONS, sparse=True)
+        )
+        try:
+            await adapter.upsert(
+                [
+                    Point(
+                        point_id=found.point_id,
+                        collection=copy,
+                        vector=found.vector,
+                        payload=found.payload,
+                        sparse=found.sparse,
+                    )
+                    async for found in adapter.iterate_points(hybrid_collection, with_vectors=True)
+                ]
+            )
+            after = await adapter.search(SearchQuery(collection=copy, sparse=query, limit=5))
+        finally:
+            await adapter.drop_collection(copy)
+
+        assert [hit.point_id for hit in before] == ["c_notice", "c_payment"]
+        assert [hit.point_id for hit in after] == [hit.point_id for hit in before]
+        assert [hit.score for hit in after] == pytest.approx([hit.score for hit in before])
+
+    async def test_a_walk_without_vectors_carries_no_sparse_vector(
+        self, adapter: VectorDBAdapter, hybrid_collection: str
+    ) -> None:
+        """``with_vectors`` is the one gate; a payload-only walk must not pay for postings."""
+        await adapter.upsert(
+            [
+                Point(
+                    point_id="c_notice",
+                    collection=hybrid_collection,
+                    vector=VECTORS["a"],
+                    sparse=encode_document("termination notice period"),
+                )
+            ]
+        )
+
+        walked = [found async for found in adapter.iterate_points(hybrid_collection)]
+
+        assert [found.sparse for found in walked] == [None]
+
+    async def test_a_dense_only_collection_walks_without_a_sparse_vector(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        """A collection with no keyword leg has none to report, asked for or not."""
+        await self.seed(adapter, collection)
+
+        walked = [found async for found in adapter.iterate_points(collection, with_vectors=True)]
+
+        assert len(walked) == 3
+        assert [found.sparse for found in walked] == [None, None, None]
+
     async def test_a_query_must_carry_exactly_one_leg(self) -> None:
         with pytest.raises(FasterRagError):
             SearchQuery(collection="any")

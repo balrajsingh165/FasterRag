@@ -140,6 +140,43 @@ async def test_a_named_vector_is_unwrapped() -> None:
     assert list((await collect(adapter, with_vectors=True))[0].vector) == [0.4, 0.5, 0.6]
 
 
+async def test_a_named_sparse_vector_is_returned() -> None:
+    """The keyword leg is unexportable unless the walk returns it (TASK-0291)."""
+    stored = {
+        "dense": [0.1, 0.2, 0.3],
+        "bm25": models.SparseVector(indices=[11, 7], values=[0.25, 0.5]),
+    }
+    adapter = build(ScrollingClient(pages=[([record("c_1", vector=stored)], None)], named=True))
+
+    carried = (await collect(adapter, with_vectors=True))[0].sparse
+
+    assert carried is not None
+    assert list(carried.indices) == [7, 11]
+    assert list(carried.values) == [0.5, 0.25]
+
+
+async def test_a_dense_only_record_carries_no_sparse_vector() -> None:
+    """An unnamed layout has no keyword leg at all, so there is nothing to report."""
+    adapter = build(ScrollingClient(pages=[([record("c_1", vector=[0.1, 0.2, 0.3])], None)]))
+
+    assert (await collect(adapter, with_vectors=True))[0].sparse is None
+
+
+async def test_an_empty_sparse_vector_reads_as_no_sparse_vector() -> None:
+    """A point with no terms is not a point carrying a vector of nothing."""
+    stored = {"dense": [0.1, 0.2, 0.3], "bm25": models.SparseVector(indices=[], values=[])}
+    adapter = build(ScrollingClient(pages=[([record("c_1", vector=stored)], None)], named=True))
+
+    assert (await collect(adapter, with_vectors=True))[0].sparse is None
+
+
+async def test_a_walk_without_vectors_carries_no_sparse_vector() -> None:
+    """Scroll returns no vectors of either kind unless asked, and the Point says so."""
+    adapter = build(ScrollingClient(pages=[([record("c_1")], None)], named=True))
+
+    assert (await collect(adapter))[0].sparse is None
+
+
 async def test_the_batch_size_is_passed_through() -> None:
     client = ScrollingClient(pages=[([], None)])
     adapter = build(client)

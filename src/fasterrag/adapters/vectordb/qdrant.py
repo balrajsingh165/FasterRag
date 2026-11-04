@@ -15,6 +15,12 @@ Qdrant point ids must be unsigned integers or UUIDs, while fasterRag chunk ids a
 opaque strings such as ``c_9f2``. The adapter derives a UUID from the chunk id
 deterministically and keeps the original in the payload, so idempotent upserts and
 replay safety survive the translation.
+
+A hybrid collection names both of its vectors, so ``scroll`` hands back a mapping holding
+a dense list and a vendor ``SparseVector``. ``iterate_points`` converts the latter into the
+neutral type rather than dropping it, which is what makes the keyword leg exportable
+(TASK-0291). It is present only when ``with_vectors`` is asked for, because ``scroll``
+returns no vectors at all otherwise — that gate is Qdrant's shape, not a choice made here.
 """
 
 from __future__ import annotations
@@ -42,6 +48,7 @@ from fasterrag.adapters.vectordb.base import (
     PointUpdate,
     ScoredPoint,
     SearchQuery,
+    SparseVector,
     UpsertResult,
     VectorDBAdapter,
     validate_filter,
@@ -132,6 +139,24 @@ def to_qdrant_filter(filters: Filter | None) -> models.Filter | None:
             must.append(_condition(key, operator, value))
 
     return models.Filter(must=must or None, must_not=must_not or None)
+
+
+def _to_sparse(stored: Any) -> SparseVector | None:
+    """Convert a stored named sparse vector into the neutral type, terms ascending.
+
+    Anything other than a populated Qdrant sparse vector reads as no keyword leg, which
+    is what a dense-only collection and an unrequested vector both look like.
+    """
+    if not isinstance(stored, models.SparseVector):
+        return None
+
+    postings = sorted(zip(stored.indices, stored.values, strict=True))
+    if not postings:
+        return None
+    return SparseVector(
+        indices=[int(term) for term, _ in postings],
+        values=[float(weight) for _, weight in postings],
+    )
 
 
 class QdrantAdapter(VectorDBAdapter):
@@ -551,7 +576,9 @@ class QdrantAdapter(VectorDBAdapter):
         point_id = payload.pop(POINT_ID_PAYLOAD_KEY, None)
 
         stored: Any = record.vector
+        sparse: SparseVector | None = None
         if named and isinstance(stored, dict):
+            sparse = _to_sparse(stored.get(SPARSE_VECTOR_NAME))
             stored = stored.get(DENSE_VECTOR_NAME)
         vector: list[float] = (
             cast("list[float]", stored)
@@ -564,6 +591,7 @@ class QdrantAdapter(VectorDBAdapter):
             collection=collection,
             vector=vector,
             payload=payload,
+            sparse=sparse,
         )
 
     async def search(self, query: SearchQuery) -> list[ScoredPoint]:

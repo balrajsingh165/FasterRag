@@ -484,3 +484,117 @@ class TestCollectionCatalogRow:
 
         assert resolved.terms_table.startswith(resolved.table)
         assert resolved.terms_table != resolved.table
+
+
+def catalog_row(*, sparse: bool) -> dict[str, Any]:
+    """Return the catalog row `_lookup` resolves a collection from."""
+    return {
+        "name": "policies",
+        "table_name": table_name_for("policies"),
+        "dimensions": 3,
+        "distance": "cosine",
+        "sparse": sparse,
+    }
+
+
+def point_row(point_id: str) -> dict[str, Any]:
+    """Return one row of the points table as `iterate_points` selects it."""
+    return {"point_id": point_id, "payload": {"tenant": "acme"}, "embedding": [0.1, 0.2, 0.3]}
+
+
+def posting_row(point_id: str, term: int, weight: float) -> dict[str, Any]:
+    """Return one row of the term table."""
+    return {"point_id": point_id, "term": term, "weight": weight}
+
+
+class TestIterationCarriesPostings:
+    """The posting join that makes the keyword leg exportable (TASK-0291)."""
+
+    async def test_a_walk_with_vectors_joins_the_posting_list_back_on(
+        self, adapter: PgvectorAdapter
+    ) -> None:
+        """Postings are rows, not a column, so a walk that skips the join loses the leg."""
+        connection = FakeConnection(
+            [
+                [catalog_row(sparse=True)],
+                [point_row("c_1")],
+                [posting_row("c_1", 7, 0.5), posting_row("c_1", 11, 0.25)],
+            ]
+        )
+
+        walked = [
+            found
+            async for found in pooled(adapter, connection).iterate_points(
+                "policies", with_vectors=True
+            )
+        ]
+
+        assert walked[0].sparse is not None
+        assert list(walked[0].sparse.indices) == [7, 11]
+        assert list(walked[0].sparse.values) == [0.5, 0.25]
+
+    async def test_postings_are_paired_with_the_point_that_owns_them(
+        self, adapter: PgvectorAdapter
+    ) -> None:
+        """One statement serves a whole page, so the rows have to be grouped by id."""
+        connection = FakeConnection(
+            [
+                [catalog_row(sparse=True)],
+                [point_row("c_1"), point_row("c_2")],
+                [posting_row("c_1", 7, 0.5), posting_row("c_2", 11, 0.25)],
+            ]
+        )
+
+        walked = {
+            found.point_id: found.sparse
+            async for found in pooled(adapter, connection).iterate_points(
+                "policies", with_vectors=True
+            )
+        }
+
+        assert walked["c_1"] is not None
+        assert list(walked["c_1"].indices) == [7]
+        assert walked["c_2"] is not None
+        assert list(walked["c_2"].indices) == [11]
+
+    async def test_a_point_with_no_postings_carries_no_sparse_vector(
+        self, adapter: PgvectorAdapter
+    ) -> None:
+        """A hybrid collection may hold a point with no terms; that is not an empty vector."""
+        connection = FakeConnection([[catalog_row(sparse=True)], [point_row("c_1")], []])
+
+        walked = [
+            found
+            async for found in pooled(adapter, connection).iterate_points(
+                "policies", with_vectors=True
+            )
+        ]
+
+        assert walked[0].sparse is None
+
+    async def test_a_walk_without_vectors_never_reads_the_term_table(
+        self, adapter: PgvectorAdapter
+    ) -> None:
+        """The gate is `with_vectors`: a payload-only export must not pay for the join."""
+        connection = FakeConnection([[catalog_row(sparse=True)], [point_row("c_1")]])
+
+        walked = [found async for found in pooled(adapter, connection).iterate_points("policies")]
+
+        assert walked[0].sparse is None
+        assert len(connection.statements) == 2
+
+    async def test_a_dense_only_collection_never_reads_the_term_table(
+        self, adapter: PgvectorAdapter
+    ) -> None:
+        """There is no term table to read; querying one would be a relation-missing error."""
+        connection = FakeConnection([[catalog_row(sparse=False)], [point_row("c_1")]])
+
+        walked = [
+            found
+            async for found in pooled(adapter, connection).iterate_points(
+                "policies", with_vectors=True
+            )
+        ]
+
+        assert walked[0].sparse is None
+        assert len(connection.statements) == 2

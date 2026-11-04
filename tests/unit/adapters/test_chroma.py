@@ -21,6 +21,7 @@ from fasterrag.adapters.vectordb.chroma import (
     _from_metadata,
     _rank,
     _score_of,
+    _sparse_from_metadata,
     _to_metadata,
     collection_name_for,
     snapshot_name_for,
@@ -191,6 +192,48 @@ class TestPayloadFlattening:
     def test_corrupt_stored_json_is_a_typed_error(self) -> None:
         with pytest.raises(FasterRagError) as caught:
             _from_metadata({"fr.j.span": "{not json"})
+
+        assert caught.value.code is ErrorCode.INTERNAL
+
+
+class TestPostingsReadBack:
+    """The postings are fasterRag's own representation, so reading them back is its job."""
+
+    def test_a_posting_list_round_trips_through_metadata(self) -> None:
+        """Exactly the weights the ranker scores with, not a re-derivation of them."""
+        written = SparseVector(indices=[7, 11], values=[1.5, 0.25])
+
+        carried = _sparse_from_metadata(_to_metadata({"department": "legal"}, written))
+
+        assert carried is not None
+        assert list(carried.indices) == [7, 11]
+        assert list(carried.values) == [1.5, 0.25]
+
+    def test_terms_come_back_in_ascending_order(self) -> None:
+        """Metadata is an unordered mapping; an export has to be reproducible anyway."""
+        carried = _sparse_from_metadata({"fr.t.11": 0.25, "fr.t.7": 1.5, "department": "legal"})
+
+        assert carried is not None
+        assert list(carried.indices) == [7, 11]
+        assert list(carried.values) == [1.5, 0.25]
+
+    def test_metadata_with_no_postings_reads_as_no_sparse_vector(self) -> None:
+        assert _sparse_from_metadata({"department": "legal"}) is None
+
+    def test_absent_metadata_reads_as_no_sparse_vector(self) -> None:
+        assert _sparse_from_metadata(None) is None
+
+    def test_a_corrupt_posting_key_is_a_typed_error(self) -> None:
+        """A key this adapter never writes means the directory is not ours to interpret."""
+        with pytest.raises(FasterRagError) as caught:
+            _sparse_from_metadata({"fr.t.notaterm": 1.0})
+
+        assert caught.value.code is ErrorCode.INTERNAL
+
+    def test_a_corrupt_posting_weight_is_a_typed_error(self) -> None:
+        """An untyped ValueError out of an adapter is the taxonomy leaking, not an error."""
+        with pytest.raises(FasterRagError) as caught:
+            _sparse_from_metadata({"fr.t.7": "heavy"})
 
         assert caught.value.code is ErrorCode.INTERNAL
 

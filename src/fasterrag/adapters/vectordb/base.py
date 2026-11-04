@@ -13,6 +13,24 @@ down to the backend. Raw expressions are never passed through to a vendor
 scalar (equality) or to a single-operator object:
 
 ``{"department": "legal", "year": {"$gte": 2024}, "status": {"$in": ["a", "b"]}}``
+
+**Sparse vectors travel with the dense ones.** ``iterate_points`` sets ``Point.sparse``
+whenever ``with_vectors`` is asked for, and leaves it ``None`` otherwise — ``with_vectors``
+means "the vectors this collection stores", and a hybrid collection stores two legs rather
+than one. Until TASK-0291 the keyword leg was not returned at all, which made it
+structurally unexportable: a reader that cannot see it cannot carry it, so a restored
+collection answered keyword queries differently from the one it was taken from.
+
+What comes back is what the backend holds, in the one shape all three store: term indices
+from ``core.retrieval.bm25.term_index`` paired with the saturated term frequencies computed
+at ingest, ordered by ascending index so two walks of an unchanged collection agree across
+backends. That is sufficient to reproduce a BM25 score exactly, because the missing factor
+— IDF — is deliberately not stored anywhere: it is a statistic of the live corpus that every
+backend derives per query (``docs/adr/ADR-0007``), so a vector re-upserted into a corpus with
+the same document frequencies scores identically, and into a different corpus scores as that
+corpus says it should. ``k1`` and ``b`` are already baked into the stored weights by
+``encode_document``, so a carried vector keeps the parameters it was written with rather than
+silently adopting the reader's.
 """
 
 from __future__ import annotations
@@ -285,7 +303,11 @@ class VectorDBAdapter(ABC):
     def iterate_points(
         self, collection: str, *, with_vectors: bool = False, batch_size: int = 256
     ) -> AsyncIterator[Point]:
-        """Yield every point in a collection, in batches."""
+        """Yield every point in a collection, in batches.
+
+        ``with_vectors`` carries both legs: a point stored in a hybrid collection comes
+        back with ``sparse`` set, ordered by ascending term index.
+        """
 
     @abstractmethod
     async def search(self, query: SearchQuery) -> list[ScoredPoint]:

@@ -30,7 +30,7 @@ from fasterrag.adapters.vectordb.base import (
     SearchQuery,
     VectorDBAdapter,
 )
-from fasterrag.adapters.vectordb.chroma import ChromaAdapter
+from fasterrag.adapters.vectordb.chroma import RESERVED_PREFIX, ChromaAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.retrieval.bm25 import encode_document, encode_query
 from fasterrag.errors import ErrorCode, FasterRagError
@@ -313,6 +313,30 @@ class TestChromaIteration(ChromaFixtures):
         walked = [found async for found in adapter.iterate_points(collection)]
 
         assert walked == []
+
+    async def test_carried_postings_never_leak_into_the_payload(
+        self, adapter: VectorDBAdapter, hybrid_collection: str
+    ) -> None:
+        """Postings are reserved metadata here, so the walk has to put them in one place."""
+        await adapter.upsert(
+            [
+                Point(
+                    point_id="c_notice",
+                    collection=hybrid_collection,
+                    vector=VECTORS["a"],
+                    payload={"department": "legal"},
+                    sparse=encode_document("termination notice period"),
+                )
+            ]
+        )
+
+        walked = [
+            found async for found in adapter.iterate_points(hybrid_collection, with_vectors=True)
+        ]
+
+        assert walked[0].payload == {"department": "legal"}
+        assert walked[0].sparse is not None
+        assert not [key for key in walked[0].payload if key.startswith(RESERVED_PREFIX)]
 
 
 class TestChromaPayloads(ChromaFixtures):

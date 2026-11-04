@@ -46,6 +46,15 @@ that does not exist for an embedded store. **The honest limit**: that read pulls
 document containing any query term into this process. It is correct, and it does not
 scale the way Qdrant's server-side sparse index does.
 
+**Those postings are still the collection's keyword leg, so ``iterate_points`` returns
+them** (TASK-0291). They are stored in fasterRag's own representation rather than a vendor
+one, which is the whole reason the question comes up — but the test that matters is whether
+they are what the backend scores a keyword search with, and they are the only thing it
+scores one with. Reading them back is exact: the weight under ``fr.t.<index>`` is the value
+``encode_document`` produced, not a re-derivation, so a point walked out and written back
+ranks identically. Refusing to return them would have made Chroma the one backend whose
+archives silently lose the leg.
+
 **Snapshots are copies into another Chroma collection in the same directory.** Chroma's
 own ``fork`` is not implemented for a local client, so ``snapshot()`` creates a second
 collection and copies the records into it. Like pgvector's table copy this is *not* a
@@ -749,6 +758,7 @@ class ChromaAdapter(VectorDBAdapter):
             "iterate_points", lambda: list(handle.get(include=_READ_NOTHING)["ids"])
         )
         ids = sorted(walked)
+        carry_sparse = with_vectors and target.sparse
         include = _READ_WITH_VECTORS if with_vectors else _READ_METADATA
         for start in range(0, len(ids), batch_size):
             page = ids[start : start + batch_size]
@@ -756,11 +766,13 @@ class ChromaAdapter(VectorDBAdapter):
             vectors = _vectors_of(fetched.get("embeddings")) if with_vectors else []
             metadatas = fetched.get("metadatas") or []
             for index, point_id in enumerate(fetched["ids"]):
+                stored = metadatas[index] if index < len(metadatas) else None
                 yield Point(
                     point_id=point_id,
                     collection=collection,
                     vector=vectors[index] if index < len(vectors) else [],
-                    payload=_from_metadata(metadatas[index] if index < len(metadatas) else None),
+                    payload=_from_metadata(stored),
+                    sparse=_sparse_from_metadata(stored) if carry_sparse else None,
                 )
 
     async def search(self, query: SearchQuery) -> list[ScoredPoint]:
@@ -1032,6 +1044,37 @@ def _from_metadata(stored: Mapping[str, Any] | None) -> dict[str, Any]:
         if key.startswith(_JSON_PREFIX):
             payload[key.removeprefix(_JSON_PREFIX)] = _decode(key, value)
     return payload
+
+
+def _sparse_from_metadata(stored: Mapping[str, Any] | None) -> SparseVector | None:
+    """Rebuild the keyword leg from the postings held in reserved metadata keys.
+
+    The representation is fasterRag's, but the data is the backend's: these are the exact
+    weights ``_rank`` scores a keyword search with.
+    """
+    if not stored:
+        return None
+
+    postings = sorted(
+        _posting(key, value) for key, value in stored.items() if key.startswith(_TERM_PREFIX)
+    )
+    if not postings:
+        return None
+    return SparseVector(
+        indices=[term for term, _ in postings], values=[weight for _, weight in postings]
+    )
+
+
+def _posting(key: str, raw: object) -> tuple[int, float]:
+    """Decode one stored posting, refusing to guess at corruption."""
+    try:
+        return int(key.removeprefix(_TERM_PREFIX)), float(str(raw))
+    except ValueError as exc:
+        raise FasterRagError(
+            f"stored posting {key!r} does not hold a term index and a weight; the "
+            "collection was written by something other than this adapter",
+            code=ErrorCode.INTERNAL,
+        ) from exc
 
 
 def _decode(key: str, raw: object) -> Any:
