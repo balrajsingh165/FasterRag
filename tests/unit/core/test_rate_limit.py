@@ -2,7 +2,7 @@
 
 Every Redis test here drives `FakeRedis`, an in-memory double. No Redis server was
 available where this was written, so "the shared window behaves this way against a real
-server" is asserted nowhere in this file and is not claimed anywhere else (TASK-0216).
+server" is asserted nowhere in this file and is not claimed anywhere else (TASK-0290).
 
 What the double is allowed to prove is the part that is ours: which commands are issued,
 that they are issued inside one transaction, what the keys are made of, and what happens
@@ -12,16 +12,22 @@ agree with the double about any of it.
 
 from __future__ import annotations
 
+import builtins
+import dataclasses
+import hashlib
 from typing import Any
 
 import pytest
 
 from fasterrag.config.schema import Settings
 from fasterrag.core.rate_limit import (
+    RATE_LIMIT_NAMESPACE,
     InProcessRateLimiter,
+    RateLimitDecision,
     RedisRateLimiter,
     create_rate_limiter,
 )
+from fasterrag.errors import ConfigError
 
 SECRET = "an-api-key-that-must-not-be-stored"
 
@@ -33,11 +39,14 @@ class FakeRedis:
         self.counters: dict[str, int] = {}
         self.expiries: dict[str, int] = {}
         self.transactions: list[list[tuple[Any, ...]]] = []
+        self.pipelines: list[FakePipeline] = []
         self.error: Exception | None = None
         self.closed = False
 
     def pipeline(self, transaction: bool = False) -> FakePipeline:
-        return FakePipeline(self, transaction)
+        opened = FakePipeline(self, transaction)
+        self.pipelines.append(opened)
+        return opened
 
     async def aclose(self) -> None:
         self.closed = True
@@ -205,6 +214,7 @@ async def test_a_backend_outage_serves_the_request_and_says_so(
         decision = await limiter.allow("k", now=0.0)
 
     assert decision.allowed
+    assert decision.retry_after == 0, "a request served during an outage was told to back off"
     assert [record.levelname for record in caplog.records] == ["WARNING"]
     assert getattr(caplog.records[0], "trace_id", None)
 
@@ -254,3 +264,146 @@ def test_an_unparseable_redis_url_is_refused_at_startup() -> None:
     """A typo must name the key at startup, not surface as a 429 storm hours later."""
     with pytest.raises(ValueError, match="rate_limit_redis_url"):
         Settings.model_validate({"security": {"rate_limit_redis_url": "localhost:6379"}})
+
+
+@pytest.mark.parametrize("limit", [1, 2, 5])
+async def test_the_in_process_ceiling_admits_exactly_the_configured_number(limit: int) -> None:
+    """N-1 and N pass, N+1 does not: otherwise nothing tells a limit of N from one of N+1."""
+    limiter = InProcessRateLimiter(limit=limit)
+    moments = [1000.0 + index / 100 for index in range(limit + 1)]
+
+    admitted = [(await limiter.allow("k", now=moment)).allowed for moment in moments]
+
+    assert admitted == [True] * limit + [False]
+
+
+@pytest.mark.parametrize("limit", [1, 2, 5])
+async def test_the_shared_ceiling_admits_exactly_the_configured_number(limit: int) -> None:
+    """The shared window must land on the same ceiling as the in-process one."""
+    limiter = shared(FakeRedis(), limit=limit)
+    moments = [1000.0 + index / 100 for index in range(limit + 1)]
+
+    admitted = [(await limiter.allow("k", now=moment)).allowed for moment in moments]
+
+    assert admitted == [True] * limit + [False]
+
+
+async def test_a_request_exactly_one_window_old_has_already_left_the_window() -> None:
+    """The boundary is inclusive, and the clock it is measured on does not start at zero."""
+    limiter = InProcessRateLimiter(limit=1)
+    await limiter.allow("k", now=1000.0)
+
+    assert not (await limiter.allow("k", now=1059.999)).allowed
+    assert (await limiter.allow("k", now=1060.0)).allowed
+
+
+async def test_the_in_process_retry_after_counts_to_the_oldest_request_ageing_out() -> None:
+    """Wrong arithmetic here is a wrong `Retry-After` on every 429 the deployment serves."""
+    limiter = InProcessRateLimiter(limit=1)
+    await limiter.allow("k", now=1000.0)
+
+    assert (await limiter.allow("k", now=1010.0)).retry_after == 51
+    assert (await limiter.allow("k", now=1059.5)).retry_after == 1
+
+
+async def test_the_in_process_wait_is_long_enough_to_be_admitted() -> None:
+    """A `Retry-After` a second short is a refused caller in a retry loop."""
+    limiter = InProcessRateLimiter(limit=1)
+    await limiter.allow("k", now=1000.0)
+    refused = await limiter.allow("k", now=1010.0)
+
+    assert (await limiter.allow("k", now=1010.0 + refused.retry_after)).allowed
+
+
+async def test_the_shared_retry_after_counts_to_the_end_of_the_fixed_window() -> None:
+    """The fixed window ends on a wall-clock bucket boundary, not a window after this call."""
+    limiter = shared(FakeRedis(), limit=1)
+    await limiter.allow("k", now=1000.0)
+
+    assert (await limiter.allow("k", now=1010.0)).retry_after == 11
+    assert (await limiter.allow("k", now=1019.5)).retry_after == 1
+
+
+async def test_the_shared_wait_lands_in_the_next_window() -> None:
+    """The advertised wait has to cross the bucket boundary, or the retry is refused too."""
+    limiter = shared(FakeRedis(), limit=1)
+    await limiter.allow("k", now=1000.0)
+    refused = await limiter.allow("k", now=1010.0)
+
+    assert (await limiter.allow("k", now=1010.0 + refused.retry_after)).allowed
+
+
+async def test_neither_limiter_tells_a_permitted_caller_to_wait() -> None:
+    """A `Retry-After` on a served request backs a healthy caller off for nothing."""
+    in_process = await InProcessRateLimiter(limit=1).allow("k", now=1000.0)
+    in_redis = await shared(FakeRedis(), limit=1).allow("k", now=1000.0)
+
+    assert (in_process.allowed, in_process.retry_after) == (True, 0)
+    assert (in_redis.allowed, in_redis.retry_after) == (True, 0)
+
+
+def test_a_decision_is_a_frozen_value_that_defaults_to_no_wait() -> None:
+    """One is allocated per authenticated request and handed to middleware that may not edit."""
+    decision = RateLimitDecision(allowed=True)
+    field = "retry_after"
+
+    assert decision.retry_after == 0
+    assert not hasattr(decision, "__dict__"), "the per-request decision grew an instance dict"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        setattr(decision, field, 5)
+
+
+async def test_the_fingerprint_in_the_key_is_a_128_bit_prefix_of_the_digest() -> None:
+    """The truncation length is a security property: shortening it is a collision budget."""
+    server = FakeRedis()
+
+    await shared(server).allow(SECRET, now=0.0)
+
+    (key,) = server.counters
+    namespace, fingerprint, bucket = key.rsplit(":", 2)
+    assert namespace == RATE_LIMIT_NAMESPACE
+    assert bucket == "0"
+    assert len(fingerprint) == 32
+    assert hashlib.sha256(SECRET.encode("utf-8")).hexdigest().startswith(fingerprint)
+
+
+async def test_the_pair_is_sent_as_a_transaction_rather_than_a_bare_pipeline() -> None:
+    """Pipelined without MULTI, a dying process can still land the INCR without the EXPIRE."""
+    server = FakeRedis()
+
+    await shared(server).allow("k", now=0.0)
+
+    assert [pipeline.transaction for pipeline in server.pipelines] == [True]
+
+
+def _without_the_redis_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every ``import redis`` inside the limiter fail the way a bare install does."""
+    real_import = builtins.__import__
+
+    def refuse(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name.startswith("redis"):
+            raise ImportError("no module named redis")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse)
+
+
+def test_selecting_the_shared_window_without_the_client_names_the_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one error an operator sees when the optional dependency is missing."""
+    _without_the_redis_extra(monkeypatch)
+
+    with pytest.raises(ConfigError, match=r"fasterrag\[redis\]"):
+        RedisRateLimiter("redis://unused", limit=1)
+
+
+async def test_an_injected_client_is_honoured_even_without_the_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """How this very file would run on a machine that never installed redis-py."""
+    server = FakeRedis()
+    _without_the_redis_extra(monkeypatch)
+
+    assert (await shared(server, limit=1).allow("k", now=0.0)).allowed
+    assert server.counters

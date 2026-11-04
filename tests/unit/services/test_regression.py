@@ -1,3 +1,5 @@
+import json
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
 
@@ -6,7 +8,7 @@ import pytest
 from fasterrag.config.schema import Settings
 from fasterrag.core.evals.harness import EvalReport
 from fasterrag.core.identity import retrieval_config_hash
-from fasterrag.errors import FasterRagError
+from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.regression import (
     COMPARABILITY_VERSION,
     Baseline,
@@ -24,8 +26,13 @@ def settings(*, gate: bool = True, **overrides: Any) -> Settings:
     return Settings.model_validate(payload)
 
 
-def report(recall: float = 0.9, ndcg: float = 0.85, k: int = 10) -> EvalReport:
-    return EvalReport(k=k, scored=20, adversarial=0, recall_at_k=recall, mrr=0.8, ndcg_at_k=ndcg)
+def report(recall: float = 0.9, ndcg: float = 0.85, k: int = 10, mrr: float = 0.8) -> EvalReport:
+    return EvalReport(k=k, scored=20, adversarial=0, recall_at_k=recall, mrr=mrr, ndcg_at_k=ndcg)
+
+
+BOUNDARY_TOLERANCE: float = 0.25
+BOUNDARY_DROPS: list[float] = [0.21875, 0.25, 0.28125]
+BOUNDARY_IDS: list[str] = ["just-inside", "exactly-on", "just-beyond"]
 
 
 def baseline_for(
@@ -127,6 +134,48 @@ def test_a_configured_tolerance_is_honored() -> None:
     base = baseline_for(lenient, recall=0.90)
 
     assert check_regression(report(recall=0.70), base, lenient).passed is True
+
+
+@pytest.mark.parametrize("drop", BOUNDARY_DROPS, ids=BOUNDARY_IDS)
+def test_the_tolerance_boundary_cases_are_exact_in_binary(drop: float) -> None:
+    """A case only lands on the boundary when the subtraction behind it is exact."""
+    assert 1.0 - (1.0 - drop) == drop
+
+
+@pytest.mark.parametrize(
+    ("drop", "blocks"),
+    list(zip(BOUNDARY_DROPS, [False, False, True], strict=True)),
+    ids=BOUNDARY_IDS,
+)
+def test_the_recall_tolerance_is_the_largest_drop_that_still_passes(
+    drop: float, blocks: bool
+) -> None:
+    """``recall_tolerance`` is the maximum allowed drop, so a drop equal to it still passes."""
+    configured = settings(eval={"regression_gate": True, "recall_tolerance": BOUNDARY_TOLERANCE})
+    base = baseline_for(configured, recall=1.0)
+
+    result = check_regression(report(recall=1.0 - drop), base, configured)
+
+    assert result.passed is (not blocks)
+    assert (result.verdict is Verdict.REGRESSED) is blocks
+
+
+@pytest.mark.parametrize(
+    ("drop", "blocks"),
+    list(zip(BOUNDARY_DROPS, [False, False, True], strict=True)),
+    ids=BOUNDARY_IDS,
+)
+def test_the_ndcg_tolerance_is_the_largest_drop_that_still_passes(
+    drop: float, blocks: bool
+) -> None:
+    """The second metric reads its own config key, so its boundary is proven separately."""
+    configured = settings(eval={"regression_gate": True, "ndcg_tolerance": BOUNDARY_TOLERANCE})
+    base = baseline_for(configured, ndcg=1.0)
+
+    result = check_regression(report(ndcg=1.0 - drop), base, configured)
+
+    assert result.passed is (not blocks)
+    assert (result.verdict is Verdict.REGRESSED) is blocks
 
 
 def test_a_missing_baseline_blocks_rather_than_passing_vacuously() -> None:
@@ -263,3 +312,82 @@ def test_any_drop_beyond_tolerance_blocks(drop: float) -> None:
     result = check_regression(report(recall=0.95 - drop), base, configured)
 
     assert result.passed is False
+
+
+@pytest.mark.parametrize("attribute", ["recall_at_k", "embedding_model", "fingerprint_version"])
+def test_a_baseline_cannot_be_edited_after_it_is_recorded(attribute: str) -> None:
+    """A record a caller can rewrite in place is no longer a record of what was measured."""
+    base = baseline_for(settings())
+
+    with pytest.raises(FrozenInstanceError):
+        setattr(base, attribute, "rewritten")
+
+
+@pytest.mark.parametrize("attribute", ["passed", "failures", "obstacles"])
+def test_a_gate_result_cannot_be_edited_after_the_gate_decided(attribute: str) -> None:
+    """A verdict a caller can flip to passing after the fact is not a gate."""
+    configured = settings()
+    result = check_regression(report(recall=0.5), baseline_for(configured), configured)
+
+    with pytest.raises(FrozenInstanceError):
+        setattr(result, attribute, True)
+
+
+def test_a_recorded_baseline_is_rounded_to_six_decimals(tmp_path: Path) -> None:
+    """The file is committed and read as a diff, so a float's full tail is noise not signal."""
+    measured = report(recall=0.123456789, ndcg=0.555555555, mrr=0.987654321)
+
+    written = write_baseline(tmp_path / "baseline.json", measured, settings())
+
+    assert written.recall_at_k == 0.123457
+    assert written.mrr == 0.987654
+    assert written.ndcg_at_k == 0.555556
+
+
+def test_a_written_baseline_is_in_the_committed_canonical_form(tmp_path: Path) -> None:
+    """Sorted keys and a two-space indent keep a re-recording from rewriting every line."""
+    path = tmp_path / "baseline.json"
+
+    write_baseline(path, report(), settings())
+    text = path.read_text(encoding="utf-8")
+    document = json.loads(text)
+
+    assert list(document) == sorted(document)
+    assert list(document["fingerprint"]) == sorted(document["fingerprint"])
+    assert text.startswith('{\n  "' + sorted(document)[0] + '"')
+    assert text.endswith("}\n")
+
+
+def test_a_baseline_is_written_into_a_directory_that_does_not_exist_yet(tmp_path: Path) -> None:
+    """A gate records into a dataset directory CI may be creating for the first time."""
+    path = tmp_path / "datasets" / "handbook" / "baseline.json"
+
+    written = write_baseline(path, report(), settings())
+
+    assert load_baseline(path) == written
+
+
+def test_a_fingerprint_recording_a_bare_number_is_refused(tmp_path: Path) -> None:
+    """A number never equals the text a field renders as, so it would mismatch forever."""
+    broken = tmp_path / "baseline.json"
+    broken.write_text(
+        '{"recorded_at": "x", "k": 5, "recall_at_k": 1.0, "mrr": 1.0, "ndcg_at_k": 1.0, '
+        '"scored": 1, "embedding_model": "m", "config_hash": "h", '
+        '"fingerprint": {"retrieval.top_k": 10}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FasterRagError):
+        load_baseline(broken)
+
+
+def test_a_corrupt_baseline_is_not_retryable(tmp_path: Path) -> None:
+    """Reading the same unparseable file again cannot succeed, so no caller may retry it."""
+    broken = tmp_path / "baseline.json"
+    broken.write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(FasterRagError) as caught:
+        load_baseline(broken)
+
+    assert caught.value.retryable is False
+    assert caught.value.code is ErrorCode.VALIDATION_FAILED

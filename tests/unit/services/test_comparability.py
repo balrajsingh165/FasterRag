@@ -238,3 +238,14 @@ def test_a_recorded_fingerprint_survives_a_json_round_trip() -> None:
 
     assert json.loads(json.dumps(fingerprint)) == fingerprint
     assert all(isinstance(value, str) for value in fingerprint.values())
+
+
+def test_a_recorded_value_renders_in_a_canonical_key_order() -> None:
+    """Equal values must render as equal text, in whatever order a model lists its fields."""
+    tiered = Settings.model_validate(MUTATIONS["embeddings.tiering"])
+
+    rendered = comparability_fingerprint(tiered)["embeddings.tiering"]
+    rule = json.loads(rendered)["rules"][0]
+
+    assert list(rule) == sorted(rule)
+    assert rendered == json.dumps(json.loads(rendered), sort_keys=True, separators=(",", ":"))

@@ -43,6 +43,16 @@ class _RecordingLimiter(RateLimiter):
         self.closed = True
 
 
+class _RefusingLimiter(RateLimiter):
+    """Refuses every request with a wait no clock in the test could have produced."""
+
+    async def allow(self, identity: str) -> RateLimitDecision:
+        return RateLimitDecision(False, 37)
+
+    async def close(self) -> None:
+        return None
+
+
 def secured(monkeypatch: pytest.MonkeyPatch, keys: str = SECRET) -> TestClient:
     monkeypatch.setenv("FASTERRAG_API_KEY", keys)
     settings = Settings.model_validate({"security": {"auth": True}})
@@ -215,6 +225,24 @@ def test_exceeding_the_limit_returns_429_with_retry_after(
     assert response.status_code == 429
     assert int(response.headers["Retry-After"]) >= 1
     assert response.json()["code"] == ErrorCode.RATE_LIMITED.value
+
+
+def test_the_retry_after_header_is_the_limiter_s_own_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The header is the only place a refused caller learns how long to wait."""
+    monkeypatch.setattr(
+        "fasterrag.api.auth.create_rate_limiter", lambda _settings: _RefusingLimiter()
+    )
+    monkeypatch.setenv("FASTERRAG_API_KEY", SECRET)
+    app = create_app(Settings.model_validate({"security": {"auth": True}}))
+    app.state.vector_db = StubVectorDB()
+
+    with TestClient(app) as client:
+        response = client.get("/metrics", headers=bearer())
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "37"
 
 
 def test_a_malformed_authorization_header_is_treated_as_missing(

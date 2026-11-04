@@ -42,7 +42,7 @@ deciding how to deploy this will actually read it.
 **Never run against a live Redis server.** Every test covering :class:`RedisRateLimiter`
 drives an in-memory double, because no Redis server was available where this was written.
 The command sequence is the conventional one and the transaction grouping is asserted, but
-"this behaves correctly against a real Redis" is an untested claim (TASK-0216).
+"this behaves correctly against a real Redis" is an untested claim (TASK-0290).
 
 The connection handling deliberately mirrors ``fasterrag.core.cache.redis``: same optional
 import, same ``ConfigError`` when the extra is missing, same ``from_url``. Folding the two
