@@ -16,6 +16,24 @@ worse than the committed baseline, the swap does not happen and blue stays live.
 The previous collection is retained for ``index.reindex.rollback_retention_hours`` so a
 rollback is an alias flip rather than another rebuild — the difference between seconds and
 hours when an index turns out to be wrong in a way the eval set did not catch.
+
+**A keyword leg can only be added by rebuilding** (TASK-0119). Qdrant will not mix a named
+sparse vector with an unnamed dense one, so a dense-only collection cannot gain one; the
+pgvector and Chroma adapters refuse the same mismatch rather than bolt a keyword leg onto a
+populated collection. Turning ``retrieval.hybrid`` on over an indexed corpus is therefore a
+*reindex*, not a restart, and :func:`audit_keyword_leg` is the preflight that says so before
+a query discovers it. It belongs where a human is already waiting for an answer —
+``fasterrag doctor``, which refuses with :func:`require_keyword_leg` — and at startup, which
+only *logs* the verdict, because the API deliberately boots with an unreachable backend and
+serves degraded rather than refusing to start. Not on the query path: a per-query check
+charges every query for a mistake made once, and reports it at 3am to a user who cannot act
+on it.
+
+It reads the live configuration through ``CollectionInfo.sparse``, which every adapter
+already reports, so detection needs no new adapter method and no new config key. It is a
+live-backend call and may raise, like any other: a caller that treats "unreachable" as
+"misconfigured" turns a transient outage into a refusal to boot, so a startup caller catches
+the backend's own typed error and carries on with the verdict unknown.
 """
 
 from __future__ import annotations
@@ -33,11 +51,14 @@ from fasterrag.services.lockfile import LockStore
 
 __all__ = [
     "GREEN_SUFFIX",
+    "KeywordLegAudit",
     "ReindexPlan",
     "ReindexResult",
     "RollbackResult",
+    "audit_keyword_leg",
     "green_name",
     "plan_reindex",
+    "require_keyword_leg",
     "retire",
     "rollback",
     "swap",
@@ -55,6 +76,84 @@ def green_name(alias: str, stamp: str | None = None) -> str:
     """Return the physical collection name for a new build behind ``alias``."""
     moment = stamp or datetime.now(tz=UTC).strftime("%Y%m%d%H%M%S")
     return f"{alias}{GREEN_SUFFIX}{moment}"
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordLegAudit:
+    """Whether the live index behind a served name can answer the configured keyword leg."""
+
+    name: str
+    live: str | None
+    required: bool
+    present: bool
+
+    @property
+    def missing(self) -> bool:
+        """Return whether hybrid retrieval is configured over an index that cannot serve it."""
+        return self.required and self.live is not None and not self.present
+
+    @property
+    def detail(self) -> str:
+        """Return the operator-facing explanation, naming the collection and the way out."""
+        if not self.missing:
+            return f"{self.name!r} matches the configured retrieval mode"
+        return (
+            f"retrieval.hybrid is on, but collection {self.live!r} (served as {self.name!r}) "
+            "was indexed without a keyword leg, and a sparse vector cannot be attached to an "
+            "existing collection. Rebuild it with "
+            f"`fasterrag index reembed {self.name} <sources>`, which builds a hybrid "
+            "collection alongside the live one and swaps the alias, or set retrieval.hybrid "
+            "to false to keep serving dense-only results knowingly"
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the serialized verdict."""
+        return {
+            "name": self.name,
+            "live": self.live,
+            "required": self.required,
+            "present": self.present,
+            "missing": self.missing,
+            "detail": self.detail,
+        }
+
+
+async def audit_keyword_leg(
+    name: str, settings: Settings, adapter: VectorDBAdapter
+) -> KeywordLegAudit:
+    """Report whether the index behind ``name`` carries the configured keyword leg.
+
+    Resolves ``name`` through any alias first, so the verdict is about the collection
+    queries actually reach. A name nothing has indexed yet is never a mismatch.
+    """
+    target = await adapter.alias_target(name) or name
+    live = next((info for info in await adapter.list_collections() if info.name == target), None)
+    audit = KeywordLegAudit(
+        name=name,
+        live=live.name if live is not None else None,
+        required=settings.retrieval.hybrid,
+        present=live is not None and live.sparse,
+    )
+    if audit.missing:
+        _logger.warning(
+            "the live index has no keyword leg but hybrid retrieval is configured",
+            extra={"alias": name, "live": audit.live},
+        )
+    return audit
+
+
+async def require_keyword_leg(
+    name: str, settings: Settings, adapter: VectorDBAdapter
+) -> KeywordLegAudit:
+    """Refuse a configuration whose keyword leg the live index cannot serve.
+
+    For ``fasterrag doctor`` and the CLI, where a human is waiting and can act on it.
+    Startup calls :func:`audit_keyword_leg` instead, which warns without refusing to boot.
+    """
+    audit = await audit_keyword_leg(name, settings, adapter)
+    if audit.missing:
+        raise FasterRagError(audit.detail, code=ErrorCode.CONFLICT, retryable=False)
+    return audit
 
 
 @dataclass(frozen=True, slots=True)

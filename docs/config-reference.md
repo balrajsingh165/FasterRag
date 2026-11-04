@@ -286,7 +286,7 @@ Thresholds the parsers apply before chunking sees anything. They are corpus-depe
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
 | `retrieval.top_k` | int | `10` | 1–100; ≤ `rerank_top_n` | Final number of chunks passed to context assembly. |
-| `retrieval.hybrid` | bool | `true` | — | Run dense ANN + sparse BM25 legs in parallel and fuse. `false` = dense-only. |
+| `retrieval.hybrid` | bool | `true` | — | Run dense ANN + sparse BM25 legs in parallel and fuse. `false` = dense-only. **Index-shaping, not a pure runtime toggle**: a keyword leg cannot be attached to an existing dense-only collection, so turning this on over one does not degrade to dense — the query fails. Run `fasterrag index reembed` to rebuild, and set it before importing an archive (TASK-0119). |
 | `retrieval.bm25_weight` | float | `1.0` | 0.0–1.0 after normalization; `bm25_weight + dense_weight > 0` | Weight of the BM25 leg in weighted-fusion mode (RRF itself is rank-based; weights scale each leg's RRF contribution). |
 | `retrieval.dense_weight` | float | `1.0` | 0.0–1.0 after normalization; see above | Weight of the dense leg. |
 | `retrieval.rrf_k` | float | `60` | > 0 | Reciprocal Rank Fusion constant. Default 60 per Cormack, Clarke & Büttcher (SIGIR 2009). |

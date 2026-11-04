@@ -19,8 +19,10 @@ from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.reindex import (
     GREEN_SUFFIX,
+    audit_keyword_leg,
     green_name,
     plan_reindex,
+    require_keyword_leg,
     retire,
     rollback,
     swap,
@@ -33,6 +35,7 @@ class AliasAdapter(VectorDBAdapter):
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
         self.collections: dict[str, int] = {}
+        self.hybrid: set[str] = set()
         self.aliases: dict[str, str] = {}
         self.snapshots: dict[str, list[str]] = {}
         self.restored: list[tuple[str, str]] = []
@@ -43,7 +46,8 @@ class AliasAdapter(VectorDBAdapter):
 
     async def list_collections(self) -> list[CollectionInfo]:
         return [
-            CollectionInfo(name=name, vectors=count) for name, count in self.collections.items()
+            CollectionInfo(name=name, vectors=count, sparse=name in self.hybrid)
+            for name, count in self.collections.items()
         ]
 
     async def drop_collection(self, name: str) -> bool:
@@ -302,3 +306,85 @@ async def test_a_zero_retention_window_still_spares_the_live_collection() -> Non
 
     assert dropped == ["docs-v20200101000000"]
     assert "docs-v20260801000000" in backend.collections
+
+
+async def test_hybrid_over_a_dense_only_index_is_refused() -> None:
+    backend = adapter(**{"docs-v20260101000000": 10})
+    backend.aliases["docs"] = "docs-v20260101000000"
+
+    with pytest.raises(FasterRagError) as failure:
+        await require_keyword_leg("docs", settings(), backend)
+
+    assert failure.value.code is ErrorCode.CONFLICT
+    assert failure.value.retryable is False
+
+
+async def test_the_refusal_names_the_collection_and_the_way_out() -> None:
+    backend = adapter(**{"docs-v20260101000000": 10})
+    backend.aliases["docs"] = "docs-v20260101000000"
+
+    with pytest.raises(FasterRagError) as failure:
+        await require_keyword_leg("docs", settings(), backend)
+
+    detail = failure.value.detail
+    assert "docs-v20260101000000" in detail
+    assert "fasterrag index reembed docs" in detail
+
+
+async def test_an_index_with_a_keyword_leg_passes() -> None:
+    backend = adapter(**{"docs-v20260101000000": 10})
+    backend.hybrid.add("docs-v20260101000000")
+    backend.aliases["docs"] = "docs-v20260101000000"
+
+    audit = await require_keyword_leg("docs", settings(), backend)
+
+    assert audit.missing is False
+    assert audit.present is True
+
+
+async def test_a_dense_only_index_is_fine_while_hybrid_is_off() -> None:
+    configured = settings(retrieval={"hybrid": False})
+    backend = adapter(**{"docs-v20260101000000": 10})
+    backend.aliases["docs"] = "docs-v20260101000000"
+
+    audit = await require_keyword_leg("docs", configured, backend)
+
+    assert audit.required is False
+    assert audit.missing is False
+
+
+async def test_the_audit_follows_the_alias_to_the_collection_queries_reach() -> None:
+    backend = adapter(**{"docs-v20260101000000": 10, "docs": 0})
+    backend.hybrid.add("docs")
+    backend.aliases["docs"] = "docs-v20260101000000"
+
+    audit = await audit_keyword_leg("docs", settings(), backend)
+
+    assert audit.live == "docs-v20260101000000"
+    assert audit.missing is True
+
+
+async def test_a_name_nothing_has_indexed_yet_is_not_a_mismatch() -> None:
+    audit = await audit_keyword_leg("docs", settings(), adapter())
+
+    assert audit.live is None
+    assert audit.missing is False
+
+
+async def test_the_audit_reports_rather_than_raises_so_doctor_can_list_it() -> None:
+    backend = adapter(docs=10)
+
+    audit = await audit_keyword_leg("docs", settings(), backend)
+
+    assert audit.as_dict()["missing"] is True
+    assert "keyword leg" in audit.as_dict()["detail"]
+
+
+async def test_a_physical_collection_is_audited_without_an_alias() -> None:
+    backend = adapter(docs=10)
+    backend.hybrid.add("docs")
+
+    audit = await audit_keyword_leg("docs", settings(), backend)
+
+    assert audit.live == "docs"
+    assert audit.missing is False

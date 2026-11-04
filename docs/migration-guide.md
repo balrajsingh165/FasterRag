@@ -49,6 +49,8 @@ If you want library-style composition back, you still have it: `fasterrag.parsin
 | Different model, different dimensions, or unknown model version | **Re-ingest from source documents.** This is the recommended default — it produces a valid `index.lock` and lets you use fasterRag's chunkers |
 | Source documents no longer available | Import chunks as documents (`--reembed`), accepting that chunk boundaries are inherited from the old system |
 
+**Decide `retrieval.hybrid` before you import, not after.** Reusing dense vectors does not cost you the keyword leg — the importer builds it, from the archive's own postings when it has them and otherwise by re-encoding the chunk text, so a dense-only source still lands as a hybrid collection. But it only does that when `retrieval.hybrid` is already true at import time, because that flag is what shapes the collection. Flip it on afterwards and you are stuck: no backend can attach a sparse vector to a collection that already exists, so the only route to a keyword leg is a full reindex (TASK-0119). This is not a quiet degradation to dense-only — queries against the mismatched index fail outright ([troubleshooting.md](troubleshooting.md) → *Retrieval quality*) — but it is hours of re-embedding you can avoid by setting the flag first.
+
 Unknown provenance is a real answer, not a failure: if you cannot state the exact model version that produced your existing vectors, re-embed. That uncertainty is precisely the problem D1's lockfile exists to eliminate going forward.
 
 **4. Estimate before you spend.** `fasterrag estimate ./corpus --all-providers` gives token counts, projected cost, and projected time — do this before a large re-embed, not after.
