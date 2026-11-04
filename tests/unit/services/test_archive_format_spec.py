@@ -16,10 +16,11 @@ from typing import Any
 
 import pytest
 
-from fasterrag.adapters.vectordb.base import Point
+from fasterrag.adapters.vectordb.base import Point, SparseVector
 from fasterrag.config.schema import Settings
 from fasterrag.services.archive import (
     ARCHIVE_SUFFIX,
+    DENSE_ONLY_FORMAT_VERSION,
     FORMAT_VERSION,
     export_archive,
 )
@@ -73,11 +74,12 @@ def resolve(payload: dict[str, Any], path: str) -> Any:
     return current
 
 
-def point(chunk_id: str) -> Point:
+def point(chunk_id: str, sparse: SparseVector | None = None) -> Point:
     """Return one point shaped the way the indexer stores them."""
     return Point(
         point_id=chunk_id,
         collection="docs",
+        sparse=sparse,
         vector=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
         payload={
             "document_id": "d_1",
@@ -127,9 +129,10 @@ def rows(body: bytes) -> list[dict[str, Any]]:
     return [json.loads(line) for line in body.decode("utf-8").splitlines() if line.strip()]
 
 
-def test_the_spec_names_the_version_this_build_writes() -> None:
+def test_the_spec_names_both_versions_this_build_writes() -> None:
     """A spec that documents another version describes an archive nobody produces."""
     assert f"`{FORMAT_VERSION}`" in spec_text()
+    assert f"`{DENSE_ONLY_FORMAT_VERSION}`" in spec_text()
 
 
 def test_the_declared_members_are_the_ones_the_spec_lists() -> None:
@@ -202,3 +205,62 @@ def test_the_checksums_member_covers_every_other_member(exported: dict[str, byte
     }
 
     assert listed == set(exported) - {"manifest.json", "checksums.sha256"}
+
+
+@pytest.fixture
+async def hybrid_exported(tmp_path: Path) -> dict[str, bytes]:
+    """Return the members of an archive the real exporter took from a hybrid collection."""
+    leg = SparseVector(indices=[4, 70], values=[0.75, 0.25])
+    await export_archive(
+        Settings.model_validate({}),
+        FakeAdapter([point("c_1", leg), point("c_2", leg)]),  # type: ignore[arg-type]
+        collection="docs",
+        destination=tmp_path / "backup",
+        include_vectors=True,
+    )
+    with tarfile.open(tmp_path / f"backup{ARCHIVE_SUFFIX}", "r:gz") as tar:
+        return {
+            member.name: tar.extractfile(member).read()  # type: ignore[union-attr]
+            for member in tar.getmembers()
+        }
+
+
+def test_the_spec_keeps_the_keyword_leg_optional_on_a_vector_row() -> None:
+    """An archive written before TASK-0302 has none, and must stay importable."""
+    assert "sparse" not in required_fields("**`vectors.jsonl`**")
+    assert "| `sparse` |" in spec_text()
+
+
+def test_the_keyword_leg_is_written_in_the_shape_the_spec_names(
+    hybrid_exported: dict[str, bytes],
+) -> None:
+    """The spec names two equal-length lists; anything else is a format nobody else reads."""
+    for row in rows(hybrid_exported["vectors.jsonl"]):
+        assert set(row["sparse"]) == {"indices", "values"}
+        assert len(row["sparse"]["indices"]) == len(row["sparse"]["values"])
+        assert row["sparse"]["indices"] == sorted(row["sparse"]["indices"])
+
+
+def test_the_spec_names_includes_sparse_as_the_manifest_declaration(
+    hybrid_exported: dict[str, bytes],
+) -> None:
+    """The reader refuses an archive whose rows and manifest disagree, so the two must agree."""
+    assert "| `includes_sparse` |" in spec_text()
+    assert json.loads(hybrid_exported["manifest.json"])["includes_sparse"] is True
+
+
+def test_an_archive_with_a_keyword_leg_declares_the_major_the_spec_assigns_it(
+    hybrid_exported: dict[str, bytes],
+) -> None:
+    """The version table is the whole backward-compatibility story; a writer off it is a trap."""
+    declared = json.loads(hybrid_exported["manifest.json"])["format_version"]
+
+    assert declared == FORMAT_VERSION
+    assert f"| `{FORMAT_VERSION}` | any vector row carries `sparse` |" in spec_text()
+
+
+def test_the_keyword_leg_adds_no_member_the_spec_never_declared(
+    hybrid_exported: dict[str, bytes],
+) -> None:
+    """It extends `vectors.jsonl` rather than arriving as a member an old reader ignores."""
+    assert set(hybrid_exported) <= set(declared_members())

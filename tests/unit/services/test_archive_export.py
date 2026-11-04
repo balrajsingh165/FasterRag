@@ -5,13 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from fasterrag.adapters.vectordb.base import Point
+from fasterrag.adapters.vectordb.base import Point, SparseVector
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.archive import (
     ARCHIVE_SUFFIX,
     CHECKSUMS_NAME,
     CHUNKS_NAME,
+    DENSE_ONLY_FORMAT_VERSION,
     DOCUMENTS_NAME,
     FORMAT_VERSION,
     LOCK_NAME,
@@ -21,7 +22,13 @@ from fasterrag.services.archive import (
 )
 
 
-def point(chunk_id: str, document_id: str = "d_1", **extra: object) -> Point:
+def point(
+    chunk_id: str,
+    document_id: str = "d_1",
+    *,
+    sparse: SparseVector | None = None,
+    **extra: object,
+) -> Point:
     payload = {
         "document_id": document_id,
         "source_uri": "docs/a.md",
@@ -32,7 +39,9 @@ def point(chunk_id: str, document_id: str = "d_1", **extra: object) -> Point:
         "embedding_model": "m",
         **extra,
     }
-    return Point(point_id=chunk_id, collection="docs", vector=[0.1, 0.2], payload=payload)
+    return Point(
+        point_id=chunk_id, collection="docs", vector=[0.1, 0.2], payload=payload, sparse=sparse
+    )
 
 
 class FakeAdapter:
@@ -122,10 +131,12 @@ async def test_the_manifest_counts_match_the_rows(tmp_path: Path) -> None:
     assert manifest["counts"] == {"documents": 2, "chunks": 2, "vectors": 2}
 
 
-async def test_the_manifest_declares_the_format_version(tmp_path: Path) -> None:
-    archive = await write(tmp_path, [point("c_1")])
+async def test_a_dense_only_export_declares_the_original_format_version(tmp_path: Path) -> None:
+    """An archive that gained no new data must not be stranded over a feature it does not use."""
+    manifest = json.loads(members(await write(tmp_path, [point("c_1")]))[MANIFEST_NAME])
 
-    assert json.loads(members(archive)[MANIFEST_NAME])["format_version"] == FORMAT_VERSION
+    assert manifest["format_version"] == DENSE_ONLY_FORMAT_VERSION
+    assert "includes_sparse" not in manifest
 
 
 async def test_the_manifest_records_whether_vectors_are_present(tmp_path: Path) -> None:
@@ -226,3 +237,68 @@ async def test_the_width_is_observed_even_without_exported_vectors(tmp_path: Pat
     archive = await write(tmp_path, [point("c_1")])
 
     assert json.loads(members(archive)[MANIFEST_NAME])["embedding"]["dimensions"] == 2
+
+
+async def test_the_keyword_leg_is_carried_beside_the_dense_vector(tmp_path: Path) -> None:
+    """TASK-0302: a hybrid collection stores two vectors per chunk, so an archive carries two."""
+    leg = SparseVector(indices=[3, 11], values=[0.5, 0.25])
+    archive = await write(tmp_path, [point("c_1", sparse=leg)], include_vectors=True)
+    row = json.loads(members(archive)[VECTORS_NAME].decode("utf-8").strip())
+
+    assert row["sparse"] == {"indices": [3, 11], "values": [0.5, 0.25]}
+
+
+async def test_sparse_postings_are_written_ascending_by_term_index(tmp_path: Path) -> None:
+    """Ascending order is what lets a reader verify the postings and a diff stay quiet."""
+    leg = SparseVector(indices=[11, 3], values=[0.25, 0.5])
+    archive = await write(tmp_path, [point("c_1", sparse=leg)], include_vectors=True)
+    row = json.loads(members(archive)[VECTORS_NAME].decode("utf-8").strip())
+
+    assert row["sparse"] == {"indices": [3, 11], "values": [0.5, 0.25]}
+
+
+async def test_the_same_postings_in_another_order_export_identically(tmp_path: Path) -> None:
+    """Byte-identity must not depend on a vendor walk happening to come back sorted."""
+    first = await write(
+        tmp_path / "a",
+        [point("c_1", sparse=SparseVector(indices=[11, 3], values=[0.25, 0.5]))],
+        include_vectors=True,
+    )
+    second = await write(
+        tmp_path / "b",
+        [point("c_1", sparse=SparseVector(indices=[3, 11], values=[0.5, 0.25]))],
+        include_vectors=True,
+    )
+
+    assert members(first)[VECTORS_NAME] == members(second)[VECTORS_NAME]
+
+
+async def test_a_dense_only_row_carries_no_sparse_key_at_all(tmp_path: Path) -> None:
+    """Presence is the signal: `sparse` means the backend was holding a keyword leg."""
+    archive = await write(tmp_path, [point("c_1")], include_vectors=True)
+
+    assert "sparse" not in json.loads(members(archive)[VECTORS_NAME].decode("utf-8").strip())
+
+
+async def test_an_archive_carrying_the_keyword_leg_declares_the_newer_major(
+    tmp_path: Path,
+) -> None:
+    """A 1.x reader accepts a 1.x archive and then drops the postings without a word."""
+    leg = SparseVector(indices=[1], values=[1.0])
+    archive = await write(tmp_path, [point("c_1", sparse=leg)], include_vectors=True)
+    manifest = json.loads(members(archive)[MANIFEST_NAME])
+
+    assert manifest["format_version"] == FORMAT_VERSION
+    assert manifest["format_version"].split(".")[0] != DENSE_ONLY_FORMAT_VERSION.split(".")[0]
+    assert manifest["includes_sparse"] is True
+
+
+async def test_an_empty_keyword_leg_is_still_carried(tmp_path: Path) -> None:
+    """A chunk of nothing but stopwords held an empty leg; recomputing one is not the same."""
+    archive = await write(
+        tmp_path, [point("c_1", sparse=SparseVector(indices=[], values=[]))], include_vectors=True
+    )
+    row = json.loads(members(archive)[VECTORS_NAME].decode("utf-8").strip())
+
+    assert row["sparse"] == {"indices": [], "values": []}
+    assert json.loads(members(archive)[MANIFEST_NAME])["includes_sparse"] is True

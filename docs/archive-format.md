@@ -21,7 +21,7 @@ archive.fragx
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `format_version` | str (SemVer) | ✅ | Archive format version; this document specifies `1.0.0`. |
+| `format_version` | str (SemVer) | ✅ | Archive format version. This document specifies `2.0.0`, which carries the keyword leg; an archive with no keyword leg declares `1.0.0` instead (see [Versioning](#versioning)). |
 | `created_at` | str (ISO 8601) | ✅ | Export timestamp. |
 | `fasterrag_version` | str | ✅ | Version that produced the archive. |
 | `collection.name` | str | ✅ | Source collection name. |
@@ -31,6 +31,7 @@ archive.fragx
 | `chunking.strategy` / `chunking.chunk_size` / `chunking.overlap` / `chunking.contextual_enrichment` | mixed | ✅ | Chunking settings the chunks were produced with. |
 | `counts.documents` / `counts.chunks` / `counts.vectors` | int | ✅ | Row counts; import verifies against actual line counts. |
 | `includes_vectors` | bool | ✅ | Whether `vectors.jsonl` is present. |
+| `includes_sparse` | bool | — | Present and `true` only when the vector rows carry a `sparse` keyword leg. Its presence is what makes the archive `2.0.0`; import refuses an archive whose rows and manifest disagree. |
 | `source_provider` | str | ✅ | Informational only (e.g. `qdrant`) — import must not branch on it. |
 | `tenant` | str\|null | — | Tenant scope of the export, when multi-tenancy is on. |
 
@@ -65,6 +66,43 @@ archive.fragx
 |---|---|---|
 | `chunk_id` | str | ✅ |
 | `vector` | list[float] | ✅ (length == `embedding.dimensions`) |
+| `sparse` | `{indices: list[int], values: list[float]}` | — (the BM25 keyword leg, present only when the source collection held one) |
+
+A `sparse` entry is the stored keyword leg exactly as the backend held it: term indices from
+`core.retrieval.bm25.term_index` paired with the saturated term frequencies computed at
+ingest, the two lists equal in length and the indices **strictly ascending**. Ascending order
+is the writer's guarantee, not the backend's, so two exports of an unchanged collection stay
+byte-identical whatever order a vendor's walk returns. A duplicate index is refused on import:
+a backend keeps whichever value it sees last, so the same postings would score differently on
+each one.
+
+IDF is deliberately absent, as it is everywhere else in the system ([ADR-0007](adr/ADR-0007.md)):
+it is a statistic of the live corpus that each backend derives per query. What the archive
+carries is the half that `k1` and `b` are already baked into, which is exactly the half a
+different deployment cannot re-derive identically.
+
+## Versioning
+
+| Declared `format_version` | Written when | Readable by |
+|---|---|---|
+| `1.0.0` | the archive carries no keyword leg | every build |
+| `2.0.0` | any vector row carries `sparse` | builds from TASK-0302 (2026-11-04) onward |
+
+The version states what a reader must understand to read the archive *faithfully*, not which
+build wrote it. A pre-TASK-0302 reader validates only the major and ignores unknown fields, so
+handed a `sparse` field it would import a collection whose keyword ranking silently differs
+from the source's — the one failure mode worse than a refusal, because nothing reports it. The
+major bump is what converts that into a clean refusal. An archive that gained no new data
+declares `1.0.0` and is not stranded over a feature it does not use.
+
+Readers from TASK-0302 onward accept majors `1` and `2`. A `1.0.0` archive therefore still
+imports; see [Import semantics](#import-semantics) §8 for what it does about the missing leg.
+
+**Converter path (2.x → 1.x)**, for a deployment that must feed an older reader: drop the
+`sparse` key from every row of `vectors.jsonl`, set `format_version` to `1.0.0`, remove
+`includes_sparse` from `manifest.json`, and recompute `checksums.sha256`. The result is a
+valid `1.0.0` archive whose keyword leg is recomputed from chunk text on import. No converter
+is needed in the other direction: a `1.0.0` archive is read as-is.
 
 ## Import semantics
 
@@ -74,7 +112,20 @@ archive.fragx
 4. **Provenance is rejoined**: `source_uri`, `content_hash`, and the document's `metadata` live in `documents.jsonl`, not on the chunk row. Import joins them back onto every chunk payload — a restored chunk without a `source_uri` cannot be cited, and one without a `content_hash` cannot be deduplicated.
 5. **Idempotent**: chunk ids are deterministic, so importing the same archive twice upserts over itself rather than duplicating. This is also the recovery path for a partial import.
 6. **Nothing half-written survives**: if a write fails partway, a collection the import created is dropped and the original error is raised; a collection that already existed is left alone — dropping it would destroy rows the archive never carried — and the refusal names the mixed state and says that re-running completes it. A process killed outright cannot roll anything back; re-running the import is what repairs it.
-7. **Lockfile**: the imported collection writes a fresh `index.lock` (model, dimensions, and the archive's per-document content hashes); the archive's own lock is retained beside it as `<collection>.source.lock.json` for provenance.
+7. **The keyword leg is transplanted, not re-derived**: when the archive carries `sparse`
+   postings and the target has `retrieval.hybrid` on, they are written through unchanged, so
+   the restored collection ranks keyword queries exactly as the source did and the weights
+   keep the `k1`/`b` the corpus was indexed with. With `retrieval.hybrid` off the target has
+   no keyword leg to store them in and they are dropped, because the collection is created
+   dense-only.
+8. **An archive with no keyword leg still gets one**: a `1.0.0` archive, or any row without
+   `sparse`, falls back to recomputing BM25 from the chunk text under the target's
+   `retrieval.bm25_k1`/`bm25_b`. That re-derives the weights rather than transplanting them,
+   which is the pre-TASK-0302 behaviour, and it is kept because a collection with no keyword
+   leg at all answers hybrid queries on one leg and reports nothing. `--reembed` recomputes
+   for the same reason it re-embeds: that path rebuilds the corpus under the target's
+   configuration, and the BM25 parameters are part of it.
+9. **Lockfile**: the imported collection writes a fresh `index.lock` (model, dimensions, and the archive's per-document content hashes); the archive's own lock is retained beside it as `<collection>.source.lock.json` for provenance.
 
 ## Resource bounds on import
 
@@ -88,10 +139,11 @@ A collection is precisely the thing that does not fit in memory, so neither side
 ## Known gaps
 
 - **`golden-set.jsonl` is specified but never written.** The exporter emits no golden set, and the reader neither expects nor reads one. It stays in the container listing as an optional member the format reserves. Tracked by TASK-0079.
-- **Sparse vectors are not carried.** `vectors.jsonl` holds the dense vector only; the **adapter layer can now return the keyword leg** — `VectorDBAdapter.iterate_points` populates `Point.sparse` on all three backends as of TASK-0291 (2026-11-04) — but the export side has not been changed to write it, so `vectors.jsonl` still carries the dense vector only. Import recomputes BM25 sparse vectors from chunk text under the target's `retrieval.bm25_k1`/`bm25_b` when `retrieval.hybrid` is on, which re-derives them under the target's parameters rather than transplanting the source's. Tracked by TASK-0079.
+- **The keyword leg is proven against a fake adapter only.** `vectors.jsonl` carries `sparse` as of TASK-0302 (2026-11-04), end to end: the adapters return it (TASK-0291), the writer records it, and import transplants it. What has actually run is the unit suite over a fake adapter plus the format-spec pins. The live assertion — that a restored collection's keyword *ranking and scores* match the source's — is `tests/integration/test_archive_round_trip.py::test_the_keyword_ranking_and_scores_survive_the_round_trip`, which skips without a Docker daemon (B7.2). Tracked by TASK-0079.
 
 ## Compatibility rules
 
 - Minor format additions are additive-only (new optional fields); readers ignore unknown fields.
-- A major `format_version` bump requires an explicit migration note in [CHANGELOG.md](CHANGELOG.md) and a converter path.
+- A major `format_version` bump requires an explicit migration note in [CHANGELOG.md](CHANGELOG.md) and a converter path. The `2.0.0` bump (TASK-0302) has its converter path under [Versioning](#versioning); **its CHANGELOG migration note is still owed** — the change landed from a session scoped out of `CHANGELOG.md`, and it is the one half of this rule not yet satisfied.
+- A reader accepts every major it can read faithfully, not only the one it writes: this build reads `1` and `2`. Dropping an older major would strand archives, and accepting a newer one would import data the reader cannot interpret.
 - The acceptance test for this spec is the D11 round-trip test ([differentiators.md](differentiators.md)): Qdrant → pgvector (`--reembed`) and Qdrant → Qdrant (vector copy), with zero chunk/metadata loss and eval metrics within regression-gate tolerance.

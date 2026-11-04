@@ -13,6 +13,21 @@ corpora small enough to materialise would be useless on the ones portability mat
 The manifest is written *last*, because it carries the row counts and those are only known
 once the rows exist. Import verifies the counts against actual line counts, so a truncated
 export is caught rather than imported as a smaller corpus.
+
+**The keyword leg travels with the dense one** (TASK-0302). A hybrid collection stores two
+vectors per chunk, and until this change the archive carried one: import recomputed BM25
+from chunk text under the *target's* ``k1``/``b``, which re-derives the weights rather than
+transplanting the ones the corpus was indexed with. A vector row now carries ``sparse``
+whenever the backend held one, with postings sorted ascending by term index so two exports
+of an unchanged collection stay byte-identical.
+
+That is a format change an older reader must not read silently, because the one thing worse
+than refusing an archive is importing it with its keyword leg quietly dropped. So an archive
+that carries postings declares ``format_version`` ``2.0.0``, which a 1.x reader refuses by
+the major check it already has, while an archive with no keyword leg still declares
+``1.0.0`` and stays readable everywhere — a version is a statement about what a reader must
+understand, and nothing that gained no new data should be stranded over a feature it does
+not use.
 """
 
 from __future__ import annotations
@@ -28,7 +43,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from fasterrag import __version__
-from fasterrag.adapters.vectordb.base import Point, VectorDBAdapter
+from fasterrag.adapters.vectordb.base import Point, SparseVector, VectorDBAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
@@ -38,20 +53,31 @@ __all__ = [
     "ARCHIVE_SUFFIX",
     "CHECKSUMS_NAME",
     "CHUNKS_NAME",
+    "DENSE_ONLY_FORMAT_VERSION",
     "DOCUMENTS_NAME",
     "FORMAT_VERSION",
     "LOCK_NAME",
     "MANIFEST_NAME",
+    "READABLE_MAJORS",
     "VECTORS_NAME",
     "ArchiveCounts",
     "build_manifest",
     "chunk_record",
     "document_record",
     "export_archive",
+    "sparse_record",
     "vector_record",
 ]
 
-FORMAT_VERSION: Final = "1.0.0"
+# CRITICAL: the version an archive declares is a statement about what a reader must
+# understand to read it *faithfully*, not about which build wrote it. An archive carrying
+# the keyword leg declares the 2.x major so a 1.x reader refuses it outright instead of
+# importing a collection whose keyword ranking silently differs; one carrying no postings
+# declares 1.0.0 and stays readable by every build that ever shipped.
+FORMAT_VERSION: Final = "2.0.0"
+DENSE_ONLY_FORMAT_VERSION: Final = "1.0.0"
+READABLE_MAJORS: Final[frozenset[str]] = frozenset({"1", "2"})
+
 ARCHIVE_SUFFIX: Final = ".fragx"
 
 MANIFEST_NAME: Final = "manifest.json"
@@ -121,9 +147,28 @@ def chunk_record(point: Point) -> dict[str, Any]:
     }
 
 
+def sparse_record(sparse: SparseVector) -> dict[str, list[Any]]:
+    """Return one keyword leg, postings ascending by term index.
+
+    The order is the writer's own guarantee rather than the adapters', because byte-identical
+    re-export must not depend on a backend's walk happening to be sorted.
+    """
+    postings = sorted(zip(sparse.indices, sparse.values, strict=True))
+    return {
+        "indices": [int(index) for index, _ in postings],
+        "values": [float(value) for _, value in postings],
+    }
+
+
 def vector_record(point: Point) -> dict[str, Any]:
-    """Return one ``vectors.jsonl`` row."""
-    return {"chunk_id": point.point_id, "vector": [float(value) for value in point.vector]}
+    """Return one ``vectors.jsonl`` row, carrying the keyword leg when the backend held one."""
+    row: dict[str, Any] = {
+        "chunk_id": point.point_id,
+        "vector": [float(value) for value in point.vector],
+    }
+    if point.sparse is not None:
+        row["sparse"] = sparse_record(point.sparse)
+    return row
 
 
 def build_manifest(
@@ -135,13 +180,14 @@ def build_manifest(
     includes_vectors: bool,
     tenant: str | None,
     observed_dimensions: int | None = None,
+    includes_sparse: bool = False,
 ) -> dict[str, Any]:
     """Return the archive's self-description."""
     chunking = settings.chunking
     embeddings = settings.embeddings
 
-    return {
-        "format_version": FORMAT_VERSION,
+    manifest: dict[str, Any] = {
+        "format_version": FORMAT_VERSION if includes_sparse else DENSE_ONLY_FORMAT_VERSION,
         "created_at": datetime.now(tz=UTC).isoformat(),
         "fasterrag_version": __version__,
         "collection": {
@@ -176,6 +222,9 @@ def build_manifest(
         "source_provider": settings.vector_db.provider,
         "tenant": tenant,
     }
+    if includes_sparse:
+        manifest["includes_sparse"] = True
+    return manifest
 
 
 def _line(payload: dict[str, Any]) -> bytes:
@@ -205,6 +254,7 @@ async def export_archive(
     counts = ArchiveCounts()
     seen_documents: set[str] = set()
     observed_dimensions: int | None = None
+    carries_sparse = False
 
     try:
         with (
@@ -227,7 +277,9 @@ async def export_archive(
                     observed_dimensions = len(point.vector)
 
                 if include_vectors and point.vector:
-                    vectors.write(_line(vector_record(point)))
+                    row = vector_record(point)
+                    carries_sparse = carries_sparse or "sparse" in row
+                    vectors.write(_line(row))
                     counts.vectors += 1
 
         if not counts.chunks:
@@ -251,6 +303,7 @@ async def export_archive(
             includes_vectors=include_vectors,
             tenant=tenant,
             observed_dimensions=observed_dimensions,
+            includes_sparse=carries_sparse,
         )
 
         names = [DOCUMENTS_NAME, CHUNKS_NAME, LOCK_NAME]
@@ -269,7 +322,12 @@ async def export_archive(
 
     _logger.info(
         "wrote a portable archive",
-        extra={"path": str(target), "collection": collection, **counts.as_dict()},
+        extra={
+            "path": str(target),
+            "collection": collection,
+            "includes_sparse": carries_sparse,
+            **counts.as_dict(),
+        },
     )
     return counts
 

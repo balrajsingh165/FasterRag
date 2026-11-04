@@ -29,6 +29,15 @@ Two write paths, and which one is legal is not the caller's choice alone:
 * **Re-embed** ignores the archived vectors and sends chunk text through the current
   embedding configuration. Always legal, because it derives the vectors it stores.
 
+**The keyword leg is transplanted when the archive carries one** (TASK-0302). A 2.x archive
+stores BM25 postings beside each dense vector, and those are written through unchanged, so a
+restored collection ranks keyword queries exactly as the source did — the weights keep the
+``k1``/``b`` they were indexed with instead of silently adopting the target's. A 1.x archive
+carries none, and the old behaviour is what it falls back to: recompute from chunk text under
+the target's parameters, because a collection with no keyword leg at all is worse than one
+re-derived. ``--reembed`` recomputes on purpose, since that path exists to rebuild a corpus
+under the target's configuration and ``bm25_k1``/``bm25_b`` are part of it.
+
 Import is idempotent by the same mechanism ingestion uses: chunk ids are deterministic, so
 importing an archive twice upserts over itself rather than duplicating. That is also the
 recovery path when a write fails partway: a collection this import created is dropped, and
@@ -45,11 +54,17 @@ import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from itertools import pairwise
 from pathlib import Path
 from typing import IO, Any, Final, NoReturn
 
 from fasterrag.adapters.embeddings.tiering import TieringRouter
-from fasterrag.adapters.vectordb.base import CollectionSpec, Point, VectorDBAdapter
+from fasterrag.adapters.vectordb.base import (
+    CollectionSpec,
+    Point,
+    SparseVector,
+    VectorDBAdapter,
+)
 from fasterrag.config.schema import Settings
 from fasterrag.core.retrieval.bm25 import encode_document
 from fasterrag.errors import ErrorCode, FasterRagError
@@ -57,10 +72,11 @@ from fasterrag.observability.logging import get_logger
 from fasterrag.services.archive import (
     CHECKSUMS_NAME,
     CHUNKS_NAME,
+    DENSE_ONLY_FORMAT_VERSION,
     DOCUMENTS_NAME,
-    FORMAT_VERSION,
     LOCK_NAME,
     MANIFEST_NAME,
+    READABLE_MAJORS,
     VECTORS_NAME,
 )
 from fasterrag.services.lockfile import LockStore, build_lock, create_lock_store
@@ -110,11 +126,23 @@ class VerificationError(FasterRagError):
 
 
 def supported_major(version: str) -> bool:
-    """Return whether this build can read an archive of ``version``."""
+    """Return whether this build can read an archive of ``version``.
+
+    Two majors are readable, not one: 2.x carries the keyword leg and 1.x predates it, and
+    refusing the older would strand every archive written before TASK-0302.
+    """
     try:
-        return version.split(".", 1)[0] == FORMAT_VERSION.split(".", 1)[0]
+        return version.split(".", 1)[0] in READABLE_MAJORS
     except (AttributeError, IndexError):
         return False
+
+
+@dataclass(frozen=True, slots=True)
+class _ArchivedVector:
+    """One vector row's two legs: the dense vector, and the keyword leg if it carried one."""
+
+    vector: list[float]
+    sparse: SparseVector | None
 
 
 @dataclass(slots=True)
@@ -148,6 +176,11 @@ class ArchiveReader:
     def includes_vectors(self) -> bool:
         """Return whether the archive carries vectors."""
         return bool(self.manifest.get("includes_vectors"))
+
+    @property
+    def includes_sparse(self) -> bool:
+        """Return whether the archive carries the keyword leg beside the dense vectors."""
+        return bool(self.manifest.get("includes_sparse"))
 
     @property
     def collection(self) -> str:
@@ -198,7 +231,7 @@ class ArchiveReader:
         return self.rows(VECTORS_NAME)
 
     @contextmanager
-    def vector_lookup(self) -> Iterator[Callable[[str], list[float] | None]]:
+    def vector_lookup(self) -> Iterator[Callable[[str], _ArchivedVector | None]]:
         """Open the vectors member once and yield a per-chunk lookup over it.
 
         The lookup must be called in chunk order: an aligned archive is walked in lockstep
@@ -281,12 +314,27 @@ class ArchiveReader:
             )
 
 
-def _no_vectors(_chunk_id: str) -> list[float] | None:
+def _no_vectors(_chunk_id: str) -> _ArchivedVector | None:
     """Return nothing, for an archive that carries no vectors at all."""
     return None
 
 
-def _lockstep_lookup(handle: IO[bytes]) -> Callable[[str], list[float] | None]:
+def _archived_vector(row: dict[str, Any]) -> _ArchivedVector:
+    """Split one staged vector row into its dense and keyword legs."""
+    posting = row.get("sparse")
+    sparse = (
+        SparseVector(
+            indices=[int(index) for index in posting.get("indices") or []],
+            values=[float(value) for value in posting.get("values") or []],
+        )
+        if isinstance(posting, dict)
+        else None
+    )
+    dense = [float(value) for value in row.get("vector") or []]
+    return _ArchivedVector(vector=dense, sparse=sparse)
+
+
+def _lockstep_lookup(handle: IO[bytes]) -> Callable[[str], _ArchivedVector | None]:
     """Return a lookup that walks the vectors member in step with the chunk stream.
 
     Legal because verification established that the vector rows are a subsequence of the
@@ -294,7 +342,7 @@ def _lockstep_lookup(handle: IO[bytes]) -> Callable[[str], list[float] | None]:
     """
     pending: list[dict[str, Any]] = []
 
-    def lookup(chunk_id: str) -> list[float] | None:
+    def lookup(chunk_id: str) -> _ArchivedVector | None:
         if not pending:
             row = _next_row(handle)
             if row is None:
@@ -302,23 +350,23 @@ def _lockstep_lookup(handle: IO[bytes]) -> Callable[[str], list[float] | None]:
             pending.append(row)
         if str(pending[0].get("chunk_id", "")) != chunk_id:
             return None
-        return list(pending.pop().get("vector") or [])
+        return _archived_vector(pending.pop())
 
     return lookup
 
 
 def _seeking_lookup(
     handle: IO[bytes], offsets: dict[str, int]
-) -> Callable[[str], list[float] | None]:
+) -> Callable[[str], _ArchivedVector | None]:
     """Return a lookup that seeks to a chunk's vector, for an archive out of chunk order."""
 
-    def lookup(chunk_id: str) -> list[float] | None:
+    def lookup(chunk_id: str) -> _ArchivedVector | None:
         offset = offsets.get(chunk_id)
         if offset is None:
             return None
         handle.seek(offset)
         row: dict[str, Any] = json.loads(handle.readline())
-        return list(row.get("vector") or [])
+        return _archived_vector(row)
 
     return lookup
 
@@ -418,6 +466,7 @@ def open_archive(path: Path) -> ArchiveReader:
         _verify_counts(path, reader)
         _verify_references(path, reader)
         _verify_vector_widths(path, reader)
+        _verify_keyword_leg(path, reader)
     except Exception:
         reader.close()
         raise
@@ -428,6 +477,7 @@ def open_archive(path: Path) -> ArchiveReader:
             "path": str(path),
             "collection": reader.collection,
             "includes_vectors": reader.includes_vectors,
+            "includes_sparse": reader.includes_sparse,
             **dict(reader.manifest.get("counts") or {}),
         },
     )
@@ -450,8 +500,8 @@ def _verified_manifest(path: Path, staged: dict[str, _StagedMember]) -> dict[str
     version = str(manifest.get("format_version", ""))
     if not supported_major(version):
         raise VerificationError(
-            f"{path} declares format_version {version!r}; this build reads "
-            f"{FORMAT_VERSION.split('.', 1)[0]}.x archives only"
+            f"{path} declares format_version {version!r}; this build reads format majors "
+            f"{', '.join(sorted(READABLE_MAJORS))} only"
         )
     return manifest
 
@@ -570,6 +620,70 @@ def _verify_vector_widths(path: Path, reader: ArchiveReader) -> None:
                 f"{row.get('chunk_id')!r} has {width}; the manifest and the data disagree"
             )
         declared = declared or width
+
+
+def _verify_keyword_leg(path: Path, reader: ArchiveReader) -> None:
+    """Confirm the postings are well formed and that the manifest owns up to carrying them.
+
+    An undeclared keyword leg is the dangerous shape, because such an archive still claims a
+    major that an older reader accepts, and that reader then drops the leg without a word.
+    """
+    declared = reader.includes_sparse
+    major = str(reader.manifest.get("format_version", "")).split(".", 1)[0]
+    found = 0
+
+    for row in reader.vectors():
+        posting = row.get("sparse")
+        if posting is None:
+            continue
+        found += 1
+        _verify_postings(path, str(row.get("chunk_id", "")), posting)
+
+    if found and not declared:
+        raise VerificationError(
+            f"{path} carries a keyword leg for {found} chunk(s) but its manifest does not "
+            "declare includes_sparse; the archive describes itself wrongly"
+        )
+    if found and major == DENSE_ONLY_FORMAT_VERSION.split(".", 1)[0]:
+        raise VerificationError(
+            f"{path} carries a keyword leg but declares format_version "
+            f"{reader.manifest.get('format_version')!r}; a reader of that major accepts the "
+            "archive and drops the postings in silence, so it is refused here"
+        )
+    if declared and not found:
+        raise VerificationError(
+            f"{path} declares includes_sparse but no vector row carries a keyword leg; the "
+            "archive is truncated or its manifest is wrong"
+        )
+
+
+def _verify_postings(path: Path, chunk_id: str, posting: Any) -> None:
+    """Confirm one keyword leg is two equal-length lists with strictly ascending indices.
+
+    A repeated or unordered index has no defined meaning: a backend keeps whichever value it
+    happens to see last, so the same postings would score differently on each (TASK-0228).
+    """
+    if not isinstance(posting, dict):
+        raise VerificationError(
+            f"{path} chunk {chunk_id!r} has a sparse entry that is not an object"
+        )
+
+    indices, values = posting.get("indices"), posting.get("values")
+    if not isinstance(indices, list) or not isinstance(values, list):
+        raise VerificationError(
+            f"{path} chunk {chunk_id!r} has a sparse entry without both an indices and a "
+            "values list"
+        )
+    if len(indices) != len(values):
+        raise VerificationError(
+            f"{path} chunk {chunk_id!r} has {len(indices)} sparse indices but "
+            f"{len(values)} values; the keyword leg is malformed"
+        )
+    if any(later <= earlier for earlier, later in pairwise(indices)):
+        raise VerificationError(
+            f"{path} chunk {chunk_id!r} has sparse indices that are not strictly ascending; "
+            "a duplicate or unordered term has no defined meaning in a sparse vector"
+        )
 
 
 async def import_archive(
@@ -704,6 +818,7 @@ async def _write_chunks(
         for row in reader.chunks():
             chunk_id = str(row.get("chunk_id", ""))
             text = str(row.get("text", ""))
+            carried: SparseVector | None = None
 
             if reembed:
                 vector: list[float] = []
@@ -716,7 +831,7 @@ async def _write_chunks(
                         code=ErrorCode.CONFLICT,
                         retryable=False,
                     )
-                vector = [float(value) for value in stored]
+                vector, carried = stored.vector, stored.sparse
 
             batch.append(
                 Point(
@@ -729,15 +844,7 @@ async def _write_chunks(
                         model=model,
                         model_version=model_version,
                     ),
-                    sparse=(
-                        encode_document(
-                            text,
-                            k1=settings.retrieval.bm25_k1,
-                            b=settings.retrieval.bm25_b,
-                        )
-                        if settings.retrieval.hybrid
-                        else None
-                    ),
+                    sparse=_keyword_leg(settings, text, carried),
                 )
             )
 
@@ -750,6 +857,21 @@ async def _write_chunks(
 
     counts.documents = len(documents)
     return counts
+
+
+def _keyword_leg(
+    settings: Settings, text: str, carried: SparseVector | None
+) -> SparseVector | None:
+    """Return the keyword leg to store: the archived postings, else recomputed from the text.
+
+    Carrying them keeps the ``k1``/``b`` the corpus was indexed with; recomputing is what a
+    pre-TASK-0302 archive leaves available, and is better than a collection with no leg.
+    """
+    if not settings.retrieval.hybrid:
+        return None
+    if carried is not None:
+        return carried
+    return encode_document(text, k1=settings.retrieval.bm25_k1, b=settings.retrieval.bm25_b)
 
 
 async def _abandon(

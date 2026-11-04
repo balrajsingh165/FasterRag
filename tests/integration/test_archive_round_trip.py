@@ -9,6 +9,7 @@ proving it against a live backend would mean loading an embedding model in CI to
 vectors the archive deliberately does not carry.
 """
 
+import json
 import re
 import tarfile
 from collections.abc import AsyncIterator
@@ -17,11 +18,12 @@ from pathlib import Path
 
 import pytest
 
-from fasterrag.adapters.vectordb.base import CollectionSpec, Point
+from fasterrag.adapters.vectordb.base import CollectionSpec, Point, SearchQuery
 from fasterrag.adapters.vectordb.qdrant import QdrantAdapter
 from fasterrag.config.schema import Settings
+from fasterrag.core.retrieval.bm25 import encode_document, encode_query
 from fasterrag.errors import FasterRagError
-from fasterrag.services.archive import export_archive
+from fasterrag.services.archive import FORMAT_VERSION, export_archive
 from fasterrag.services.archive_import import (
     VerificationError,
     import_archive,
@@ -316,3 +318,127 @@ async def test_a_live_archive_imports_without_materialising_or_indexing_it(
 
     assert counts.chunks == len(written)
     assert not staging.exists()
+
+
+KEYWORD_PASSAGES = {
+    "c_notice": "Either party may terminate this agreement with written notice.",
+    "c_payment": "Invoices are payable within thirty days of the notice date.",
+    "c_expense": "Expense claims need a receipt and a manager approval.",
+}
+
+# CRITICAL: deliberately not the deployment's configured k1/b. An import that recomputed the
+# keyword leg from chunk text would produce weights under 1.2/0.75 instead, which scores
+# differently — and that difference is the only thing separating a carried leg from a
+# re-derived one. Aligning these parameters with the defaults would make this test pass
+# against the behaviour it exists to forbid.
+SOURCE_K1 = 0.4
+SOURCE_B = 0.1
+
+
+@pytest.fixture
+async def hybrid(
+    qdrant: Settings, collection_name: str
+) -> AsyncIterator[tuple[QdrantAdapter, str]]:
+    """Return an adapter over a hybrid collection whose keyword leg is already indexed."""
+    adapter = QdrantAdapter(qdrant)
+
+    await adapter.create_collection(
+        CollectionSpec(name=collection_name, dimensions=DIMENSIONS, distance="cosine", sparse=True)
+    )
+    await adapter.upsert(
+        [
+            Point(
+                point_id=chunk_id,
+                collection=collection_name,
+                vector=vector(index),
+                payload={
+                    "text": text,
+                    "document_id": "d_0000",
+                    "source_uri": "/docs/policy-0.md",
+                    "content_hash": "hash0000",
+                },
+                sparse=encode_document(text, k1=SOURCE_K1, b=SOURCE_B),
+            )
+            for index, (chunk_id, text) in enumerate(KEYWORD_PASSAGES.items())
+        ]
+    )
+
+    yield adapter, collection_name
+
+    for name in (collection_name, f"{collection_name}-restored"):
+        with suppress(FasterRagError):
+            await adapter.drop_collection(name)
+    await adapter.close()
+
+
+async def test_the_keyword_ranking_and_scores_survive_the_round_trip(
+    hybrid: tuple[QdrantAdapter, str], qdrant: Settings, tmp_path: Path
+) -> None:
+    """TASK-0302 fidelity is the ranking, not the bytes: a leg that rescores is a leg lost."""
+    adapter, collection = hybrid
+    archive = tmp_path / "corpus.fragx"
+    restored = f"{collection}-restored"
+    query = encode_query("terminate notice")
+
+    before = await adapter.search(SearchQuery(collection=collection, sparse=query, limit=5))
+    await export_archive(
+        qdrant, adapter, collection=collection, destination=archive, include_vectors=True
+    )
+    await import_archive(
+        qdrant, adapter, open_archive(archive), collection=restored, lock_root=tmp_path
+    )
+    after = await adapter.search(SearchQuery(collection=restored, sparse=query, limit=5))
+
+    assert [hit.point_id for hit in before] == ["c_notice", "c_payment"]
+    assert [hit.point_id for hit in after] == [hit.point_id for hit in before]
+    assert [hit.score for hit in after] == pytest.approx([hit.score for hit in before])
+
+
+async def test_the_stored_postings_come_back_term_for_term(
+    hybrid: tuple[QdrantAdapter, str], qdrant: Settings, tmp_path: Path
+) -> None:
+    """What a backend holds is what the archive must carry, weights and all."""
+    adapter, collection = hybrid
+    archive = tmp_path / "corpus.fragx"
+    restored = f"{collection}-restored"
+
+    await export_archive(
+        qdrant, adapter, collection=collection, destination=archive, include_vectors=True
+    )
+    await import_archive(
+        qdrant, adapter, open_archive(archive), collection=restored, lock_root=tmp_path
+    )
+
+    source = {
+        point.point_id: point
+        async for point in adapter.iterate_points(collection, with_vectors=True)
+    }
+    recovered = {
+        point.point_id: point async for point in adapter.iterate_points(restored, with_vectors=True)
+    }
+
+    assert set(recovered) == set(source) == set(KEYWORD_PASSAGES)
+    for point_id, original in source.items():
+        carried, held = recovered[point_id].sparse, original.sparse
+        assert carried is not None
+        assert held is not None
+        assert dict(zip(carried.indices, carried.values, strict=True)) == pytest.approx(
+            dict(zip(held.indices, held.values, strict=True))
+        )
+
+
+async def test_a_live_hybrid_export_declares_the_newer_major(
+    hybrid: tuple[QdrantAdapter, str], qdrant: Settings, tmp_path: Path
+) -> None:
+    """An older reader must refuse this archive rather than drop its keyword leg quietly."""
+    adapter, collection = hybrid
+    archive = tmp_path / "corpus.fragx"
+
+    await export_archive(
+        qdrant, adapter, collection=collection, destination=archive, include_vectors=True
+    )
+    with tarfile.open(archive) as tar:
+        manifest = json.loads(tar.extractfile("manifest.json").read())  # type: ignore[union-attr]
+
+    assert manifest["format_version"] == FORMAT_VERSION
+    assert manifest["includes_sparse"] is True

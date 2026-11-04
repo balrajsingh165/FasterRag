@@ -11,11 +11,14 @@ import pytest
 
 from fasterrag.adapters.vectordb.base import Point
 from fasterrag.config.schema import Settings
+from fasterrag.core.retrieval.bm25 import encode_document
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.archive import (
     CHECKSUMS_NAME,
     CHUNKS_NAME,
+    DENSE_ONLY_FORMAT_VERSION,
     DOCUMENTS_NAME,
+    FORMAT_VERSION,
     LOCK_NAME,
     MANIFEST_NAME,
     VECTORS_NAME,
@@ -43,6 +46,7 @@ def make(
     manifest: dict[str, Any] | None = None,
     corrupt: str | None = None,
     drop: str | None = None,
+    sparse: bool = False,
 ) -> Path:
     documents = documents if documents is not None else [{"document_id": "d_1"}]
     chunks = chunks if chunks is not None else [{"chunk_id": "c_1", "document_id": "d_1"}]
@@ -56,7 +60,7 @@ def make(
         members[VECTORS_NAME] = b"".join(line(row) for row in vectors)
 
     body = manifest or {
-        "format_version": "1.0.0",
+        "format_version": FORMAT_VERSION if sparse else DENSE_ONLY_FORMAT_VERSION,
         "collection": {"name": "docs"},
         "embedding": {"model": "m", "model_version": "1", "dimensions": 2},
         "counts": {
@@ -65,6 +69,7 @@ def make(
             "vectors": len(vectors or []),
         },
         "includes_vectors": vectors is not None,
+        **({"includes_sparse": True} if sparse else {}),
     }
 
     digests = {name: hashlib.sha256(data).hexdigest() for name, data in members.items()}
@@ -139,7 +144,7 @@ def test_a_vector_with_no_chunk_is_refused(tmp_path: Path) -> None:
 def test_an_unknown_major_version_is_refused(tmp_path: Path) -> None:
     """A major bump means a field changed meaning; reading it anyway imports wrong data."""
     manifest = {
-        "format_version": "2.0.0",
+        "format_version": "3.0.0",
         "collection": {"name": "docs"},
         "embedding": {},
         "counts": {"documents": 1, "chunks": 1, "vectors": 0},
@@ -150,10 +155,12 @@ def test_an_unknown_major_version_is_refused(tmp_path: Path) -> None:
         open_archive(make(tmp_path, manifest=manifest))
 
 
-def test_a_minor_version_ahead_is_accepted() -> None:
-    """Minor additions are additive-only, so a newer minor stays readable."""
+def test_both_shipped_majors_are_readable_and_nothing_else_is() -> None:
+    """1.x predates the keyword leg and 2.x carries it; refusing either strands archives."""
     assert supported_major("1.7.0")
-    assert not supported_major("2.0.0")
+    assert supported_major("2.0.0")
+    assert supported_major("2.4.1")
+    assert not supported_major("3.0.0")
     assert not supported_major("")
 
 
@@ -809,12 +816,16 @@ BULK_CHUNKS = 2_000
 BULK_DIMENSIONS = 128
 
 
-def bulky(tmp_path: Path) -> tuple[Path, int]:
+def bulky(tmp_path: Path, *, with_sparse: bool = False) -> tuple[Path, int]:
     """Write an archive far larger than a streaming reader's working set.
 
     Returns the archive and the uncompressed size of its row members, which is what an
     implementation that materialises them has to hold.
     """
+    postings = {
+        "indices": [index * 7 for index in range(120)],
+        "values": [round(0.5 + index / 1000, 6) for index in range(120)],
+    }
     text = "expense policy section " * 350
     vector = [round(0.001 * index, 6) for index in range(BULK_DIMENSIONS)]
     documents: list[dict[str, Any]] = [
@@ -831,14 +842,20 @@ def bulky(tmp_path: Path) -> tuple[Path, int]:
         for index in range(BULK_CHUNKS)
     ]
     vectors: list[dict[str, Any]] = [
-        {"chunk_id": f"c_{index:05d}", "vector": vector} for index in range(BULK_CHUNKS)
+        {
+            "chunk_id": f"c_{index:05d}",
+            "vector": vector,
+            **({"sparse": postings} if with_sparse else {}),
+        }
+        for index in range(BULK_CHUNKS)
     ]
     manifest: dict[str, Any] = {
-        "format_version": "1.0.0",
+        "format_version": FORMAT_VERSION if with_sparse else DENSE_ONLY_FORMAT_VERSION,
         "collection": {"name": "docs"},
         "embedding": {"model": "m", "model_version": "1", "dimensions": BULK_DIMENSIONS},
         "counts": {"documents": 1, "chunks": BULK_CHUNKS, "vectors": BULK_CHUNKS},
         "includes_vectors": True,
+        **({"includes_sparse": True} if with_sparse else {}),
     }
 
     archive = make(tmp_path, documents=documents, chunks=chunks, vectors=vectors, manifest=manifest)
@@ -989,3 +1006,229 @@ def test_a_refusal_raised_mid_stream_still_releases_the_staging_directory(
         open_archive(make(tmp_path, vectors=[{"chunk_id": "c_absent", "vector": [0.1, 0.2]}]))
 
     assert list(root.iterdir()) == []
+
+
+KEYWORD_TEXT = "termination notice period for either party"
+CARRIED = {"indices": [7, 9, 4242], "values": [0.75, 0.5, 0.25]}
+
+
+def keyworded(tmp_path: Path, *, sparse: dict[str, Any] | None = None, declared: bool) -> Path:
+    """Return an archive of one chunk, optionally carrying a keyword leg for it."""
+    row: dict[str, Any] = {"chunk_id": "c_1", "vector": [0.1, 0.2]}
+    if sparse is not None:
+        row["sparse"] = sparse
+    return make(
+        tmp_path,
+        chunks=[{"chunk_id": "c_1", "document_id": "d_1", "text": KEYWORD_TEXT, "metadata": {}}],
+        vectors=[row],
+        sparse=declared,
+    )
+
+
+async def imported(tmp_path: Path, archive: Path, settings: Settings) -> RecordingAdapter:
+    """Import one archive through a recording adapter and return what it was handed."""
+    adapter = RecordingAdapter()
+    await import_archive(
+        settings,
+        adapter,  # type: ignore[arg-type]
+        open_archive(archive),
+        collection="restored",
+        lock_root=tmp_path,
+    )
+    return adapter
+
+
+async def test_the_carried_keyword_leg_is_written_rather_than_recomputed(tmp_path: Path) -> None:
+    """TASK-0302: a restored leg keeps the `k1`/`b` the corpus was actually indexed with.
+
+    This is the one that fails against the pre-change reader, which dropped the archived
+    postings and re-derived them from the chunk text under the *target's* parameters.
+    """
+    adapter = await imported(
+        tmp_path, keyworded(tmp_path, sparse=CARRIED, declared=True), copy_settings()
+    )
+    stored = adapter.points[0].sparse
+
+    assert stored is not None
+    assert list(stored.indices) == CARRIED["indices"]
+    assert list(stored.values) == pytest.approx(CARRIED["values"])
+    assert list(stored.indices) != list(encode_document(KEYWORD_TEXT).indices)
+
+
+async def test_an_archive_without_a_keyword_leg_has_one_recomputed(tmp_path: Path) -> None:
+    """A 1.0.0 archive predates the leg, and a collection with none answers on one leg."""
+    settings = copy_settings()
+    adapter = await imported(tmp_path, keyworded(tmp_path, declared=False), settings)
+    stored = adapter.points[0].sparse
+    expected = encode_document(
+        KEYWORD_TEXT, k1=settings.retrieval.bm25_k1, b=settings.retrieval.bm25_b
+    )
+
+    assert stored is not None
+    assert list(stored.indices) == list(expected.indices)
+    assert list(stored.values) == pytest.approx(list(expected.values))
+
+
+async def test_a_target_with_no_keyword_leg_stores_none(tmp_path: Path) -> None:
+    """`retrieval.hybrid` off creates a dense-only collection; postings have nowhere to go."""
+    settings = Settings.model_validate(
+        {"embeddings": {"model": "m"}, "retrieval": {"hybrid": False}}
+    )
+    adapter = await imported(tmp_path, keyworded(tmp_path, sparse=CARRIED, declared=True), settings)
+
+    assert adapter.points[0].sparse is None
+
+
+async def test_re_embedding_recomputes_the_keyword_leg_rather_than_carrying_it(
+    tmp_path: Path,
+) -> None:
+    """`--reembed` rebuilds the corpus under the target's config, and BM25 is part of it."""
+    settings = copy_settings()
+    adapter = RecordingAdapter()
+
+    await import_archive(
+        settings,
+        adapter,  # type: ignore[arg-type]
+        open_archive(keyworded(tmp_path, sparse=CARRIED, declared=True)),
+        collection="restored",
+        reembed=True,
+        router=StubRouter(),  # type: ignore[arg-type]
+        lock_root=tmp_path,
+    )
+    stored = adapter.points[0].sparse
+
+    assert stored is not None
+    assert list(stored.indices) == list(encode_document(KEYWORD_TEXT).indices)
+
+
+def test_a_keyword_leg_the_manifest_never_declared_is_refused(tmp_path: Path) -> None:
+    """Such an archive declares a major an older reader accepts, which then drops the leg."""
+    with pytest.raises(VerificationError, match="does not declare includes_sparse"):
+        open_archive(keyworded(tmp_path, sparse=CARRIED, declared=False))
+
+
+def test_a_declared_keyword_leg_that_is_absent_is_refused(tmp_path: Path) -> None:
+    """The manifest promising postings nothing carries is the truncation check again."""
+    with pytest.raises(VerificationError, match="declares includes_sparse"):
+        open_archive(keyworded(tmp_path, declared=True))
+
+
+def test_sparse_indices_that_are_not_ascending_are_refused(tmp_path: Path) -> None:
+    """A duplicate or unordered index has no defined meaning; backends disagree on it."""
+    unordered = {"indices": [9, 7], "values": [0.5, 0.75]}
+
+    with pytest.raises(VerificationError, match="strictly ascending"):
+        open_archive(keyworded(tmp_path, sparse=unordered, declared=True))
+
+
+def test_sparse_indices_repeated_in_one_posting_list_are_refused(tmp_path: Path) -> None:
+    """The backend keeps whichever value it sees last, so the same leg scores differently."""
+    repeated = {"indices": [7, 7], "values": [0.5, 0.75]}
+
+    with pytest.raises(VerificationError, match="strictly ascending"):
+        open_archive(keyworded(tmp_path, sparse=repeated, declared=True))
+
+
+def test_sparse_indices_and_values_of_different_lengths_are_refused(tmp_path: Path) -> None:
+    """Nothing downstream can pair them, and `SparseVector` would raise mid-write."""
+    ragged = {"indices": [7, 9], "values": [0.5]}
+
+    with pytest.raises(VerificationError, match="2 sparse indices but 1 values"):
+        open_archive(keyworded(tmp_path, sparse=ragged, declared=True))
+
+
+def test_a_sparse_entry_that_is_not_two_lists_is_refused(tmp_path: Path) -> None:
+    """A hand-edited archive reaches the writer otherwise, and fails halfway through it."""
+    with pytest.raises(VerificationError, match="indices and a values list"):
+        open_archive(keyworded(tmp_path, sparse={"indices": 7, "values": 0.5}, declared=True))
+
+
+async def test_the_keyword_leg_survives_a_real_export_and_import(tmp_path: Path) -> None:
+    """Both halves against each other: what the exporter wrote is what the importer stores.
+
+    The source postings are deliberately not what this target would compute from the text,
+    so a reader that quietly recomputed would come back with different weights.
+    """
+    source = SourceAdapter(
+        [
+            Point(
+                point_id=f"c_{index}",
+                collection="docs",
+                vector=[0.1 * index, 0.2],
+                payload={
+                    "document_id": "d_1",
+                    "source_uri": "/docs/policy.md",
+                    "content_hash": "sha-abc",
+                    "text": KEYWORD_TEXT,
+                },
+                sparse=encode_document(KEYWORD_TEXT, k1=0.4, b=0.1),
+            )
+            for index in range(3)
+        ]
+    )
+    archive = tmp_path / "exported.fragx"
+    await export_archive(
+        copy_settings(),
+        source,  # type: ignore[arg-type]
+        collection="docs",
+        destination=archive,
+        include_vectors=True,
+    )
+    adapter = await imported(tmp_path, archive, copy_settings())
+
+    written = encode_document(KEYWORD_TEXT, k1=0.4, b=0.1)
+    expected = dict(zip(written.indices, written.values, strict=True))
+    for point in adapter.points:
+        assert point.sparse is not None
+        assert dict(zip(point.sparse.indices, point.sparse.values, strict=True)) == pytest.approx(
+            expected
+        )
+
+
+def test_a_keyword_leg_declared_under_the_older_major_is_refused(tmp_path: Path) -> None:
+    """The declaration is not the guard an old reader sees; the major is, so it must agree."""
+    manifest = {
+        "format_version": DENSE_ONLY_FORMAT_VERSION,
+        "collection": {"name": "docs"},
+        "embedding": {"model": "m", "model_version": "1", "dimensions": 2},
+        "counts": {"documents": 1, "chunks": 1, "vectors": 1},
+        "includes_vectors": True,
+        "includes_sparse": True,
+    }
+    archive = make(
+        tmp_path,
+        chunks=[{"chunk_id": "c_1", "document_id": "d_1", "text": KEYWORD_TEXT}],
+        vectors=[{"chunk_id": "c_1", "vector": [0.1, 0.2], "sparse": CARRIED}],
+        manifest=manifest,
+    )
+
+    with pytest.raises(VerificationError, match="drops the postings in silence"):
+        open_archive(archive)
+
+
+async def test_a_keyword_leg_does_not_cost_the_streaming_import(tmp_path: Path) -> None:
+    """TASK-0302 must not undo TASK-0293: postings are verified and written a row at a time.
+
+    The keyword leg adds a whole pass over `vectors.jsonl` and a second value per chunk, and
+    an implementation that indexed either of them would grow with the collection again.
+    """
+    archive, payload = bulky(tmp_path, with_sparse=True)
+    adapter = CountingAdapter()
+    settings = copy_settings()
+
+    tracemalloc.start()
+    try:
+        counts = await import_archive(
+            settings,
+            adapter,  # type: ignore[arg-type]
+            open_archive(archive),
+            collection="restored",
+            lock_root=tmp_path,
+        )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert settings.retrieval.hybrid is True
+    assert counts.chunks == BULK_CHUNKS
+    assert peak < payload // 4, f"held {peak} bytes while reading a {payload} byte archive"
