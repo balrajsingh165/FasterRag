@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -149,3 +150,33 @@ def test_ties_break_deterministically() -> None:
 
 def test_the_public_surface_exports_the_documented_function() -> None:
     assert public_rrf_fuse is rrf_fuse
+
+
+def test_a_fused_result_cannot_be_rewritten_by_whoever_receives_it() -> None:
+    """Fusion's output is evidence: the reranker and context assembly read it, never edit it."""
+    fused = rrf_fuse(["a", "b"])
+
+    with pytest.raises(FrozenInstanceError):
+        # CRITICAL: mypy is right that this assignment is illegal, and that is the assertion.
+        # A fused result travels to the reranker and then to context assembly, which build new
+        # objects rather than editing this one, so the score a trace shows is the score fusion
+        # produced. This proves the dataclass refuses at runtime, not only at type-check time,
+        # so the ignore cannot be dropped.
+        fused[0].score = 99.0  # type: ignore[misc]
+
+    assert fused[0].score == pytest.approx(1 / 61)
+
+
+def test_a_leg_cannot_be_rewritten_once_it_is_declared() -> None:
+    """A ``Ranking`` is the caller's declaration of a leg, weight included."""
+    leg = Ranking(name="dense", ids=["a"], weight=1.0)
+
+    with pytest.raises(FrozenInstanceError):
+        # CRITICAL: mypy is right that this assignment is illegal, and that is the assertion.
+        # The weight comes from `retrieval.dense_weight`; a leg fusion could retune in flight
+        # would make the configured balance unverifiable from the trace. This proves the
+        # dataclass refuses at runtime, not only at type-check time, so the ignore cannot be
+        # dropped.
+        leg.weight = 5.0  # type: ignore[misc]
+
+    assert leg.weight == 1.0

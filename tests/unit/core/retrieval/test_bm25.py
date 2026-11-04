@@ -130,3 +130,58 @@ def test_a_document_and_its_query_share_no_weights_but_share_terms() -> None:
 
     assert set(query.indices) < set(document.indices)
     assert list(query.values) == [1.0, 1.0]
+
+
+def bm25_weight(frequency: int, length: int, *, k1: float = 1.2, b: float = 0.75) -> float:
+    """Saturated term frequency, transcribed from the BM25 definition in ADR-0007.
+
+    The constants are spelled out rather than imported, because pinning them is the point.
+    """
+    normalizer = k1 * (1 - b + b * length / 256)
+    return frequency * (k1 + 1) / (frequency + normalizer)
+
+
+@pytest.mark.parametrize(("occurrences", "length"), [(1, 12), (4, 12), (1, 600), (7, 600)])
+def test_document_weights_are_the_documented_number_not_merely_the_right_order(
+    occurrences: int, length: int
+) -> None:
+    """Both tuning constants and the whole saturation expression live inside this number."""
+    observed = fixed_length_document(occurrences, length)
+
+    assert observed == pytest.approx(bm25_weight(occurrences, length))
+
+
+def distinct_terms(count: int) -> str:
+    """Return a document of exactly ``count`` distinct terms."""
+    return " ".join(f"term{index}" for index in range(count))
+
+
+def test_the_average_length_is_the_pivot_where_b_stops_mattering() -> None:
+    """At exactly 256 terms the normalizer is ``k1`` whatever ``b`` is: that is what 256 means."""
+    body = distinct_terms(256)
+
+    assert len(tokenize(body)) == 256
+    assert weight_of(encode_document(body, b=0.0), "term7") == pytest.approx(1.0)
+    assert weight_of(encode_document(body, b=1.0), "term7") == pytest.approx(1.0)
+
+
+def test_one_term_either_side_of_the_pivot_tilts_in_opposite_directions() -> None:
+    """So the pivot above cannot pass by ``b`` having stopped doing anything at all."""
+    shorter, longer = distinct_terms(255), distinct_terms(257)
+
+    assert weight_of(encode_document(shorter, b=1.0), "term7") > weight_of(
+        encode_document(shorter, b=0.0), "term7"
+    )
+    assert weight_of(encode_document(longer, b=1.0), "term7") < weight_of(
+        encode_document(longer, b=0.0), "term7"
+    )
+
+
+def test_two_character_terms_reach_the_index() -> None:
+    """The sparse leg exists for exact short tokens: ``ai``, ``ml``, ``db``, ``v2`` are terms."""
+    assert tokenize("ai ml db v2") == ["ai", "ml", "db", "v2"]
+
+
+def test_the_filter_after_stemming_uses_the_same_minimum_as_the_one_before_it() -> None:
+    """``ops`` stems to ``op``: two characters is short, not too short, on either side."""
+    assert tokenize("ops") == ["op"]
