@@ -49,7 +49,7 @@ Every item below was re-verified this session by running it, reading its impleme
 | **Coverage-gate reconciliation (TASK-0252, §4.2)** | The documented blocking gate may not be holding | Engineering |
 | **LLM breaker: consult or stop constructing (TASK-0245)** | A metric reporting a state no code transitions is a false observability signal | Engineering |
 | **Disk-full typing (TASK-0234 ✅)** | Closed 2026-08-10. One translation at one boundary, with the chained `OSError` preserved so errno 28 survives; the paired chaos assertion was inverted in the same commit | Engineering |
-| **Reranker default (TASK-0175, B6)** | A 2.2 GB model with a 400 s first-load *(dev machine)* as the default is every adopter's first impression | Maintainer |
+| **Reranker default (TASK-0175, B6)** | A 2.2 GB default model is every adopter's first impression. BENCH-0003 (2026-11-03) corrected the cost: the weights **download** in 357 s and then **load in 8.3–9.3 s** from cache — the old “400 s first-load” conflated the two. The larger recurring cost is **17–25×** the small model's per-query rerank latency, 55.7–86.9 s per query at the shipped `rerank_top_n: 100`, CPU-only; the quality benefit remains unmeasurable on the current golden sets (TASK-0297) | Maintainer |
 | **Ladder-scope ADR (TASK-0165, B3)** | Ships either `cache_only` (TASK-0159) or an honest narrowing; releasing with "specified-not-built" annotations is acceptable, releasing without the decision recorded is not | Maintainer |
 | **SBOM at tag (remainder of TASK-0087)** | Documented supply-chain promise attached to the first tag | Engineering |
 

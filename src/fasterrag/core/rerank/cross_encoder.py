@@ -69,9 +69,11 @@ class CrossEncoderReranker:
             # CRITICAL: warning, not info. Nothing configures logging in a plain script or a
             # notebook, so an info line is invisible and the default reranker —
             # BAAI/bge-reranker-v2-m3, 2.2 GB — downloads and loads in total silence.
-            # Measured at over 400 s on a developer laptop, which reads as a hang rather
-            # than as work. Python's last-resort handler emits warnings without setup, so
-            # this is the only level that reaches the person waiting.
+            # BENCH-0003 measured that first run on a developer laptop as a 357 s download
+            # followed by an 8.3-9.3 s load from the populated cache: minutes of silence,
+            # which reads as a hang rather than as work. The earlier "over 400 s to load"
+            # figure conflated the two. Python's last-resort handler emits warnings without
+            # setup, so this is the only level that reaches the person waiting.
             _logger.warning(
                 "loading the reranker model; the first run downloads the weights, which for "
                 "a large cross-encoder is several gigabytes and can take minutes. Set "

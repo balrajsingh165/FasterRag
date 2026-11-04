@@ -63,7 +63,7 @@ The nightly CI job produces numbers but its own header states they are not citab
 
 ## B6 — The shipped reranker is 2.2 GB (TASK-0175)
 
-Default config is `retrieval.rerank: true` with `BAAI/bge-reranker-v2-m3`. **Measured: did not finish loading within 400 s** on a developer laptop; with `rerank: false` the same query path returns in 4.3 s. A `pip install` user's first query downloads 2.2 GB and appears to hang.
+Default config is `retrieval.rerank: true` with `BAAI/bge-reranker-v2-m3`. **Measured (BENCH-0003, 2026-11-03, indicative only — non-isolated hardware): the 2.2 GB of weights download in 357 s, and the model then loads in 8.3–9.3 s from a populated cache** — about a second more than the 90 MB `cross-encoder/ms-marco-MiniLM-L-6-v2`. The earlier "over 400 s to load" figure conflated the download with the load. The download is paid once per machine; the recurring cost is the larger one: **17–25× the small model's per-query rerank latency**, which at the shipped `retrieval.rerank_top_n: 100` is **55.7–86.9 s per query**, CPU-only. With `rerank: false` the same query path returns in 4.3 s. A `pip install` user's first query downloads 2.2 GB and appears to hang.
 
 TASK-0174 ✅ made the wait *visible* — the loader now warns, names the cost, and names the two ways out — but it did not decide whether the wait should exist.
 
