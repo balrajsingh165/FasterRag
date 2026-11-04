@@ -4,7 +4,7 @@ Doctrine: **a claim without a measurement is a bug** ([reliability.md](reliabili
 
 ## 1. Testing pyramid (all layers required)
 
-> **Build status (2026-08-09 claims audit, TASK-0238).** "Required" is the target, not a report. Layers **1.1–1.6 and 1.9 are built and run in CI**. Layers **1.7 (load), 1.8 (soak), and 1.10 (mutation) do not exist**: no k6 or Locust script, no soak suite, and `mutmut` is not a dependency — the `load`, `soak`, and `mutation` markers are declared in `pyproject.toml` and used by no test. They are tracked as TASK-0243, and FMEA rows that name one of them as their proving test are annotated accordingly.
+> **Build status (2026-08-09 claims audit, TASK-0238; mutation layer revised 2026-11-04).** "Required" is the target, not a report. Layers **1.1–1.6, 1.9 and 1.10 are built**; 1.1–1.6 and 1.9 run in CI on every push or PR and **1.10 runs nightly** (§1.10). Layers **1.7 (load) and 1.8 (soak) still do not exist**: no k6 or Locust script, no soak suite, and the `load` and `soak` markers are declared in `pyproject.toml` and used by no test. Both need reference hardware (TASK-0084) and remain the open part of TASK-0243; FMEA rows that name one of them as their proving test are annotated accordingly.
 
 ### 1.1 Unit tests
 
@@ -106,11 +106,32 @@ scenarios defined in that module only. It therefore does not yet see the two new
 it would not notice if they were deleted. The scenarios run and pass; it is the audit that
 is behind, and extending it is an open task.
 
-### 1.10 Mutation testing (mutmut) — **NOT BUILT** (TASK-0243)
+### 1.10 Mutation testing — **built 2026-11-04**, runs nightly
 
-*Specified:* sampled on the two places where a subtle bug silently ruins quality — **chunk-boundary logic** and **retrieval-scoring/fusion logic**. Surviving mutants are triaged as missing-test bugs in [todo.md](todo.md).
+`scripts/mutation_run.py`, driven by the `mutation` job in `.github/workflows/nightly.yml`. It automates what this repository was already doing by hand: TASK-0193, TASK-0208, TASK-0211, TASK-0229 and TASK-0232 each record a maintainer breaking a line and confirming exactly one test went red. A habit protects whatever somebody remembered to break.
 
-*As built:* `mutmut` is not a dependency and has no configuration; the `mutation` marker is declared and unused. Mutation checking is done **by hand** today — several slices record deliberately breaking the code and confirming exactly one test fails (TASK-0193, TASK-0208, TASK-0211, TASK-0229, TASK-0232) — which is the practice this layer would automate, not a substitute for it.
+**Neither mutmut nor cosmic-ray, and why.** Both were installed and tried here against Python 3.14.7 on Windows, the machine this repository is developed on.
+
+- `mutmut` 3.8.0 installs and then refuses to run: it prints *"To run mutmut on Windows, please use the WSL"* and exits without mutating anything. A nightly survivor that the maintainer cannot reproduce locally is a report, not a gate.
+- `cosmic-ray` 8.7.0 installs cleanly on 3.14, but it parses with `parso` 0.8.7, which raises a **false `SyntaxError` on valid code in this tree** — the parenthesized `with` statement in `src/fasterrag/services/archive.py` (lines 211–214), legal since Python 3.10 and accepted by `ast.parse`. It also takes one global `test-command` per session, so running only the tests that cover a module means one session, one SQLite database and one report per target, re-stitched by a script of ours anyway.
+
+The runner is therefore purpose-built on `ast`, which by construction parses exactly what the interpreter parses, following the same pattern as `scripts/trim_docstrings.py` and its before/after structure comparison. It is stdlib-only and adds no dependency.
+
+**Target set, explicit and configurable.** Mutating 27k lines produces a run that never finishes and a report nobody reads. `DEFAULT_TARGETS` names six, each paired with the tests that are supposed to defend it: `core/retrieval`, `core/chunking`, `core/identity.py`, `core/breaker.py`, `services/regression.py`, `core/rate_limit.py`. `--only` narrows it; `--targets-file` replaces it.
+
+**Operators.** Comparison swaps (including `is`/`is not` and `in`/`not in`), arithmetic swaps, `and`/`or`, `not`-removal, numeric-literal perturbation and boolean-literal flips. String literals are deliberately **not** mutated: they are overwhelmingly error codes and messages here, and mutating them manufactures survivors no behavioural test should be asked to kill. Every candidate passes three guards before it counts — it must still parse, it must differ from the original under `ast.dump`, and it must occupy the same number of lines, so a reported line number is the line a reader will find.
+
+**Output is a survivor list, not a score.** A surviving mutant is a claim that some line can be changed without any test noticing, so every survivor is printed with file, line, column, operator and the exact `before -> after` substitution, into the run's `$GITHUB_STEP_SUMMARY` as well as a JSON artifact. A score on its own is noise.
+
+**Fail-or-report, deliberately asymmetric.** A **survivor is a warning**, not a job failure: the set includes equivalent mutants (a perturbed constant nothing can observe) and timing-dependent ones, and a nightly that goes red on those is switched off within a week. The answer to "a report nobody reads is how the FMEA table rotted" is to put the survivors on the run page rather than to build a brittle gate. A run that **could not be performed fails the job** (exit code 2): a target whose own suite was already red kills every mutant for free and would otherwise report a perfect score — the vacuity defect the trap registry calls T12.
+
+**Nothing under `src/` is ever written.** The tree is copied once per run and the copy is mutated; pytest is pointed at the copy with `-o pythonpath=` (emptying the ini setting that would otherwise put the real `src` first) plus `PYTHONPATH`.
+
+**Two bounds, stated rather than implied.** A target whose named tests do not import its source reports *every* mutant as surviving — loud, but it is a mis-wired target rather than an untested module, and only a reader can tell the two apart. And a survivor is a statement about the test suite, never by itself proof of a defect.
+
+**What has actually been measured, exactly.** The catalogue generates **420 mutants over the six targets' 18 files**. On 2026-11-04, on a Windows dev machine shared with other work, **four of the six targets were run exhaustively**: `identity` (20 mutants, 7 killed, 13 survived), `breaker` (34, 20 killed, 14 survived), `regression` (40, 26 killed, 14 survived) and `rate-limit` (40, 18 killed, 22 survived) — **134 mutants, 71 killed, 63 survived, 183 s wall clock**. The remaining two targets, `retrieval` (52 mutants) and `chunking` (234), **have not been measured**: their suites are the slow ones and the unbounded run over all six was still executing when it was stopped. No mutation score is claimed for them, and none is claimed for the tree.
+
+One result is **not reproducible between two runs of the same target on the same code**: `breaker` reported 13 survivors in one run and 14 in another, differing by `core/breaker.py:43` (`CLOSED = 0` → `1`). That is unexplained, and it is precisely the reason a survivor count is a warning here rather than a gate.
 
 ### 1.11 Live provider checks (credential-gated)
 
@@ -165,7 +186,8 @@ Three settings are pinned rather than inherited, each of them a value `tests/eva
 | `eval` | PRs touching retrieval paths + nightly | small datasets in repo; the live provider checks (§1.11) additionally need provider credentials and skip without them |
 | `chaos` | runnable now against a local stack | Docker |
 | `load`, `soak` | *planned* — no test carries either marker yet (TASK-0243); results would go to the ledger | reference hardware (TASK-0084) |
-| `mutation` | *planned* — no test carries the marker; `mutmut` is not installed (TASK-0243) | — |
+
+There is deliberately **no `mutation` marker**. One was declared from 2026-07-29 and carried by zero tests for three months, which is how the claims audit found it; the layer that replaced it (§1.10) is a script that *runs* the suite rather than a test inside it, so the marker was removed in the same change rather than left as a second piece of unused scaffolding.
 
 ## 4. Definition of done for any implemented feature
 

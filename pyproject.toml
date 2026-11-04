@@ -241,7 +241,6 @@ markers = [
     "load: load-test scenarios run on reference hardware",
     "soak: long-running stability runs",
     "chaos: scripted fault-injection scenarios",
-    "mutation: mutation-testing runs",
 ]
 
 [tool.coverage.run]

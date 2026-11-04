@@ -3,9 +3,9 @@
 # to a benchmark-ledger entry (docs/benchmarks.md), and a ledger nobody regenerates goes
 # stale silently.
 #
-# Deliberately not part of `ci`. Both suites download model weights and run for minutes, so
-# gating every push on them would trade a fast feedback loop for numbers that only matter
-# once a day.
+# Deliberately not part of `ci`. The `measure` job's two suites download model weights and
+# run for minutes, so gating every push on them would trade a fast feedback loop for numbers
+# that only matter once a day.
 #
 # The numbers produced here are NOT citable as benchmark-ledger entries on their own: a
 # shared GitHub runner has neighbours, and docs/performance.md requires an isolated,
@@ -22,6 +22,25 @@
 # written by a machine from numbers the header above says are not citable. A regression here
 # fails the job, which is already a notification, and a human decides whether it is worth an
 # entry.
+#
+# The `mutation` job is here for the same reason as `measure` and not for the push path: it
+# re-runs a test suite once per mutant, so it is minutes of work for an answer that only
+# changes when a test or a target module changes. scripts/mutation_run.py explains why it is
+# a purpose-built runner rather than mutmut or cosmic-ray.
+#
+# Its two outcomes are deliberately asymmetric, because the two failures they guard against
+# are not the same failure. A SURVIVING MUTANT IS A WARNING, not a job failure: survivors
+# include equivalent mutants (a perturbed constant that nothing can observe) and
+# timing-dependent ones, so gating pushes — or nightlies — on a number that moves for
+# non-bugs buys a gate that is switched off within the week. The answer to "a report nobody
+# reads is how the FMEA table rotted" is not a brittle gate, it is making the report
+# unavoidable: every survivor is written into $GITHUB_STEP_SUMMARY with its file, line and
+# substitution, on the run page rather than inside an artifact nobody downloads.
+#
+# A run that COULD NOT BE PERFORMED does fail the job. That is exit code 2 — the target's
+# own suite was already red, or no mutant could be generated — and it is the vacuity defect
+# (rebuild-playbook T12) this repository treats as a bug: a red baseline kills every mutant
+# for free and would otherwise report a perfect score.
 name: nightly
 
 on:
@@ -124,5 +143,58 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: nightly-measurements
+          path: artifacts/
+          retention-days: 30
+
+  mutation:
+    runs-on: ubuntu-latest
+    # A mutant costs one run of its target's suite. The budget below bounds the count, but a
+    # pathological mutant can still hang, so the job carries a ceiling of its own on top of
+    # the per-mutant --timeout.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Only `.[dev]`: the targeted modules are pure chunking, retrieval, identity, breaker,
+      # regression-gate and rate-limit logic, and their unit tests run without model weights.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # --budget caps the mutants per target with a seeded, reproducible sample, so a night
+      # takes a bounded time and two nights on the same code report the same mutants rather
+      # than a different random slice. Raise it, or drop it for an exhaustive run, when
+      # somebody is actually working through the survivor list.
+      - name: Mutate the targeted modules
+        run: |
+          mkdir -p artifacts
+          set +e
+          python scripts/mutation_run.py \
+            --budget 40 \
+            --timeout 300 \
+            --json-out artifacts/mutation.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+          verdict=$?
+          set -e
+          case "${verdict}" in
+            0) ;;
+            1) echo "::warning::mutants survived: lines in the targeted modules that no test defends. The full list, with file, line and substitution, is in this run's summary and in the mutation.json artifact" ;;
+            2) echo "::error::the mutation run could not be performed — a target's own test suite was already red, or no mutant could be generated, either of which would have scored a perfect run for free"
+               exit 1 ;;
+            *) echo "::error::scripts/mutation_run.py exited ${verdict}, which is not a verdict it defines"
+               exit 1 ;;
+          esac
+
+      - name: Upload the survivor list
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-survivors
           path: artifacts/
           retention-days: 30
