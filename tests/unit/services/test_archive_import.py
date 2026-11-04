@@ -2,11 +2,14 @@ import hashlib
 import io
 import json
 import tarfile
+import tempfile
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from fasterrag.adapters.vectordb.base import Point
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.archive import (
@@ -16,6 +19,7 @@ from fasterrag.services.archive import (
     LOCK_NAME,
     MANIFEST_NAME,
     VECTORS_NAME,
+    export_archive,
 )
 from fasterrag.services.archive_import import (
     VerificationError,
@@ -664,3 +668,324 @@ def test_a_decompression_bomb_is_refused_before_it_exhausts_memory(
 
     with pytest.raises(VerificationError, match="expands beyond"):
         open_archive(archive)
+
+
+def test_closing_the_reader_releases_the_staging_directory(tmp_path: Path) -> None:
+    """The members live on disk now, so something has to delete them."""
+    reader = open_archive(make(tmp_path))
+    staging = reader.staging
+
+    assert (staging / CHUNKS_NAME).is_file()
+
+    reader.close()
+    reader.close()
+
+    assert not staging.exists()
+
+
+def test_leaving_the_reader_block_releases_the_staging_directory(tmp_path: Path) -> None:
+    """A caller that scopes the reader should not have to remember the directory."""
+    with open_archive(make(tmp_path)) as reader:
+        staging = reader.staging
+        assert staging.is_dir()
+
+    assert not staging.exists()
+
+
+def test_a_staging_directory_that_cannot_be_removed_does_not_break_the_caller(
+    tmp_path: Path,
+) -> None:
+    """On Windows an open handle makes cleanup fail, and an import must not die of it."""
+    reader = open_archive(make(tmp_path))
+
+    def refuse() -> None:
+        raise OSError("the staging directory is in use")
+
+    assert reader.workspace is not None
+    reader.workspace.cleanup = refuse  # type: ignore[method-assign]
+
+    reader.close()
+
+    assert reader.workspace is None
+
+
+def test_a_refused_archive_leaves_no_staging_directory_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verification now writes before it refuses, and a refusal must not leak what it wrote."""
+    root = tmp_path / "staging-root"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+
+    with pytest.raises(VerificationError, match="checksum"):
+        open_archive(make(tmp_path, corrupt=CHUNKS_NAME))
+
+    assert list(root.iterdir()) == []
+
+
+async def test_a_chunk_missing_its_vector_is_refused_not_handed_its_neighbours(
+    tmp_path: Path,
+) -> None:
+    """Reading the vectors in step with the chunks has to match on id, not on position."""
+    archive = make(
+        tmp_path,
+        chunks=[
+            {"chunk_id": "c_1", "document_id": "d_1", "text": "one", "metadata": {}},
+            {"chunk_id": "c_2", "document_id": "d_1", "text": "two", "metadata": {}},
+        ],
+        vectors=[{"chunk_id": "c_2", "vector": [0.3, 0.4]}],
+    )
+    adapter = RecordingAdapter()
+
+    with pytest.raises(FasterRagError) as caught:
+        await import_archive(
+            copy_settings(),
+            adapter,  # type: ignore[arg-type]
+            open_archive(archive),
+            collection="restored",
+            lock_root=tmp_path,
+        )
+
+    assert caught.value.code is ErrorCode.CONFLICT
+    assert "no vector for chunk 'c_1'" in caught.value.detail
+    assert adapter.points == []
+
+
+async def test_vectors_out_of_chunk_order_still_land_on_their_own_chunks(
+    tmp_path: Path,
+) -> None:
+    """Nothing in the format promises vector order, so a lockstep read alone would mispair them."""
+    archive = make(
+        tmp_path,
+        chunks=[
+            {"chunk_id": "c_1", "document_id": "d_1", "text": "one", "metadata": {}},
+            {"chunk_id": "c_2", "document_id": "d_1", "text": "two", "metadata": {}},
+        ],
+        vectors=[
+            {"chunk_id": "c_2", "vector": [0.3, 0.4]},
+            {"chunk_id": "c_1", "vector": [0.1, 0.2]},
+        ],
+    )
+    adapter = RecordingAdapter()
+
+    await import_archive(
+        copy_settings(),
+        adapter,  # type: ignore[arg-type]
+        open_archive(archive),
+        collection="restored",
+        lock_root=tmp_path,
+    )
+
+    assert [(point.point_id, list(point.vector)) for point in adapter.points] == [
+        ("c_1", [0.1, 0.2]),
+        ("c_2", [0.3, 0.4]),
+    ]
+
+
+class CountingAdapter:
+    """Accepts points and forgets them, so a memory measurement sees the import, not the test."""
+
+    def __init__(self) -> None:
+        self.written = 0
+        self.created: list[Any] = []
+
+    async def list_collections(self) -> list[Any]:
+        return []
+
+    async def create_collection(self, spec: Any) -> None:
+        self.created.append(spec)
+
+    async def drop_collection(self, name: str) -> bool:
+        return True
+
+    async def upsert(self, points: list[Any]) -> Any:
+        from fasterrag.adapters.vectordb.base import UpsertResult
+
+        self.written += len(points)
+        return UpsertResult(upserted=len(points))
+
+
+BULK_CHUNKS = 2_000
+BULK_DIMENSIONS = 128
+
+
+def bulky(tmp_path: Path) -> tuple[Path, int]:
+    """Write an archive far larger than a streaming reader's working set.
+
+    Returns the archive and the uncompressed size of its row members, which is what an
+    implementation that materialises them has to hold.
+    """
+    text = "expense policy section " * 350
+    vector = [round(0.001 * index, 6) for index in range(BULK_DIMENSIONS)]
+    documents: list[dict[str, Any]] = [
+        {
+            "document_id": "d_1",
+            "source_uri": "/docs/policy.md",
+            "content_hash": "sha-abc",
+            "version": 1,
+            "metadata": {},
+        }
+    ]
+    chunks: list[dict[str, Any]] = [
+        {"chunk_id": f"c_{index:05d}", "document_id": "d_1", "text": text, "metadata": {}}
+        for index in range(BULK_CHUNKS)
+    ]
+    vectors: list[dict[str, Any]] = [
+        {"chunk_id": f"c_{index:05d}", "vector": vector} for index in range(BULK_CHUNKS)
+    ]
+    manifest: dict[str, Any] = {
+        "format_version": "1.0.0",
+        "collection": {"name": "docs"},
+        "embedding": {"model": "m", "model_version": "1", "dimensions": BULK_DIMENSIONS},
+        "counts": {"documents": 1, "chunks": BULK_CHUNKS, "vectors": BULK_CHUNKS},
+        "includes_vectors": True,
+    }
+
+    archive = make(tmp_path, documents=documents, chunks=chunks, vectors=vectors, manifest=manifest)
+    payload = sum(len(line(row)) for row in [*documents, *chunks, *vectors])
+    return archive, payload
+
+
+def bulk_settings() -> Settings:
+    """Copy settings with the keyword leg off, so the measurement is of the archive stream."""
+    return Settings.model_validate({"embeddings": {"model": "m"}, "retrieval": {"hybrid": False}})
+
+
+async def test_the_import_never_holds_the_archive_it_is_reading(tmp_path: Path) -> None:
+    """TASK-0293: a collection is exactly the thing that does not fit in memory.
+
+    The bomb ceilings bound a hostile archive at 4 GiB; they do nothing for an honest
+    corpus larger than RAM. The reader that materialised every member before verifying a
+    checksum could not pass this, and no other assertion in this file would have noticed.
+    """
+    archive, payload = bulky(tmp_path)
+    adapter = CountingAdapter()
+
+    assert payload > 8 * 1024 * 1024
+
+    tracemalloc.start()
+    try:
+        counts = await import_archive(
+            bulk_settings(),
+            adapter,  # type: ignore[arg-type]
+            open_archive(archive),
+            collection="restored",
+            lock_root=tmp_path,
+        )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert counts.chunks == BULK_CHUNKS
+    assert adapter.written == BULK_CHUNKS
+    assert peak < payload // 4, f"held {peak} bytes while reading a {payload} byte archive"
+
+
+class SourceAdapter:
+    """Yields points the way a backend's cursor does, so the real exporter can run."""
+
+    def __init__(self, points: list[Any]) -> None:
+        self.points = points
+
+    async def iterate_points(
+        self, collection: str, *, with_vectors: bool = False, batch_size: int = 256
+    ) -> Any:
+        for point in self.points:
+            yield point
+
+
+async def test_an_archive_from_the_real_exporter_needs_no_offset_index(tmp_path: Path) -> None:
+    """The exporter writes vectors in chunk order, so the import holds one row, not an index.
+
+    The index is the fallback for an archive nobody here produced. If the normal path ever
+    takes it, import memory grows with the collection again and nothing else would say so.
+    """
+    source = SourceAdapter(
+        [
+            Point(
+                point_id=f"c_{index}",
+                collection="docs",
+                vector=[0.1 * index, 0.2],
+                payload={
+                    "document_id": "d_1",
+                    "source_uri": "/docs/policy.md",
+                    "content_hash": "sha-abc",
+                    "text": f"chunk {index}",
+                },
+            )
+            for index in range(5)
+        ]
+    )
+    archive = tmp_path / "exported.fragx"
+
+    await export_archive(
+        copy_settings(),
+        source,  # type: ignore[arg-type]
+        collection="docs",
+        destination=archive,
+        include_vectors=True,
+    )
+    reader = open_archive(archive)
+    adapter = RecordingAdapter()
+
+    counts = await import_archive(
+        copy_settings(),
+        adapter,  # type: ignore[arg-type]
+        reader,
+        collection="restored",
+        lock_root=tmp_path,
+    )
+
+    assert reader.vector_offsets is None
+    assert counts.chunks == 5
+    assert [point.point_id for point in adapter.points] == [f"c_{index}" for index in range(5)]
+    assert adapter.points[3].payload["source_uri"] == "/docs/policy.md"
+
+
+async def test_re_embedding_an_archive_that_carries_no_vectors_imports_it(
+    tmp_path: Path,
+) -> None:
+    """An export without `--include-vectors` can only come back this way, so it must work.
+
+    There is no vectors member to stream at all, and the reader has to say so rather than
+    open a file that was never written.
+    """
+    archive = make(
+        tmp_path,
+        chunks=[
+            {"chunk_id": "c_1", "document_id": "d_1", "text": "one", "metadata": {}},
+            {"chunk_id": "c_2", "document_id": "d_1", "text": "two", "metadata": {}},
+        ],
+    )
+    adapter = RecordingAdapter()
+
+    counts = await import_archive(
+        Settings.model_validate({}),
+        adapter,  # type: ignore[arg-type]
+        open_archive(archive),
+        collection="restored",
+        reembed=True,
+        router=StubRouter(),  # type: ignore[arg-type]
+        lock_root=tmp_path,
+    )
+
+    assert counts.chunks == 2
+    assert [list(point.vector) for point in adapter.points] == [[0.9, 0.9], [0.9, 0.9]]
+
+
+def test_a_refusal_raised_mid_stream_still_releases_the_staging_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal leaves its row iterator suspended, and an open file cannot be deleted.
+
+    Found in the wild while building this: 61 abandoned staging directories, each holding
+    the one `vectors.jsonl` that the reference check still had open when it refused.
+    """
+    root = tmp_path / "staging-root"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+
+    with pytest.raises(VerificationError, match="vector for chunk"):
+        open_archive(make(tmp_path, vectors=[{"chunk_id": "c_absent", "vector": [0.1, 0.2]}]))
+
+    assert list(root.iterdir()) == []

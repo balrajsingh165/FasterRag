@@ -286,3 +286,33 @@ async def test_the_import_leaves_a_lockfile_describing_the_restored_collection(
     assert lock is not None
     assert lock.dimensions == DIMENSIONS
     assert set(lock.document_hashes) == {f"d_{index:04d}" for index in range(4)}
+
+
+async def test_a_live_archive_imports_without_materialising_or_indexing_it(
+    populated: tuple[QdrantAdapter, str, list[Point]], qdrant: Settings, tmp_path: Path
+) -> None:
+    """TASK-0293: the streaming import, against an archive a real backend produced.
+
+    The unit suite proves the reader streams a synthetic archive. What only a live export
+    can show is that the archive Qdrant's own scroll order produces is read in lockstep —
+    no offset index, so import memory does not grow with the collection — and that the
+    staging directory the reader writes is gone afterwards.
+    """
+    adapter, collection, written = populated
+    archive = tmp_path / "corpus.fragx"
+    restored = f"{collection}-restored"
+
+    await export_archive(
+        qdrant, adapter, collection=collection, destination=archive, include_vectors=True
+    )
+    reader = open_archive(archive)
+    staging = reader.staging
+
+    assert reader.vector_offsets is None
+    assert (staging / "chunks.jsonl").is_file()
+
+    counts = await import_archive(qdrant, adapter, reader, collection=restored, lock_root=tmp_path)
+    reader.close()
+
+    assert counts.chunks == len(written)
+    assert not staging.exists()

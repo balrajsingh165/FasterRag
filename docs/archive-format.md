@@ -68,7 +68,7 @@ archive.fragx
 
 ## Import semantics
 
-1. **Verify first**: checksums, manifest counts, referential integrity (every chunk's `document_id` resolves; every vector's `chunk_id` resolves), and vector width (every row in `vectors.jsonl` is `embedding.dimensions` long, since that is the width the target collection is created at). Any failure → `VALIDATION_FAILED` problem, nothing written.
+1. **Verify first, and stream while verifying**: the reader copies every member out of the tar into a private staging directory in fixed-size blocks, hashing each one as it lands, and then checks checksums, manifest counts, referential integrity (every chunk's `document_id` resolves; every vector's `chunk_id` resolves), and vector width (every row in `vectors.jsonl` is `embedding.dimensions` long, since that is the width the target collection is created at) by reading those staged files back a line at a time. Any failure → `VALIDATION_FAILED` problem, nothing written to the target and the staging directory removed. Streaming does not weaken the ordering: the bytes that were hashed are the same bytes on disk that every verification pass and the writer then read, and all of it still happens before the first upsert.
 2. **Vector copy path** (no `--reembed`): allowed **iff** `includes_vectors` and the target collection's model, model version, and dimensions all match the manifest — otherwise import refuses and names every mismatch at once (`CONFLICT`). The target's identity is read from its own `index.lock` when it already has one, because that is what actually built it; otherwise from `embeddings.model` and `embeddings.dimensions`, because that is what will query it next. A target with no lockfile declares no model version, and a value nobody declares is not compared.
 3. **Re-embed path** (`--reembed`): ignores `vectors.jsonl`; chunks flow through the normal embedding pool under the current config; the manifest's chunking settings are preserved as chunk metadata.
 4. **Provenance is rejoined**: `source_uri`, `content_hash`, and the document's `metadata` live in `documents.jsonl`, not on the chunk row. Import joins them back onto every chunk payload — a restored chunk without a `source_uri` cannot be cited, and one without a `content_hash` cannot be deduplicated.
@@ -76,10 +76,19 @@ archive.fragx
 6. **Nothing half-written survives**: if a write fails partway, a collection the import created is dropped and the original error is raised; a collection that already existed is left alone — dropping it would destroy rows the archive never carried — and the refusal names the mixed state and says that re-running completes it. A process killed outright cannot roll anything back; re-running the import is what repairs it.
 7. **Lockfile**: the imported collection writes a fresh `index.lock` (model, dimensions, and the archive's per-document content hashes); the archive's own lock is retained beside it as `<collection>.source.lock.json` for provenance.
 
+## Resource bounds on import
+
+A collection is precisely the thing that does not fit in memory, so neither side of the archive may assume it does: export streams rows through a staging directory, and import (TASK-0293) streams them back.
+
+- **Memory is bounded by row counts, not by archive size.** Peak is a small multiple of the reader's block size while members are staged, plus two things that scale with rows rather than bytes: the document rows (`documents.jsonl`), which the payload join needs per chunk and which the fresh `index.lock` already requires one hash of each anyway; and, **only** for an archive whose vectors are not in chunk order, one file offset per vector row.
+- **Vector order decides which read path is taken.** The exporter writes `vectors.jsonl` in the same order as `chunks.jsonl`, so the two are read in lockstep and one vector row is held at a time. The format does not *require* that order — an archive whose vectors are shuffled is still valid, is still verified before anything is written, and is read through the offset index instead, which costs memory per vector row.
+- **Disk is the trade.** Staging needs free temporary space for the uncompressed archive. The directory is removed when the reader is closed, when it is garbage collected, and on any verification failure.
+- **The decompression-bomb ceilings are unchanged** (`docs/security.md` §5.2): 1 GiB per member, refused on the tar header, and 4 GiB per archive as a running budget charged against bytes actually read. The budget is spent block by block, so an archive that breaches it is refused on the block that crosses the line rather than after a large read.
+
 ## Known gaps
 
 - **`golden-set.jsonl` is specified but never written.** The exporter emits no golden set, and the reader neither expects nor reads one. It stays in the container listing as an optional member the format reserves. Tracked by TASK-0079.
-- **Sparse vectors are not carried.** `vectors.jsonl` holds the dense vector only; the vendor-neutral read side (`VectorDBAdapter.iterate_points`) does not return a point's sparse vector at all. Import recomputes BM25 sparse vectors from chunk text under the target's `retrieval.bm25_k1`/`bm25_b` when `retrieval.hybrid` is on, which re-derives them under the target's parameters rather than transplanting the source's. Tracked by TASK-0079.
+- **Sparse vectors are not carried.** `vectors.jsonl` holds the dense vector only; the **adapter layer can now return the keyword leg** — `VectorDBAdapter.iterate_points` populates `Point.sparse` on all three backends as of TASK-0291 (2026-11-04) — but the export side has not been changed to write it, so `vectors.jsonl` still carries the dense vector only. Import recomputes BM25 sparse vectors from chunk text under the target's `retrieval.bm25_k1`/`bm25_b` when `retrieval.hybrid` is on, which re-derives them under the target's parameters rather than transplanting the source's. Tracked by TASK-0079.
 
 ## Compatibility rules
 
