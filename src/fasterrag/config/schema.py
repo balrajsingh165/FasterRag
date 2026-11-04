@@ -701,6 +701,16 @@ class SecuritySettings(Section):
     rate_limit_redis_url: str = DEFAULT_REDIS_URL
     max_request_mb: Annotated[int, Field(ge=1, le=1024)] = 25
 
+    # CRITICAL: this is an authorization boundary, not a convenience. `POST /v1/admin/export`
+    # names the file it writes and `POST /v1/admin/import` names the file it reads, both from
+    # the request body, so without confinement an `admin` key writes anywhere the process can
+    # write — over `config.yaml`, into a web root — and reads any archive on the host. It
+    # lives beside `auth` rather than under a feature section because it bounds what a
+    # credential may reach on the host, which is what the rest of this section decides.
+    # Empty means "unconfined", which `guard_archive_path` refuses outright once `auth` is
+    # on, so leaving it empty breaks a served deployment loudly instead of exposing it.
+    allowed_archive_roots: list[str] = []
+
     @field_validator("rate_limit_redis_url")
     @classmethod
     def _check_rate_limit_redis_url(cls, value: str) -> str:

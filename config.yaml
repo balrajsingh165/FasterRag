@@ -180,3 +180,6 @@ security:
   rate_limit_backend: memory
   rate_limit_redis_url: redis://localhost:6379/0
   max_request_mb: 25
+  # Directories admin export may write into and admin import may read from. Empty is
+  # unconfined, which is refused outright once auth is on -- see docs/security.md.
+  allowed_archive_roots: []

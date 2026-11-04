@@ -119,3 +119,54 @@ def test_the_round_trip_runs_over_rest(tmp_path: Path) -> None:
     assert exported["chunks"] == imported["chunks"] == 2
     assert imported["collection"] == "restored"
     assert imported["reembed"] is False
+
+
+def confined(roots: list[Path], points: list[Any] | None = None) -> TestClient:
+    """A deployment that has named the directories its archives live in."""
+    app = create_app(
+        Settings.model_validate(
+            {"security": {"allowed_archive_roots": [str(root) for root in roots]}}
+        )
+    )
+    app.state.vector_db = IterableStub(points)
+    return TestClient(app)
+
+
+def test_exporting_outside_the_allowed_roots_is_refused(tmp_path: Path) -> None:
+    """The destination arrives in the request body, so it is a write primitive."""
+    allowed = tmp_path / "archives"
+    allowed.mkdir()
+
+    with confined([allowed], [point("c_1")]) as api:
+        response = api.post("/v1/admin/export", json={"out": str(tmp_path / "config")})
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_FAILED"
+    assert not (tmp_path / "config.fragx").exists()
+
+
+def test_exporting_inside_an_allowed_root_still_works(tmp_path: Path) -> None:
+    """Control case: confinement must not break the feature it protects."""
+    allowed = tmp_path / "archives"
+    allowed.mkdir()
+
+    with confined([allowed], [point("c_1")]) as api:
+        response = api.post("/v1/admin/export", json={"out": str(allowed / "backup")})
+
+    assert response.status_code == 200
+    assert (allowed / "backup.fragx").is_file()
+
+
+def test_importing_from_outside_the_allowed_roots_is_refused(tmp_path: Path) -> None:
+    """An archive anywhere on disk is readable without this."""
+    allowed = tmp_path / "archives"
+    allowed.mkdir()
+    outside = tmp_path / "elsewhere.fragx"
+    outside.write_bytes(b"")
+
+    with confined([allowed]) as api:
+        response = api.post("/v1/admin/import", json={"archive": str(outside)})
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_FAILED"
+    assert "allowed_archive_roots" in response.json()["detail"]

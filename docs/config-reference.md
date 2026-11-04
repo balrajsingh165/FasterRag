@@ -187,6 +187,9 @@ security:
   rate_limit_backend: memory
   rate_limit_redis_url: redis://localhost:6379/0
   max_request_mb: 25
+  # Directories admin export may write into and admin import may read from. Empty is
+  # unconfined, which is refused outright once auth is on -- see docs/security.md.
+  allowed_archive_roots: []
 ```
 
 ---
@@ -432,7 +435,7 @@ Anything else — `openai_compatible` gateways, Cohere's Command A / R7B lineup 
 
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
-| `autopilot.enabled` | bool | `false` | — | D6: eval-driven auto-tuning. Generates a golden Q&A set from the corpus, searches chunk size / top_k / hybrid weights / rerank settings, outputs a **suggested config diff with measured deltas**. **NEVER auto-applies** — human approves. |
+| `autopilot.enabled` | bool | `false` | — | D6: eval-driven auto-tuning. Generates a golden Q&A set from the corpus, searches the query-time parameters it can score without a rebuild — hybrid weights, `rrf_k` and rerank settings (`top_k` is deliberately excluded: measuring recall@k retrieves exactly k, so a top_k candidate cannot change the score; chunk size and overlap need the separate, priced index-time sweep and have no CLI surface yet, TASK-0145), outputs a **suggested config diff with measured deltas**. **NEVER auto-applies** — human approves. |
 | `autopilot.golden_set_size` | int | `100` | 10–10000 | Q&A pairs generated for the golden set; the default for `fasterrag autopilot generate-golden-set --size`, which overrides it per run. |
 
 ## `eval`
@@ -468,6 +471,7 @@ All integration toggles default `false`.
 | `security.rate_limit_backend` | str | `memory` | `memory`, `redis` | Where the per-key window is counted. `memory` is per process: with N API workers or replicas the effective ceiling is `rate_limit_per_minute × N`, which is correct only for a single-process deployment. `redis` counts every replica into one shared fixed window (`INCR` + `EXPIRE` in one transaction, keyed by a SHA-256 fingerprint of the API key, never the key). Needs `pip install fasterrag[redis]`. **The Redis backend has never been exercised against a live Redis server** — only against an in-memory double (TASK-0216); see [security.md](security.md) §2. |
 | `security.rate_limit_redis_url` | str | `redis://localhost:6379/0` | starts with `redis://`, `rediss://`, or `unix://` | Connection URL, read only when `security.rate_limit_backend` is `redis`. Counters are namespaced under `fasterrag:ratelimit`, so the same server can also back the caches. **A URL containing a password is a secret and must not be written here** — supply it through the environment instead (`FASTERRAG_SET=security.rate_limit_redis_url=...`). |
 | `security.max_request_mb` | int | `25` | 1–1024 | Input size limit for API request bodies (ingestion uploads are governed by `ingestion.max_document_mb`). |
+| `security.allowed_archive_roots` | list[str] | `[]` | paths | Directories `POST /v1/admin/export` may write an archive into and `POST /v1/admin/import` may read one from. **Authorization boundary**: both paths arrive in the request body, so an unconfined export overwrites any file the process can write (`config.yaml`, a web root) and an unconfined import reads any archive on the host. One list covers both verbs because they name the same artifact in the same directory. Paths are resolved before comparison, so `..` and symlinks cannot escape a root. Empty means unconfined, which is refused outright when `security.auth` is on — the same rule as `ingestion.allowed_source_roots`. |
 
 ---
 

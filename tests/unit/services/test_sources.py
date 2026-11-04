@@ -8,10 +8,11 @@ import pytest
 
 from fasterrag.config.schema import Settings
 from fasterrag.core.identity import document_id
-from fasterrag.errors import IngestionError, ParseError
+from fasterrag.errors import FasterRagError, IngestionError, ParseError
 from fasterrag.services.sources import (
     INLINE_SCHEME,
     _addresses,
+    guard_archive_path,
     resolve_sources,
     typed_source,
 )
@@ -28,11 +29,14 @@ def serve(
     """Route every AsyncClient the module builds through an in-memory transport."""
     real_client = httpx.AsyncClient
 
-    def client(*, timeout: float, follow_redirects: bool) -> httpx.AsyncClient:
+    def client(
+        *, timeout: float, follow_redirects: bool, limits: httpx.Limits
+    ) -> httpx.AsyncClient:
         return real_client(
             transport=httpx.MockTransport(handler),
             timeout=timeout,
             follow_redirects=follow_redirects,
+            limits=limits,
         )
 
     monkeypatch.setattr("fasterrag.services.sources.httpx.AsyncClient", client)
@@ -270,7 +274,7 @@ async def test_a_redirect_into_the_perimeter_is_refused(monkeypatch: pytest.Monk
     """The hop is guarded, not just the first URL — otherwise the guard is decoration."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "example.com":
+        if request.headers["host"] == "example.com":
             return httpx.Response(302, headers={"location": "http://169.254.169.254/"})
         return httpx.Response(200, content=b"metadata")
 
@@ -371,3 +375,158 @@ async def test_an_unauthenticated_deployment_still_ingests_local_paths(tmp_path:
     resolved = await resolve_sources([{"type": "path", "value": str(document)}], settings())
 
     assert resolved.sources == [str(document)]
+
+
+def rebinding(monkeypatch: pytest.MonkeyPatch, first: str, later: str) -> list[str]:
+    """Answer ``first`` once and ``later`` after that, the shape of a TTL-0 rebind."""
+    asked: list[str] = []
+
+    async def addresses(host: str) -> list[IPv4Address | IPv6Address]:
+        asked.append(host)
+        return [ip_address(first if len(asked) == 1 else later)]
+
+    monkeypatch.setattr("fasterrag.services.sources._addresses", addresses)
+    return asked
+
+
+def recorder() -> tuple[list[httpx.Request], Callable[[httpx.Request], httpx.Response]]:
+    """Return a request log and a handler that fills it."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=b"# body")
+
+    return seen, handler
+
+
+async def test_the_address_that_was_checked_is_the_address_dialled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DNS rebinding: a second answer must not be able to redirect the connection."""
+    seen, handler = recorder()
+    serve(handler, monkeypatch)
+    asked = rebinding(monkeypatch, "93.184.216.34", "169.254.169.254")
+
+    resolved = await resolve_sources(
+        [{"type": "url", "value": "https://example.com/doc.md"}], settings()
+    )
+    resolved.cleanup()
+
+    assert asked == ["example.com"]
+    assert seen[0].url.host == "93.184.216.34"
+
+
+async def test_pinning_keeps_the_host_header_and_the_certificate_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinning must not cost virtual hosting, nor verify the certificate against an IP."""
+    seen, handler = recorder()
+    serve(handler, monkeypatch)
+    resolve_as(monkeypatch, {"example.com": "93.184.216.34"})
+
+    resolved = await resolve_sources(
+        [{"type": "url", "value": "https://example.com:8443/doc.md"}], settings()
+    )
+    resolved.cleanup()
+
+    assert seen[0].headers["host"] == "example.com:8443"
+    assert seen[0].extensions["sni_hostname"] == "example.com"
+
+
+async def test_an_ipv6_answer_is_dialled_as_a_bracketed_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An IPv6 literal written into a URL unbracketed is not a URL."""
+    seen, handler = recorder()
+    serve(handler, monkeypatch)
+    resolve_as(monkeypatch, {"example.com": "2606:4700:4700::1111"})
+
+    resolved = await resolve_sources(
+        [{"type": "url", "value": "http://example.com/doc.md"}], settings()
+    )
+    resolved.cleanup()
+
+    assert str(seen[0].url) == "http://[2606:4700:4700::1111]/doc.md"
+
+
+async def test_a_relative_redirect_is_joined_against_the_name_not_the_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Joining against the pinned URL would lose the name the next hop must be checked by."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if len(seen) == 1:
+            return httpx.Response(302, headers={"location": "/next"})
+        return httpx.Response(200, content=b"# body")
+
+    serve(handler, monkeypatch)
+    resolve_as(monkeypatch, {"example.com": "93.184.216.34"})
+
+    resolved = await resolve_sources(
+        [{"type": "url", "value": "https://example.com/doc.md"}], settings()
+    )
+    resolved.cleanup()
+
+    assert [request.url.path for request in seen] == ["/doc.md", "/next"]
+    assert seen[1].headers["host"] == "example.com"
+    assert seen[1].extensions["sni_hostname"] == "example.com"
+
+
+async def test_an_unconfined_archive_path_is_refused_on_a_served_deployment() -> None:
+    """Export writes where the caller says, so unconfined is a write primitive."""
+    with pytest.raises(FasterRagError, match="allowed_archive_roots is empty"):
+        guard_archive_path("/etc/fasterrag/config.yaml", served())
+
+
+async def test_an_archive_path_outside_every_configured_root_is_refused(tmp_path: Path) -> None:
+    """A configured root is a boundary, not a hint."""
+    allowed = tmp_path / "archives"
+    allowed.mkdir()
+    configured = Settings.model_validate(
+        {"security": {"auth": True, "allowed_archive_roots": [str(allowed)]}}
+    )
+
+    with pytest.raises(FasterRagError, match="outside every directory"):
+        guard_archive_path(str(tmp_path / "elsewhere.fragx"), configured)
+
+
+async def test_traversal_out_of_an_allowed_archive_root_is_refused(tmp_path: Path) -> None:
+    """`..` must be collapsed before the comparison, or the root is decorative."""
+    allowed = tmp_path / "archives"
+    allowed.mkdir()
+    configured = Settings.model_validate(
+        {"security": {"auth": True, "allowed_archive_roots": [str(allowed)]}}
+    )
+
+    escape = str(allowed / ".." / "config.yaml")
+    with pytest.raises(FasterRagError, match="outside every directory"):
+        guard_archive_path(escape, configured)
+
+
+async def test_an_archive_path_inside_an_allowed_root_is_returned_resolved(
+    tmp_path: Path,
+) -> None:
+    """Control case: confinement must not break the feature it protects."""
+    allowed = tmp_path / "archives"
+    allowed.mkdir()
+    configured = Settings.model_validate(
+        {"security": {"auth": True, "allowed_archive_roots": [str(allowed)]}}
+    )
+
+    assert (
+        guard_archive_path(str(allowed / "backup.fragx"), configured)
+        == (allowed / "backup.fragx").resolve()
+    )
+
+
+async def test_an_unauthenticated_deployment_still_writes_archives_anywhere(
+    tmp_path: Path,
+) -> None:
+    """The CLI case. Auth off means nobody but the operator can reach it."""
+    assert (
+        guard_archive_path(str(tmp_path / "backup.fragx"), settings())
+        == (tmp_path / "backup.fragx").resolve()
+    )

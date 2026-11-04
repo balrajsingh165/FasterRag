@@ -12,7 +12,6 @@ and the endpoint's own availability is not what it is reporting on.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
@@ -31,6 +30,7 @@ from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.lockfile import create_lock_store
 from fasterrag.services.provision_registry import provision_tool, stop_tool, tool_status
 from fasterrag.services.provisioning import ProvisionResult
+from fasterrag.services.sources import guard_archive_path
 from fasterrag.services.tenancy import scoped_name, unscoped_name
 
 __all__ = ["router"]
@@ -96,7 +96,12 @@ async def export_collection(
     adapter: CurrentVectorDB,
     tenant: CurrentTenant,
 ) -> dict[str, Any]:
-    """Write a collection to a portable archive (D11)."""
+    """Write a collection to a portable archive (D11).
+
+    The destination is confined to ``security.allowed_archive_roots`` before anything is
+    written: the caller names a path on the server, so it is an authorization boundary.
+    """
+    destination = guard_archive_path(body.out, settings)
     collection = scoped_name(body.collection or settings.vector_db.collection.default_name, tenant)
     store = create_lock_store(settings)
     lock = store.read(collection) if store is not None and store.enabled else None
@@ -105,7 +110,7 @@ async def export_collection(
         settings,
         adapter,
         collection=collection,
-        destination=Path(body.out),
+        destination=destination,
         include_vectors=body.include_vectors,
         lock=lock,
         tenant=tenant,
@@ -123,9 +128,10 @@ async def import_collection(
     """Import a previously exported archive (D11).
 
     Verification runs before anything is written, so a refused archive leaves the target
-    untouched rather than half-populated.
+    untouched rather than half-populated. The source path is confined first, by the same
+    rule the export side applies.
     """
-    reader = open_archive(Path(body.archive))
+    reader = open_archive(guard_archive_path(body.archive, settings))
     target = scoped_name(body.target_collection or reader.collection, tenant)
 
     router_ = build_embedding_router(settings) if body.reembed else None

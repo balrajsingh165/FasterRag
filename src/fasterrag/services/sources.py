@@ -14,6 +14,11 @@ each time and nothing would report a problem. The canonical URI is therefore pre
 Staged files live under one directory per job and are removed when the job settles. They are
 a transport detail, not a cache: keeping them would mean a second copy of the corpus on disk
 that nothing tracks and nothing prunes.
+
+This module also owns the confinement applied to every *caller-supplied server path*, which
+is why :func:`guard_archive_path` lives here beside the ingestion guard rather than next to
+the archive service: both answer the same question with the same rule, and a second shape of
+the same check is a second place for it to be wrong.
 """
 
 from __future__ import annotations
@@ -37,10 +42,16 @@ import httpx
 
 from fasterrag.config.schema import Settings
 from fasterrag.core.identity import text_hash
-from fasterrag.errors import ErrorCode, IngestionError, ParseError
+from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["INLINE_SCHEME", "ResolvedSources", "resolve_sources", "typed_source"]
+__all__ = [
+    "INLINE_SCHEME",
+    "ResolvedSources",
+    "guard_archive_path",
+    "resolve_sources",
+    "typed_source",
+]
 
 INLINE_SCHEME: Final = "inline:"
 
@@ -48,6 +59,7 @@ _MEGABYTE: Final = 1024 * 1024
 _FETCH_TIMEOUT_SECONDS: Final = 60.0
 _ALLOWED_SCHEMES: Final = frozenset({"http", "https"})
 _MAXIMUM_REDIRECTS: Final = 5
+_NO_REUSE: Final = httpx.Limits(max_connections=10, max_keepalive_connections=0)
 
 _logger = get_logger(__name__)
 
@@ -100,6 +112,18 @@ def _decode_inline(value: str) -> bytes:
         raise ParseError(f"an inline source is neither base64 nor valid UTF-8: {exc}") from exc
 
 
+def _within(value: str, roots: Sequence[str]) -> Path | None:
+    """Return the resolved path when it sits inside a root, else ``None``.
+
+    ``resolve()`` is what makes the comparison sound: it collapses ``..`` and follows
+    symlinks, so neither traversal nor a link planted inside a root can escape it.
+    """
+    candidate = Path(value).resolve()
+    if any(candidate.is_relative_to(Path(root).resolve()) for root in roots):
+        return candidate
+    return None
+
+
 def _guard_path(value: str, settings: Settings) -> None:
     """Refuse a path source that falls outside ``ingestion.allowed_source_roots``.
 
@@ -109,11 +133,10 @@ def _guard_path(value: str, settings: Settings) -> None:
     """
     # CRITICAL: `value` names a file on the SERVER and arrives from whoever called
     # `POST /v1/ingest`. Unconfined, it reads `.env`, `config.yaml` or an SSH key into a
-    # collection the same caller can query back. `resolve()` is what makes the check sound:
-    # it collapses `..` and follows symlinks, so neither traversal nor a link planted inside
-    # an allowed root can escape it. When no roots are configured the deployment is either
-    # single-operator (auth off — the CLI case, left alone) or served (auth on — refused
-    # here), because a control this important must not be satisfied by forgetting it.
+    # collection the same caller can query back. The resolve-before-compare lives in
+    # `_within`. When no roots are configured the deployment is either single-operator
+    # (auth off — the CLI case, left alone) or served (auth on — refused here), because a
+    # control this important must not be satisfied by forgetting it.
     roots = settings.ingestion.allowed_source_roots
     if not roots:
         if settings.security.auth:
@@ -126,12 +149,50 @@ def _guard_path(value: str, settings: Settings) -> None:
             )
         return
 
-    candidate = Path(value).resolve()
-    if any(candidate.is_relative_to(Path(root).resolve()) for root in roots):
+    if _within(value, roots) is not None:
         return
 
     raise IngestionError(
         f"source path {value!r} is outside every directory in ingestion.allowed_source_roots",
+        code=ErrorCode.VALIDATION_FAILED,
+        retryable=False,
+    )
+
+
+def guard_archive_path(value: str, settings: Settings) -> Path:
+    """Return a caller-supplied archive path confined to ``security.allowed_archive_roots``.
+
+    Raises:
+        FasterRagError: If archive paths are unconfined on a served deployment, or the
+            path resolves outside every configured root.
+    """
+    # CRITICAL: `value` names a file on the SERVER and arrives in the body of
+    # `POST /v1/admin/export` (which WRITES it) or `POST /v1/admin/import` (which reads it).
+    # Unconfined, export overwrites anything the process can write — `config.yaml`, a web
+    # root, an authorized_keys file — and import reads any archive on the host. The `admin`
+    # scope is trusted to drop collections and drive provisioning; in a tenant-operator
+    # deployment that is not the same as filesystem access. One list covers both verbs
+    # because they name the same artifact in the same directory — the round trip is the
+    # normal case — so two lists would be set identically and could only ever diverge by
+    # mistake. Empty-means-refused-once-auth-is-on mirrors `_guard_path`, for its reasons.
+    roots = settings.security.allowed_archive_roots
+    if not roots:
+        if settings.security.auth:
+            raise FasterRagError(
+                "archive paths are refused while security.auth is on and "
+                "security.allowed_archive_roots is empty; list the directories this "
+                "deployment may read and write archives in",
+                code=ErrorCode.VALIDATION_FAILED,
+                retryable=False,
+            )
+        return Path(value).resolve()
+
+    confined = _within(value, roots)
+    if confined is not None:
+        return confined
+
+    raise FasterRagError(
+        f"archive path {value!r} is outside every directory in security.allowed_archive_roots",
         code=ErrorCode.VALIDATION_FAILED,
         retryable=False,
     )
@@ -147,8 +208,8 @@ async def _addresses(host: str) -> list[IPv4Address | IPv6Address]:
     return [ip_address(str(record[4][0])) for record in records]
 
 
-async def _guard_url(uri: str) -> None:
-    """Refuse a URL that does not name a public http(s) endpoint.
+async def _guard_url(uri: str) -> IPv4Address | IPv6Address:
+    """Refuse a URL that does not name a public http(s) endpoint, returning its address.
 
     Raises:
         IngestionError: If the scheme, host, or resolved address is not permitted.
@@ -178,7 +239,11 @@ async def _guard_url(uri: str) -> None:
             retryable=False,
         )
 
-    for address in await _addresses(host):
+    checked = await _addresses(host)
+    if not checked:
+        raise ParseError(f"{host} resolved to no addresses")
+
+    for address in checked:
         if not address.is_global or address.is_multicast:
             raise IngestionError(
                 f"source URL {uri!r} resolves to the non-public address {address}; "
@@ -186,6 +251,29 @@ async def _guard_url(uri: str) -> None:
                 code=ErrorCode.VALIDATION_FAILED,
                 retryable=False,
             )
+    return checked[0]
+
+
+def _pinned(
+    uri: str, address: IPv4Address | IPv6Address
+) -> tuple[httpx.URL, dict[str, str], dict[str, Any]]:
+    """Dial the address that was checked, preserving ``Host`` and the TLS name."""
+    # CRITICAL: this is what closes DNS rebinding, and the two extras are not optional.
+    # Checking a name and then handing the name back to the connector resolves it a second
+    # time, so a record with a near-zero TTL can answer public to `_guard_url` and private
+    # to the socket — the guard above would be decoration. The connection is therefore
+    # addressed to the literal that was checked. `Host` keeps virtual hosting working and
+    # `sni_hostname` keeps TLS correct: httpcore passes it as `server_hostname`, which is
+    # both the SNI sent and the name the certificate is verified against, so pinning the
+    # address does NOT weaken verification to the IP. Changing either back reintroduces
+    # the rebinding window or silently breaks certificate checking. Both read the IDNA
+    # form (`netloc`, `raw_host`) rather than `url.host`, which hands back decoded unicode
+    # for an internationalised name — exactly the two values httpx and httpcore would have
+    # derived themselves, so pinning changes the destination and nothing else.
+    url = httpx.URL(uri)
+    headers = {"Host": url.netloc.decode("ascii")}
+    extensions: dict[str, Any] = {"sni_hostname": url.raw_host.decode("ascii")}
+    return url.copy_with(host=str(address)), headers, extensions
 
 
 async def _read_body(response: httpx.Response, uri: str, limit: int) -> bytes:
@@ -218,17 +306,33 @@ async def _fetch(uri: str, limit: int) -> bytes:
         # CRITICAL: redirects are followed by hand, not by httpx. `follow_redirects=True`
         # would send the later hops without passing them through `_guard_url`, so a public
         # URL could redirect to the metadata endpoint and the guard above would be decoration.
-        client = httpx.AsyncClient(timeout=_FETCH_TIMEOUT_SECONDS, follow_redirects=False)
+        # CRITICAL: no connection is kept alive between hops. httpcore pools connections by
+        # origin, and after pinning an origin is `(scheme, IP, port)` — so two hosts sharing
+        # an address would share a connection, sending the second host's request over a TLS
+        # session established and verified for the first. Zero keepalive makes every hop its
+        # own connection, which is what keeps `_pinned`'s SNI guarantee true per request.
+        client = httpx.AsyncClient(
+            timeout=_FETCH_TIMEOUT_SECONDS,
+            follow_redirects=False,
+            limits=_NO_REUSE,
+        )
         async with client:
             current = uri
             for _ in range(_MAXIMUM_REDIRECTS + 1):
-                await _guard_url(current)
-                async with client.stream("GET", current) as response:
+                address = await _guard_url(current)
+                url, headers, extensions = _pinned(current, address)
+                async with client.stream(
+                    "GET", url, headers=headers, extensions=extensions
+                ) as response:
                     if response.is_redirect:
                         location = response.headers.get("location")
                         if not location:
                             raise ParseError(f"{current} redirected without a Location header")
-                        current = str(response.url.join(location))
+                        # CRITICAL: a relative `Location` is joined against the URL the
+                        # caller named, never against `response.url` — that one carries the
+                        # pinned literal, so joining there would turn the next hop into an
+                        # address and lose the name the guard and the certificate check need.
+                        current = str(httpx.URL(current).join(location))
                         continue
                     response.raise_for_status()
                     return await _read_body(response, uri, limit)
