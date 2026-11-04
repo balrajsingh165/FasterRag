@@ -14,7 +14,12 @@ from typing import Any
 
 import pytest
 
-from fasterrag.core.chunking.pooling import WINDOW_OVERLAP_FRACTION, pool_spans, supports_pooling
+from fasterrag.core.chunking.pooling import (
+    WINDOW_OVERLAP_FRACTION,
+    _windows,
+    pool_spans,
+    supports_pooling,
+)
 from fasterrag.errors import EmbedError
 
 torch = pytest.importorskip("torch", reason="pooling needs the optional 'huggingface' extra")
@@ -159,8 +164,85 @@ def test_a_model_that_cannot_pool_is_refused() -> None:
         pool_spans(object(), TEXT, [(0, 5)])
 
     assert "token-level" in caught.value.detail
+    assert caught.value.retryable is False
 
 
 def test_a_document_with_no_tokens_is_refused() -> None:
     with pytest.raises(EmbedError):
         pool_spans(FakeModel(), "   ", [(0, 3)])
+
+
+ONE_HOT_WIDTH = 8
+
+
+class OneHotNetwork:
+    """Returns a distinct one-hot row per token id, so a pooled set stays readable."""
+
+    def __init__(self) -> None:
+        self.config = type("c", (), {"hidden_size": ONE_HOT_WIDTH})()
+        self.windows: list[int] = []
+        self._parameter = torch.nn.Parameter(torch.zeros(1))
+
+    def parameters(self) -> Any:
+        return iter([self._parameter])
+
+    def __call__(self, input_ids: Any, attention_mask: Any) -> Any:
+        """Return a one-hot row per input token, recording the window width."""
+        self.windows.append(int(input_ids.shape[1]))
+        rows = torch.stack(
+            [
+                torch.nn.functional.one_hot(
+                    torch.tensor(int(value) % ONE_HOT_WIDTH), ONE_HOT_WIDTH
+                ).float()
+                for value in input_ids[0].tolist()
+            ]
+        )
+        return type("o", (), {"last_hidden_state": rows.unsqueeze(0)})()
+
+
+class OneHotModel:
+    """A stand-in whose token vectors differ, making "which tokens" an equality.
+
+    ``FakeModel`` gives every token the same direction, so any mean normalizes to the same
+    unit vector and a span that pools one token too many is indistinguishable from a correct
+    one. Only a model with distinguishable tokens can assert the selection rule.
+    """
+
+    def __init__(self) -> None:
+        self.tokenizer = FakeTokenizer()
+        self.network = OneHotNetwork()
+        self.max_seq_length = 512
+
+    def __getitem__(self, index: int) -> Any:
+        """Return the transformer module, as sentence-transformers exposes it."""
+        return type("m", (), {"auto_model": self.network})()
+
+
+def one_hot(*indices: int) -> list[float]:
+    """Return the unit vector that pooling the given token indices produces."""
+    scale = len(indices) ** -0.5
+    return [scale if index in indices else 0.0 for index in range(ONE_HOT_WIDTH)]
+
+
+def test_a_span_pools_exactly_the_tokens_that_lie_inside_it() -> None:
+    """Which tokens are averaged is the whole feature, and getting it wrong is silent."""
+    vectors = pool_spans(OneHotModel(), TEXT, [(0, 5), (6, 10), (0, 11)])
+
+    assert vectors[0] == pytest.approx(one_hot(1))
+    assert vectors[1] == pytest.approx(one_hot(2))
+    assert vectors[2] == pytest.approx(one_hot(1, 2))
+
+
+def test_a_token_starting_where_the_span_ends_is_not_pooled() -> None:
+    """One character of slack widens every chunk's vector by a whole neighbouring token."""
+    assert pool_spans(OneHotModel(), TEXT, [(0, 6)])[0] == pytest.approx(one_hot(1))
+
+
+def test_a_token_ending_where_the_span_starts_is_not_pooled() -> None:
+    assert pool_spans(OneHotModel(), TEXT, [(5, 10)])[0] == pytest.approx(one_hot(2))
+
+
+def test_windows_step_forward_by_the_window_less_its_overlap() -> None:
+    """The step is what gives an edge token a window in which it is not on an edge."""
+    assert _windows(20, 8) == [(0, 8), (6, 14), (12, 20)]
+    assert _windows(5, 8) == [(0, 5)]

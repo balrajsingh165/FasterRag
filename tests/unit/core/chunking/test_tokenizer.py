@@ -15,9 +15,11 @@ class StubTokenizer:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.special: bool | None = None
 
     def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
         self.calls += 1
+        self.special = add_special_tokens
         return list(range(len(text.split())))
 
 
@@ -76,6 +78,16 @@ def test_a_tokenizer_that_cannot_encode_falls_back(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(tokenizer_module, "load_tokenizer", lambda model: Broken())
 
     assert ModelTokenCounter("some/model").count(DENSE) == EstimatingTokenCounter().count(DENSE)
+
+
+def test_only_the_chunks_own_tokens_are_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Counting the model's wrapper tokens makes every chunk smaller than it was configured."""
+    stub = StubTokenizer()
+    monkeypatch.setattr(tokenizer_module, "load_tokenizer", lambda model: stub)
+
+    ModelTokenCounter("some/model").count(DENSE)
+
+    assert stub.special is False
 
 
 def test_empty_text_costs_no_call(monkeypatch: pytest.MonkeyPatch) -> None:
