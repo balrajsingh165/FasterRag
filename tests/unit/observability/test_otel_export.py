@@ -203,7 +203,7 @@ def test_the_traces_path_is_derived_from_the_configured_endpoint(
 ) -> None:
     """One setting feeds two exporters, so it is a base URL, not a traces URL.
 
-    Verified against a real collector (TASK-0216): posting a bare endpoint 404s and posting
+    Verified against a real collector (TASK-0231): posting a bare endpoint 404s and posting
     a metrics payload to /v1/traces 400s, and both are a warning nobody reads.
     """
     assert signal_endpoint(configured, "traces") == expected
