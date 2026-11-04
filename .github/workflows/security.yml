@@ -46,14 +46,30 @@ jobs:
         with:
           enable-cache: true
 
-      # Blocking, not advisory. Measured clean over all locked packages on 2026-10-28, so a
-      # failure here means something genuinely changed rather than a pre-existing advisory
-      # nobody can act on. When it fires, the fix is `uv lock --upgrade` followed by the
-      # full suite — a refreshed lockfile moves versions that tests depend on.
+      # Blocking, not advisory. Clean over all locked packages apart from the four accepted
+      # chromadb advisories below, so a failure here means something genuinely changed
+      # rather than a pre-existing advisory nobody can act on. When it fires, the fix is
+      # `uv lock --upgrade` followed by the full suite — a refreshed lockfile moves
+      # versions that tests depend on.
+      # CRITICAL: these four ignores must stay identical to the Dependency audit step in
+      # ci.yml. They are the same gate run on two triggers, and a difference between them
+      # means one of the two is not auditing what the other is.
+      # chromadb 1.5.9 is the latest release, so there is nothing to upgrade to. All four
+      # advisories are in Chroma's HTTP server, which fasterRag never starts: the adapter
+      # uses an embedded PersistentClient, serves no API, never constructs
+      # SimpleRBACAuthorizationProvider, and passes vectors itself rather than configuring
+      # a Chroma-side embedding function, which is the path `trust_remote_code` travels.
+      # Reviewed against the shipped code, not taken from the vendor.
+      #   PYSEC-2026-311  pre-auth RCE via trust_remote_code on the collections endpoint
+      #   PYSEC-2026-3813 any authenticated user may read/write any tenant's collection
+      #   PYSEC-2026-3814 authenticated RCE via trust_remote_code on a collection update
+      #   PYSEC-2026-3815 SimpleRBACAuthorizationProvider ignores tenant/database scope
+      # Re-checked by TASK-0299; delete an ignore the moment a fixed release exists, and
+      # delete all four if the Chroma extra is dropped.
       - name: Audit the locked dependency set
         run: |
           uv export --format requirements-txt --all-extras --no-emit-project -o locked.txt
-          uvx --python 3.12 pip-audit -r locked.txt --no-deps --desc
+          uvx --python 3.12 pip-audit -r locked.txt --no-deps --desc             --ignore-vuln PYSEC-2026-311             --ignore-vuln PYSEC-2026-3813             --ignore-vuln PYSEC-2026-3814             --ignore-vuln PYSEC-2026-3815
 
       # Separate step so the summary survives a failing audit and names what to do next,
       # rather than leaving a red tick whose only content is a stack of advisory IDs.
