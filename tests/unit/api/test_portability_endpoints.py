@@ -1,10 +1,13 @@
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
+from fasterrag.api import admin
 from fasterrag.api.main import create_app
 from fasterrag.config.schema import Settings
+from fasterrag.services.archive_import import ArchiveReader, open_archive
 from tests.unit.api.conftest import StubVectorDB
 
 
@@ -119,6 +122,48 @@ def test_the_round_trip_runs_over_rest(tmp_path: Path) -> None:
     assert exported["chunks"] == imported["chunks"] == 2
     assert imported["collection"] == "restored"
     assert imported["reembed"] is False
+
+
+@pytest.fixture
+def staged(monkeypatch: pytest.MonkeyPatch) -> list[ArchiveReader]:
+    """Keep every reader the endpoint opened, so its staging directory can be checked."""
+    readers: list[ArchiveReader] = []
+
+    def spy(path: Path) -> ArchiveReader:
+        reader = open_archive(path)
+        readers.append(reader)
+        return reader
+
+    monkeypatch.setattr(admin, "open_archive", spy)
+    return readers
+
+
+def test_a_successful_import_releases_the_staging_directory(
+    tmp_path: Path, staged: list[ArchiveReader]
+) -> None:
+    """Relying on the finalizer left 61 abandoned directories behind (TASK-0301)."""
+    out = tmp_path / "released"
+
+    with client([point("c_1")]) as api:
+        api.post("/v1/admin/export", json={"out": str(out), "include_vectors": True})
+        response = api.post("/v1/admin/import", json={"archive": str(out.with_suffix(".fragx"))})
+
+    assert response.status_code == 200, response.json()
+    assert [reader.staging.exists() for reader in staged] == [False]
+
+
+def test_a_refused_import_releases_the_staging_directory(
+    tmp_path: Path, staged: list[ArchiveReader]
+) -> None:
+    """A vectorless archive asked for as a vector copy is refused after it has been staged."""
+    out = tmp_path / "novectors"
+
+    with client([point("c_1")]) as api:
+        api.post("/v1/admin/export", json={"out": str(out)})
+        response = api.post("/v1/admin/import", json={"archive": str(out.with_suffix(".fragx"))})
+
+    assert response.status_code == 409, response.json()
+    assert [reader.staging.exists() for reader in staged] == [False]
 
 
 def confined(roots: list[Path], points: list[Any] | None = None) -> TestClient:

@@ -131,22 +131,22 @@ async def import_collection(
     untouched rather than half-populated. The source path is confined first, by the same
     rule the export side applies.
     """
-    reader = open_archive(guard_archive_path(body.archive, settings))
-    target = scoped_name(body.target_collection or reader.collection, tenant)
+    with open_archive(guard_archive_path(body.archive, settings)) as reader:
+        target = scoped_name(body.target_collection or reader.collection, tenant)
 
-    router_ = build_embedding_router(settings) if body.reembed else None
-    try:
-        counts = await import_archive(
-            settings,
-            adapter,
-            reader,
-            collection=target,
-            reembed=body.reembed,
-            router=router_,
-        )
-    finally:
-        if router_ is not None:
-            await router_.close()
+        router_ = build_embedding_router(settings) if body.reembed else None
+        try:
+            counts = await import_archive(
+                settings,
+                adapter,
+                reader,
+                collection=target,
+                reembed=body.reembed,
+                router=router_,
+            )
+        finally:
+            if router_ is not None:
+                await router_.close()
 
     return {
         "collection": unscoped_name(target, tenant),

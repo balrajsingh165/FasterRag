@@ -1,6 +1,9 @@
 """The ``export`` and ``import`` wrappers (D11): exit codes, name resolution, cleanup."""
 
+import hashlib
+import io
 import json
+import tarfile
 from pathlib import Path
 from typing import Any
 
@@ -10,8 +13,15 @@ from fasterrag.cli.commands import portability
 from fasterrag.cli.main import main
 from fasterrag.cli.output import ExitCode
 from fasterrag.errors import FasterRagError
-from fasterrag.services.archive import ArchiveCounts
-from fasterrag.services.archive_import import ImportCounts
+from fasterrag.services.archive import (
+    CHECKSUMS_NAME,
+    CHUNKS_NAME,
+    DOCUMENTS_NAME,
+    LOCK_NAME,
+    MANIFEST_NAME,
+    ArchiveCounts,
+)
+from fasterrag.services.archive_import import ArchiveReader, ImportCounts, open_archive
 from tests.unit.cli.conftest import Closeable
 
 
@@ -31,6 +41,13 @@ class FakeReader:
     """An opened archive, standing in for a verified ``.fragx``."""
 
     collection = "archived-docs"
+
+    def __enter__(self) -> "FakeReader":
+        """Enter the scope that owns the staging directory, as the real reader does."""
+        return self
+
+    def __exit__(self, *details: object) -> None:
+        """Leave that scope however the block ended."""
 
 
 class Recorder:
@@ -348,3 +365,78 @@ def test_a_failed_import_closes_both_the_adapter_and_the_router(
 
 def test_import_refuses_an_invalid_config(bad_config: str, tmp_path: Path) -> None:
     assert main(["import", "--config", bad_config, str(tmp_path / "a.fragx")]) == ExitCode.USAGE
+
+
+def built(tmp_path: Path) -> Path:
+    """Write a minimal well-formed ``.fragx``, enough for a real reader to stage it."""
+    members: dict[str, bytes] = {
+        DOCUMENTS_NAME: b'{"document_id": "d_1"}\n',
+        CHUNKS_NAME: b'{"chunk_id": "c_1", "document_id": "d_1"}\n',
+        LOCK_NAME: b"{}\n",
+    }
+    members[CHECKSUMS_NAME] = "".join(
+        f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in members.items()
+    ).encode("utf-8")
+    members[MANIFEST_NAME] = json.dumps(
+        {
+            "format_version": "1.0.0",
+            "collection": {"name": "archived-docs"},
+            "embedding": {"model": "m", "model_version": "1", "dimensions": 2},
+            "counts": {"documents": 1, "chunks": 1, "vectors": 0},
+            "includes_vectors": False,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+
+    path = tmp_path / "a.fragx"
+    with tarfile.open(path, "w:gz") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            info.mtime = 0
+            tar.addfile(info, io.BytesIO(data))
+    return path
+
+
+@pytest.fixture
+def staged(monkeypatch: pytest.MonkeyPatch, importing: Recorder) -> list[ArchiveReader]:
+    """Open real archives, keeping every reader so its staging directory can be checked."""
+    readers: list[ArchiveReader] = []
+
+    def spy(path: Path) -> ArchiveReader:
+        reader = open_archive(path)
+        readers.append(reader)
+        return reader
+
+    monkeypatch.setattr(portability, "open_archive", spy)
+    return readers
+
+
+def test_a_successful_import_releases_the_staging_directory(
+    config: str,
+    tmp_path: Path,
+    adapter: Closeable,
+    importing: Recorder,
+    staged: list[ArchiveReader],
+) -> None:
+    """Relying on the finalizer left 61 abandoned directories behind (TASK-0301)."""
+    code = main(["import", "--config", config, str(built(tmp_path))])
+
+    assert code == ExitCode.SUCCESS
+    assert [reader.staging.exists() for reader in staged] == [False]
+
+
+def test_a_failed_import_releases_the_staging_directory(
+    config: str,
+    tmp_path: Path,
+    adapter: Closeable,
+    importing: Recorder,
+    staged: list[ArchiveReader],
+) -> None:
+    """A refusal is exactly the path that used to retain the handle keeping staging alive."""
+    importing.error = FasterRagError("qdrant is not answering", retryable=False)
+
+    code = main(["import", "--config", config, str(built(tmp_path))])
+
+    assert code == ExitCode.FAILURE
+    assert [reader.staging.exists() for reader in staged] == [False]

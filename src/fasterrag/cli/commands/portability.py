@@ -82,26 +82,27 @@ async def run_import(args: argparse.Namespace, console: Console) -> ExitCode:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE
 
-    target = args.target_collection or args.collection or reader.collection
-    adapter = create_vector_db_adapter(settings)
-    router = create_embedding_router(settings) if args.reembed else None
+    with reader:
+        target = args.target_collection or args.collection or reader.collection
+        adapter = create_vector_db_adapter(settings)
+        router = create_embedding_router(settings) if args.reembed else None
 
-    try:
-        counts = await import_archive(
-            settings,
-            adapter,
-            reader,
-            collection=target,
-            reembed=args.reembed,
-            router=router,
-        )
-    except FasterRagError as exc:
-        console.problem(exc.code.value, exc.detail)
-        return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
-    finally:
-        await adapter.close()
-        if router is not None:
-            await router.close()
+        try:
+            counts = await import_archive(
+                settings,
+                adapter,
+                reader,
+                collection=target,
+                reembed=args.reembed,
+                router=router,
+            )
+        except FasterRagError as exc:
+            console.problem(exc.code.value, exc.detail)
+            return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
+        finally:
+            await adapter.close()
+            if router is not None:
+                await router.close()
 
     console.emit(f"collection      {target}")
     console.emit(f"documents       {counts.documents}")
