@@ -249,6 +249,43 @@ autopilot:
 
 Then: ingest a representative slice → `fasterrag autopilot run` for a measured baseline → flip `retrieval.rerank: true` and re-run to see the delta on **your** corpus. **Why:** this is the honest way to evaluate — our defaults are informed by published evidence ([references.md](references.md)), but your corpus is the only benchmark that decides your configuration.
 
+## R10 — Choosing a chunk size by measurement rather than folklore
+
+`chunking.chunk_size` and `chunking.overlap` are the two settings people copy from a blog post and never revisit, because checking them is expensive: each value is a *different index*, so comparing two of them means building two of them. `fasterrag autopilot run` (R9) deliberately will not touch them for that reason — it searches query-time settings, where one index serves every candidate.
+
+The index-time search is a separate operation with a separate price tag, in `services/autopilot.py`:
+
+```python
+from fasterrag.services.autopilot import plan_index_sweep, render_plan, sweep_index_time
+
+plan = plan_index_sweep(dataset, settings, collection="docs")
+print(render_plan(plan))        # rebuilds, chunks, embedding tokens, list-price cost
+
+outcome = await sweep_index_time(
+    plan, dataset, settings, adapter, router,
+    rebuild=my_rebuild,          # builds one scratch collection from candidate settings
+    approved_rebuilds=plan.rebuilds,   # defaults to 0 — the sweep refuses until you raise it
+)
+```
+
+```yaml
+autopilot:
+  enabled: true
+cost:
+  estimator: true                # the plan is priced with D9's estimator; off means no plan
+chunking:
+  token_counter: estimate        # the plan chunks the corpus once per candidate
+```
+
+Four things to know before you run it:
+
+- **It rebuilds the eval dataset's corpus, not your production corpus.** A golden set only means something against the corpus it was written against, and that corpus is small enough to build four or five times. Keep it representative or the answer transfers to nothing.
+- **The cost is shown before it is paid, and the approval is per run.** `plan_index_sweep` prices every candidate with the same estimator `fasterrag estimate` uses; `sweep_index_time` refuses to start unless `approved_rebuilds` covers what the plan reported. The default is `0`, so forgetting the argument costs nothing.
+- **Each candidate is built into its own `autopilot-sweep-*` collection and dropped afterwards**, inside a `finally` that runs over names recorded *before* each build started. The live collection is scored as-is and no alias is ever moved. If a drop itself fails, the name comes back in `outcome.leaked` — drop those by hand.
+- **The suggestion is still only a suggestion, and an index-time one needs a reindex.** Pasting a new `chunk_size` into `config.yaml` changes nothing the live index already contains; run `fasterrag index reembed` afterwards or you have changed the label, not the index.
+
+**Status (2026-11-04, TASK-0145):** this is a Python surface only. There is no `fasterrag autopilot sweep` command and no config key gating it yet — the opt-in is the `approved_rebuilds` argument. **Trade-off:** you supply the `rebuild` callable, which keeps the sweep independent of how you ingest; it must create the scratch collection at the candidate's own dimensions.
+
 ---
 
 ## Composing recipes
@@ -260,3 +297,4 @@ Then: ingest a representative slice → `fasterrag autopilot run` for a measured
 | R5 + R3 | Natural pairing, and now complete: tenant isolation, preflight estimation, *and* a runtime per-tenant budget (TASK-0242 ✅). Size the budget for your replica count — it is counted per process. |
 | R2 + R4 | Conflicting: `rerank_top_n` 300 vs 50 is the same dial pulled in opposite directions. Pick your point on the curve and measure it. |
 | Any + R7 | Always worth adding. A tuned config with no regression gate degrades silently over time. |
+| R9 + R10 | The full evaluation: R9 settles the query-time knobs for free against one index, then R10 pays for the index-time ones. Run R9 first — if it finds a large win cheaply, you may not need to buy the rebuilds at all. |

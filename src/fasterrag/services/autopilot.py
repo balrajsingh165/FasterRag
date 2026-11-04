@@ -10,15 +10,37 @@ behind it; a human reads them and decides. That is not timidity — an auto-tune
 production configuration turns a bad measurement into an outage, and the measurement is only
 as good as the golden set behind it.
 
-**Only query-time parameters are searched.** The fusion weights, ``rrf_k``, and reranking all
-change how an existing index is queried, so a candidate costs one evaluation. ``top_k`` is
-excluded even though it is query-time: measuring recall@k means retrieving exactly k, so the
-harness fixes the depth and a top_k candidate is a no-op by construction.
-Chunk size and overlap change how the index is *built*, so every candidate would cost a full
-re-chunk and re-embed of the corpus — hours on a real one. That search is a different
-operation with a different cost profile and is deliberately not folded in here (TASK-0145).
+**Two searches, not one, because they cost different things.**
 
-**The search is time-boxed and reports what it did not reach.** A tuner that silently
+:func:`tune` searches *query-time* parameters. The fusion weights, ``rrf_k``, and reranking
+all change how an existing index is queried, so one index serves every candidate and a
+candidate costs one evaluation. ``top_k`` is excluded even though it is query-time: measuring
+recall@k means retrieving exactly k, so the harness fixes the depth and a top_k candidate is
+a no-op by construction.
+
+:func:`sweep_index_time` searches *index-time* parameters — chunk size and overlap. These
+change how the index is built, so no index can serve two candidates: each one is a different
+index, and scoring it means re-chunking and re-embedding the corpus first. Three rules make
+that affordable to reason about rather than merely possible to run:
+
+* **The cost is priced before it is paid.** :func:`plan_index_sweep` runs D9's estimator
+  (``services/estimation.py``) once per candidate and reports chunks, embedding tokens, and
+  list-price cost. A sweep refuses to start unless the caller passes ``approved_rebuilds``
+  covering what the plan says it would build, so the expensive default is "do nothing".
+* **Every rebuild is scratch and is dropped.** Candidates are built into collections named
+  ``autopilot-sweep-*``, never behind the live alias, and the drop runs in a ``finally`` over
+  every name recorded *before* its build started — a rebuild that dies halfway still gets
+  cleaned up. A drop that itself fails is reported as a leak rather than swallowed.
+* **The corpus swept is the dataset's own.** A golden set only means anything against the
+  corpus it was written against, and that corpus is small enough to rebuild a handful of
+  times; the production corpus is neither.
+
+**Neither search writes ``config.yaml``.** A sweep does create and delete scratch collections
+— that is real work on the vector database — but the configuration it recommends is only ever
+a suggestion, and an index-time suggestion additionally needs a reindex before it means
+anything, which the rendered fragment says out loud.
+
+**Both searches are time-boxed and report what they did not reach.** A tuner that silently
 evaluated a third of its grid and announced a winner would be presenting the best of an
 arbitrary subset as though it were the best available.
 """
@@ -26,7 +48,7 @@ arbitrary subset as though it were the best available.
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -38,19 +60,43 @@ from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
+from fasterrag.services.estimation import PRICES_DATED, estimate_sources, require_estimator
 from fasterrag.services.evaluation import EvalDataset, score_collection
 
 __all__ = [
+    "SCRATCH_PREFIX",
     "SUGGESTION_FILE",
     "Candidate",
+    "IndexSweepPlan",
+    "RebuildEstimate",
+    "RebuildFn",
     "Suggestion",
+    "SweepOutcome",
     "TrialResult",
     "candidate_grid",
+    "index_candidate_grid",
+    "plan_index_sweep",
+    "render_plan",
     "render_suggestion",
+    "sweep_index_time",
     "tune",
 ]
 
 SUGGESTION_FILE: Final = "autopilot-suggestion.yaml"
+
+# CRITICAL: a sweep collection must never be mistaken for a live one, so the name is
+# deliberately unlike `reindex.green_name`'s `<alias>-v<stamp>`: nothing resolves an alias to
+# it, no rollback can restore it, and an operator grepping for leftovers after a crash has one
+# fixed prefix to look for. Changing this orphans collections created under the old one.
+SCRATCH_PREFIX: Final = "autopilot-sweep"
+
+RebuildFn = Callable[[str, Settings], Awaitable[None]]
+"""Build one scratch collection from a candidate's settings.
+
+Injected rather than imported so this module stays independent of the ingestion service, and
+so the sweep's cleanup and budget behaviour are testable without a vector database. The
+implementation owns creating the collection at the candidate's dimensions.
+"""
 
 # CRITICAL: query-time only. Every key here changes how an existing index is searched, so a
 # trial costs one evaluation. Adding an index-time key (chunk_size, overlap, the embedding
@@ -63,7 +109,24 @@ _SEARCHED_KEYS: Final[tuple[str, ...]] = (
     "retrieval.rerank",
 )
 
+# CRITICAL: index-time only, and searched by `sweep_index_time`, never by `tune`. Every key
+# here costs one full re-chunk and re-embed of the corpus per candidate, which is why the two
+# searches have separate entry points, separate budgets and separate opt-ins. Moving a key
+# from this tuple into `_SEARCHED_KEYS` would make `tune` score candidates against an index
+# that was not built for them — silently wrong numbers rather than a visible failure.
+_INDEX_SEARCHED_KEYS: Final[tuple[str, ...]] = (
+    "chunking.chunk_size",
+    "chunking.overlap",
+)
+
+_INDEX_SECTIONS: Final[frozenset[str]] = frozenset({"chunking", "embeddings"})
+
 _logger = get_logger(__name__)
+
+
+def _is_index_time(key: str) -> bool:
+    """Return whether a key changes how the index is built rather than how it is queried."""
+    return key.partition(".")[0] in _INDEX_SECTIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +230,106 @@ class Suggestion:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class RebuildEstimate:
+    """What one index-time candidate would cost to build before it can be scored."""
+
+    candidate: Candidate
+    collection: str
+    documents: int
+    chunks: int
+    tokens: int
+    cost_usd: float | None
+    basis: str
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the serialized estimate."""
+        return {
+            "overrides": self.candidate.overrides,
+            "label": self.candidate.label,
+            "collection": self.collection,
+            "documents": self.documents,
+            "chunks": self.chunks,
+            "tokens": self.tokens,
+            "cost_usd": self.cost_usd,
+            "basis": self.basis,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class IndexSweepPlan:
+    """What an index-time sweep would build, priced before any of it is built."""
+
+    collection: str
+    corpus: str
+    estimates: list[RebuildEstimate] = field(default_factory=list)
+    rejected: list[str] = field(default_factory=list)
+    prices_dated: str = PRICES_DATED
+
+    @property
+    def rebuilds(self) -> int:
+        """Return how many scratch indexes the sweep would build."""
+        return len(self.estimates)
+
+    @property
+    def tokens(self) -> int:
+        """Return the embedding tokens every rebuild would consume between them."""
+        return sum(estimate.tokens for estimate in self.estimates)
+
+    @property
+    def cost_usd(self) -> float | None:
+        """Return the total list price, or ``None`` when any rebuild is unpriced.
+
+        One unpriced rebuild makes the total unknown, not smaller. Summing the rest would
+        report a confident figure that is wrong by an amount nobody can see.
+        """
+        if any(estimate.cost_usd is None for estimate in self.estimates):
+            return None
+        return sum(estimate.cost_usd or 0.0 for estimate in self.estimates)
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the serialized plan."""
+        return {
+            "collection": self.collection,
+            "corpus": self.corpus,
+            "rebuilds": self.rebuilds,
+            "tokens": self.tokens,
+            "cost_usd": self.cost_usd,
+            "prices_dated": self.prices_dated,
+            "scratch_prefix": SCRATCH_PREFIX,
+            "estimates": [estimate.as_dict() for estimate in self.estimates],
+            "rejected": list(self.rejected),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SweepOutcome:
+    """What an index-time sweep measured, and what it did to the database to measure it."""
+
+    plan: IndexSweepPlan
+    suggestion: Suggestion
+    rebuilt: int = 0
+    scratch: list[str] = field(default_factory=list)
+    leaked: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the serialized outcome."""
+        return {
+            **self.suggestion.as_dict(),
+            "plan": self.plan.as_dict(),
+            "rebuilt": self.rebuilt,
+            "scratch_collections": list(self.scratch),
+            "leaked_collections": list(self.leaked),
+            "note": (
+                "Autopilot never writes config.yaml. This sweep did create and drop "
+                f"{self.rebuilt} scratch collection(s) named {SCRATCH_PREFIX}-*; any listed "
+                "under leaked_collections survived and must be dropped by hand. Applying an "
+                "index-time suggestion also needs a reindex: changing config.yaml alone "
+                "leaves the live index as the old settings built it."
+            ),
+        }
+
+
 def candidate_grid(settings: Settings) -> list[Candidate]:
     """Return the query-time candidates to try, cheapest and most promising first.
 
@@ -198,6 +361,305 @@ def candidate_grid(settings: Settings) -> list[Candidate]:
         candidates.append(Candidate({"retrieval.rerank": False}))
 
     return candidates
+
+
+def index_candidate_grid(settings: Settings) -> list[Candidate]:
+    """Return the index-time candidates to try, each one a whole rebuild's worth of work.
+
+    A sparse ladder, not a grid: every rung is a re-chunk and re-embed of the corpus, so the
+    default search is five rebuilds at most rather than a dense product of two dimensions.
+    """
+    current = settings.chunking
+    candidates: list[Candidate] = []
+
+    # CRITICAL: one key per candidate, never a pair, and a ladder rather than a product.
+    # A candidate that moved chunk size and overlap together would cost the same rebuild as
+    # a single-key one while reporting a score neither half can be credited with. The rungs
+    # are anchored on the shipped default and spaced by halving and doubling, because a
+    # golden set of a few dozen queries cannot separate adjacent values; overlap 0 is in
+    # deliberately, since "does overlap earn its duplicated tokens" is the one overlap
+    # question whose answer moves the bill as well as the score. Widening either tuple is
+    # not free: every entry added is another full re-chunk and re-embed of the corpus.
+    for chunk_size in (384, 768, 1536):
+        if chunk_size != current.chunk_size:
+            candidates.append(Candidate({"chunking.chunk_size": chunk_size}))
+
+    for overlap in (0, 128):
+        if overlap != current.overlap:
+            candidates.append(Candidate({"chunking.overlap": overlap}))
+
+    return candidates
+
+
+def _corpus_sources(dataset: EvalDataset) -> list[str]:
+    """Return the corpus files every scratch index in a sweep is rebuilt from."""
+    corpus = dataset.corpus
+    if not corpus.is_dir():
+        raise FasterRagError(
+            f"{corpus} is missing; an index-time sweep rebuilds the dataset's own corpus, so "
+            "the dataset directory must carry the corpus/ its golden set was written against",
+            code=ErrorCode.NOT_FOUND,
+            retryable=False,
+        )
+
+    files = sorted(
+        str(path)
+        for path in corpus.rglob("*")
+        if path.is_file()
+        and not any(part.startswith(".") for part in path.relative_to(corpus).parts)
+    )
+    if not files:
+        raise FasterRagError(
+            f"{corpus} holds no files; there is nothing for a sweep to rebuild",
+            code=ErrorCode.NOT_FOUND,
+            retryable=False,
+        )
+    return files
+
+
+def plan_index_sweep(
+    dataset: EvalDataset,
+    settings: Settings,
+    *,
+    collection: str,
+    candidates: Sequence[Candidate] | None = None,
+    stamp: str | None = None,
+) -> IndexSweepPlan:
+    """Price every rebuild an index-time sweep would perform, before performing any.
+
+    Reuses D9's estimator rather than inventing a second notion of cost, so the figure here
+    is the same one ``fasterrag estimate`` prints and carries the same provenance.
+    """
+    require_estimator(settings)
+
+    grid = list(candidates if candidates is not None else index_candidate_grid(settings))
+    sources = _corpus_sources(dataset)
+    moment = stamp or datetime.now(tz=UTC).strftime("%Y%m%d%H%M%S")
+
+    estimates: list[RebuildEstimate] = []
+    rejected: list[str] = []
+
+    for candidate in grid:
+        # CRITICAL: the baseline is skipped here because it must never be rebuilt. The live
+        # collection already holds the current configuration's index, which is precisely
+        # what a baseline measurement wants; building a copy of it would pay for a rebuild
+        # to learn nothing and would compare the candidates against a second index rather
+        # than against the one production is actually serving.
+        if not candidate.overrides:
+            continue
+
+        query_time = [key for key in candidate.overrides if not _is_index_time(key)]
+        if query_time:
+            rejected.append(f"{candidate.label} (query-time; search it with tune() instead)")
+            continue
+
+        try:
+            candidate_settings = candidate.apply(settings)
+        except ValidationError:
+            rejected.append(f"{candidate.label} (rejected by the configuration schema)")
+            continue
+
+        estimate = estimate_sources(sources, candidate_settings)
+        priced = estimate.providers[0] if estimate.providers else None
+        estimates.append(
+            RebuildEstimate(
+                candidate=candidate,
+                collection=f"{SCRATCH_PREFIX}-{moment}-{len(estimates):02d}",
+                documents=estimate.documents,
+                chunks=estimate.chunks,
+                tokens=estimate.tokens,
+                cost_usd=priced.cost_usd if priced is not None else None,
+                basis=priced.basis if priced is not None else "no embedding provider priced",
+            )
+        )
+
+    plan = IndexSweepPlan(
+        collection=collection,
+        corpus=str(dataset.corpus),
+        estimates=estimates,
+        rejected=rejected,
+    )
+    _logger.info(
+        "planned an index-time sweep",
+        extra={
+            "rebuilds": plan.rebuilds,
+            "tokens": plan.tokens,
+            "cost_usd": plan.cost_usd,
+            "rejected": len(rejected),
+        },
+    )
+    return plan
+
+
+async def _drop_scratch(adapter: VectorDBAdapter, names: Sequence[str], leaked: list[str]) -> None:
+    """Drop every scratch collection a sweep created, recording any that survived."""
+    for name in names:
+        try:
+            await adapter.drop_collection(name)
+        # CRITICAL: the net is wide here on purpose, and one failure never stops the loop.
+        # This runs in the cleanup path of an operation that creates indexes, so an
+        # unexpected error from one drop must not leave the remaining scratch collections
+        # on a production database. Nothing is swallowed: each failure is logged with the
+        # collection name and reported to the caller as a leak.
+        except Exception as exc:
+            leaked.append(name)
+            _logger.error(
+                "autopilot could not drop a scratch collection; drop it by hand",
+                extra={"collection": name, "error": str(exc)},
+            )
+
+
+async def _score_candidate(
+    candidate: Candidate,
+    dataset: EvalDataset,
+    settings: Settings,
+    adapter: VectorDBAdapter,
+    router: TieringRouter,
+    collection: str,
+) -> TrialResult:
+    """Score one candidate against a collection and time how long that took."""
+    started = time.perf_counter()
+    report = await score_collection(dataset, settings, adapter, router, collection=collection)
+    return TrialResult(
+        candidate=candidate,
+        recall_at_k=report.recall_at_k,
+        mrr=report.mrr,
+        ndcg_at_k=report.ndcg_at_k,
+        k=report.k,
+        seconds=time.perf_counter() - started,
+    )
+
+
+def _require_router_factory(
+    plan: IndexSweepPlan, router_factory: Callable[[Settings], TieringRouter] | None
+) -> None:
+    """Refuse an embedding-model sweep that would score candidates with the wrong router."""
+    if router_factory is not None:
+        return
+
+    unsupported = [
+        estimate.candidate.label
+        for estimate in plan.estimates
+        if any(key.startswith("embeddings.") for key in estimate.candidate.overrides)
+    ]
+    if unsupported:
+        raise FasterRagError(
+            "scoring an embedding candidate needs a router built from that candidate's own "
+            "settings — the supplied router embeds queries with the current model, which "
+            f"would search {unsupported} with vectors from a different model and report the "
+            "mismatch as a quality result. Pass router_factory, or drop those candidates",
+            code=ErrorCode.VALIDATION_FAILED,
+            retryable=False,
+        )
+
+
+async def sweep_index_time(
+    plan: IndexSweepPlan,
+    dataset: EvalDataset,
+    settings: Settings,
+    adapter: VectorDBAdapter,
+    router: TieringRouter,
+    *,
+    rebuild: RebuildFn,
+    approved_rebuilds: int = 0,
+    budget_seconds: float = 3600.0,
+    router_factory: Callable[[Settings], TieringRouter] | None = None,
+) -> SweepOutcome:
+    """Rebuild one scratch index per planned candidate, score it, and suggest the best.
+
+    ``approved_rebuilds`` defaults to zero, so the expensive behaviour is opt-in at the call
+    site: a caller that has not read the plan's cost cannot accidentally pay it.
+    """
+    if not settings.autopilot.enabled:
+        raise FasterRagError(
+            "autopilot.enabled is false; set it to true to allow eval-driven tuning",
+            code=ErrorCode.VALIDATION_FAILED,
+            retryable=False,
+        )
+
+    if approved_rebuilds < plan.rebuilds:
+        raise FasterRagError(
+            f"this sweep would rebuild the corpus {plan.rebuilds} time(s) at an estimated "
+            f"{plan.tokens} embedding tokens, and {approved_rebuilds} rebuild(s) are "
+            "approved; read the plan and raise approved_rebuilds once you accept that cost",
+            code=ErrorCode.VALIDATION_FAILED,
+            retryable=False,
+        )
+
+    _require_router_factory(plan, router_factory)
+
+    started = time.perf_counter()
+    created: list[str] = []
+    leaked: list[str] = []
+    trials: list[TrialResult] = []
+
+    try:
+        trials.append(
+            await _score_candidate(
+                Candidate({}), dataset, settings, adapter, router, plan.collection
+            )
+        )
+
+        for estimate in plan.estimates:
+            if time.perf_counter() - started >= budget_seconds:
+                _logger.info(
+                    "index sweep stopped at its budget",
+                    extra={"rebuilt": len(created), "skipped": plan.rebuilds - len(created)},
+                )
+                break
+
+            candidate_settings = estimate.candidate.apply(settings)
+            # CRITICAL: recorded before the build starts, never after it succeeds. A rebuild
+            # that dies halfway has already created the collection, and a name recorded only
+            # on success would leave exactly that wreckage behind on a production database.
+            created.append(estimate.collection)
+            await rebuild(estimate.collection, candidate_settings)
+
+            trial_router = router_factory(candidate_settings) if router_factory else router
+            try:
+                trials.append(
+                    await _score_candidate(
+                        estimate.candidate,
+                        dataset,
+                        candidate_settings,
+                        adapter,
+                        trial_router,
+                        estimate.collection,
+                    )
+                )
+            finally:
+                if trial_router is not router:
+                    await trial_router.close()
+    finally:
+        await _drop_scratch(adapter, created, leaked)
+
+    best = max(trials, key=lambda trial: (trial.ndcg_at_k, trial.recall_at_k, trial.mrr))
+    suggestion = Suggestion(
+        baseline=trials[0],
+        best=best,
+        trials=trials,
+        evaluated=len(trials),
+        skipped=plan.rebuilds - (len(trials) - 1),
+        seconds=time.perf_counter() - started,
+        created_at=datetime.now(tz=UTC).isoformat(),
+    )
+
+    _logger.info(
+        "index sweep finished",
+        extra={
+            "rebuilt": len(created),
+            "evaluated": suggestion.evaluated,
+            "improves": suggestion.improves,
+            "leaked": len(leaked),
+        },
+    )
+    return SweepOutcome(
+        plan=plan,
+        suggestion=suggestion,
+        rebuilt=len(created),
+        scratch=created,
+        leaked=leaked,
+    )
 
 
 async def tune(
@@ -337,6 +799,16 @@ def render_suggestion(suggestion: Suggestion) -> str:
         ]
     )
 
+    if any(_is_index_time(key) for key in suggestion.best.candidate.overrides):
+        lines.extend(
+            [
+                "# These are index-time settings. Pasting them in is not enough: the live",
+                "# index was built by the old ones and keeps serving what they produced",
+                "# until `fasterrag index reembed` rebuilds it.",
+                "",
+            ]
+        )
+
     sections: dict[str, dict[str, Any]] = {}
     for key, value in sorted(suggestion.best.candidate.overrides.items()):
         section, _, field_name = key.partition(".")
@@ -348,4 +820,47 @@ def render_suggestion(suggestion: Suggestion) -> str:
             rendered = str(value).lower() if isinstance(value, bool) else value
             lines.append(f"  {field_name}: {rendered}")
 
+    return "\n".join(lines) + "\n"
+
+
+def render_plan(plan: IndexSweepPlan) -> str:
+    """Render what an index-time sweep would do, for a human to read before approving it.
+
+    The whole point of the plan is that it is read, so this leads with the number of
+    rebuilds and the cost rather than burying them under a table of candidates.
+    """
+    cost = (
+        f"${plan.cost_usd:.4f} at list prices (checked {plan.prices_dated})"
+        if plan.cost_usd is not None
+        else "unknown — at least one rebuild uses an unpriced embedding model"
+    )
+    lines = [
+        "Index-time sweep plan — NOTHING HAS BEEN BUILT YET.",
+        f"  baseline       {plan.collection} (already built; scored as-is, no rebuild)",
+        f"  corpus         {plan.corpus}",
+        f"  rebuilds       {plan.rebuilds}",
+        f"  tokens         {plan.tokens} to embed across every rebuild",
+        f"  cost           {cost}",
+        "",
+        "candidates (chunks / tokens / cost):",
+    ]
+
+    for estimate in plan.estimates:
+        priced = f"${estimate.cost_usd:.4f}" if estimate.cost_usd is not None else "unpriced"
+        lines.append(
+            f"  {estimate.chunks:>7} / {estimate.tokens:>9} / {priced:>10}   "
+            f"{estimate.candidate.label}  -> {estimate.collection}"
+        )
+
+    for entry in plan.rejected:
+        lines.append(f"  skipped: {entry}")
+
+    lines.extend(
+        [
+            "",
+            f"Each candidate is built into its own {SCRATCH_PREFIX}-* collection, scored, and",
+            "dropped. Nothing is written to config.yaml and no alias is moved, so the live",
+            "index keeps serving throughout. Approve the rebuild count to run it.",
+        ]
+    )
     return "\n".join(lines) + "\n"
