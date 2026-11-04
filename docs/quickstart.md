@@ -145,7 +145,7 @@ The dashboard shows cache stats, token usage, cost per query, p50/p95 latency sp
 fasterrag autopilot run --budget-minutes 30
 ```
 
-Autopilot builds a golden Q&A set from *your* corpus, searches chunk size / top_k / hybrid weights / rerank settings against it, and writes a **suggested config diff with measured deltas** (e.g. recall@10 before → after). It never edits your config — you review and apply (D6).
+Autopilot builds a golden Q&A set from *your* corpus, searches the query-time parameters it can score without a rebuild — hybrid weights, `rrf_k` and rerank settings (`top_k` is deliberately excluded: measuring recall@k retrieves exactly k, so a top_k candidate cannot change the score; chunk size and overlap need the separate, priced index-time sweep and have no CLI surface yet, TASK-0145) against it, and writes a **suggested config diff with measured deltas** (e.g. recall@10 before → after). It never edits your config — you review and apply (D6).
 
 Once you have a golden set, lock quality in:
 

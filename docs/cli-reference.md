@@ -273,7 +273,7 @@ $ fasterrag config show --changed
 
 ## `fasterrag autopilot run`
 
-D6 eval-driven auto-tuning (requires `autopilot.enabled: true`). Generates a golden Q&A set from the corpus, searches chunk size / top_k / hybrid weights / rerank settings, and writes a **suggested config diff with measured deltas** (e.g. recall@10 before/after) to stdout and `autopilot-suggestion.yaml`. **Never applies changes** — a human reviews and applies the diff.
+D6 eval-driven auto-tuning (requires `autopilot.enabled: true`). Generates a golden Q&A set from the corpus, searches the query-time parameters it can score without a rebuild — hybrid weights, `rrf_k` and rerank settings (`top_k` is deliberately excluded: measuring recall@k retrieves exactly k, so a top_k candidate cannot change the score; chunk size and overlap need the separate, priced index-time sweep and have no CLI surface yet, TASK-0145), and writes a **suggested config diff with measured deltas** (e.g. recall@10 before/after) to stdout and `autopilot-suggestion.yaml`. **Never applies changes** — a human reviews and applies the diff.
 
 | Flag | Description |
 |---|---|

@@ -52,7 +52,7 @@ Specified in full in [testing-strategy.md](testing-strategy.md).
 
 **Built and running:** unit (≥ 85% coverage on `core/`, `adapters/`, `workers/`) · property-based chunker invariants (Hypothesis) · golden-file parser tests · testcontainers integration (Qdrant docker + remote modes, and pgvector) · the shared adapter contract suite · the retrieval eval harness · the chaos suite (D12).
 
-**Specified but not built** (TASK-0243): load (k6/Locust, hardware-annotated) · 24 h soak (no memory/fd growth) · mutation testing (mutmut) on chunk-boundary and retrieval-scoring logic. Mutation checking is currently done by hand, slice by slice, rather than by a tool.
+**Specified but not built** (TASK-0243): load (k6/Locust, hardware-annotated) and 24 h soak (no memory/fd growth) — both still waiting on the reference hardware TASK-0084 needs. **Mutation testing landed 2026-11-04** as `scripts/mutation_run.py`, built on CPython's own `ast` rather than mutmut (which refuses to run on Windows) or cosmic-ray (whose parser rejects valid code in this tree); it runs nightly, never on the push path, and reports survivors rather than failing the build, because the set contains equivalent mutants. Its first measured run covered four of six targets — 134 mutants, 71 killed, **63 survivors that are genuine test-suite gaps** (TASK-0300). Mutation checking by hand continues alongside it: the runner finds gaps, a reviewer still proves each new test red before it is trusted.
 
 ## 5. Static discipline
 

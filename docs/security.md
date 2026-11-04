@@ -123,11 +123,29 @@ non-multicast. Redirects are followed by hand, at most five, with the same guard
 each hop — `follow_redirects=True` would have sent later hops unchecked, which makes any
 first-URL-only check decorative.
 
-**Known limit, not closed: DNS rebinding.** The guard resolves the host and then connects,
-so a record with a near-zero TTL that answers public on the check and private on the
-connection is not stopped. Closing it means pinning the resolved address into the
-connection, which needs a custom transport (TASK-0294). An operator who needs the guarantee
-today should egress-filter the service rather than rely on this check.
+**DNS rebinding is closed (follow-up, 2026-11-04, TASK-0294).** The guard used to resolve
+the host and then hand the *name* back to the connector, which resolved it a second time —
+so a record with a near-zero TTL could answer public on the check and private on the
+connection. The connection is now addressed to the literal that was checked: `_guard_url`
+returns the verified address, the request URL is rewritten to it, and the hop is dialled at
+that address. There is no second resolution left to poison.
+
+Pinning an address must not cost anything else, so two things ride along. The original
+`Host` header is sent explicitly, keeping virtual hosting intact. The real hostname travels
+as httpx's `sni_hostname` request extension, which httpcore passes to `start_tls` as
+`server_hostname` — that is both the SNI sent and the name the certificate chain is verified
+against, so **TLS verification still checks the hostname, not the IP**. Connection keepalive
+is also disabled for these fetches: httpcore pools by origin, and after pinning an origin is
+`(scheme, IP, port)`, so two hosts sharing an address would otherwise share a TLS session
+established and verified for whichever came first.
+
+What is proven: unit tests assert that the address dialled is the first answer of a resolver
+that changes its answer, that the resolver is consulted exactly once, that `Host` and
+`sni_hostname` survive, that an IPv6 answer is dialled as a bracketed literal, and that a
+relative `Location` is joined against the *name* rather than the pinned URL. What is not
+proven here: no test completes a real TLS handshake against a pinned address — the
+certificate-verification claim rests on reading httpcore's `_connect`, not on a live
+handshake (TASK-0294 note). An integration test against a real server would settle it.
 
 ### 5.2 Archive import is bounded (audit, 2026-11-03)
 
@@ -137,8 +155,11 @@ apply: `MAXIMUM_MEMBER_BYTES` (1 GiB) per member, refused on the header, and
 `MAXIMUM_TOTAL_BYTES` (4 GiB) across the archive, which is what catches many members that
 are individually legal. Tar member names were already validated against traversal.
 
-These are ceilings, not a design. Import materialises every member at once while export
-goes to some trouble to stream; the real fix is to stream the import (TASK-0293).
+**Both sides now stream (TASK-0293, 2026-11-04).** `open_archive` copies each member into a private 0700 staging directory in 256 KiB blocks, hashing as it lands and charging each block against the running budget, so peak memory is flat in archive size — measured 1.55 MB for an 18 MB archive.
+
+**The first version of this guard was itself a memory bomb.** Spending the budget with a single `read(remaining + 1)` asked the allocator for the entire remaining 4 GiB on the first member: reading an 18 MB archive peaked at 4.33 GB. A ceiling expressed as one allocation is not a ceiling. The budget is now spent block by block, so a breach is caught on the block that crosses the line.
+
+**One guarantee did change, and it is a real trade.** “Nothing is written before verification” now means nothing is written *to the target collection*: unauthenticated archive bytes do land on local disk first, because hashing them without holding them requires it. They land in a private temp directory, bounded by the same 4 GiB budget, refused on any member that is not a plain file at the archive root — the traversal check that was previously belt-and-braces is now what keeps members inside that directory — and removed on every failure path. An import therefore needs free temp space for the uncompressed archive, and a full disk becomes a refusal rather than a silent partial import.
 
 ### 5.3 An unbound key is now announced
 
@@ -151,12 +172,11 @@ requiring an explicit marker instead would break every existing key file (TASK-0
 
 ### 5.4 Still open after this audit
 
-- `POST /v1/admin/export` writes to a caller-supplied path and `POST /v1/admin/import`
-  reads one, with no confinement. Both require the `admin` scope, which is already trusted
-  to drop collections and drive provisioning — but in a tenant-operator deployment that is
-  not the same as filesystem access on the host (TASK-0296).
 - Prompt injection through retrieved content is inherent to RAG and is bounded by the P1–P4
   call-site contracts, not eliminated. The library never executes model output.
+
+Closed since: the admin archive paths (TASK-0296, §5.6) and DNS rebinding (TASK-0294, §5.1),
+both on 2026-11-04.
 
 ### 5.5 Checked and sound
 
@@ -167,6 +187,32 @@ router a 403 rather than an open endpoint; the unhandled-exception handler retur
 problem document and keeps the traceback in logs behind a trace id; and there is no
 `pickle`, `eval`/`exec`, `yaml.load`, `shell=True`, or disabled TLS verification anywhere in
 `src/`.
+
+### 5.6 Admin archive paths are confined (follow-up, 2026-11-04)
+
+`POST /v1/admin/export` took the file it writes from the request body and
+`POST /v1/admin/import` took the file it reads the same way. An `admin`-scoped caller could
+therefore write over `config.yaml`, drop a file into a web root, or read any archive on the
+host. The `admin` scope is trusted to drop collections and drive provisioning; in a
+tenant-operator deployment that is not the same as filesystem access (TASK-0296).
+
+`security.allowed_archive_roots` now confines both, with exactly the rule §5.1 applies to
+ingestion paths: the path is `resolve()`d before comparison, so `..` is collapsed and a
+symlink planted inside a root cannot point out of it; an empty list means unconfined, and
+unconfined is **refused outright once `security.auth` is on**, so forgetting the setting
+breaks a served deployment loudly rather than exposing it quietly. With auth off the
+deployment is single-operator and `fasterrag export` keeps working as before. Refusals are
+`422 VALIDATION_FAILED` problem documents naming the setting.
+
+**One list, not two.** Export writes and import reads the same artifact in the same
+directory — the round trip is the normal case — so two lists would be set identically by
+every operator and could only ever diverge by mistake. The asymmetry that would justify
+splitting them (writing is more dangerous than reading) is not an asymmetry in *where* the
+archives live.
+
+The setting sits under `security` rather than beside a feature section because it bounds
+what a credential may reach on the host, which is what the rest of that section decides;
+`ingestion.allowed_source_roots` sits under `ingestion` only because that section exists.
 
 ## 6. Supply chain
 
