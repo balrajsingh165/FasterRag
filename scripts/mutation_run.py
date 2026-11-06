@@ -37,6 +37,24 @@ is never allowed to look like a pass.
 **Nothing under ``src/`` is ever written.** The tree is copied once per run and the copy is
 mutated; pytest is pointed at it with ``-o pythonpath=`` (which empties the ini setting that
 would otherwise put the real ``src`` first) plus ``PYTHONPATH``.
+
+**The tests are snapshotted too, and no bytecode crosses into the run** (TASK-0303). The
+runner used to copy ``src/`` and then read the tests live from the working tree, so a test
+file saved mid-run silently changed the verdict of every mutant executed afterwards — a
+``core/breaker.py`` mutant was flipped from survived to killed with ``src/`` byte-identical,
+purely by editing its test between two runs. ``tests/`` and ``pyproject.toml`` are now copied
+into the same workspace and pytest is pointed at the copies. The whole tree is copied rather
+than only the paths a target names, because a test that reaches past itself —
+``test_comparability.py`` reads ``tests/eval/datasets`` through ``__file__`` — must find the
+snapshot's copy rather than nothing. ``__pycache__`` is excluded from both copies and the
+child runs with ``PYTHONDONTWRITEBYTECODE``, because CPython validates a cached ``.pyc`` on
+``(int source mtime seconds, source size)`` alone: a length-preserving mutant such as
+``'0' -> '1'`` whose mtime second collides with the cached one is never executed, and the
+runner would then report a verdict for a mutant it never ran — the vacuity class this script
+exists to detect. The price is roughly a second of copying per run and a recompile of the
+mutated package per mutant; the breaker target's verdict was unchanged across the fix (34
+mutants, 32 killed, the same two survivors), and no wall-clock comparison taken on a machine
+running ten agents at once is worth quoting.
 """
 
 from __future__ import annotations
@@ -79,12 +97,19 @@ __all__ = [
     "run",
     "select",
     "source_files",
+    "stage_suite",
+    "staged_tests",
 ]
 
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 
 DEFAULT_TIMEOUT_S: Final = 180.0
 DEFAULT_SEED: Final = 0
+
+# CRITICAL: no ``__pycache__`` may enter the workspace. A cached ``.pyc`` is validated on
+# the source's mtime seconds and byte size only, so one carried in beside a mutated file can
+# shadow the mutation entirely and the run reports a verdict for a mutant it never executed.
+_IGNORED: Final = shutil.ignore_patterns("__pycache__")
 
 
 class Verdict(StrEnum):
@@ -447,6 +472,38 @@ def source_files(root: Path, source: str) -> list[Path]:
     return [path] if path.is_file() else []
 
 
+def stage_suite(workspace: Path) -> None:
+    """Copy the test tree and pytest's configuration beside the mutated sources.
+
+    The whole tree goes, not only the paths a target names, so a test that reaches
+    for a fixture or dataset beside it finds the snapshot's copy rather than nothing.
+    """
+    shutil.copytree(
+        REPOSITORY_ROOT / "tests", workspace / "tests", dirs_exist_ok=True, ignore=_IGNORED
+    )
+    configuration = REPOSITORY_ROOT / "pyproject.toml"
+    if configuration.is_file():
+        shutil.copy2(configuration, workspace / configuration.name)
+
+
+def staged_tests(tests: tuple[str, ...], workspace: Path) -> tuple[str, ...]:
+    """Point one target's test paths at their copies, refusing one the snapshot lacks.
+
+    Reading the tests live from the working tree makes every verdict a function of
+    whatever was saved while the run was in flight, which is no verdict at all.
+    """
+    resolved: list[str] = []
+    root = workspace.resolve()
+    for test in tests:
+        copy = (workspace / test).resolve()
+        if not copy.is_relative_to(root):
+            raise ValueError(f"{test} points outside the snapshot")
+        if not copy.exists():
+            raise FileNotFoundError(f"{test} matched no test in the snapshot")
+        resolved.append(str(copy))
+    return tuple(resolved)
+
+
 def load_targets(document: Any) -> list[Target]:
     """Read a --targets-file document, refusing a shape that cannot be run."""
     if not isinstance(document, list):
@@ -535,13 +592,14 @@ def markdown(report: RunReport) -> str:
 
 
 def _pytest(tests: tuple[str, ...], workspace: Path, timeout: float) -> int | None:
-    """Run one target's tests against the mutated copy; ``None`` means it timed out.
+    """Run one target's staged tests against the mutated copy; ``None`` means it timed out.
 
     ``-o pythonpath=`` empties the ini setting that would otherwise put the real ``src``
-    ahead of the copy, which is what keeps this run off the working tree entirely.
+    ahead of the copy; ``PYTHONDONTWRITEBYTECODE`` stops a ``.pyc`` outliving its mutant.
     """
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(workspace)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     command = [
         sys.executable,
         "-m",
@@ -574,8 +632,8 @@ def _run_target(
 ) -> TargetResult:
     """Mutate one target in the workspace copy and record what its tests caught.
 
-    Mutations are generated from the copy, so a mutation's offsets always belong to the
-    text it is spliced into.
+    Mutations are generated from the copy and the tests are read from the copy, so
+    neither a mutation's offsets nor its verdict depend on the live working tree.
     """
     result = TargetResult(name=target.name)
     started = time.monotonic()
@@ -585,7 +643,13 @@ def _run_target(
         result.problems.append(f"{target.name}: {target.source} matched no Python file")
         return result
 
-    baseline = _pytest(target.tests, workspace, timeout)
+    try:
+        tests = staged_tests(target.tests, workspace)
+    except (OSError, ValueError) as exc:
+        result.problems.append(f"{target.name}: its tests could not be snapshotted: {exc}")
+        return result
+
+    baseline = _pytest(tests, workspace, timeout)
     if baseline != 0:
         result.problems.append(
             f"{target.name}: the unmutated suite exited {baseline}, so every mutant would "
@@ -608,7 +672,7 @@ def _run_target(
         original = copied.read_text(encoding="utf-8")
         copied.write_text(apply(original, mutation), encoding="utf-8")
         try:
-            code = _pytest(target.tests, workspace, timeout)
+            code = _pytest(tests, workspace, timeout)
         finally:
             copied.write_text(original, encoding="utf-8")
         result.executed += 1
@@ -628,8 +692,9 @@ def _run_target(
 def run(
     targets: list[Target], *, budget: int | None, seed: int, timeout: float, workspace: Path
 ) -> RunReport:
-    """Copy ``src/`` into the workspace, then run every target against the copy."""
-    shutil.copytree(REPOSITORY_ROOT / "src", workspace, dirs_exist_ok=True)
+    """Snapshot ``src/``, ``tests/`` and the ini, then run every target against the copy."""
+    shutil.copytree(REPOSITORY_ROOT / "src", workspace, dirs_exist_ok=True, ignore=_IGNORED)
+    stage_suite(workspace)
     results = [
         _run_target(target, workspace, budget=budget, seed=seed, timeout=timeout)
         for target in targets

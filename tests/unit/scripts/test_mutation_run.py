@@ -1,5 +1,7 @@
 import ast
+import importlib.util
 import json
+import py_compile
 from pathlib import Path
 
 import pytest
@@ -22,8 +24,11 @@ from mutation_run import (
     markdown,
     render,
     restrict,
+    run,
     select,
     source_files,
+    stage_suite,
+    staged_tests,
 )
 
 
@@ -370,3 +375,188 @@ class TestCommandLine:
         )
         assert main(["--list", "--targets-file", str(document)]) == 0
         assert capsys.readouterr().out.startswith("only-breaker: ")
+
+
+COMPARISON_MODULE = '''"""One comparison and no literal, so the module has exactly one mutant."""
+
+
+def check(a: int, b: int) -> bool:
+    """Report whether a is below b."""
+    return a < b
+'''
+
+CONSTANT_MODULE = '''"""One integer literal, so the module's only mutant preserves its length."""
+
+
+def limit() -> int:
+    """Report the limit its test pins."""
+    return 0
+'''
+
+PINNING_TEST = '''"""Pin the constant, so the mutant dies the moment it is actually executed."""
+
+from pkgy.mod import limit
+
+
+def test_limit() -> None:
+    assert limit() == 0
+'''
+
+STRICT_TEST = '''"""The stricter test an edit lands mid-run; it notices ``<`` becoming ``<=``."""
+
+from pkgx.mod import check
+
+
+def test_check() -> None:
+    assert check(1, 2) is True
+    assert check(2, 2) is False
+'''
+
+LENIENT_TEST = '''"""The test the run starts with; it does not notice the mutant.
+
+Executing it overwrites the live copy of itself with the stricter test, which is the
+mid-run edit this regression is about.
+"""
+
+from pathlib import Path
+
+from pkgx.mod import check
+
+LIVE = Path({live})
+STRICT = {strict}
+
+
+def test_check() -> None:
+    LIVE.write_text(STRICT, encoding="utf-8")
+    assert check(1, 2) is True
+'''
+
+
+PYPROJECT = """[tool.pytest.ini_options]
+addopts = ""
+"""
+
+
+def miniature(root: Path, package: str, module: str, test: str) -> None:
+    """Lay out a miniature repository: one package, one module, one test, one ini."""
+    for relative, body in (
+        ("pyproject.toml", PYPROJECT),
+        (f"src/{package}/__init__.py", ""),
+        (f"src/{package}/mod.py", module),
+        ("tests/__init__.py", ""),
+        ("tests/test_mod.py", test),
+    ):
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(body, encoding="utf-8")
+
+
+def mutate(
+    root: Path,
+    workspace: Path,
+    package: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tests: tuple[str, ...] = ("tests/test_mod.py",),
+) -> TargetResult:
+    """Point the runner at a miniature repository and run its single target."""
+    monkeypatch.setattr("mutation_run.REPOSITORY_ROOT", root)
+    report = run(
+        [Target(name="x", source=f"src/{package}/mod.py", tests=tests)],
+        budget=None,
+        seed=0,
+        timeout=120.0,
+        workspace=workspace,
+    )
+    return report.results[0]
+
+
+class TestIsolation:
+    """TASK-0303: a verdict may depend on nothing but the snapshot the run was given."""
+
+    def test_a_test_edited_mid_run_cannot_change_a_verdict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "root"
+        live = root / "tests/test_mod.py"
+        miniature(
+            root,
+            "pkgx",
+            COMPARISON_MODULE,
+            LENIENT_TEST.format(live=repr(str(live)), strict=repr(STRICT_TEST)),
+        )
+
+        outcome = mutate(root, tmp_path / "workspace", "pkgx", monkeypatch)
+
+        assert live.read_text(encoding="utf-8") == STRICT_TEST
+        assert outcome.problems == []
+        assert (outcome.generated, outcome.executed) == (1, 1)
+        assert outcome.survived == 1
+
+    def test_a_stale_bytecode_cache_cannot_shadow_a_length_preserving_mutant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "root"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+        module = root / "src/pkgy/mod.py"
+        py_compile.compile(
+            str(module),
+            cfile=importlib.util.cache_from_source(str(module)),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+        )
+
+        outcome = mutate(root, tmp_path / "workspace", "pkgy", monkeypatch)
+
+        assert outcome.problems == []
+        assert (outcome.generated, outcome.executed) == (1, 1)
+        assert outcome.killed == 1
+        assert outcome.survivors == []
+
+    def test_the_workspace_keeps_no_bytecode_for_a_later_mutant_to_reuse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "root"
+        workspace = tmp_path / "workspace"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+        module = root / "src/pkgy/mod.py"
+        py_compile.compile(str(module), doraise=True)
+
+        mutate(root, workspace, "pkgy", monkeypatch)
+
+        assert list(workspace.rglob("__pycache__")) == []
+        assert list(workspace.rglob("*.pyc")) == []
+
+    def test_staging_copies_the_whole_test_tree_a_named_test_may_reach_into(
+        self, tmp_path: Path
+    ) -> None:
+        stage_suite(tmp_path)
+        resolved = staged_tests(("tests/unit/core/test_breaker.py", "tests/unit/scripts"), tmp_path)
+
+        assert resolved == (
+            str(tmp_path / "tests/unit/core/test_breaker.py"),
+            str(tmp_path / "tests/unit/scripts"),
+        )
+        for neighbour in (
+            "pyproject.toml",
+            "tests/conftest.py",
+            "tests/unit/scripts/test_mutation_run.py",
+            "tests/eval/datasets/handbook/baseline.json",
+        ):
+            assert (tmp_path / neighbour).is_file(), neighbour
+        assert list(tmp_path.rglob("__pycache__")) == []
+
+    def test_a_test_path_outside_the_snapshot_is_refused(self, tmp_path: Path) -> None:
+        stage_suite(tmp_path)
+        with pytest.raises(ValueError, match="outside the snapshot"):
+            staged_tests((str(REPOSITORY_ROOT / "tests/unit/core/test_breaker.py"),), tmp_path)
+
+    def test_a_test_path_that_cannot_be_staged_is_reported_rather_than_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "root"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+
+        outcome = mutate(root, tmp_path / "workspace", "pkgy", monkeypatch, ("tests/test_gone.py",))
+
+        assert outcome.executed == 0
+        assert any("could not be snapshotted" in problem for problem in outcome.problems)
