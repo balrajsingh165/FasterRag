@@ -1,0 +1,18 @@
+# Findings gitleaks must not re-report, pinned by fingerprint.
+#
+# CRITICAL: every entry here is commit:file:rule:line, which waives exactly one finding in
+# exactly one historical commit. Do not weaken an entry into a path or a rule allowlist --
+# that would mask a real credential committed to the same file later, which is the failure
+# this file is one bad edit away from causing.
+#
+# The entry below is a deliberately fake rate-limiter identity fixture, shaped like a
+# Stripe key so a reader could not mistake it for a real one, matched by the generic-api-key
+# rule on entropy alone. It was renamed out of the working tree on 2026-11-07 once the
+# scheduled scan flagged it, but a rename cannot change a commit that already exists, and
+# the only thing that could is a force push over shared history.
+#
+# That it fires at all is the secret scan working as documented: `ci.yml` and `security.yml`
+# both promise to scan full history precisely because "a secret committed and later removed
+# is still in the history, and still compromised". Until TASK-0315 replaced the action with
+# a pinned binary, the push path scanned one commit and called this clean.
+ce08283cf7ec6f46dff5797320d2d332181a27a2:tests/integration/test_redis_rate_limit.py:generic-api-key:114
