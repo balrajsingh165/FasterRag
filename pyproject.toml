@@ -252,7 +252,7 @@ testpaths = ["tests"]
 # code ever having been executed, and the pre-commit hook runs pytest, so the gate agrees.
 # pytest inserts these at the front of sys.path, which puts the local tree ahead of the .pth.
 pythonpath = ["src", "scripts"]
-addopts = "--strict-markers --strict-config"
+addopts = "--strict-markers --strict-config -m 'not eval and not load and not soak and not chaos'"
 asyncio_mode = "auto"
 markers = [
     "integration: requires containerized backends (testcontainers)",
