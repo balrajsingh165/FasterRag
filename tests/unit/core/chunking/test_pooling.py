@@ -246,3 +246,104 @@ def test_windows_step_forward_by_the_window_less_its_overlap() -> None:
     """The step is what gives an edge token a window in which it is not on an edge."""
     assert _windows(20, 8) == [(0, 8), (6, 14), (12, 20)]
     assert _windows(5, 8) == [(0, 5)]
+
+
+class ZeroWidthTokenizer(FakeTokenizer):
+    """Reports a zero-width token between the words, as tokenizers do for dropped marks."""
+
+    def __call__(
+        self, text: str, add_special_tokens: bool = True, return_offsets_mapping: bool = False
+    ) -> dict[str, Any]:
+        """Return the word tokens plus one token that spans no characters at all."""
+        base = super().__call__(text, add_special_tokens, return_offsets_mapping)
+        ids: list[int] = list(base["input_ids"])
+        offsets: list[tuple[int, int]] = list(base["offset_mapping"])
+        gap = offsets[0][1]
+        return {
+            "input_ids": [ids[0], len(ids) + 1, *ids[1:]],
+            "offset_mapping": [offsets[0], (gap, gap), *offsets[1:]],
+        }
+
+
+class ZeroWidthModel(OneHotModel):
+    """A one-hot stand-in whose tokenizer emits a token covering no characters."""
+
+    def __init__(self) -> None:
+        """Build the model with the zero-width tokenizer in place."""
+        super().__init__()
+        self.tokenizer: Any = ZeroWidthTokenizer()
+
+
+def test_a_token_spanning_no_characters_is_never_pooled() -> None:
+    """A zero-width token sits inside every span around it, so admitting one dilutes them all."""
+    vectors = pool_spans(ZeroWidthModel(), "alpha beta", [(0, 10)])
+
+    assert vectors[0] == pytest.approx(one_hot(1, 2))
+
+
+POSITION_WIDTH = 4
+WINDOWED_TEXT = " ".join(f"w{index:02d}" for index in range(20))
+
+
+class PositionNetwork:
+    """Returns a row naming the call that produced it and the slot it occupied.
+
+    Both other fakes answer by token id alone, so a token pooled from the window where
+    it is least contextual produces exactly the same vector as a correct one.
+    """
+
+    def __init__(self) -> None:
+        self.config = type("c", (), {"hidden_size": POSITION_WIDTH})()
+        self.calls = 0
+        self._parameter = torch.nn.Parameter(torch.zeros(1))
+
+    def parameters(self) -> Any:
+        return iter([self._parameter])
+
+    def __call__(self, input_ids: Any, attention_mask: Any) -> Any:
+        """Return one row per slot, encoding this call's number and the slot's index."""
+        self.calls += 1
+        rows = torch.stack(
+            [
+                torch.tensor([float(self.calls), float(slot), 1.0, 1.0])
+                for slot in range(int(input_ids.shape[1]))
+            ]
+        )
+        return type("o", (), {"last_hidden_state": rows.unsqueeze(0)})()
+
+
+class PositionModel:
+    """A stand-in whose vectors say which window a token's representation came from."""
+
+    def __init__(self, max_seq_length: int) -> None:
+        self.tokenizer = FakeTokenizer()
+        self.network = PositionNetwork()
+        self.max_seq_length = max_seq_length
+
+    def __getitem__(self, index: int) -> Any:
+        """Return the transformer module, as sentence-transformers exposes it."""
+        return type("m", (), {"auto_model": self.network})()
+
+
+def from_window(call: int, slot: int) -> list[float]:
+    """Return the unit vector a token taken from window ``call`` at ``slot`` pools to."""
+    row = torch.tensor([float(call), float(slot), 1.0, 1.0])
+    return [float(value) for value in torch.nn.functional.normalize(row, dim=0).tolist()]
+
+
+def test_a_token_takes_its_vector_from_the_window_it_sits_deepest_inside() -> None:
+    """Centrality is the whole point of windowing, and choosing wrong is silent.
+
+    Slot 0 of every window holds the CLS sentinel, so a token at window offset ``n``
+    reports slot ``n + 1``.
+    """
+    model = PositionModel(max_seq_length=12)
+    spans = [(index * 4, index * 4 + 3) for index in (8, 9, 16, 17)]
+
+    vectors = pool_spans(model, WINDOWED_TEXT, spans)
+
+    assert model.network.calls == 3
+    assert vectors[0] == pytest.approx(from_window(1, 9))
+    assert vectors[1] == pytest.approx(from_window(2, 2))
+    assert vectors[2] == pytest.approx(from_window(2, 9))
+    assert vectors[3] == pytest.approx(from_window(3, 2))

@@ -310,3 +310,58 @@ def test_an_injected_counter_reaches_the_chunker_the_factory_builds() -> None:
     assert chunks
     assert counter.counted
     assert counter.sized
+
+
+def test_the_semantic_strategy_ships_the_same_window_and_overlap_as_the_others() -> None:
+    """Semantic takes its own defaults, and a deployment that configures nothing gets them.
+
+    The body carries no sentence punctuation, so the whole document is one tile and the
+    boundaries below are the 768-token limit and the 64-token reach-back, nothing else.
+    """
+    document = parse_plaintext(DEFAULT_LIMIT_BODY.encode())
+
+    chunks = SemanticChunker(ShiftingEmbedder()).split(document)
+
+    assert [(chunk.start, chunk.end) for chunk in chunks[:2]] == [(0, 3070), (2814, 6140)]
+
+
+def test_a_semantic_group_that_lands_exactly_on_the_limit_still_takes_the_next_sentence() -> None:
+    """Refusing the exact fit cuts a sentence off every chunk that happens to land on it."""
+    document = parse_plaintext(b"AAAA. BBBB. CCCC. DDDD.")
+
+    chunks = SemanticChunker(
+        ShiftingEmbedder(), chunk_size=3, overlap=0, counter=EstimatingTokenCounter()
+    ).split(document)
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 12), (12, 23)]
+
+
+def test_a_blank_segment_is_absorbed_by_its_neighbour_not_by_the_first_chunk() -> None:
+    """Absorbing into the first chunk makes the last one restate the whole document."""
+    text = "alphabeta   "
+
+    chunks = assemble(
+        text,
+        [(0, 5), (5, 9), (9, 12)],
+        overlap_chars=0,
+        strategy="fixed",
+        counter=EstimatingTokenCounter(),
+    )
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 5), (5, 12)]
+    assert [chunk.text for chunk in chunks] == ["alpha", "beta   "]
+
+
+def test_a_strategy_that_emits_a_blank_segment_keeps_its_tiling() -> None:
+    """Reachable from a shipped strategy, so the merge anchor is not a theoretical concern.
+
+    ``RecursiveChunker`` splits the run of spaces off as a segment of its own here; anchoring
+    the merge on the first chunk instead of the previous one makes chunk 1 restate chunk 0.
+    """
+    document = parse_plaintext(b"Rate. Limit.   Policy. Notes.")
+
+    chunks = RecursiveChunker(chunk_size=2, overlap=0, counter=EstimatingTokenCounter()).split(
+        document
+    )
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 6), (6, 15), (15, 23), (23, 29)]

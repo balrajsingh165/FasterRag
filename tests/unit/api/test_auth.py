@@ -2,7 +2,7 @@ import logging
 
 import pytest
 from fastapi.testclient import TestClient
-from starlette.types import Receive, Scope, Send
+from starlette.types import Message, Receive, Scope, Send
 
 from fasterrag.api.auth import (
     ALL_SCOPES,
@@ -322,3 +322,135 @@ def test_a_fully_bound_key_set_is_announced_quietly(
         AuthMiddleware(_unreached, settings)
 
     assert not any("may act for any tenant" in record.getMessage() for record in caplog.records)
+
+
+class _Recorder:
+    """Captures the authenticated identity the middleware puts on the scope."""
+
+    def __init__(self) -> None:
+        self.state: dict[str, object] = {}
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        self.state = dict(scope.get("state", {}))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+
+async def drive(middleware: AuthMiddleware, headers: list[tuple[bytes, bytes]]) -> None:
+    """Send one `GET /metrics` through the middleware with the given raw headers."""
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Message) -> None:
+        return None
+
+    await middleware(
+        {"type": "http", "path": "/metrics", "method": "GET", "headers": headers},
+        receive,
+        send,
+    )
+
+
+def test_a_key_cannot_be_rewritten_after_it_is_loaded() -> None:
+    """The registry's key objects are handed downstream on every request.
+
+    A mutable one would let any later code widen `scopes` for the whole process, so the
+    key is frozen and slotted and neither an assignment nor a new attribute can land.
+    """
+    key = ApiKey(secret="s", scopes=frozenset({"query"}))
+    field = "scopes"
+
+    with pytest.raises(AttributeError):
+        setattr(key, field, ALL_SCOPES)
+    assert not hasattr(key, "__dict__")
+
+
+def test_a_narrow_scope_is_honoured_as_well_as_refused() -> None:
+    """`permits` must not collapse to admin-only; a query key has to be able to query."""
+    key = ApiKey(secret="s", scopes=frozenset({"query"}))
+
+    assert key.permits("query")
+    assert not key.permits("ingest")
+
+
+def test_the_scope_table_matches_both_exactly_and_by_prefix() -> None:
+    """Both halves of the match stay live, or every endpoint silently requires admin."""
+    assert required_scope("/v1/query") == "query"
+    assert required_scope("/v1/retrieve") == "query"
+    assert required_scope("/v1/collections") == "collections"
+    assert required_scope("/v1/ingest/jobs/abc") == "ingest"
+    assert required_scope("/v1/traces/t-1") == "admin"
+    assert required_scope("/metrics") == "admin"
+
+
+def test_a_truncated_or_extended_key_does_not_resolve() -> None:
+    """The comparison covers the whole secret, not a prefix of it."""
+    registry = KeyRegistry([ApiKey(secret="aaaa", scopes=ALL_SCOPES)])
+
+    assert registry.resolve("aaa") is None
+    assert registry.resolve("aaaaa") is None
+    assert registry.resolve("aaaa") is not None
+
+
+def test_the_empty_key_error_counts_entries_from_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator has to be told which entry to fix, and the list they read is 1-based."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "good:query;:ingest")
+
+    with pytest.raises(ConfigError, match="entry 2 has an empty key"):
+        load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+
+def test_each_key_is_named_by_its_position_from_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The unbound-key warning names keys positionally; an off-by-one blames the wrong entry."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "alpha:query;beta:ingest")
+
+    keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+    assert [key.name for key in keys] == ["key-1", "key-2"]
+
+
+def test_a_non_bearer_credential_reads_as_no_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`Basic <blob>` must not be lifted out and tried as a bearer token."""
+    with secured(monkeypatch) as client:
+        basic = client.get("/metrics", headers={"Authorization": "Basic c2VjcmV0"})
+        bare = client.get("/metrics", headers={"Authorization": "Bearer"})
+
+    assert basic.json()["code"] == ErrorCode.AUTH_MISSING.value
+    assert bare.json()["code"] == ErrorCode.AUTH_MISSING.value
+
+
+async def test_an_operator_key_acts_as_the_tenant_it_declared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The declared tenant has to reach downstream, or the operator acts untenanted instead."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", SECRET)
+    settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}})
+    recorder = _Recorder()
+
+    await drive(
+        AuthMiddleware(recorder, settings),
+        [
+            (b"authorization", f"Bearer {SECRET}".encode("latin-1")),
+            (b"x-tenant-id", b"globex"),
+        ],
+    )
+
+    assert recorder.state["tenant"] == "globex"
+
+
+async def test_a_bound_key_acts_as_its_own_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ordinary case: the header matched, so the key's own tenant is what travels."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{SECRET}:admin:acme")
+    settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}})
+    recorder = _Recorder()
+
+    await drive(
+        AuthMiddleware(recorder, settings),
+        [
+            (b"authorization", f"Bearer {SECRET}".encode("latin-1")),
+            (b"x-tenant-id", b"acme"),
+        ],
+    )
+
+    assert recorder.state["tenant"] == "acme"

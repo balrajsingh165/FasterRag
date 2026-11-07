@@ -38,8 +38,8 @@ from fasterrag.core.rate_limit import (
 
 pytestmark = pytest.mark.integration
 
-SECRET = "sk-live-an-api-key-that-must-never-reach-the-server"
-OTHER_SECRET = "sk-live-a-second-caller-entirely"
+SECRET = "caller-whose-api-key-must-never-reach-the-server"
+OTHER_SECRET = "a-second-caller-entirely"
 
 # CRITICAL: bucket-aligned arithmetic depends on this being a plain second, so that
 # FIXED_NOW and FIXED_NOW + WINDOW_SECONDS are guaranteed to be adjacent windows.

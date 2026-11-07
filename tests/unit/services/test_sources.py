@@ -2,15 +2,18 @@ import base64
 from collections.abc import AsyncIterator, Callable
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 
 from fasterrag.config.schema import Settings
 from fasterrag.core.identity import document_id
-from fasterrag.errors import FasterRagError, IngestionError, ParseError
+from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
 from fasterrag.services.sources import (
+    _MAXIMUM_REDIRECTS,
     INLINE_SCHEME,
+    ResolvedSources,
     _addresses,
     guard_archive_path,
     resolve_sources,
@@ -530,3 +533,315 @@ async def test_an_unauthenticated_deployment_still_writes_archives_anywhere(
         guard_archive_path(str(tmp_path / "backup.fragx"), settings())
         == (tmp_path / "backup.fragx").resolve()
     )
+
+
+def serve_recording(
+    handler: Callable[[httpx.Request], httpx.Response], monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """Serve like :func:`serve`, and hand back the arguments the client was built with."""
+    built: dict[str, Any] = {}
+    real_client = httpx.AsyncClient
+
+    def client(
+        *, timeout: float, follow_redirects: bool, limits: httpx.Limits
+    ) -> httpx.AsyncClient:
+        built.update(timeout=timeout, follow_redirects=follow_redirects, limits=limits)
+        return real_client(
+            transport=httpx.MockTransport(handler),
+            timeout=timeout,
+            follow_redirects=follow_redirects,
+            limits=limits,
+        )
+
+    monkeypatch.setattr("fasterrag.services.sources.httpx.AsyncClient", client)
+    resolve_as(monkeypatch, {"example.com": "93.184.216.34"})
+    return built
+
+
+async def test_the_fetch_client_pools_nothing_and_follows_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinning only holds per connection.
+
+    httpcore pools by origin and a pinned origin is `(scheme, IP, port)`, so a kept-alive
+    connection would carry a second host's request over the first host's verified session;
+    and a client that followed redirects itself would route hops past the guard entirely.
+    """
+    built = serve_recording(lambda _: httpx.Response(200, content=b"# body"), monkeypatch)
+
+    resolved = await resolve_sources(
+        [{"type": "url", "value": "http://example.com/a.md"}], settings()
+    )
+    resolved.cleanup()
+
+    assert built["follow_redirects"] is False
+    assert built["limits"].max_keepalive_connections == 0
+    assert built["limits"].max_connections == 10
+    assert built["timeout"] == 60.0
+
+
+@pytest.mark.parametrize(
+    "uri", ["http://224.0.0.1/admin", "http://239.1.2.3/admin", "http://[ff02::1]/"]
+)
+async def test_a_multicast_address_is_refused(uri: str) -> None:
+    """`ip_address(...).is_global` is True for multicast, so only the multicast term refuses it."""
+    with pytest.raises(IngestionError, match="non-public address"):
+        await resolve_sources([{"type": "url", "value": uri}], settings())
+
+
+async def test_one_private_answer_among_public_ones_refuses_the_whole_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every record is checked; a public answer must not launder a private sibling."""
+    seen, handler = recorder()
+    serve(handler, monkeypatch)
+
+    async def addresses(host: str) -> list[IPv4Address | IPv6Address]:
+        return [ip_address("93.184.216.34"), ip_address("127.0.0.1")]
+
+    monkeypatch.setattr("fasterrag.services.sources._addresses", addresses)
+
+    with pytest.raises(IngestionError, match="non-public address"):
+        await resolve_sources([{"type": "url", "value": "http://example.com/a"}], settings())
+
+    assert seen == []
+
+
+async def test_the_first_checked_answer_is_the_one_dialled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pin has to name an address the guard actually examined and approved."""
+    seen, handler = recorder()
+    serve(handler, monkeypatch)
+
+    async def addresses(host: str) -> list[IPv4Address | IPv6Address]:
+        return [ip_address("93.184.216.34"), ip_address("1.1.1.1")]
+
+    monkeypatch.setattr("fasterrag.services.sources._addresses", addresses)
+
+    resolved = await resolve_sources([{"type": "url", "value": "http://example.com/a"}], settings())
+    resolved.cleanup()
+
+    assert seen[0].url.host == "93.184.216.34"
+
+
+async def test_the_scheme_refusal_names_what_arrived() -> None:
+    """An operator reading the refusal needs the scheme that was sent, or that none was."""
+    with pytest.raises(IngestionError, match="scheme 'ftp' is not supported"):
+        await resolve_sources([{"type": "url", "value": "ftp://host/f"}], settings())
+
+    with pytest.raises(IngestionError, match=r"scheme '\(none\)' is not supported"):
+        await resolve_sources([{"type": "url", "value": "example.com/f"}], settings())
+
+
+async def test_five_redirects_are_followed_and_the_sixth_hop_is_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound is a number, not merely "finite": moving it moves how far a caller is led."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if len(seen) <= _MAXIMUM_REDIRECTS:
+            return httpx.Response(302, headers={"location": f"/hop{len(seen)}"})
+        return httpx.Response(200, content=b"# body")
+
+    serve(handler, monkeypatch)
+
+    resolved = await resolve_sources([{"type": "url", "value": "http://example.com/a"}], settings())
+    resolved.cleanup()
+
+    assert _MAXIMUM_REDIRECTS == 5
+    assert len(seen) == 6
+
+
+async def test_a_sixth_redirect_ends_the_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One request per allowed hop plus the first, then a refusal naming the bound."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(302, headers={"location": f"/hop{len(seen)}"})
+
+    serve(handler, monkeypatch)
+
+    with pytest.raises(ParseError, match="exceeded 5 redirects"):
+        await resolve_sources([{"type": "url", "value": "http://example.com/a"}], settings())
+
+    assert len(seen) == 6
+
+
+async def test_a_body_of_exactly_the_limit_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The documented maximum is inclusive, and a megabyte is 1024 * 1024 bytes."""
+    serve(lambda _: httpx.Response(200, content=b"x" * (1024 * 1024)), monkeypatch)
+    limited = Settings.model_validate({"ingestion": {"max_document_mb": 1}})
+
+    resolved = await resolve_sources(
+        [{"type": "url", "value": "https://example.com/exact.bin"}], limited
+    )
+
+    staged = Path(resolved.locations["https://example.com/exact.bin"])
+    assert staged.stat().st_size == 1024 * 1024
+    resolved.cleanup()
+
+
+async def test_one_byte_over_the_limit_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other side of the same boundary, which is what makes the first test a boundary."""
+    serve(lambda _: httpx.Response(200, content=b"x" * (1024 * 1024 + 1)), monkeypatch)
+    limited = Settings.model_validate({"ingestion": {"max_document_mb": 1}})
+
+    with pytest.raises(IngestionError, match="above the configured limit"):
+        await resolve_sources([{"type": "url", "value": "https://example.com/over.bin"}], limited)
+
+
+async def test_a_ten_character_extension_survives_and_an_eleventh_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parsing dispatches on the staged filename, so the suffix window is a real boundary."""
+    serve(lambda _: httpx.Response(200, content=b"body"), monkeypatch)
+
+    kept = await resolve_sources(
+        [{"type": "url", "value": "https://example.com/a.abcdefghi"}], settings()
+    )
+    dropped = await resolve_sources(
+        [{"type": "url", "value": "https://example.com/a.abcdefghij"}], settings()
+    )
+
+    assert Path(kept.locations["https://example.com/a.abcdefghi"]).suffix == ".abcdefghi"
+    assert Path(dropped.locations["https://example.com/a.abcdefghij"]).suffix == ".txt"
+    kept.cleanup()
+    dropped.cleanup()
+
+
+async def test_a_uri_ending_in_a_bare_dot_stages_as_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`Path("report.").suffix` is "." — one character, and not an extension any parser knows."""
+    serve(lambda _: httpx.Response(200, content=b"body"), monkeypatch)
+
+    resolved = await resolve_sources(
+        [{"type": "url", "value": "https://example.com/report."}], settings()
+    )
+
+    assert Path(resolved.locations["https://example.com/report."]).suffix == ".txt"
+    resolved.cleanup()
+
+
+async def test_plain_text_is_not_mistaken_for_base64() -> None:
+    """Unvalidated, `b64decode` discards the space and decodes the rest into unrelated bytes."""
+    resolved = await resolve_sources([{"type": "inline", "value": "same text"}], settings())
+
+    staged = Path(resolved.locations[resolved.sources[0]])
+    assert staged.read_text(encoding="utf-8") == "same text"
+    resolved.cleanup()
+
+
+async def test_the_inline_uri_carries_a_fixed_length_digest() -> None:
+    """The canonical URI is what a document id derives from, so its shape is a contract."""
+    resolved = await resolve_sources([{"type": "inline", "value": "text"}], settings())
+
+    digest = resolved.sources[0].removeprefix(INLINE_SCHEME).removesuffix(".txt")
+    assert len(digest) == 32
+    assert all(character in "0123456789abcdef" for character in digest)
+    resolved.cleanup()
+
+
+def test_a_resolved_source_set_refuses_an_unknown_field() -> None:
+    """Three fields that must stay in step; a typo must fail rather than create a fourth."""
+    resolved = ResolvedSources()
+    typo = "stagin"
+
+    with pytest.raises(AttributeError):
+        setattr(resolved, typo, Path("."))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"type": "url", "value": "ftp://host/f"},
+        {"type": "url", "value": "http:///nohost"},
+        {"type": "url", "value": "http://169.254.169.254/"},
+        {"type": "ftp", "value": "ftp://host/f"},
+    ],
+)
+async def test_a_refused_source_is_not_advertised_as_retryable(source: dict[str, str]) -> None:
+    """`retryable` reaches the problem document and the CLI exit code.
+
+    A guard refusal that says "retry" turns a single refused request into a loop against
+    the guard, and tells an operator the deployment is flaky rather than the input wrong.
+    """
+    with pytest.raises(IngestionError) as caught:
+        await resolve_sources([source], settings())
+
+    assert caught.value.code is ErrorCode.VALIDATION_FAILED
+    assert caught.value.retryable is False
+
+
+async def test_a_refused_path_is_not_advertised_as_retryable(tmp_path: Path) -> None:
+    """Both path refusals: unconfined on a served deployment, and outside every root."""
+    allowed = tmp_path / "corpus"
+    allowed.mkdir()
+    configured = Settings.model_validate(
+        {"security": {"auth": True}, "ingestion": {"allowed_source_roots": [str(allowed)]}}
+    )
+
+    with pytest.raises(IngestionError) as unconfined:
+        await resolve_sources([{"type": "path", "value": "/etc/passwd"}], served())
+    with pytest.raises(IngestionError) as outside:
+        await resolve_sources([{"type": "path", "value": "/etc/passwd"}], configured)
+
+    assert unconfined.value.retryable is False
+    assert outside.value.retryable is False
+
+
+def test_a_refused_archive_path_is_not_advertised_as_retryable(tmp_path: Path) -> None:
+    """Both archive refusals, which gate a caller-named write as well as a read."""
+    allowed = tmp_path / "archives"
+    allowed.mkdir()
+    configured = Settings.model_validate(
+        {"security": {"auth": True, "allowed_archive_roots": [str(allowed)]}}
+    )
+
+    with pytest.raises(FasterRagError) as unconfined:
+        guard_archive_path("/etc/fasterrag/config.yaml", served())
+    with pytest.raises(FasterRagError) as outside:
+        guard_archive_path(str(tmp_path / "elsewhere.fragx"), configured)
+
+    assert unconfined.value.retryable is False
+    assert outside.value.retryable is False
+
+
+async def test_an_oversized_source_is_not_advertised_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All three size refusals: declared, counted while streaming, and measured inline."""
+    limited = Settings.model_validate({"ingestion": {"max_document_mb": 1}})
+
+    async def chunks() -> AsyncIterator[bytes]:
+        for _ in range(32):
+            yield b"x" * 65536
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/declared.pdf":
+            return httpx.Response(
+                200, headers={"content-length": str(4 * 1024 * 1024)}, content=b""
+            )
+        return httpx.Response(200, content=chunks())
+
+    serve(handler, monkeypatch)
+
+    with pytest.raises(IngestionError) as declared:
+        await resolve_sources(
+            [{"type": "url", "value": "https://example.com/declared.pdf"}], limited
+        )
+    with pytest.raises(IngestionError) as streamed:
+        await resolve_sources(
+            [{"type": "url", "value": "https://example.com/streamed.bin"}], limited
+        )
+    with pytest.raises(IngestionError) as inline:
+        await resolve_sources([{"type": "inline", "value": "y" * (2 * 1024 * 1024)}], limited)
+
+    assert declared.value.code is ErrorCode.PAYLOAD_TOO_LARGE
+    assert declared.value.retryable is False
+    assert streamed.value.retryable is False
+    assert inline.value.retryable is False
