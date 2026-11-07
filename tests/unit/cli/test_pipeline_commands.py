@@ -294,6 +294,65 @@ async def test_an_unknown_distance_is_a_usage_error(
     assert "--distance must be one of" in capsys.readouterr().err
 
 
+class _StubEmbedder:
+    """An embedding model that already knows its vector size."""
+
+    dimensions = 8
+
+
+class _StubRouter:
+    """A tiering router whose default model needs no network."""
+
+    def __init__(self) -> None:
+        self.default = _StubEmbedder()
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_creating_over_a_dense_only_collection_refuses_rather_than_claiming_success(
+    config: str,
+    adapter: FakeAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    adapter.collections = [CollectionInfo(name="docs", vectors=10, sparse=False)]
+    monkeypatch.setattr(pipeline, "create_embedding_router", lambda settings: _StubRouter())
+
+    code = await pipeline.run_index(
+        namespace(
+            config=config, action="create", name="docs", distance=None, shards=None, replicas=None
+        ),
+        Console(),
+    )
+
+    captured = capsys.readouterr()
+    assert code == ExitCode.FAILURE
+    assert "created docs" not in captured.out
+    assert "[CONFLICT]" in captured.err
+    assert "fasterrag index reembed docs" in captured.err
+
+
+async def test_creating_a_collection_the_backend_really_builds_still_succeeds(
+    config: str,
+    adapter: FakeAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(pipeline, "create_embedding_router", lambda settings: _StubRouter())
+
+    code = await pipeline.run_index(
+        namespace(
+            config=config, action="create", name="docs", distance=None, shards=None, replicas=None
+        ),
+        Console(),
+    )
+
+    assert code == ExitCode.SUCCESS
+    assert [spec.sparse for spec in adapter.created] == [True]
+    assert "created docs" in capsys.readouterr().out
+
+
 async def test_an_invalid_config_never_reaches_the_backend(
     tmp_path: Path, adapter: FakeAdapter
 ) -> None:

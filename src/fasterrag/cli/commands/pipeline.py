@@ -42,7 +42,7 @@ from fasterrag.services.journal import JobRecord, Journal, create_journal
 from fasterrag.services.lockfile import create_lock_store, detect_drift
 from fasterrag.services.querying import RetrievalService
 from fasterrag.services.regression import GateResult
-from fasterrag.services.reindex import plan_reindex, retire, rollback, swap
+from fasterrag.services.reindex import plan_reindex, require_keyword_leg, retire, rollback, swap
 from fasterrag.services.traces import create_trace_store
 
 __all__ = ["run_index", "run_ingest", "run_query"]
@@ -455,7 +455,11 @@ async def _dimensions_of(embedder: EmbeddingAdapter) -> int | None:
 async def _index_create(
     args: argparse.Namespace, settings: Settings, adapter: VectorDBAdapter, console: Console
 ) -> ExitCode:
-    """Create a collection sized from the configured embedding model."""
+    """Create a collection sized from the configured embedding model.
+
+    Verifies afterwards that the live collection really carries the configured keyword leg,
+    because a backend may accept a create over an existing collection without adding one.
+    """
     distance = _distance_for(args, settings, console)
     if distance is None:
         return ExitCode.USAGE
@@ -481,6 +485,7 @@ async def _index_create(
                 sparse=settings.retrieval.hybrid,
             )
         )
+        await require_keyword_leg(args.name, settings, adapter)
     finally:
         await router.close()
 

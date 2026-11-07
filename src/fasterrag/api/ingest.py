@@ -12,6 +12,12 @@ which a distributed queue satisfies identically. Moving to one later changes no 
 
 Per-document status (D3) is served from the journal, so a dead-lettered document stays
 answerable long after the job that produced it finished.
+
+Accepting is also the last moment at which a configuration mistake can be reported *to the
+caller*. Everything after the ``202`` happens in a background task whose failures reach a
+log, not the client, so the keyword-leg preflight (TASK-0119) runs here: ingesting hybrid
+chunks into a dense-only collection is refused as a 409 before the job exists, rather than
+accepted and then dead-lettering every document against an error about one point id.
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from fasterrag.api.schemas import IngestRequest
 from fasterrag.errors import FasterRagError
 from fasterrag.observability.logging import get_logger, use_trace_id
 from fasterrag.services.journal import JobRecord, Journal
+from fasterrag.services.reindex import require_keyword_leg
 
 __all__ = ["router"]
 
@@ -92,9 +99,13 @@ async def start_ingest(
 ) -> dict[str, Any]:
     """Accept an ingestion job and return its id immediately.
 
-    Replaying an ``idempotency_key`` returns the original job rather than starting a second
-    ingest of the same corpus.
+    Refuses first if the target index cannot serve the configured keyword leg; replaying an
+    ``idempotency_key`` returns the original job rather than ingesting the corpus twice.
     """
+    await require_keyword_leg(
+        body.collection or settings.vector_db.collection.default_name, settings, adapter
+    )
+
     service = build_ingestion(settings, adapter, journal, None)
     # CRITICAL: the tenant is recorded at creation. Without it every job is written
     # untenanted, and scoping the read path would then refuse a tenant access to the job it
@@ -161,7 +172,7 @@ async def retry_dead_letters(
     adapter: CurrentVectorDB,
     tenant: CurrentTenant,
 ) -> dict[str, Any]:
-    """Re-ingest a job's dead-lettered documents as a new job.
+    """Re-ingest a job's dead-lettered documents as a new job, behind the same preflight.
 
     A new job rather than a mutation of the old one: the original is an audit record of what
     happened, and rewriting it would destroy the evidence of the failure being retried.
@@ -170,6 +181,8 @@ async def retry_dead_letters(
     failed = journal.dead_lettered(job_id)
     if not failed:
         return {"job_id": job_id, "retried": 0, "status": original.status}
+
+    await require_keyword_leg(original.collection, settings, adapter)
 
     service = build_ingestion(settings, adapter, journal, None)
     retry = await service.accept(

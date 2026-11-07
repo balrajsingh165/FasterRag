@@ -4,7 +4,7 @@ The REST API is one half of the control plane (the other is the [CLI](cli-refere
 
 - Authentication: `Authorization: Bearer <api-key>` when `security.auth: true`. Keys carry scopes (`ingest`, `query`, `collections`, `admin`). See [security.md](security.md).
 - Multi-tenancy: `X-Tenant-ID` header (configurable) when `security.multi_tenancy: true`.
-- Idempotency: all mutating endpoints accept an `Idempotency-Key` header; replaying the same key returns the original result and performs no duplicate work.
+- Idempotency: **what ships is narrower than this line used to claim, and in a different place.** `POST /v1/ingest` takes an `idempotency_key` **in the request body**, and replaying it returns the original job without re-ingesting (`services/journal.py`, `find_by_idempotency_key`). No endpoint reads an `Idempotency-Key` **header**, and no other mutating endpoint — collection create and delete, DLQ retry, the admin routes, replay — is idempotent at all. The header form across every mutating endpoint remains specified-but-unbuilt (TASK-0318).
 - Backpressure: when queues are full the API returns `429` with a `Retry-After` header.
 
 ## Error model (RFC 9457 `application/problem+json`)
@@ -88,8 +88,9 @@ Request:
 | `sources[]` | list | yes, ≥ 1 | `type` ∈ `path`, `url`, `inline`; `value` per type. |
 | `metadata` | object | no | Merged into every produced chunk's metadata. |
 | `priority_class` | str | no | Tiered-embedding routing class (D9). Merged into chunk metadata as `priority_class`, which is what `embeddings.tiering.rules[].match` matches on. |
+| `idempotency_key` | str | no | Replaying a key returns the original job and enqueues nothing. This is the **only** idempotency the API implements, and it is a body field, not the `Idempotency-Key` header described above. |
 
-Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `422` · `429 QUEUE_FULL`.
+Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `409 CONFLICT` — the target collection was indexed without the keyword leg `retrieval.hybrid` asks for, and a sparse vector cannot be attached to an existing collection; the detail names the rebuild command and the opt-out (see [troubleshooting.md](troubleshooting.md)). Refused before a job id is issued, so nothing is written · `422` · `429 QUEUE_FULL`.
 
 ### `GET /v1/ingest/{job_id}`
 
@@ -101,7 +102,7 @@ Per-document status (D3), filterable. Each entry: `{"document_id", "source", "st
 
 ### `POST /v1/ingest/{job_id}/retry-dlq`
 
-Re-enqueues dead-lettered documents of the job. `202`.
+Re-enqueues dead-lettered documents of the job. `202`, or `409 CONFLICT` under the same keyword-leg preflight as `POST /v1/ingest`.
 
 ## Query
 

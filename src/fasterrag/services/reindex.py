@@ -22,18 +22,25 @@ sparse vector with an unnamed dense one, so a dense-only collection cannot gain 
 pgvector and Chroma adapters refuse the same mismatch rather than bolt a keyword leg onto a
 populated collection. Turning ``retrieval.hybrid`` on over an indexed corpus is therefore a
 *reindex*, not a restart, and :func:`audit_keyword_leg` is the preflight that says so before
-a query discovers it. It belongs where a human is already waiting for an answer —
-``fasterrag doctor``, which refuses with :func:`require_keyword_leg` — and at startup, which
-only *logs* the verdict, because the API deliberately boots with an unreachable backend and
-serves degraded rather than refusing to start. Not on the query path: a per-query check
-charges every query for a mistake made once, and reports it at 3am to a user who cannot act
-on it.
+a write discovers it.
 
-It reads the live configuration through ``CollectionInfo.sparse``, which every adapter
-already reports, so detection needs no new adapter method and no new config key. It is a
-live-backend call and may raise, like any other: a caller that treats "unreachable" as
-"misconfigured" turns a transient outage into a refusal to boot, so a startup caller catches
-the backend's own typed error and carries on with the verdict unknown.
+**The gate sits on the write path, not the query path.** ``POST /v1/ingest`` and its
+retry-DLQ sibling call :func:`require_keyword_leg` before a job record exists, so a
+misconfigured run is refused with a 409 that names the rebuild rather than accepted with a
+``202`` and then dying document by document inside a background task the caller never
+watches. ``fasterrag index create`` calls it after creating, which is the only way the CLI
+can tell that a backend accepted a create whose keyword leg it did not actually add. The
+cost is one metadata round trip per job — noise beside a corpus that takes minutes to
+hours, where the same check per query would charge every question for a mistake made once
+and report it at 3am to somebody who cannot act on it.
+
+It reads live state through ``CollectionInfo.sparse``, which every adapter reports from the
+server rather than from what creation was *asked* for, so the verdict is right even on a
+backend whose ``create_collection`` waved the mismatch through (TASK-0305). Detection needs
+no new adapter method and no new config key. It is a live-backend call and may raise, like
+any other: a caller that treats "unreachable" as "misconfigured" turns a transient outage
+into a refusal, so a caller that must not fail closed — a startup probe, a dashboard panel
+— uses :func:`audit_keyword_leg` and carries on with the verdict unknown.
 """
 
 from __future__ import annotations
