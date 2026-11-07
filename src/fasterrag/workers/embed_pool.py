@@ -11,6 +11,15 @@ whether it is worth repeating; this pool decides how often and how long to wait,
 exponential backoff and jitter from ``reliability.retries`` (``docs/reliability.md`` §2).
 A batch that exhausts its attempts dead-letters its documents with a reason code instead of
 stalling the pipeline.
+
+The pool is also where embedding spend is accounted. Every successful batch is priced
+through ``services.estimation`` and charged to the shared ``CostGovernor``, using the
+*provider's* reported token count where the adapter surfaced one and the local count only
+where it did not — so a deployment can reconcile ``fasterrag_cost_usd_total`` against an
+invoice instead of against its own tokenizer. Where both numbers exist and disagree, the
+difference is published as ``EmbedReport.token_drift`` rather than quietly discarded. The
+price table is imported inside ``_charge`` rather than at module scope because the estimator
+imports this package, and the two deadlock on import otherwise.
 """
 
 from __future__ import annotations
@@ -27,7 +36,9 @@ from fasterrag.config.schema import Settings
 from fasterrag.core.breaker import CircuitBreaker, CircuitOpenError
 from fasterrag.core.chunking.models import Segment
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger
+from fasterrag.services.budget import CostGovernor, shared_governor
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload, EmbeddedBatch
 
 __all__ = [
@@ -67,6 +78,26 @@ class EmbedReport:
     retries: int = 0
     failed: int = 0
     failures: list[tuple[str, str]] = field(default_factory=list)
+    tokens_counted: int = 0
+    """Tokens this pass counted locally, over every batch it embedded."""
+
+    tokens_reported: int = 0
+    """Tokens the providers said they billed, over the batches that stated a figure."""
+
+    tokens_counted_where_reported: int = 0
+    """The local count for exactly those batches, so ``token_drift`` compares like with like."""
+
+    batches_without_usage: int = 0
+    """Batches whose provider stated no usage, so their spend is priced from the local count."""
+
+    @property
+    def token_drift(self) -> int:
+        """Return provider-reported minus locally-counted tokens, over reporting batches.
+
+        Published rather than reconciled away: a non-zero drift means our tokenizer and the
+        invoice disagree, and silently preferring either one hides that.
+        """
+        return self.tokens_reported - self.tokens_counted_where_reported
 
 
 def backoff_delay(attempt: int, settings: Settings) -> float:
@@ -92,11 +123,19 @@ class EmbeddingWorkerPool:
         router: TieringRouter,
         sink: ChunkSink,
         breaker: CircuitBreaker | None = None,
+        *,
+        tenant: str | None = None,
+        governor: CostGovernor | None = None,
     ) -> None:
         """Build the pool."""
         self.settings = settings
         self.router = router
         self.sink = sink
+        self.tenant = tenant
+        # CRITICAL: the shared governor, not a fresh one. A per-job instance would charge a
+        # rolling tenant window that is discarded with the job, which looks like accounting
+        # and enforces nothing.
+        self.governor = governor or shared_governor(settings)
         self.breaker = breaker or CircuitBreaker(
             provider="embeddings",
             failure_threshold=settings.reliability.circuit_breaker.failure_threshold,
@@ -243,11 +282,49 @@ class EmbeddingWorkerPool:
                 )
             )
             self.breaker.record_success()
+            self._charge(adapter, ordered, result)
             self.report.embedded += len(group)
             self.report.batches += 1
             return
 
         self._give_up(group, last)
+
+    def _charge(
+        self, adapter: EmbeddingAdapter, group: Sequence[ChunkPayload], result: EmbeddingResult
+    ) -> None:
+        """Account for one embedded batch, in tokens and in money.
+
+        The provider's figure is billed where it stated one and the local count where it
+        did not; the gap between them is recorded rather than resolved.
+        """
+        from fasterrag.services.estimation import price_for
+
+        counted = sum(payload.chunk.token_count for payload in group)
+        reported = result.total_tokens
+        self.report.tokens_counted += counted
+
+        if reported is None:
+            self.report.batches_without_usage += 1
+        else:
+            self.report.tokens_reported += reported
+            self.report.tokens_counted_where_reported += counted
+
+        billed = counted if reported is None else reported
+        provider = adapter.provider
+        metrics.TOKENS.increment(
+            float(billed), kind="embedding", provider=provider, tenant=self.tenant or "none"
+        )
+
+        cost, _ = price_for(provider, result.model, billed)
+        if cost is None:
+            # CRITICAL: an unpriced model must be visible rather than absent. Contributing
+            # nothing to the cost total makes a dashboard understate spend while looking
+            # healthy, which reads as "this was free" instead of "this is unknown".
+            metrics.UNPRICED_TOKENS.increment(float(billed), provider=provider, model=result.model)
+        elif cost:
+            metrics.COST.increment(cost, provider=provider, tenant=self.tenant or "none")
+
+        self.governor.record(billed, tenant=self.tenant)
 
     def _give_up(self, group: Sequence[ChunkPayload], error: FasterRagError | None) -> None:
         """Record a batch that could not be embedded, without stopping the pool."""

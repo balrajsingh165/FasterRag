@@ -3,6 +3,17 @@
 Ollama embeds one text per request, so the adapter issues a request per text rather than
 pretending to batch. That is a property of the server, not a shortcut: reporting it
 honestly is what lets the cost estimator and throughput numbers stay truthful.
+
+**This adapter reports no billed usage, because the endpoint it calls states none.** The
+client's ``embeddings()`` call is the legacy ``/api/embeddings`` route, whose documented
+response body is a bare ``{"embedding": [...]}`` — no model, no durations, no
+``prompt_eval_count`` (Ollama API reference, ``docs/api.md``). The newer ``/api/embed``
+route does return ``prompt_eval_count``, so a token count is reachable, but only by moving
+to a route that needs an Ollama server new enough to serve it; that is a deployment change,
+not an extraction fix, and it is tracked separately. Until then ``total_tokens`` is ``None``
+— "no receipt" — rather than ``0``, which would price local traffic as a measured free call
+instead of an unmeasured one. Ollama is priced at zero anyway because it runs locally
+(``LOCAL_PROVIDERS`` in ``services.estimation``), so no bill is understated by the gap.
 """
 
 from __future__ import annotations

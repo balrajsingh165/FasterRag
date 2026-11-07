@@ -9,6 +9,12 @@ chunk and in the index lockfile, and they are the anchor drift detection compare
 (D1, ``docs/data-model.md``) — an adapter that reports a vague version makes drift
 undetectable.
 
+Adapters report billed usage on ``EmbeddingResult.total_tokens`` when the provider states
+it, mirroring ``Completion.prompt_tokens`` on the generation side. It is the *provider's*
+figure, not ours: the embedding pool prices it through ``services.estimation`` so a bill can
+be reconciled against an invoice rather than against our own tokenizer's guess. A provider
+that states nothing reports ``None``, never ``0``.
+
 Adapters do not retry. They classify failures — setting ``retryable`` from what the
 provider actually said — and the embedding worker pool owns backoff, so retry policy
 lives in exactly one place (``docs/reliability.md`` §2).
@@ -32,6 +38,7 @@ __all__ = [
     "classify_provider_failure",
     "require_extra",
     "require_key",
+    "sum_reported",
 ]
 
 _AUTH_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
@@ -111,6 +118,17 @@ def classify_provider_failure(
     )
 
 
+def sum_reported(values: Sequence[int | None]) -> int | None:
+    """Return the batch total, or ``None`` when any batch reported no usage.
+
+    All-or-nothing on purpose: a partial sum is an under-count, and an under-count
+    reconciles wrong against an invoice while looking like a receipt.
+    """
+    if any(value is None for value in values):
+        return None
+    return sum(value for value in values if value is not None)
+
+
 @dataclass(frozen=True, slots=True)
 class EmbeddingResult:
     """Vectors for a batch, with the model that produced them."""
@@ -119,6 +137,12 @@ class EmbeddingResult:
     model: str
     model_version: str
     total_tokens: int | None = None
+    """Tokens the provider said it billed, or ``None`` when it reported none.
+
+    ``None`` and ``0`` are different facts and must stay different: ``0`` means nothing was
+    billed (a fully cached batch), while ``None`` means there is no receipt to reconcile
+    against an invoice. Collapsing the two prices unreported traffic as free.
+    """
 
 
 class EmbeddingAdapter(ABC):

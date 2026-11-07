@@ -124,7 +124,7 @@ class IngestionService:
         resume_from = self.journal.resume_index(record)
 
         indexer = Indexer(self.settings, self.adapter, collection=record.collection)
-        pool = EmbeddingWorkerPool(self.settings, self.router, indexer)
+        pool = EmbeddingWorkerPool(self.settings, self.router, indexer, tenant=record.tenant)
         queue: BoundedQueue[ChunkPayload] = BoundedQueue(self.settings.workers.queue_depth)
 
         running = replace(record, status="running")
@@ -143,8 +143,6 @@ class IngestionService:
                 },
             )
 
-            # The enrichment model is built only when the toggle is on: constructing an LLM
-            # adapter for every ingest would open a provider client that most jobs never use.
             enricher = (
                 create_llm_adapter(self.settings)
                 if self.settings.chunking.contextual_enrichment
@@ -212,6 +210,16 @@ class IngestionService:
         resolved.cleanup()
 
         _logger.info("ingest finished", extra={"job_id": record.job_id, **counts})
+        _logger.info(
+            "embedding usage reconciled",
+            extra={
+                "job_id": record.job_id,
+                "tokens_counted": embed_report.tokens_counted,
+                "tokens_reported": embed_report.tokens_reported,
+                "token_drift": embed_report.token_drift,
+                "batches_without_usage": embed_report.batches_without_usage,
+            },
+        )
         return settled
 
     def _publish_metrics(

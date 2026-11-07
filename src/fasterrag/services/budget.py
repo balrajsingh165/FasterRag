@@ -43,11 +43,14 @@ from typing import Final
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 
-__all__ = ["ROLLING_WINDOW_SECONDS", "CostGovernor", "create_governor"]
+__all__ = [
+    "ROLLING_WINDOW_SECONDS",
+    "CostGovernor",
+    "create_governor",
+    "reset_shared_governors",
+    "shared_governor",
+]
 
-# The documented budget is "rolling" without naming a period, and a rolling window means
-# nothing without one. A day is the shortest period over which a spend cap is normally
-# reasoned about, and it is stated in config-reference.md rather than left to be inferred.
 ROLLING_WINDOW_SECONDS: Final = 86_400.0
 
 _UNLIMITED: Final = 0
@@ -128,3 +131,25 @@ def create_governor(settings: Settings) -> CostGovernor:
         per_query=settings.cost.per_query_token_budget,
         per_tenant=settings.cost.per_tenant_token_budget,
     )
+
+
+_SHARED: Final[dict[tuple[int, int], CostGovernor]] = {}
+
+
+def shared_governor(settings: Settings) -> CostGovernor:
+    """Return the process-wide governor for these budgets, creating it on first use.
+
+    A rolling per-tenant window is memory, and memory a caller rebuilds per unit of work
+    remembers nothing; sharing one instance is what makes spend accumulate at all.
+    """
+    key = (settings.cost.per_query_token_budget, settings.cost.per_tenant_token_budget)
+    governor = _SHARED.get(key)
+    if governor is None:
+        governor = create_governor(settings)
+        _SHARED[key] = governor
+    return governor
+
+
+def reset_shared_governors() -> None:
+    """Drop every shared governor, so a test or a reload starts from an unspent window."""
+    _SHARED.clear()

@@ -62,7 +62,7 @@ All five LLM providers below are **shipped**, with streaming.
 | Ollama (local) | `ollama` | — | ✅ | Fully local generation. |
 | Any OpenAI-compatible endpoint | `openai_compatible` | per endpoint | ✅ | `llm.base_url` required — covers vLLM, LM Studio, llama.cpp servers, TGI, and most hosted gateways. |
 
-**Cost coverage.** OpenAI, Anthropic, and part of the Cohere lineup have dated list prices recorded, so their traffic reaches `fasterrag_cost_usd_total`; Ollama is priced at zero because it is local. `openai_compatible` never is — a gateway sets its own prices, and charging its traffic at the upstream vendor's rate would be a fabricated bill. Unpriced traffic is counted by `fasterrag_unpriced_tokens_total` rather than silently dropped. The exact per-model coverage and its check dates are in [config-reference.md](config-reference.md#which-models-carry-a-price).
+**Cost coverage.** OpenAI, Anthropic, and part of the Cohere lineup have dated list prices recorded, so their traffic reaches `fasterrag_cost_usd_total`; Ollama is priced at zero because it is local. Embedding spend reaches the same counter as of TASK-0312 (2026-11-08), priced from the **provider's own reported token count** where the adapter surfaces one — OpenAI's `usage.total_tokens` and Cohere's `meta.billed_units.input_tokens` — and from our local count only where the provider states nothing. Where both exist and disagree, the difference is reported as `EmbedReport.token_drift` and logged at the end of the ingest rather than silently resolved in either direction. `openai_compatible` never is — a gateway sets its own prices, and charging its traffic at the upstream vendor's rate would be a fabricated bill. Unpriced traffic is counted by `fasterrag_unpriced_tokens_total` rather than silently dropped. The exact per-model coverage and its check dates are in [config-reference.md](config-reference.md#which-models-carry-a-price).
 
 ## 3a. Live provider verification — what `pytest -m eval` does and does not prove
 
@@ -90,7 +90,7 @@ Each provider is gated on its own credential and skips, never fails, when it is 
 
 **Status, as of 2026-10-29.** The gating logic is verified on every commit. The live call bodies have **never been executed against a real provider**, in CI or by hand, because no credentials have been available to any run — so no row in the table above is backed by a recorded response today (TASK-0205). The HuggingFace embedder is the one advertised provider with no entry here and needs none: it is local, and `tests/eval/test_real_models.py` exercises it against real downloaded weights.
 
-[testing-strategy.md](testing-strategy.md) §1.11 holds the fuller treatment of this layer, including the known gap that the Cohere and Ollama embedding adapters surface no token usage.
+[testing-strategy.md](testing-strategy.md) §1.11 holds the fuller treatment of this layer, including why `reports_token_usage` is `True` for the Cohere embedder and `False` for the Ollama one.
 
 ## 4. Rerankers (`retrieval.reranker_model`)
 

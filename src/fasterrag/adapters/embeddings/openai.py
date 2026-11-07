@@ -16,6 +16,7 @@ from fasterrag.adapters.embeddings.base import (
     classify_provider_failure,
     require_extra,
     require_key,
+    sum_reported,
 )
 from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
@@ -69,7 +70,7 @@ class OpenAIEmbedder(EmbeddingAdapter):
             )
         return self._client
 
-    async def _embed(self, texts: Sequence[str]) -> tuple[list[list[float]], int]:
+    async def _embed(self, texts: Sequence[str]) -> tuple[list[list[float]], int | None]:
         """Embed one batch, returning vectors and the tokens the provider billed."""
         request: dict[str, Any] = {"model": self.config.model, "input": list(texts)}
         if self.config.dimensions is not None:
@@ -91,23 +92,23 @@ class OpenAIEmbedder(EmbeddingAdapter):
             ) from exc
 
         vectors = [list(item.embedding) for item in response.data]
-        tokens = getattr(getattr(response, "usage", None), "total_tokens", 0) or 0
-        return vectors, int(tokens)
+        tokens = getattr(getattr(response, "usage", None), "total_tokens", None)
+        return vectors, None if tokens is None else int(tokens)
 
     async def embed_documents(self, texts: Sequence[str]) -> EmbeddingResult:
         """Embed passages in provider-sized batches."""
         vectors: list[list[float]] = []
-        total = 0
+        billed: list[int | None] = []
         for batch in self.batches(texts):
             batch_vectors, tokens = await self._embed(batch)
             vectors.extend(batch_vectors)
-            total += tokens
+            billed.append(tokens)
 
         return EmbeddingResult(
             vectors=vectors,
             model=self.model,
             model_version=self.model_version,
-            total_tokens=total,
+            total_tokens=sum_reported(billed),
         )
 
     async def embed_query(self, text: str) -> list[float]:

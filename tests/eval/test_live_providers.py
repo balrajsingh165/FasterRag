@@ -40,6 +40,13 @@ here, and it needs none.
 The gating helpers themselves are proved by ``test_live_provider_gating.py``, which carries
 no ``eval`` marker and therefore runs in the ordinary CI job: without it, the only evidence
 that a skip is a real gate rather than a silent bug would come from a job that skips.
+
+``reports_token_usage`` is a claim about the vendor, not about our code. A ``False`` must
+carry a ``usage_note`` saying what the provider's documented response omits, so the flag can
+never quietly record an unimplemented extraction as a vendor limitation; the constructor
+refuses one without a reason. The flags are checked against the adapters by
+``tests/unit/adapters/embeddings/test_usage.py``, which runs in ordinary CI and needs no
+credential, while the live probes here are what can falsify the claim against the vendor.
 """
 
 from __future__ import annotations
@@ -82,6 +89,19 @@ class LiveCheck:
     reports_token_usage: bool
     base_url_env: str | None = None
     keyless: bool = False
+    usage_note: str = ""
+    """Why this provider states no billed usage. Mandatory when the flag is ``False``.
+
+    A ``False`` that nobody had to justify is how an unimplemented extraction gets recorded
+    as a provider limitation, which is the defect this field exists to make impossible.
+    """
+
+    def __post_init__(self) -> None:
+        """Refuse a silent ``reports_token_usage=False``."""
+        if not self.reports_token_usage and not self.usage_note.strip():
+            raise ValueError(f"{self.name} must say why it reports no token usage")
+        if self.reports_token_usage and self.usage_note.strip():
+            raise ValueError(f"{self.name} reports usage, so it needs no usage_note")
 
     @property
     def name(self) -> str:
@@ -161,10 +181,6 @@ EMBEDDING_CHECKS: tuple[LiveCheck, ...] = (
         default_model="text-embedding-3-small",
         reports_token_usage=True,
     ),
-    # TODO: cohere and ollama embeddings report no token usage because neither adapter
-    # surfaces it — Cohere returns billed units in response.meta that CohereEmbedder
-    # discards. The assertion below pins the current behaviour rather than asserting an
-    # accounting that does not exist; see TASK-0312.
     LiveCheck(
         kind="embeddings",
         provider="cohere",
@@ -172,7 +188,7 @@ EMBEDDING_CHECKS: tuple[LiveCheck, ...] = (
         package="cohere",
         extra="cohere",
         default_model="embed-english-v3.0",
-        reports_token_usage=False,
+        reports_token_usage=True,
     ),
     LiveCheck(
         kind="embeddings",
@@ -184,6 +200,12 @@ EMBEDDING_CHECKS: tuple[LiveCheck, ...] = (
         reports_token_usage=False,
         base_url_env="OLLAMA_HOST",
         keyless=True,
+        usage_note=(
+            "the legacy /api/embeddings route the client's embeddings() call uses returns a "
+            "bare {'embedding': [...]} with no prompt_eval_count, so there is nothing to "
+            "extract; /api/embed does report one, which is a route change rather than an "
+            "extraction fix. Ollama is priced locally at zero, so no bill is understated"
+        ),
     ),
 )
 
@@ -398,7 +420,13 @@ async def test_the_provider_accepts_a_real_embedding(check: LiveCheck) -> None:
         assert result.total_tokens is not None
         assert result.total_tokens > 0
     else:
-        assert result.total_tokens is None
+        # A provider that quietly started reporting usage must fail here rather than keep
+        # its flag: the flag claims the vendor states nothing, and the live call is the only
+        # thing that can falsify that claim.
+        assert result.total_tokens is None, (
+            f"{check.name} now reports {result.total_tokens} tokens, so reports_token_usage "
+            f"is stale; its recorded reason was: {check.usage_note}"
+        )
 
     LEDGER.record_verified(
         check.name,
