@@ -1,0 +1,53 @@
+# The supply-chain audit, defined once.
+#
+# It used to be defined twice: `ci.yml`'s `Dependency audit` step and `security.yml`'s
+# `Audit the locked dependency set` ran the same pip-audit over the same export on
+# different triggers. On 2026-11-04 the four accepted chromadb ignores were added to
+# `ci.yml` alone, the scheduled run went red that night, and it would have stayed red every
+# night afterwards — a blocking gate that always fails is a gate everyone learns to ignore.
+# A comment telling the next person to keep the two lists identical is not a mechanism, so
+# both callers now reference this file and the second list no longer exists to drift from.
+#
+# Requires `uv` and `uvx` on PATH (astral-sh/setup-uv) and a checked-out workspace. Both
+# callers set uv up themselves because `ci.yml` also runs `uv lock --check` beside this.
+name: Dependency audit
+description: Audit the exported lockfile with pip-audit, carrying the accepted ignores.
+
+runs:
+  using: composite
+  steps:
+    # Auditing the LOCKFILE, not an installed environment. Those differ: an environment is
+    # whatever resolved on this runner today, while the lockfile is what every machine will
+    # actually install. `--no-deps` is correct here precisely because the export is fully
+    # pinned — there is nothing left to resolve.
+    #
+    # Blocking, not advisory, and exactly scoped: run against the lockfile on 2026-11-07
+    # the bare audit reported 5 findings in 1 package (all chromadb 1.5.9) and exited 1,
+    # and with the four ignores below it reported "No known vulnerabilities found, 5
+    # ignored" and exited 0. Nothing else is silenced, so a failure here means something
+    # genuinely changed rather than a pre-existing advisory nobody can act on. When it
+    # fires, the fix is `uv lock --upgrade` followed by the full suite — a refreshed
+    # lockfile moves versions that tests depend on.
+    #
+    # The four chromadb ignores are a reasoned exception, not a silencing. chromadb 1.5.9
+    # is the LATEST release and no fixed version exists, so there is nothing to upgrade to;
+    # every one of these advisories is in Chroma's SERVER, which fasterRag never starts.
+    # The adapter uses an embedded PersistentClient against a local directory, so there is
+    # no HTTP API, no SimpleRBACAuthorizationProvider, and no Chroma-side embedding
+    # function (we pass vectors ourselves, which is what `trust_remote_code` would travel
+    # through). Reviewed against the shipped code, not taken from the vendor.
+    #   PYSEC-2026-311  pre-auth RCE via trust_remote_code on the collections endpoint
+    #   PYSEC-2026-3813 any authenticated user may read/write any tenant's collection
+    #   PYSEC-2026-3814 authenticated RCE via trust_remote_code on a collection update
+    #   PYSEC-2026-3815 SimpleRBACAuthorizationProvider ignores tenant/database scope
+    # Re-checked by TASK-0299; delete an ignore the moment a fixed release exists, and
+    # delete all four if the Chroma extra is dropped.
+    - name: Audit the exported lockfile
+      shell: bash
+      run: |
+        uv export --format requirements-txt --all-extras --no-emit-project -o locked.txt
+        uvx --python 3.12 pip-audit -r locked.txt --no-deps --desc \
+          --ignore-vuln PYSEC-2026-311 \
+          --ignore-vuln PYSEC-2026-3813 \
+          --ignore-vuln PYSEC-2026-3814 \
+          --ignore-vuln PYSEC-2026-3815

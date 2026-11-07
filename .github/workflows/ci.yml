@@ -62,6 +62,13 @@ jobs:
       - name: Denials still cite open work
         run: python scripts/check_claims.py
 
+      # The sibling gates above all scan docs/ and none opens a .py file, so a docstring or
+      # a `# TODO:` marker could cite a ticked, superseded or invented task and stay green —
+      # which is how three rate-limit modules kept pointing at finished work. CI only: the
+      # maintainer directed that doc gates stay out of pre-commit.
+      - name: Task ids cited in code resolve
+        run: python scripts/check_task_ids.py
+
       # The four mechanical places a version lives cannot be edited atomically by hand, and
       # a tree halfway through a stamp ships a wheel that contradicts its own README.
       - name: Version is coherent across the tree
@@ -199,36 +206,12 @@ jobs:
       - name: Lockfile is current
         run: uv lock --check
 
-      # Auditing the *lockfile* rather than an installed environment. Those differ: an
-      # environment is whatever resolved on this runner today, while the lockfile is what
-      # every machine will actually install. `--no-deps` is correct here precisely because
-      # the export is fully pinned — there is nothing left to resolve.
-      #
-      # Blocking, not advisory. Measured clean over all 135 locked packages on 2026-08-03,
-      # so a failure here means something genuinely changed rather than a pre-existing
-      # advisory nobody can act on.
-      #
-      # The four chromadb ignores are a reasoned exception, not a silencing. chromadb 1.5.9
-      # is the LATEST release and no fixed version exists, so there is nothing to upgrade
-      # to; every one of these advisories is in Chroma's SERVER, which fasterRag never
-      # starts. The adapter uses an embedded PersistentClient against a local directory, so
-      # there is no HTTP API, no SimpleRBACAuthorizationProvider, and no Chroma-side
-      # embedding function (we pass vectors ourselves, which is what `trust_remote_code`
-      # would travel through). Reviewed against the shipped code, not taken from the vendor.
-      #   PYSEC-2026-311  pre-auth RCE via trust_remote_code on the collections endpoint
-      #   PYSEC-2026-3813 any authenticated user may read/write any tenant's collection
-      #   PYSEC-2026-3814 authenticated RCE via trust_remote_code on a collection update
-      #   PYSEC-2026-3815 SimpleRBACAuthorizationProvider ignores tenant/database scope
-      # Re-checked by TASK-0299; delete an ignore the moment a fixed release exists, and
-      # delete all four if the Chroma extra is dropped.
+      # The audit itself, and the four accepted chromadb ignores with the review that
+      # justifies them, live in .github/actions/dependency-audit. security.yml runs the
+      # same action on the scheduled trigger. It was two copies until 2026-11-07, and the
+      # copies drifted the day they diverged (TASK-0308).
       - name: Dependency audit
-        run: |
-          uv export --format requirements-txt --all-extras --no-emit-project -o locked.txt
-          uvx --python 3.12 pip-audit -r locked.txt --no-deps --desc \
-            --ignore-vuln PYSEC-2026-311 \
-            --ignore-vuln PYSEC-2026-3813 \
-            --ignore-vuln PYSEC-2026-3814 \
-            --ignore-vuln PYSEC-2026-3815
+        uses: ./.github/actions/dependency-audit
 
   integration:
     runs-on: ubuntu-latest

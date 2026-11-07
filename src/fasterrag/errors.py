@@ -7,9 +7,13 @@ are never renamed once released. Every exception carries ``code``, ``trace_id``,
 renders it as an RFC 9457 problem document, the library raises the class, and the CLI
 maps it to an exit code.
 
-There is no bare ``except`` anywhere in this codebase and no exception is silently
-swallowed: every caught error is either handled with its correlation id logged or
-rethrown (``docs/CONTRIBUTING.md`` §6).
+There is no bare ``except`` anywhere in this codebase, which ruff's E722 enforces. The
+companion rule -- that no exception is silently swallowed, every caught error being
+either handled with its correlation id logged or rethrown (``docs/CONTRIBUTING.md`` §6)
+-- held only as a convention until 2026-11-07, when ``scripts/check_error_taxonomy.py``
+first measured it and found four handlers whose whole body is ``continue`` or ``return``.
+They are frozen in that gate's ratchet and cleared by TASK-0317; this paragraph claimed
+they did not exist.
 """
 
 from __future__ import annotations

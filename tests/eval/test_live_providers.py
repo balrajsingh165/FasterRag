@@ -164,7 +164,7 @@ EMBEDDING_CHECKS: tuple[LiveCheck, ...] = (
     # TODO: cohere and ollama embeddings report no token usage because neither adapter
     # surfaces it — Cohere returns billed units in response.meta that CohereEmbedder
     # discards. The assertion below pins the current behaviour rather than asserting an
-    # accounting that does not exist; see TASK-0205 follow-up.
+    # accounting that does not exist; see TASK-0312.
     LiveCheck(
         kind="embeddings",
         provider="cohere",

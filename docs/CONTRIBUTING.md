@@ -40,12 +40,14 @@ Optional extras, needed only for what they name: `.[huggingface]` and `.[rerank]
   - `# TODO: <what remains>` / `# BLOCKED: <blocker + ticket/date>` — explicit pending/blocker markers.
 - A marker may open a **block**: `#` lines immediately following a `# CRITICAL:`/`# TODO:`/`# BLOCKED:` line continue that marker and count as part of it (this codifies the existing practice in `src/`).
 - Any `# type: ignore` requires an adjacent `# CRITICAL:` justification.
+- A `# TODO:`/`# BLOCKED:` marker may only cite an **open** ledger entry. The marker says work remains and a ticked entry says it is finished, so the pair is always wrong one way or the other; `scripts/check_task_ids.py` fails on it. A `# CRITICAL:` block or a docstring may cite a completed task freely — that is history, correctly attributed.
 
 ## 3. One-todo-file rule
 
 - [docs/todo.md](todo.md) is the ONLY task file in this repository. Never create any other todo/task/tracking file (no `TASKS.md`, no `ROADMAP-todo.md`, no per-module todos).
 - Entry format: `- [ ] TASK-0001: <description>`; on completion: `- [x] TASK-0001: <description> — ✅ YYYY-MM-DD`.
 - Ticked entries are **frozen** — append-only, never edited afterwards. Task IDs are sequential and never reused.
+- Every `TASK-####` written in a comment or docstring under `src/`, `tests/` or `scripts/` must resolve to an entry in todo.md. A dangling id is unreadable: whoever greps for it cannot tell whether the task was renumbered, never filed, or imagined. `scripts/check_task_ids.py` enforces this in CI (not pre-commit).
 
 ## 4. Incremental-shipping rule
 
@@ -79,7 +81,9 @@ Narrow to the smallest layer that still reproduces — parse alone, adapter roun
 
 ## 7. Quality gates for every PR
 
-Lint + format clean (ruff) · `mypy --strict` zero errors · unit + integration tests green · coverage ≥ 85% on touched `core/`/`adapters/`/`workers/` packages · eval regression gate green when retrieval paths change · secret scan clean · docs updated in the same PR as any behavior change · [todo.md](todo.md) updated and ticked with dates.
+Lint + format clean (ruff) · `mypy --strict` zero errors · unit + integration tests green · coverage ≥ 85% on touched `core/`/`adapters/`/`workers/` packages · eval regression gate green when retrieval paths change · secret scan clean · every `TASK-` id cited in code resolves (`scripts/check_task_ids.py`) · docs updated in the same PR as any behavior change · [todo.md](todo.md) updated and ticked with dates.
+
+The supply-chain audit is defined **once**, as the composite action `.github/actions/dependency-audit`, which both `ci.yml` and `security.yml` call. An accepted advisory ignore is added there and nowhere else: when the same list lived in both workflows, four ignores went into one copy and the scheduled run was red every night until somebody noticed.
 
 ## 8. Adding a provider adapter
 
