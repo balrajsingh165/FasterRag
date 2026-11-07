@@ -24,6 +24,12 @@ on:
       - "uv.lock"
       - "pyproject.toml"
       - ".github/workflows/security.yml"
+      # The two files that decide what the secret scan does and what it forgives.
+      # Without these a waiver could be added, or the scan itself rewritten, and the
+      # job that reads them would not run until the next nightly - so the change
+      # would sit unproven for up to a day.
+      - ".gitleaksignore"
+      - ".github/actions/secret-scan/**"
 
 permissions:
   contents: read
