@@ -8,6 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`Idempotency-Key` on every mutating endpoint** (2026-11-08, closes TASK-0318). Any `POST`/`PUT`/`PATCH`/`DELETE` may now carry the standard header: `POST /v1/ingest`, the DLQ retry, collection create and delete, `doctor/fix`, provisioning up and down, export and import. A replay returns the original response byte for byte with `Idempotent-Replayed: true`, and every keyed response echoes `Idempotency-Key` back. The header is optional and inert — a request without it is passed straight through and touches no store — so no existing client changes behaviour.
+  - **Scope is `(tenant, key)` over a fingerprint of method, path, query string and body.** A key names one request, so reusing it for a different body, or on a different endpoint, is `422 IDEMPOTENCY_KEY_REUSED` rather than the wrong endpoint's answer returned as a success. Two tenants that both choose `retry-1` never meet.
+  - **The concurrent duplicate is handled, which is the case that usually ships broken.** The reservation is an `O_CREAT | O_EXCL` create, so exactly one of two simultaneous copies wins and the loser is refused `409 IDEMPOTENCY_IN_PROGRESS` with `Retry-After: 1` instead of executing. `tests/unit/api/test_idempotency.py` drives both copies through the real ASGI stack and asserts the handler ran once.
+  - **Only 2xx is remembered**, so a `503` can be retried under the same key and a `422` can be resent with a fixed body. Errors release the key, as does a success larger than 256 KB.
+  - **Lifetime**: 24 hours for a completed record, a 15-minute lease for an unfinished one so a killed worker does not hold a key for a day. Expiry is lazy. Neither is configurable yet.
+  - **`/v1/query`, `/v1/retrieve`, `/v1/estimate` and `/v1/replay` are deliberately excluded** — they are `POST` for the body, not for an effect, and `/v1/query` can be an SSE stream that cannot be captured and replayed. A key sent to one is ignored, not refused.
+  - **Implemented as middleware over a service**, not as a per-route dependency: the failure mode of forgetting a route is then an endpoint that is silently not idempotent, which is how this gap persisted. A mutating router added later is covered when it is mounted. New error codes `IDEMPOTENCY_KEY_REUSED` and `IDEMPOTENCY_IN_PROGRESS` join the stable table in [api-reference.md](api-reference.md).
+  - **Known limit, stated rather than hidden**: records are files under the ingestion journal root, which covers every Gunicorn worker on one host — a deployment spread over several hosts needs that directory on shared storage, or idempotency is per host.
+
+### Deprecated
+
+- **`idempotency_key` as a `POST /v1/ingest` body field** (2026-11-08, TASK-0318). Superseded by the `Idempotency-Key` header, which is what a client library already knows how to send. **It still works and is removed in 1.0.** Both may be sent together; the header is resolved first, in middleware, so the body field never sees a header replay. A request that uses the field gets `Deprecation: true` and `Link: <...>; rel="deprecation"` on its response, and the field is flagged `deprecated` in `/openapi.json`. The two are not equivalent: the field dedupes only the job and compares nothing about the rest of the request, while the header replays the original response and refuses a changed one.
+
+### Fixed
+
+- **`Journal.find_by_idempotency_key` was not tenant-scoped** (2026-11-08, TASK-0318). It globbed every job record on the host and matched on the key alone, so under `security.multi_tenancy` a tenant replaying a key another tenant had used was handed **that tenant's job id** and had its own ingest silently dropped — an id disclosure and a lost corpus from one collision on a client-chosen string. The lookup now matches tenant as well as key, so an untenanted deployment behaves exactly as before and two tenants cannot collide.
+
 ### Changed
 
 - **Portability archive `format_version` 2.0.0 — migration note** (2026-11-04, TASK-0302). A `.fragx` now carries the keyword leg: each `vectors.jsonl` row may hold an optional `sparse` object (`indices`, `values`), and the manifest declares `includes_sparse`. **The bump is conditional** — an export with no postings still declares `1.0.0` and writes byte-for-byte what it wrote before, so an archive that gained no new data is not stranded over a feature it does not use.

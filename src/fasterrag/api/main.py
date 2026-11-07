@@ -27,6 +27,7 @@ from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.api import admin, collections, health, ingest, metrics, query, traces
 from fasterrag.api.auth import AuthMiddleware
+from fasterrag.api.idempotency import IdempotencyMiddleware
 from fasterrag.api.limits import BodyLimitMiddleware
 from fasterrag.api.problems import install_exception_handlers
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
@@ -156,9 +157,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await provision_enabled_observability(settings)
 
-    # Metrics are pushed on an interval rather than per request, so the pusher's lifetime
-    # is the process's. Started here and stopped below, which is also the only place that
-    # can send a final snapshot before the counters go with the process.
     app.state.metric_pusher = create_metric_pusher(settings)
     if app.state.metric_pusher is not None:
         app.state.metric_pusher.start()
@@ -217,6 +215,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # reverse, so listing auth last runs it *first* — an unauthenticated request is refused
     # before it reaches metrics or a handler, and a rejected key cannot inflate per-endpoint
     # counters or leave a trace id in the logs of an endpoint it never reached.
+    #
+    # Idempotency is added first, which makes it innermost: a replayed request is still
+    # counted by metrics, its record is written against the tenant auth resolved, and its
+    # refusals carry the correlation id the middleware above it bound.
+    app.add_middleware(IdempotencyMiddleware)
     app.add_middleware(metrics.MetricsMiddleware)
     app.add_middleware(CorrelationIdMiddleware)
     app.add_middleware(AuthMiddleware, settings=resolved)

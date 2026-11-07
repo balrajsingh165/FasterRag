@@ -57,6 +57,8 @@ class ErrorCode(StrEnum):
     VALIDATION_FAILED = "VALIDATION_FAILED"
     NOT_FOUND = "NOT_FOUND"
     CONFLICT = "CONFLICT"
+    IDEMPOTENCY_KEY_REUSED = "IDEMPOTENCY_KEY_REUSED"
+    IDEMPOTENCY_IN_PROGRESS = "IDEMPOTENCY_IN_PROGRESS"
     PAYLOAD_TOO_LARGE = "PAYLOAD_TOO_LARGE"
     RATE_LIMITED = "RATE_LIMITED"
     QUEUE_FULL = "QUEUE_FULL"
@@ -106,6 +108,12 @@ PROBLEM_SPECS: Final[dict[ErrorCode, ProblemSpec]] = {
     ),
     ErrorCode.NOT_FOUND: ProblemSpec(404, "not-found", "Resource not found", False),
     ErrorCode.CONFLICT: ProblemSpec(409, "conflict", "Conflicting resource state", False),
+    ErrorCode.IDEMPOTENCY_KEY_REUSED: ProblemSpec(
+        422, "idempotency-key-reused", "Idempotency key reused for a different request", False
+    ),
+    ErrorCode.IDEMPOTENCY_IN_PROGRESS: ProblemSpec(
+        409, "idempotency-in-progress", "A request with this idempotency key is in flight", True
+    ),
     ErrorCode.PAYLOAD_TOO_LARGE: ProblemSpec(
         413, "payload-too-large", "Payload exceeds the configured limit", False
     ),

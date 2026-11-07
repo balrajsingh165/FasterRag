@@ -50,7 +50,21 @@ class IngestRequest(Strict):
     collection: str | None = None
     metadata: dict[str, Any] | None = None
     priority_class: str | None = None
-    idempotency_key: str | None = None
+    # CRITICAL: marked deprecated through the schema rather than through Field(deprecated=),
+    # which warns on every *read* of the attribute — including the read that decides whether
+    # the caller sent it. That turned one deprecated request into a DeprecationWarning on
+    # every ingest, whether or not the field was used. The published OpenAPI flag is the
+    # same either way; the response header is what reaches a client that ignores schemas.
+    idempotency_key: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Deprecated: send the Idempotency-Key header instead. Removed in 1.0 (TASK-0318)."
+            ),
+            json_schema_extra={"deprecated": True},
+        ),
+    ] = None
 
 
 class QueryRequest(Strict):

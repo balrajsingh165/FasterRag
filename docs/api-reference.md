@@ -4,7 +4,7 @@ The REST API is one half of the control plane (the other is the [CLI](cli-refere
 
 - Authentication: `Authorization: Bearer <api-key>` when `security.auth: true`. Keys carry scopes (`ingest`, `query`, `collections`, `admin`). See [security.md](security.md).
 - Multi-tenancy: `X-Tenant-ID` header (configurable) when `security.multi_tenancy: true`.
-- Idempotency: **what ships is narrower than this line used to claim, and in a different place.** `POST /v1/ingest` takes an `idempotency_key` **in the request body**, and replaying it returns the original job without re-ingesting (`services/journal.py`, `find_by_idempotency_key`). No endpoint reads an `Idempotency-Key` **header**, and no other mutating endpoint — collection create and delete, DLQ retry, the admin routes, replay — is idempotent at all. The header form across every mutating endpoint remains specified-but-unbuilt (TASK-0318).
+- Idempotency: every mutating endpoint accepts an optional `Idempotency-Key` header (TASK-0318 ✅ 2026-11-08). See [Idempotency](#idempotency) below for its scope, lifetime, conflict codes and replay signal.
 - Backpressure: when queues are full the API returns `429` with a `Retry-After` header.
 
 ## Error model (RFC 9457 `application/problem+json`)
@@ -41,6 +41,8 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `VALIDATION_FAILED` | 422 | — | Request body failed schema validation (`errors[]` lists fields). |
 | `NOT_FOUND` | 404 | — | Unknown job, collection, trace, or document id. |
 | `CONFLICT` | 409 | — | e.g. collection already exists; concurrent alias swap. |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | — | The `Idempotency-Key` was already used for a *different* request (method, path, query string or body differ). Non-retryable: resend under a new key. |
+| `IDEMPOTENCY_IN_PROGRESS` | 409 | — | A request with this `Idempotency-Key` is still in flight. **Retryable**, with `Retry-After: 1` — the original response is replayable once it lands. |
 | `PAYLOAD_TOO_LARGE` | 413 | — | Body exceeds `security.max_request_mb` / `ingestion.max_document_mb`. |
 | `RATE_LIMITED` | 429 | — | Per-key rate limit exceeded (`Retry-After` set). |
 | `QUEUE_FULL` | 429 | `IngestionError` | Bounded queue overflow (`Retry-After` set). |
@@ -59,6 +61,39 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `CACHE_ERROR` | 500 | `CacheError` | Cache backend failure (system degrades to cache-off rather than failing queries; surfaced on admin endpoints). |
 | `NOT_READY` | 503 | — | A readiness dependency check failed; returned only by `/readyz`, with a `dependencies[]` extension member naming each check and its state. |
 | `INTERNAL` | 500 | `FasterRagError` | Anything unclassified. Always carries `trace_id`. Never returned without a problem body. |
+
+---
+
+## Idempotency
+
+Shipped by TASK-0318 (✅ 2026-11-08). Implemented in `api/idempotency.py` (transport) over `services/idempotency.py` (the store and every decision), covered by `tests/unit/api/test_idempotency.py`.
+
+**The header.** Any `POST`, `PUT`, `PATCH` or `DELETE` may carry `Idempotency-Key: <1–255 printable ASCII characters>`. It is **optional**: a request without it is passed straight through and touches no store, so nothing changes for a client that does not use it. A key outside those bounds is refused `422 VALIDATION_FAILED`, and the offending value is never echoed back.
+
+**Scope is `(tenant, key)`.** A key names *one request*, not one endpoint's namespace. The request's method, path, query string and body are fingerprinted and stored beside the response, so reusing a key for anything else — a different body, or the same key on another endpoint — is `422 IDEMPOTENCY_KEY_REUSED` rather than a silent wrong answer. The tenant (as `security.multi_tenancy` resolved it) is part of the record path, so two tenants that both pick `retry-1` never meet.
+
+**Lifetime.** A completed record is replayable for **24 hours**; an unfinished reservation is held for a **15-minute lease**, so a worker that died mid-request frees its key in minutes instead of holding it for a day. Expiry is lazy — the next request to reach an expired record takes it over — so nothing has to sweep the directory. Neither duration is configurable yet (NEW-1).
+
+**Replay signal.** A replayed response is the original one byte for byte — same status, same body — plus `Idempotent-Replayed: true`. Every keyed response, replayed or not, echoes `Idempotency-Key`. A client can therefore tell "this already happened" from "this just happened", which a bare repeated `201` cannot.
+
+**Only 2xx is remembered.** A refusal does not pin a key: a caller that hit a `503` must be able to retry the same key and get through, and a caller that hit a `422` will fix the body — which the fingerprint would then refuse if the failure had been stored. Error responses release the key. A success larger than 256 KB is also not stored; it is returned normally and its key is released.
+
+**Concurrent duplicates.** Two copies of one request arriving before either finishes is the ordinary shape of a client retry, and it is the case a check-then-write implementation returns two `200`s for. The reservation is taken with `O_CREAT | O_EXCL`, so exactly one caller wins; the loser is refused `409 IDEMPOTENCY_IN_PROGRESS` with `Retry-After: 1` and executes nothing.
+
+**Covered endpoints.** Everything mutating: `POST /v1/ingest`, `POST /v1/ingest/{job_id}/retry-dlq`, `POST /v1/collections`, `DELETE /v1/collections/{name}`, `POST /v1/admin/doctor/fix`, `POST /v1/admin/provision/{tool}`, `DELETE /v1/admin/provision/{tool}`, `POST /v1/admin/export`, `POST /v1/admin/import`. A mutating router added later is covered the moment it is mounted, because this is middleware rather than a per-route dependency.
+
+**Deliberately not covered**, because they are `POST` for the body and not for an effect: `/v1/query`, `/v1/retrieve`, `/v1/estimate`, `/v1/replay`. A key sent to one of them is ignored rather than refused, so a client that sets the header on every request keeps working. `/v1/query` can also be a `text/event-stream`, which cannot be captured and handed back.
+
+**Storage, and its limit.** Records are files under the ingestion journal root (`.fasterrag/journal/idempotency/`), *not* process memory — production runs Gunicorn with several Uvicorn workers, and a per-process map would make a key hold only for the worker that served the first request. A shared filesystem therefore covers every worker on one host. **Several hosts behind a load balancer need that directory on shared storage**; without it, idempotency is per host. This is a documented limit, not a solved problem (NEW-2).
+
+### Deprecated: the `idempotency_key` body field
+
+`POST /v1/ingest` has always taken an `idempotency_key` **body field**, resolved by `Journal.find_by_idempotency_key`. It **still works and is not being broken now**; it is deprecated and removed in 1.0.
+
+- Both mechanisms may be sent together. The header is resolved first, in middleware, so a header replay never reaches the route and the body field never sees it.
+- A request that uses the body field gets `Deprecation: true` and `Link: <...>; rel="deprecation"` on its response, and the field is marked `deprecated` in `/openapi.json`.
+- The two are not identical: the body field dedupes only the *job*, re-running the keyword-leg preflight and returning a fresh `202` each time, and it compares nothing about the rest of the request. The header replays the original response and refuses a changed one. Prefer the header.
+- Until 2026-11-08 the body field's lookup was **not tenant-scoped**: one tenant replaying another tenant's key was handed that tenant's job id and its own ingest was silently dropped. Fixed with the rest of TASK-0318.
 
 ---
 
@@ -88,7 +123,7 @@ Request:
 | `sources[]` | list | yes, ≥ 1 | `type` ∈ `path`, `url`, `inline`; `value` per type. |
 | `metadata` | object | no | Merged into every produced chunk's metadata. |
 | `priority_class` | str | no | Tiered-embedding routing class (D9). Merged into chunk metadata as `priority_class`, which is what `embeddings.tiering.rules[].match` matches on. |
-| `idempotency_key` | str | no | Replaying a key returns the original job and enqueues nothing. This is the **only** idempotency the API implements, and it is a body field, not the `Idempotency-Key` header described above. |
+| `idempotency_key` | str | no | **Deprecated, removed in 1.0** — send the [`Idempotency-Key` header](#idempotency) instead. Still honoured: replaying a key returns the original job and enqueues nothing, scoped to the caller's tenant. A request that uses it gets `Deprecation: true` on the response. |
 
 Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `409 CONFLICT` — the target collection was indexed without the keyword leg `retrieval.hybrid` asks for, and a sparse vector cannot be attached to an existing collection; the detail names the rebuild command and the opt-out (see [troubleshooting.md](troubleshooting.md)). Refused before a job id is issued, so nothing is written · `422` · `429 QUEUE_FULL`.
 

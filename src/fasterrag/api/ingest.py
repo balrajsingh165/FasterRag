@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Query, Request, Response, status
 
 from fasterrag.api.dependencies import (
     CurrentSettings,
@@ -45,6 +45,23 @@ __all__ = ["router"]
 router = APIRouter(prefix="/v1/ingest", tags=["ingestion"])
 
 _logger = get_logger(__name__)
+
+
+DEPRECATED_KEY_FIELD_DOC = "https://fasterrag.dev/docs/api-reference#idempotency"
+
+
+def _mark_deprecated(response: Response) -> None:
+    """Flag a response whose request used the superseded ``idempotency_key`` body field.
+
+    Announced in the response rather than only in the docs, so a client that never reads
+    them still learns before 1.0 removes the field (TASK-0318).
+    """
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = f'<{DEPRECATED_KEY_FIELD_DOC}>; rel="deprecation"'
+    _logger.warning(
+        "the idempotency_key body field is deprecated; send the Idempotency-Key header",
+        extra={"endpoint": "POST /v1/ingest"},
+    )
 
 
 def _job_body(record: JobRecord, journal: Journal) -> dict[str, Any]:
@@ -91,6 +108,7 @@ async def _run_job(request: Request, record: JobRecord, metadata: dict[str, Any]
 async def start_ingest(
     body: IngestRequest,
     request: Request,
+    response: Response,
     background: BackgroundTasks,
     settings: CurrentSettings,
     journal: JournalDep,
@@ -102,6 +120,9 @@ async def start_ingest(
     Refuses first if the target index cannot serve the configured keyword leg; replaying an
     ``idempotency_key`` returns the original job rather than ingesting the corpus twice.
     """
+    if body.idempotency_key is not None:
+        _mark_deprecated(response)
+
     await require_keyword_leg(
         body.collection or settings.vector_db.collection.default_name, settings, adapter
     )
@@ -118,9 +139,6 @@ async def start_ingest(
     )
 
     if record.status in {"queued"}:
-        # The routing class is ordinary chunk metadata, because that is what the tiering
-        # rules match on (`embeddings.tiering.rules[].match`). Merged here rather than
-        # threaded separately so the REST and CLI surfaces produce identical chunks.
         metadata = dict(body.metadata or {})
         if body.priority_class:
             metadata["priority_class"] = body.priority_class

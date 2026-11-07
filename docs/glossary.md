@@ -31,7 +31,7 @@ Pinned definitions for every loaded term in this repository. Documentation, code
 | **Golden set** | A versioned JSONL set of query → relevant-chunk/answer records used by the eval harness, the regression gate, and Autopilot (schema in [testing-strategy.md](testing-strategy.md) §1.6). |
 | **Grounded-or-refuse** | D5: answers below the faithfulness threshold are replaced by a structured `INSUFFICIENT_EVIDENCE` response instead of a guess. |
 | **Hybrid retrieval** | Dense ANN + sparse BM25 legs run in parallel with the same pushed-down filters, then fused. |
-| **Idempotency key** | The `Idempotency-Key` header on mutating endpoints; replaying it returns the original result and performs no duplicate work. |
+| **Idempotency key** | The `Idempotency-Key` header on mutating endpoints; replaying it returns the original result, flagged `Idempotent-Replayed: true`, and performs no duplicate work. Scoped to `(tenant, key)` over a fingerprint of the whole request, so the same key with a different body is refused rather than silently answered. |
 | **Index lockfile (`index.lock`)** | D1: per-index record of config hash, embedding model name+version, chunker strategy+version, and per-document content hashes — the reproducibility contract of the index. |
 | **Ingestion journal** | D3: the checkpointed record (every `checkpoint_every` documents) that lets a crashed ingest resume exactly where it stopped. Written with atomic write-temp-then-rename. |
 | **Ledger entry** | One record in the benchmark ledger; the only thing that can turn a goal into a claim. |

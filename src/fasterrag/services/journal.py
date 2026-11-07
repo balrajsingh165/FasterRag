@@ -44,6 +44,8 @@ __all__ = [
     "JobStatus",
     "Journal",
     "create_journal",
+    "envelope",
+    "open_envelope",
 ]
 
 DEFAULT_JOURNAL_ROOT: Final = Path(".fasterrag") / "journal"
@@ -162,18 +164,18 @@ def _write_atomically(path: Path, payload: str) -> None:
         ) from exc
 
 
-def _envelope(payload: dict[str, Any]) -> str:
+def envelope(payload: dict[str, Any]) -> str:
     """Wrap a payload with a checksum so a torn write is detectable."""
     body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return json.dumps({"checksum": text_hash(body), "body": body}, separators=(",", ":"))
 
 
-def _open_envelope(text: str) -> dict[str, Any] | None:
+def open_envelope(text: str) -> dict[str, Any] | None:
     """Return the payload if its checksum matches, otherwise None."""
     try:
-        envelope = json.loads(text)
-        body = envelope["body"]
-        if text_hash(body) != envelope["checksum"]:
+        wrapper = json.loads(text)
+        body = wrapper["body"]
+        if text_hash(body) != wrapper["checksum"]:
             return None
         loaded = json.loads(body)
     except (json.JSONDecodeError, KeyError, TypeError):
@@ -223,7 +225,7 @@ class Journal:
         retried submission never starts a second ingest of the same corpus.
         """
         if idempotency_key is not None:
-            existing = self.find_by_idempotency_key(idempotency_key)
+            existing = self.find_by_idempotency_key(idempotency_key, tenant=tenant)
             if existing is not None:
                 _logger.info(
                     "returning the existing job for a replayed idempotency key",
@@ -245,7 +247,7 @@ class Journal:
 
     def save_job(self, record: JobRecord) -> None:
         """Persist a job record atomically."""
-        _write_atomically(self._job_path(record.job_id), _envelope(record.as_dict()))
+        _write_atomically(self._job_path(record.job_id), envelope(record.as_dict()))
 
     def load_job(self, job: str, *, tenant: str | None = None) -> JobRecord:
         """Load a job record, falling back to the previous good copy."""
@@ -253,11 +255,11 @@ class Journal:
         if not path.exists():
             raise IngestionError(f"unknown ingest job {job!r}", code=ErrorCode.NOT_FOUND)
 
-        payload = _open_envelope(path.read_text(encoding="utf-8"))
+        payload = open_envelope(path.read_text(encoding="utf-8"))
         if payload is None:
             previous = path.with_suffix(path.suffix + _PREVIOUS_SUFFIX)
             payload = (
-                _open_envelope(previous.read_text(encoding="utf-8")) if previous.exists() else None
+                open_envelope(previous.read_text(encoding="utf-8")) if previous.exists() else None
             )
             if payload is None:
                 raise IngestionError(
@@ -276,15 +278,21 @@ class Journal:
             raise IngestionError(f"unknown ingest job {job!r}", code=ErrorCode.NOT_FOUND)
         return record
 
-    def find_by_idempotency_key(self, key: str) -> JobRecord | None:
-        """Return the job created with ``key``, if one exists."""
+    def find_by_idempotency_key(self, key: str, *, tenant: str | None = None) -> JobRecord | None:
+        """Return the job ``tenant`` created with ``key``, if one exists.
+
+        Scoped to the tenant, because an unscoped match hands one tenant another's job id
+        and swallows the ingest it asked for (TASK-0318).
+        """
         directory = self.root / _JOBS_DIR
         if not directory.is_dir():
             return None
 
         for path in sorted(directory.glob("*.json")):
-            payload = _open_envelope(path.read_text(encoding="utf-8"))
-            if payload is not None and payload.get("idempotency_key") == key:
+            payload = open_envelope(path.read_text(encoding="utf-8"))
+            if payload is None or payload.get("idempotency_key") != key:
+                continue
+            if payload.get("tenant") == tenant:
                 return JobRecord.from_dict(payload)
         return None
 
