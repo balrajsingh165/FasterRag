@@ -7,10 +7,12 @@ from starlette.types import Message, Receive, Scope, Send
 
 from fasterrag.api.auth import (
     ALL_SCOPES,
+    ALL_SCOPES_TOKEN,
     PUBLIC_PATHS,
     ApiKey,
     AuthMiddleware,
     KeyRegistry,
+    _parse_scopes,
     load_keys,
     required_scope,
 )
@@ -184,6 +186,92 @@ def test_a_tenant_can_be_attached_to_a_key(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("FASTERRAG_API_KEY", "k:query:acme")
 
     assert load_keys(Settings.model_validate({"security": {"auth": True}}))[0].tenant == "acme"
+
+
+@pytest.mark.parametrize("raw", ["", " ", " , ", ","])
+def test_an_empty_scope_field_is_refused_instead_of_granting_everything(raw: str) -> None:
+    """`frozenset(scopes or ALL_SCOPES)` turned a blank field into `admin` (TASK-0327)."""
+    with pytest.raises(ConfigError, match="empty scope field"):
+        _parse_scopes(raw)
+
+
+@pytest.mark.parametrize("entry", ["k:", "k::acme", "k: , ", "k:::"])
+def test_a_key_with_a_blank_scope_field_refuses_to_start(
+    monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """Each of these loaded as a full admin key before TASK-0327, `k::acme` silently."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", entry)
+
+    with pytest.raises(ConfigError, match="empty scope field"):
+        load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+
+def test_the_blank_scope_refusal_names_the_entry_and_the_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failing closed with no documented fix is just a different outage."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "good:query;bad::acme")
+
+    with pytest.raises(ConfigError) as refusal:
+        load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+    assert "entry 2" in str(refusal.value)
+    assert f"'{ALL_SCOPES_TOKEN}'" in str(refusal.value)
+
+
+def test_the_all_scopes_token_asks_for_every_scope_in_writing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"k:{ALL_SCOPES_TOKEN}")
+
+    keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+    assert keys[0].scopes == ALL_SCOPES
+
+
+def test_a_tenant_can_be_named_without_naming_individual_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replacement spelling for `k::acme`, which no longer parses."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"k:{ALL_SCOPES_TOKEN}:acme")
+
+    keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+    assert keys[0].scopes == ALL_SCOPES
+    assert keys[0].tenant == "acme"
+
+
+def test_a_bare_secret_still_needs_no_scope_field_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An omitted field and a blank one are different things; only the blank one is refused."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "just-a-secret")
+
+    keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+    assert keys[0].scopes == ALL_SCOPES
+    assert keys[0].tenant is None
+
+
+def test_a_trailing_colon_after_the_scopes_leaves_the_key_unbound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`k:query:` is an operator key for any tenant, which TASK-0295 weighs, not this fix."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "k:query:")
+
+    keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+    assert keys[0].scopes == frozenset({"query"})
+    assert keys[0].tenant is None
+
+
+def test_a_third_colon_lands_inside_the_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Documented here as observed behaviour: the remainder is not split again."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "k:query:acme:extra")
+
+    keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+    assert keys[0].tenant == "acme:extra"
 
 
 def test_a_misspelled_scope_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

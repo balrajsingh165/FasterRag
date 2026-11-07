@@ -9,6 +9,12 @@ has to be attached to each route, so the failure mode of *forgetting one* is an 
 that is silently public. Middleware sees every request, so a new router is protected the
 moment it is mounted and a gap has to be introduced on purpose.
 
+**An entry is ``<secret>[:<scopes>[:<tenant>]]`` and an omitted scope field is not an empty
+one.** A bare secret is the single-operator case and still carries all four scopes; a field
+that is written and left blank (``k:``, ``k::acme``, ``k: , ``) is refused at startup,
+because defaulting it granted ``admin`` to the one spelling that could name a tenant. Ask
+for every scope in writing with ``*`` — ``k:*:acme`` (TASK-0327, ``docs/security.md`` §2).
+
 **Failures say nothing about whether a key exists.** ``AUTH_MISSING`` means no credential
 arrived, ``AUTH_INVALID`` means one did and was refused — an unknown key and a revoked key
 are indistinguishable, so the endpoint cannot be used to enumerate valid keys.
@@ -39,6 +45,7 @@ from fasterrag.observability.logging import get_logger
 
 __all__ = [
     "ALL_SCOPES",
+    "ALL_SCOPES_TOKEN",
     "PUBLIC_PATHS",
     "ApiKey",
     "AuthMiddleware",
@@ -48,6 +55,12 @@ __all__ = [
 ]
 
 ALL_SCOPES: Final[frozenset[str]] = frozenset({"ingest", "query", "collections", "admin"})
+
+# CRITICAL: the only way to ask for every scope in writing. A bare secret still means all
+# four, but once an entry names a tenant it must also name its scopes, and this token is
+# what it writes to keep them all. Without it, failing an empty scope field closed would
+# leave `secret::tenant` with no replacement spelling at all.
+ALL_SCOPES_TOKEN: Final[str] = "*"
 
 # CRITICAL: liveness and readiness are unauthenticated on purpose. A load balancer or
 # orchestrator probes them without credentials, and a health check that needs a key reports
@@ -64,8 +77,6 @@ _SCOPE_BY_PREFIX: Final[tuple[tuple[str, str], ...]] = (
     ("/v1/retrieve", "query"),
     ("/v1/traces", "admin"),
     ("/metrics", "admin"),
-    # The dashboard's own routes. It is a separate application, but it reads the same
-    # traces and metrics, so it needs the same scope rather than a weaker one of its own.
     ("/api/traces", "admin"),
     ("/api/metrics", "admin"),
 )
@@ -106,16 +117,30 @@ def required_scope(path: str) -> str | None:
     return "admin"
 
 
-def _parse_scopes(raw: str) -> frozenset[str]:
-    """Parse a comma-separated scope list, rejecting anything undefined."""
+def _parse_scopes(raw: str, where: str = "this key entry") -> frozenset[str]:
+    """Parse a present scope field, rejecting an undefined or an empty one.
+
+    An empty field used to default to every scope, so ``k::acme`` — the only way the old
+    grammar could name a tenant — was a silent `admin` key. Say ``*`` to mean all.
+    """
     scopes = {part.strip() for part in raw.split(",") if part.strip()}
-    unknown = scopes - ALL_SCOPES
+    if not scopes:
+        raise ConfigError(
+            f"{where} has an empty scope field; it used to grant every scope including "
+            f"'admin', so it is now refused. Write '{ALL_SCOPES_TOKEN}' for all scopes "
+            f"(as in 'secret:{ALL_SCOPES_TOKEN}:tenant'), or name the scopes this key "
+            f"needs ({', '.join(sorted(ALL_SCOPES))}), or drop the colon entirely for a "
+            f"bare operator key"
+        )
+    unknown = scopes - ALL_SCOPES - {ALL_SCOPES_TOKEN}
     if unknown:
         raise ConfigError(
             f"unknown scope(s) {', '.join(sorted(unknown))}; "
             f"valid scopes are {', '.join(sorted(ALL_SCOPES))}"
         )
-    return frozenset(scopes or ALL_SCOPES)
+    if ALL_SCOPES_TOKEN in scopes:
+        return ALL_SCOPES
+    return frozenset(scopes)
 
 
 def load_keys(settings: Settings) -> list[ApiKey]:
@@ -132,14 +157,18 @@ def load_keys(settings: Settings) -> list[ApiKey]:
     for index, entry in enumerate(part.strip() for part in raw.split(";")):
         if not entry:
             continue
-        secret, _, remainder = entry.partition(":")
+        secret, separator, remainder = entry.partition(":")
         scopes_raw, _, tenant = remainder.partition(":")
         if not secret:
             raise ConfigError(f"{name} entry {index + 1} has an empty key")
+        # CRITICAL: a bare secret has no scope field at all and still means all four, the
+        # single-operator case. A field that is present and empty is a different thing and
+        # is refused — the two were indistinguishable here until TASK-0327.
+        scopes = _parse_scopes(scopes_raw, f"{name} entry {index + 1}") if separator else ALL_SCOPES
         keys.append(
             ApiKey(
                 secret=secret,
-                scopes=_parse_scopes(scopes_raw),
+                scopes=scopes,
                 name=f"key-{index + 1}",
                 tenant=tenant.strip() or None,
             )
@@ -245,8 +274,6 @@ class AuthMiddleware:
         assert self._registry is not None
         key = self._registry.resolve(presented)
         if key is None:
-            # Deliberately identical in wording and timing to a revoked key: an attacker must
-            # not be able to tell a wrong key from an unknown one.
             await self._refuse(
                 scope,
                 receive,
@@ -294,8 +321,6 @@ class AuthMiddleware:
                 return
             tenant = declared or key.tenant
 
-        # Downstream reads the authenticated identity from here rather than re-parsing the
-        # header, so exactly one place decides who the caller is and which tenant they are.
         scope["state"] = {**scope.get("state", {}), "api_key": key, "tenant": tenant}
         await self.app(scope, receive, send)
 
@@ -326,8 +351,6 @@ def _tenant_refusal(key: ApiKey, declared: str | None) -> FasterRagError | None:
             code=ErrorCode.TENANT_FORBIDDEN,
         )
     if key.tenant is not None and declared != key.tenant:
-        # Deliberately does not echo the key's tenant: that would let a caller enumerate
-        # which tenants exist by trying values and reading the error.
         return FasterRagError(
             "this key may not act for the requested tenant",
             code=ErrorCode.TENANT_FORBIDDEN,

@@ -29,6 +29,24 @@ FASTERRAG_API_KEY=secret-one:query,ingest:acme; secret-two:admin
 
 Each entry is `<secret>[:<scopes>[:<tenant>]]`. A bare secret with no scopes gets all four — the single-operator case. The two separators differ deliberately: with a comma for both, `a:query,ingest` reads equally as one key with two scopes or as two keys, and the parser would have to guess.
 
+**An omitted scope field is not an empty one, and `*` is how you ask for all four in writing (TASK-0327, 2026-11-08).** The decision the grammar now records:
+
+| Entry | Scopes | Why |
+|---|---|---|
+| `k` | all four | The single-operator case. A field that was never written cannot have been written wrong. |
+| `k:*` | all four | The same grant, stated. |
+| `k:*:acme` | all four, bound to `acme` | The only way to name a tenant without enumerating scopes. |
+| `k:query,ingest:acme` | as named | The normal case. |
+| `k:`, `k::acme`, `k: , `, `k:::` | **refused at startup** | `ConfigError` naming the entry number and the `*` spelling. |
+
+Until 2026-11-08 the last row loaded as a key with **all four scopes, `admin` included**: `_parse_scopes` ended in `frozenset(scopes or ALL_SCOPES)`, so a blank field fell through to the bare-secret default. The aggravating part was the grammar itself — `<secret>[:<scopes>[:<tenant>]]` gave an operator who wanted "default scopes, this tenant" no spelling but `k::acme`, so the natural thing to write was the one that silently produced a full admin credential. Three fields, three ways to be wrong, and this one failed **toward** privilege while `required_scope` fails **away** from it on the same kind of omission.
+
+Failing it closed alone would only have moved the problem: the operator writing `k::acme` would have gotten a hard startup failure with no documented replacement. So the refusal ships with the replacement — `*` — and the refusal message names it. Mixing is harmless and allowed (`*,query` is all four), since the token is a union, not an override.
+
+**This does not change what an omitted *tenant* means** (`k:query:` and `k:query` are both operator keys free to act for any tenant, §5.3). That is the same shape one field over and is a separate, deliberate grant with its own open decision (TASK-0295); fixing it is an incompatible change to every key file, which `*` is not. If that decision later lands on an explicit any-tenant marker, `*` is the token already in this grammar — note that `k:query:*` today means the literal tenant id `*`, not "any tenant".
+
+**Three parser edges, recorded rather than rediscovered.** A trailing colon after the scopes (`k:query:`) is an empty tenant and reads as no tenant. A *third* colon is not a fourth field: `k:query:acme:extra` yields the tenant `acme:extra`, which then matches no header and fails closed. An entry with an empty secret (`:query`) is refused, naming its 1-based position.
+
 **Enforced as ASGI middleware, not a per-route dependency.** A dependency has to be attached to each route, so forgetting one leaves an endpoint silently public. Middleware sees every request, so a newly mounted router is protected by default and a gap must be introduced deliberately. For the same reason an **unmapped path requires `admin`** rather than defaulting to open.
 
 **`/healthz`, `/readyz`, and `/openapi.json` stay unauthenticated.** A load balancer probes them without credentials, and a health check that needs a key reports the service as down whenever the key is wrong — turning a credential mistake into an outage. Neither reveals corpus content. **`/metrics` is not public**: it exposes per-endpoint volumes and costs, so it requires `admin` like any other surface.
