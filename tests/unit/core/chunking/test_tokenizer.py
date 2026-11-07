@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 import pytest
@@ -70,14 +71,46 @@ def test_an_unloadable_tokenizer_falls_back_rather_than_raising(
     assert counter.count(DENSE) == EstimatingTokenCounter().count(DENSE)
 
 
-def test_a_tokenizer_that_cannot_encode_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Broken:
-        def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
-            raise ValueError("input is not valid for this vocabulary")
+class Broken:
+    """A tokenizer that loads but refuses every string."""
 
+    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+        raise ValueError("input is not valid for this vocabulary")
+
+
+def test_a_tokenizer_that_cannot_encode_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tokenizer_module, "load_tokenizer", lambda model: Broken())
 
     assert ModelTokenCounter("some/model").count(DENSE) == EstimatingTokenCounter().count(DENSE)
+
+
+def test_an_encode_failure_is_logged_rather_than_silently_estimated(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Unlogged, the degrade to the estimate moves every chunk boundary with no trace."""
+    monkeypatch.setattr(tokenizer_module, "load_tokenizer", lambda model: Broken())
+
+    with caplog.at_level(logging.WARNING, logger="fasterrag.core.chunking.tokenizer"):
+        ModelTokenCounter("some/model").count(DENSE)
+
+    reports = [record for record in caplog.records if "could not encode" in str(record.msg)]
+    assert len(reports) == 1
+    assert reports[0].__dict__["model"] == "some/model"
+    assert reports[0].__dict__["error"] == "ValueError"
+
+
+def test_the_encode_failure_warning_is_not_repeated_per_chunk(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``count`` runs once per candidate split, so a per-call warning would flood the log."""
+    monkeypatch.setattr(tokenizer_module, "load_tokenizer", lambda model: Broken())
+    counter = ModelTokenCounter("some/model")
+
+    with caplog.at_level(logging.WARNING, logger="fasterrag.core.chunking.tokenizer"):
+        for _ in range(5):
+            counter.count(DENSE)
+
+    assert len([record for record in caplog.records if "could not encode" in str(record.msg)]) == 1
 
 
 def test_only_the_chunks_own_tokens_are_counted(monkeypatch: pytest.MonkeyPatch) -> None:

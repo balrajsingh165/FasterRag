@@ -28,9 +28,6 @@ from fasterrag.errors import EmbedError
 
 __all__ = ["WINDOW_OVERLAP_FRACTION", "pool_spans", "supports_pooling"]
 
-# How much of each window repeats the one before it. A token at a window's edge sees
-# context on one side only, so windows overlap and every token is scored by how centred it
-# is — a quarter is enough for the edges to lose to a neighbouring window's middle.
 WINDOW_OVERLAP_FRACTION = 4
 
 _SPECIAL_TOKEN_BUDGET = 2
@@ -96,7 +93,6 @@ def _token_states(model: Any, ids: Sequence[int], size: int) -> Any:
         with torch.no_grad():
             hidden = network(input_ids=input_ids, attention_mask=attention).last_hidden_state[0]
 
-        # Drop the sentinels so positions line up with the document's own token indices.
         body = hidden[len(prefix) : len(prefix) + len(window)].to("cpu")
 
         positions = torch.arange(len(window))
@@ -141,9 +137,6 @@ def pool_spans(model: Any, text: str, spans: Sequence[Segment]) -> list[list[flo
             if finish > begin and begin < end and finish > start
         ]
         if not selected:
-            # A span holding only whitespace or characters the tokenizer dropped. Its
-            # chunk still needs a vector, and a zero one would rank against every query,
-            # so it falls back to the document's own mean.
             selected = list(range(len(ids)))
 
         pooled = states[selected].mean(dim=0)

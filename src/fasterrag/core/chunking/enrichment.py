@@ -82,9 +82,6 @@ def _clean(raw: str) -> str:
     openers = ("Here is the context:", "Situating context:", "Context:", "context:")
     text = raw.strip()
 
-    # Looped, because the two forms nest: a model writes `Context: "…"` as readily as
-    # `"Context: …"`, and stripping in one fixed order leaves the other's residue behind —
-    # a stray quote that then travels into every embedding.
     for _ in range(4):
         before = text
         for opener in openers:

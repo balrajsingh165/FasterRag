@@ -85,11 +85,25 @@ def test_layout_keeps_a_small_table_whole() -> None:
     assert "Cure | 15" in table_chunks[0].text
 
 
-def test_layout_falls_back_when_a_document_has_no_blocks() -> None:
-    document = parse_plaintext(paragraphs(10))
-    chunker = LayoutChunker(chunk_size=20, overlap=0, counter=COUNTER)
+def test_layout_packs_a_plaintext_document_onto_its_paragraph_blocks() -> None:
+    """Block packing, not the blockless fallback: these spans are the ones it never packs.
 
-    assert chunker.split(document)
+    Named for that fallback until 2026-11-08, which ``parse_plaintext`` cannot reach;
+    ``test_a_document_without_blocks_is_chunked_from_its_first_character`` does.
+    """
+    document = parse_plaintext(paragraphs(10))
+    chunker = LayoutChunker(chunk_size=40, overlap=0, counter=COUNTER)
+
+    chunks = chunker.split(document)
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [
+        (0, 150),
+        (150, 300),
+        (300, 450),
+        (450, 600),
+        (600, 748),
+    ]
+    assert all(chunk.start in {block.start for block in document.blocks} for chunk in chunks)
 
 
 def test_semantic_breaks_where_the_topic_shifts() -> None:

@@ -36,9 +36,6 @@ __all__ = [
 
 CHARS_PER_TOKEN: Final = 4
 
-# The character limit below which the budget pass stops halving. Without a floor a text the
-# counter never reports as fitting — a single glyph tokenizing to several tokens — would
-# recurse until the segments were one character wide.
 MINIMUM_LIMIT: Final = 16
 
 Segment = tuple[int, int]

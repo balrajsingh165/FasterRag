@@ -8,6 +8,7 @@ from check_error_taxonomy import (
     REPOSITORY_ROOT,
     SWALLOW,
     SWALLOW_DOCUMENTED,
+    SWALLOW_FALLBACK,
     UNJUSTIFIED_IGNORE,
     UNTYPED_RAISE,
     VACUOUS,
@@ -37,6 +38,14 @@ def anchor() -> None:
         pass
     except ValueError:
         raise
+
+
+def anchor_fallback(values: dict[str, int]) -> int:
+    \"\"\"Give the fallback matcher one candidate, for the same reason.\"\"\"
+    try:
+        return values["k"]
+    except KeyError:
+        return 0
 """
 
 
@@ -61,7 +70,7 @@ def work() -> None:
 
     assert len(found) == 1
     assert found[0].path == "src/fasterrag/a.py"
-    assert found[0].line == 13
+    assert found[0].line == 21
 
 
 def test_a_handler_that_only_continues_is_a_swallow(tmp_path: Path) -> None:
@@ -207,6 +216,139 @@ def read() -> dict[str, int] | None:
 
     assert rules(findings, SWALLOW) == []
     assert len(rules(findings, SWALLOW_DOCUMENTED)) == 1
+
+
+def test_a_broad_catch_that_only_returns_a_fallback_is_a_swallow(tmp_path: Path) -> None:
+    """The shape this gate missed: the caller gets a plausible value and no signal at all."""
+    root = build(
+        tmp_path,
+        **{
+            "core__chunking__tokenizer.py": HANDLER
+            + """
+def count(self, text: str) -> int:
+    \"\"\"Count the tokens.\"\"\"
+    try:
+        return len(tokenizer.encode(text))
+    except Exception:
+        return self._estimate.count(text)
+"""
+        },
+    )
+
+    found = rules(check(root), SWALLOW_FALLBACK)
+
+    assert len(found) == 1
+    assert found[0].line == 21
+    assert "self._estimate.count(text)" in found[0].detail
+    assert SWALLOW_FALLBACK in ERROR_RULES
+
+
+def test_the_fallback_swallow_is_not_also_reported_as_a_broad_catch(tmp_path: Path) -> None:
+    """One line, one bucket: the blocking verdict must not sit beside a warning too."""
+    root = build(
+        tmp_path,
+        **{
+            "a.py": HANDLER
+            + """
+def count(text: str) -> int:
+    \"\"\"Count the tokens.\"\"\"
+    try:
+        return len(tokenizer.encode(text))
+    except Exception:
+        return 4
+"""
+        },
+    )
+
+    findings = check(root)
+
+    assert len(rules(findings, SWALLOW_FALLBACK)) == 1
+    assert rules(findings, BROAD_EXCEPT) == []
+
+
+def test_a_fallback_that_carries_the_exception_is_not_a_fallback_swallow(tmp_path: Path) -> None:
+    """``HealthStatus(healthy=False, detail=exc.detail)`` reports the failure, in the value."""
+    root = build(
+        tmp_path,
+        **{
+            "a.py": HANDLER
+            + """
+def health() -> HealthStatus:
+    \"\"\"Probe the provider.\"\"\"
+    try:
+        return probe()
+    except Exception as exc:
+        return HealthStatus(healthy=False, detail=str(exc))
+"""
+        },
+    )
+
+    assert rules(check(root), SWALLOW_FALLBACK) == []
+
+
+def test_a_narrow_catch_returning_a_fallback_is_left_alone(tmp_path: Path) -> None:
+    """Measured at 65% false positives: a predicate's ValueError *is* the answer False."""
+    root = build(
+        tmp_path,
+        **{
+            "a.py": HANDLER
+            + """
+def _is_ip_address(value: str) -> bool:
+    \"\"\"Return whether the value parses as an address.\"\"\"
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+"""
+        },
+    )
+
+    assert rules(check(root), SWALLOW_FALLBACK) == []
+
+
+def test_a_fallback_assembled_over_two_statements_is_not_reported(tmp_path: Path) -> None:
+    """The rule reads a lone return; a handler that logs first already does the right thing."""
+    root = build(
+        tmp_path,
+        **{
+            "a.py": HANDLER
+            + """
+def count(text: str) -> int:
+    \"\"\"Count the tokens.\"\"\"
+    try:
+        return len(tokenizer.encode(text))
+    except Exception as exc:
+        _logger.warning("falling back to the estimate", extra={"error": type(exc).__name__})
+        return 4
+"""
+        },
+    )
+
+    assert rules(check(root), SWALLOW_FALLBACK) == []
+
+
+def test_a_tree_that_never_exercises_the_fallback_matcher_fails(tmp_path: Path) -> None:
+    """Trap T12 again: a blocking rule whose matcher never runs reports clean either way."""
+    root = build(
+        tmp_path,
+        **{
+            "a.py": """
+def anchor() -> None:
+    \"\"\"One handler, and no fallback return anywhere.\"\"\"
+    try:
+        pass
+    except ValueError:
+        raise
+"""
+        },
+    )
+
+    findings = check(root)
+
+    assert len(findings) == 1
+    assert findings[0].rule == VACUOUS
+    assert "swallow-fallback matcher" in findings[0].detail
 
 
 def test_a_broad_catch_that_translates_is_the_adapter_boundary_working(tmp_path: Path) -> None:

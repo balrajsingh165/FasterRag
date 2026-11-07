@@ -65,9 +65,14 @@ class ModelTokenCounter:
         """Record the model without loading anything yet."""
         self.model = model
         self._estimate = EstimatingTokenCounter(chars_per_token)
+        self._warned = False
 
     def count(self, text: str) -> int:
-        """Return the token count, falling back to the estimate when unavailable."""
+        """Return the token count, falling back to the estimate when unavailable.
+
+        An encode failure cannot abort the document, but it moves every chunk boundary
+        in the corpus, so it is logged once per counter rather than once per call.
+        """
         stripped = text.strip()
         if not stripped:
             return 0
@@ -78,9 +83,14 @@ class ModelTokenCounter:
 
         try:
             return len(tokenizer.encode(stripped, add_special_tokens=False))
-        except Exception:
-            # A tokenizer that loaded but cannot encode this particular string must not
-            # abort the document; the estimate is a worse answer, not no answer.
+        except Exception as exc:
+            if not self._warned:
+                self._warned = True
+                _logger.warning(
+                    "the embedding tokenizer could not encode this text; falling back to the "
+                    "estimate, so chunk_size counts approximate tokens",
+                    extra={"model": self.model, "error": type(exc).__name__},
+                )
             return self._estimate.count(stripped)
 
     @property

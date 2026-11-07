@@ -24,10 +24,29 @@ and separates what it is certain about from what a human must judge:
   published contract, so the caller cannot mistake it for success. It stays a warning
   rather than disappearing, because the annotation cannot distinguish "absent" from
   "corrupt" and some of these sites conflate the two.
+* ``swallow-fallback`` (error) — a handler whose entire body is ``return <expr>`` for a
+  substantive ``expr``, catching ``Exception``/``BaseException``, where ``expr`` does not
+  mention the caught exception. Nothing is logged, nothing is rethrown, and the caller gets
+  a value it cannot tell from a real result: the ``swallow`` shape with a fallback in place
+  of ``pass``, and the commonest form of it. The scope is measured rather than assumed. On
+  2026-11-08 ``src/`` and ``scripts/`` held 34 handlers whose body is a lone fallback
+  ``return``; 20 of those return a value carrying no trace of the exception, and hand
+  classification of those 20 gave 7 true positives against 13 false positives — 65%, far
+  too noisy to block. The false positives are predicates and probes where the exception *is*
+  the answer (``except ValueError: return False`` in ``_is_ip_address``), or values that
+  report the failure themselves (``HealthStatus(healthy=False, detail=exc.detail)``,
+  ``"unknown (git unavailable)"``). Narrowing to a *broad* catch left exactly one site,
+  ``ModelTokenCounter.count``, which was a true positive and is fixed: 0 false positives of
+  1, so this rule blocks. The six remaining true positives all catch a named type and are
+  filed in TASK-0333 rather than swept into the ratchet.
 * ``broad-except`` (warning) — ``except Exception``/``except BaseException`` that does not
   rethrow. A broad catch that immediately translates the vendor's error into a typed one is
   the adapter boundary working exactly as ``docs/reliability.md`` specifies, so only the
-  non-translating ones are reported.
+  non-translating ones are reported. A handler already reported as ``swallow-fallback`` is
+  not reported here as well, so a line judged blocking never also sits in a warning bucket.
+  This bucket's "7 of 7 false positives" reading from 2026-11-07 was itself wrong:
+  ``ModelTokenCounter.count`` was one of those seven and was a real swallow, which is why
+  ``swallow-fallback`` exists (TASK-0333). Six of seven, not seven.
 * ``untyped-raise`` (warning) — a builtin exception raised out of a *public* function in
   ``services/`` or ``adapters/`` with no enclosing ``try`` to translate it. That is an
   untyped error crossing a boundary ``docs/reliability.md`` says only typed errors cross.
@@ -44,10 +63,18 @@ defect in miniature:
   exception, where it can be certain the type is outside the hierarchy;
 * it cannot see runtime behaviour at all. A handler that logs through something this file
   does not recognise as a logger is still a handler whose body is not trivial, so it is
-  never reported; a handler that logs to ``/dev/null`` is never reported either.
+  never reported; a handler that logs to ``/dev/null`` is never reported either;
+* ``swallow-fallback`` reads the returned expression lexically. ``return _recover(exc)`` is
+  exempt because it mentions the exception, whether or not ``_recover`` reports anything,
+  and a fallback assembled over two statements is not a lone ``return`` at all;
+* every handler rule reads ``src/fasterrag`` and nothing else. ``scripts/`` is parsed only
+  for ``# type: ignore`` comments, so three of the seven true positives the 2026-11-08
+  fallback measurement found live in gate scripts this gate cannot see (TASK-0333).
 
-A vacuity guard is mandatory (rebuild-playbook trap T12): a run that matches no files, or
-parses no handlers, fails rather than reporting a clean tree.
+A vacuity guard is mandatory (rebuild-playbook trap T12): a run that matches no files,
+parses no handlers, or never puts a lone fallback ``return`` in front of the
+``swallow-fallback`` matcher, fails rather than reporting a clean tree. A blocking rule
+whose matcher never runs is the vacuous pass it exists to prevent.
 
 Exit codes: ``0`` when no error-severity finding exceeds the ratchet, ``1`` otherwise.
 """
@@ -73,17 +100,22 @@ BOUNDARY_PARTS: Final[tuple[str, ...]] = ("services", "adapters")
 
 SWALLOW: Final = "swallow"
 SWALLOW_DOCUMENTED: Final = "swallow-documented"
+SWALLOW_FALLBACK: Final = "swallow-fallback"
 BROAD_EXCEPT: Final = "broad-except"
 UNTYPED_RAISE: Final = "untyped-raise"
 UNJUSTIFIED_IGNORE: Final = "unjustified-ignore"
 VACUOUS: Final = "vacuous-scan"
 
-ERROR_RULES: Final[frozenset[str]] = frozenset({SWALLOW, UNJUSTIFIED_IGNORE, VACUOUS})
+ERROR_RULES: Final[frozenset[str]] = frozenset(
+    {SWALLOW, SWALLOW_FALLBACK, UNJUSTIFIED_IGNORE, VACUOUS}
+)
 
-# Termination signals, not failures: the iterator protocol raises these to say "done".
+BROAD_EXCEPTIONS: Final[frozenset[str]] = frozenset({"Exception", "BaseException"})
+
+FALLBACK_EXCERPT: Final = 60
+
 CONTROL_FLOW_SIGNALS: Final[frozenset[str]] = frozenset({"StopIteration", "StopAsyncIteration"})
 
-# NotImplementedError is the abstract-method idiom, not an error crossing a boundary.
 RAISE_ALLOWED_BUILTINS: Final[frozenset[str]] = frozenset({"NotImplementedError"})
 
 BUILTIN_EXCEPTIONS: Final[frozenset[str]] = frozenset(
@@ -177,6 +209,32 @@ def _trivial_body(body: list[ast.stmt]) -> str | None:
     return None
 
 
+def _fallback_return(body: list[ast.stmt]) -> ast.Return | None:
+    """Return the lone ``return <expr>`` this handler body is, for a substantive ``expr``."""
+    statements = _body_without_docstring(body)
+    if len(statements) != 1:
+        return None
+    only = statements[0]
+    if not isinstance(only, ast.Return) or only.value is None:
+        return None
+    if isinstance(only.value, ast.Constant) and only.value.value is None:
+        return None
+    return only
+
+
+def _mentions(node: ast.AST, name: str | None) -> bool:
+    """Return whether ``name`` is read anywhere inside ``node``."""
+    if name is None:
+        return False
+    return any(isinstance(child, ast.Name) and child.id == name for child in ast.walk(node))
+
+
+def _excerpt(node: ast.AST) -> str:
+    """Return the source of ``node``, shortened to stay inside one report line."""
+    text = " ".join(ast.unparse(node).split())
+    return text if len(text) <= FALLBACK_EXCERPT else f"{text[:FALLBACK_EXCERPT]}..."
+
+
 def _admits_none(function: ast.FunctionDef | ast.AsyncFunctionDef | None) -> bool:
     """Return whether the function's return annotation already publishes ``None``."""
     if function is None or function.returns is None:
@@ -260,6 +318,7 @@ class _ModuleScan:
         self.at_boundary = any(part in relative.split("/") for part in BOUNDARY_PARTS)
         self.findings: list[Finding] = []
         self.handlers = 0
+        self.fallbacks = 0
         self._walk(tree, _Scope(function=None, try_depth=0))
 
     def _walk(self, node: ast.AST, scope: _Scope) -> None:
@@ -308,9 +367,11 @@ class _ModuleScan:
                 )
             )
 
-        if any(name in {"Exception", "BaseException"} for name in caught) and not _escapes(
-            handler.body, self.noreturn
-        ):
+        broad = any(name in BROAD_EXCEPTIONS for name in caught)
+        if self._inspect_fallback(handler, shown, broad=broad, signal=signal):
+            return
+
+        if broad and not _escapes(handler.body, self.noreturn):
             self.findings.append(
                 Finding(
                     BROAD_EXCEPT,
@@ -320,6 +381,34 @@ class _ModuleScan:
                     "taxonomy types it is meant to absorb, or translate and raise",
                 )
             )
+
+    def _inspect_fallback(
+        self,
+        handler: ast.ExceptHandler,
+        shown: str,
+        *,
+        broad: bool,
+        signal: bool,
+    ) -> bool:
+        """Report a lone fallback ``return``, counting every candidate the matcher saw."""
+        fallback = _fallback_return(handler.body)
+        if fallback is None or signal:
+            return False
+
+        self.fallbacks += 1
+        if not broad or _mentions(fallback, handler.name):
+            return False
+
+        self.findings.append(
+            Finding(
+                SWALLOW_FALLBACK,
+                self.relative,
+                handler.lineno,
+                f"'except {shown}' does only '{_excerpt(fallback)}': the caller cannot tell "
+                "that fallback from a real result, and the failure leaves no trace",
+            )
+        )
+        return True
 
     def _inspect_raise(self, node: ast.Raise, scope: _Scope) -> None:
         """Apply the untyped-raise rule to one ``raise`` at a service or adapter boundary."""
@@ -388,15 +477,17 @@ def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
 
     findings: list[Finding] = []
     handlers = 0
+    fallbacks = 0
     for path in modules:
         relative = path.relative_to(root).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         scan = _ModuleScan(relative, tree)
         findings.extend(scan.findings)
         handlers += scan.handlers
+        fallbacks += scan.fallbacks
 
+    where = Path(*PACKAGE_PARTS).as_posix()
     if handlers == 0:
-        where = Path(*PACKAGE_PARTS).as_posix()
         return [
             Finding(
                 VACUOUS,
@@ -404,6 +495,18 @@ def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
                 0,
                 f"parsed {len(modules)} modules and found no 'except' handler at all; "
                 "either error handling has left this package, or the scan is broken",
+            )
+        ]
+
+    if fallbacks == 0:
+        return [
+            Finding(
+                VACUOUS,
+                where,
+                0,
+                f"parsed {handlers} handlers and put none of them in front of the "
+                "swallow-fallback matcher; a blocking rule that never runs reports clean "
+                "for the same reason a broken one does",
             )
         ]
 

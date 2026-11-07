@@ -9,6 +9,12 @@ to documents that jump between topics. No configuration key is needed for it.
 Embedding is supplied by the caller through :class:`SentenceEmbedder`. Chunking runs in
 the CPU worker pool rather than on the event loop, so the interface is deliberately
 synchronous.
+
+The embedder contract is one vector per text, all of the same width. A provider that
+returns a narrower vector for one sentence is rejected with a typed ``EmbedError`` rather
+than measured over the common prefix: the prefix distance is a plausible number, so the
+document would be chunked at the wrong places and re-ided with no error anywhere. The
+worker pool dead-letters the document with ``EMBED_PROVIDER_ERROR``.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from fasterrag.core.chunking.models import (
 )
 from fasterrag.core.chunking.recursive import pack
 from fasterrag.core.parsing.models import ParsedDocument
+from fasterrag.errors import EmbedError
 
 __all__ = ["BREAKPOINT_PERCENTILE", "SemanticChunker", "SentenceEmbedder"]
 
@@ -62,8 +69,20 @@ def _sentences(text: str) -> list[Segment]:
 
 
 def _distance(left: Sequence[float], right: Sequence[float]) -> float:
-    """Return the cosine distance between two vectors."""
-    dot = sum(a * b for a, b in zip(left, right, strict=False))
+    """Return the cosine distance between two vectors.
+
+    Vectors of unequal width raise rather than yielding a prefix distance, which is a
+    plausible number that would move every boundary placed after it.
+    """
+    try:
+        dot = sum(a * b for a, b in zip(left, right, strict=True))
+    except ValueError as exc:
+        raise EmbedError(
+            f"the embedding provider returned a {len(left)}-dimension vector beside a "
+            f"{len(right)}-dimension one for sentences of the same document; semantic "
+            "boundaries cannot be placed from vectors of different widths",
+            retryable=False,
+        ) from exc
     left_norm = math.sqrt(sum(value * value for value in left))
     right_norm = math.sqrt(sum(value * value for value in right))
     if not left_norm or not right_norm:

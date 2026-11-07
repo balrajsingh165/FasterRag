@@ -38,6 +38,7 @@ from fasterrag.core.chunking.recursive import pack, split_span
 from fasterrag.core.chunking.semantic import _distance, _sentences, _threshold
 from fasterrag.core.parsing import parse_markdown, parse_plaintext
 from fasterrag.core.parsing.models import ParsedDocument
+from fasterrag.errors import EmbedError, ErrorCode, IngestionError
 
 WORDS = "alpha beta gamma delta"
 DENSE_BODY = "検索拡張生成" * 200
@@ -242,6 +243,49 @@ def test_the_distance_ignores_magnitude_and_separates_opposites() -> None:
     assert _distance([0.0, 0.0], [1.0, 0.0]) == 1.0
     assert _distance([1.0, 0.0], [3.0, 0.0]) == pytest.approx(0.0)
     assert _distance([3.0, 4.0], [0.0, 2.0]) == pytest.approx(0.2)
+
+
+def test_a_distance_between_vectors_of_different_widths_is_refused() -> None:
+    """A prefix distance is a plausible number, so the widths have to be compared.
+
+    Measured 2026-11-08: over the common prefix these two vectors score 0.0, identical
+    topics, and the boundary the chunker then skips is invisible everywhere downstream.
+    """
+    with pytest.raises(EmbedError) as caught:
+        _distance([1.0, 0.0, 0.0], [1.0, 0.0])
+
+    assert "3-dimension" in caught.value.detail
+    assert "2-dimension" in caught.value.detail
+    assert caught.value.code is ErrorCode.EMBED_PROVIDER_ERROR
+    assert caught.value.retryable is False
+    assert isinstance(caught.value, IngestionError)
+
+
+def test_a_distance_is_refused_whichever_vector_is_the_short_one() -> None:
+    """Only the left vector is reached by indexing, so the mirrored case needs its own case."""
+    with pytest.raises(EmbedError, match="2-dimension vector beside a 3-dimension one"):
+        _distance([1.0, 0.0], [1.0, 0.0, 0.0])
+
+
+class RaggedEmbedder:
+    """Returns one narrower vector mid-document, as a truncated provider reply would."""
+
+    def embed(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
+        return [[1.0, 0.0] if index != 2 else [1.0] for index in range(len(texts))]
+
+
+def test_a_ragged_embedder_fails_the_document_instead_of_chunking_it_anyway() -> None:
+    """The guard has to hold on the path a corpus actually takes, not only in isolation.
+
+    The worker pool dead-letters an IngestionError, so the document is reported; a
+    prefix distance would instead have chunked it at the wrong places, silently.
+    """
+    document = parse_plaintext(b"First one. Second one. Third one. Fourth one.")
+
+    with pytest.raises(EmbedError, match="different widths"):
+        SemanticChunker(
+            RaggedEmbedder(), chunk_size=200, overlap=0, counter=EstimatingTokenCounter()
+        ).split(document)
 
 
 def test_the_semantic_boundary_lands_on_the_sentence_the_distance_spikes_at() -> None:
