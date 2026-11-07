@@ -1,0 +1,10 @@
+# The load generator, kept out of the `dev` extra on purpose: it pulls gevent, flask and
+# pyzmq, and CI's quality job installs `.[dev]` on every push. Nothing in the ordinary test
+# suite imports it, and tests/load/test_load_harness.py covers the guards without it.
+#
+# Install for a load run:  pip install -r tests/load/requirements.txt
+#
+# TODO: TASK-0243 — fold this into pyproject.toml as `[project.optional-dependencies] load`
+# plus a `[[tool.mypy.overrides]]` entry for `locust.*`. Until then this file is the pin and
+# tests/load/locustfile.py carries the suppression.
+locust==2.47.0
