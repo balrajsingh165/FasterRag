@@ -25,7 +25,23 @@ from fasterrag.services.archive import (
     export_archive,
 )
 
-SPEC = Path(__file__).resolve().parents[3] / "docs" / "archive-format.md"
+SPEC_RELATIVE = Path("docs") / "archive-format.md"
+
+
+def _spec_path() -> Path:
+    """Locate the specification from the test file, else from the working directory.
+
+    `scripts/mutation_run.py` snapshots `tests/` without `docs/`, so a lookup anchored
+    only on `__file__` makes the whole archive suite red there and every mutant vacuous.
+    """
+    for anchor in (Path(__file__).resolve(), Path.cwd().resolve() / "_"):
+        for parent in anchor.parents:
+            if (parent / SPEC_RELATIVE).is_file():
+                return parent / SPEC_RELATIVE
+    raise FileNotFoundError(f"{SPEC_RELATIVE} was not found from {__file__} or {Path.cwd()}")
+
+
+SPEC = _spec_path()
 
 REQUIRED = "✅"
 _MEMBER = re.compile(r"^[└├]── (\S+)\s+# (REQUIRED|OPTIONAL)")

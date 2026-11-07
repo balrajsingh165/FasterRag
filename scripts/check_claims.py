@@ -14,18 +14,39 @@ ticked in ``docs/todo.md``, the sentence is stale by the ledger's own account. T
 itself is never the failure — ``the cache_only rung is not built (TASK-0159)`` is true, and
 stays green for exactly as long as TASK-0159 stays open.
 
+The 2026-11-07 sweep (TASK-0309) found 24 defects this gate scored green, and two of its
+three causes are closed here (TASK-0310). The scan root now covers ``README.md`` and
+``CLAUDE.md`` as well as ``docs/`` — it read neither, so the literal sentence this gate
+exists to stop ("``--watch`` is declared but not yet implemented", matching its own
+pattern) survived on the page PyPI renders. And :data:`DENIAL_PATTERNS` now carries the
+denial shapes that contain no denial verb, every one of which needed the word ``not`` to
+match before: ``unbuilt``, ``pending (TASK-####)``, ``refuses startup until … ships``,
+``not enforced by anything``.
+
 What this gate CANNOT do, stated plainly because a check that oversells its coverage is the
 same defect in miniature:
 
+* **an umbrella task id keeps every denial citing it green, and no regex closes this.** The
+  gate's only question is whether the cited id is ticked. TASK-0049 is one open id covering
+  six vector-DB adapters; Chroma shipped under it on 2026-11-03 and Milvus in 348aa66 on
+  2026-11-08, and the id correctly stays open for the rest. So ``README.md`` calling the Milvus
+  adapter "pending (TASK-0049)" and ``migration-guide.md`` calling it "specified but
+  unbuilt (TASK-0049)" are both false today and both pass — the new ``unbuilt`` and
+  ``pending`` patterns match them and change nothing. Closing this needs denials to cite an
+  id covering exactly the thing denied, or a per-item sub-ledger; it is not a pattern
+  problem;
 * it cannot see a denial that cites no task id at all — the overwhelming majority of English
   sentences about unbuilt things;
 * it cannot see a denial that is false for any reason other than its task being ticked, such
   as work that shipped under a different id, or under no id;
-* it only knows the phrasings in :data:`DENIAL_PATTERNS`, derived from the three real
-  incidents above. A fourth incident worded differently passes.
+* it only knows the phrasings in :data:`DENIAL_PATTERNS`, derived from real incidents. A
+  fresh incident worded differently passes;
+* it says nothing about the affirmative half of the provable-claims policy — an overclaim,
+  a stale count, an unmeasured superlative. ``tests/unit/docs/test_counts_parity.py`` and
+  ``tests/unit/docs/test_superlative_scan.py`` cover the two slices of that which are
+  mechanically decidable.
 
-It is a gate against the one failure that has actually happened three times, not a truth
-detector.
+It is a gate against the failures that have actually happened here, not a truth detector.
 
 Exit codes: ``0`` when every denial cites open work, ``1`` on any stale denial or if the
 scan parses nothing.
@@ -40,14 +61,25 @@ from pathlib import Path
 from typing import Final
 
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
-DOCS: Final = REPOSITORY_ROOT / "docs"
+DOCS_DIRECTORY: Final = "docs"
 TODO_NAME: Final = "todo.md"
+
+# CRITICAL: README.md is the page PyPI renders and CLAUDE.md is loaded into every agent
+# session as instructions, so a stale denial in either is read more often than one in
+# docs/. The gate iterated docs/ only until TASK-0310, and that is how the --watch denial
+# it was built to stop survived in README.md. A missing file here is itself a failure:
+# losing a scan root silently is the defect, not a tidier scan.
+ROOT_DOCUMENTS: Final[tuple[str, ...]] = ("README.md", "CLAUDE.md")
 
 # CRITICAL: every phrasing here is taken from a sentence somebody actually wrote rather
 # than imagined: "The runtime governor does not exist", "declared but not implemented",
 # "none of these suites has been written", "Neither exists yet", "the cache_only
-# degradation rung is not built". Widening this list is cheap, and widening it carelessly
-# is how a gate starts firing on honest prose and gets disabled.
+# degradation rung is not built", "adapters pending (TASK-0049)", "specified but unbuilt",
+# "until TASK-0124 ships it". Widening this list is cheap, and widening it carelessly is
+# how a gate starts firing on honest prose and gets disabled: "refuses to start" alone was
+# rejected because cookbook.md, security.md, differentiators.md and python-api.md all use
+# it for fail-fast behaviour that shipped, one of them beside a ticked id. The shape that
+# denies something is "refuses to start UNTIL", never "refuses to start".
 DENIAL_PATTERNS: Final[tuple[str, ...]] = (
     r"\b(?:does|do|did)\s+not\s+(?:yet\s+)?exist",
     r"\bneither\s+exists?(?:\s+yet)?",
@@ -55,6 +87,31 @@ DENIAL_PATTERNS: Final[tuple[str, ...]] = (
     r"\b(?:is|are|was|were)\s+not\s+(?:yet\s+)?built",
     r"\b(?:has|have)\s+not\s+(?:yet\s+)?been\s+written",
     r"\b(?:is|are|was|were)\s+not\s+(?:yet\s+)?written",
+    r"\b(?:is|are|was|were|remains?|stays?)\s+(?:\w+\s+){0,2}unbuilt\b",
+    r"\bspecified[\s-]*but[\s-]*unbuilt\b",
+    r"\bpending\s*\(TASK-\d{4}\)",
+    r"\brefuses?\s+(?:to\s+)?start(?:\s*up)?\s+until\b",
+    r"\bnot\s+enforced\s+by\s+anything\b",
+    r"\buntil\s+(?:\S+\s+){0,4}?(?:ships?|lands?)\b",
+)
+
+# CRITICAL: a changelog entry describes the repository at the date in its heading and is
+# frozen afterwards, exactly as a ticked ledger entry is. "raises a ConfigError until
+# TASK-0124 ships it" was true of the 2026-07-31 release and stays in the record; rewriting
+# it to match today would destroy the history the file exists to keep. The cost is real and
+# accepted: a standing note at the top of CHANGELOG.md is invisible to this gate, which is
+# why tests/unit/docs/test_counts_parity.py reads that file instead.
+EXEMPT_DOCUMENTS: Final[frozenset[str]] = frozenset({"docs/CHANGELOG.md"})
+
+# CRITICAL: sentences whose ticked id names the task that FOUND the gap, not the task that
+# will close it. "Row 19 is unbuilt twice over, found while fixing row 18 (TASK-0289)" is
+# true today — TASK-0165 is the open id that builds the rerank timeout — and no pattern
+# separates an attribution clause from a citation. This is the umbrella-id hole in
+# miniature, recorded the way check_doc_truth.py records its duplicate ids: so the gate
+# reports growth rather than history. Never add an entry to quiet a new failure; repoint
+# the sentence at the id that covers what it denies, which is what the gate is asking for.
+ATTRIBUTED_DENIALS: Final[tuple[tuple[str, str], ...]] = (
+    ("docs/failure-modes.md", "Row 19 is unbuilt twice over"),
 )
 
 _DENIAL: Final = re.compile("|".join(DENIAL_PATTERNS), re.IGNORECASE)
@@ -105,67 +162,84 @@ def _row_units(line: str) -> list[str]:
     return units
 
 
-def _split(body: str) -> list[str]:
-    """Split into comparison units, resolving table rows cell by cell."""
-    units: list[str] = []
-    for line in body.split("\n"):
-        if _TABLE_RULE.match(line):
-            continue
-        if _TABLE_ROW.match(line):
-            units.extend(_row_units(line))
-            continue
-        units.extend(_SENTENCE_BREAK.split(line))
-    return units
+def _split(line: str) -> list[str]:
+    """Split one line into comparison units, resolving a table row cell by cell."""
+    if _TABLE_RULE.match(line):
+        return []
+    if _TABLE_ROW.match(line):
+        return _row_units(line)
+    return _SENTENCE_BREAK.split(line)
 
 
 def _sentences(body: str) -> list[tuple[int, str]]:
-    """Return each sentence of a document with the line it starts on."""
+    """Return each sentence of a document with the line it sits on.
+
+    Counted per line rather than by searching the body for each unit: a reconstructed
+    table cell carries ids its source line does not, so the search drifted forward and
+    the gate named a line up to 76 off. A gate pointing at the wrong line is ignored.
+    """
     stripped = _FENCE.sub(lambda match: "\n" * match.group(0).count("\n"), body)
-
-    units: list[tuple[int, str]] = []
-    offset = 0
-    for piece in _split(stripped):
-        start = stripped.find(piece, offset) if piece else offset
-        if start < 0:
-            start = offset
-        if piece.strip():
-            units.append((stripped[:start].count("\n") + 1, piece))
-        offset = start + len(piece)
-    return units
+    return [
+        (number, piece)
+        for number, line in enumerate(stripped.split("\n"), 1)
+        for piece in _split(line)
+        if piece.strip()
+    ]
 
 
-def check(docs: Path = DOCS) -> list[str]:
+def scanned_documents(root: Path) -> list[Path]:
+    """Return every document the gate reads: docs/ minus the ledger, plus the root pages."""
+    docs = root / DOCS_DIRECTORY
+    found = [path for path in sorted(docs.rglob("*.md")) if path.name != TODO_NAME]
+    found += [root / name for name in ROOT_DOCUMENTS if (root / name).is_file()]
+    return [path for path in found if path.relative_to(root).as_posix() not in EXEMPT_DOCUMENTS]
+
+
+def _attributed(relative: str, sentence: str) -> bool:
+    """Say whether this sentence is a recorded discovery attribution rather than a denial."""
+    return any(
+        relative == document and fragment in sentence for document, fragment in ATTRIBUTED_DENIALS
+    )
+
+
+def check(root: Path = REPOSITORY_ROOT) -> list[str]:
     """Return one message per stale denial, empty when every denial cites open work."""
+    docs = root / DOCS_DIRECTORY
     if not docs.is_dir():
         return [f"{docs} is not a directory; the claim scan read nothing"]
 
     ticked = _ticked_ids(docs / TODO_NAME)
 
     violations: list[str] = []
-    documents = 0
+    paths = scanned_documents(root)
     denials = 0
 
-    for path in sorted(docs.rglob("*.md")):
-        if path.name == TODO_NAME:
-            continue
-        documents += 1
+    for path in paths:
         for line, sentence in _sentences(path.read_text(encoding="utf-8")):
             denial = _DENIAL.search(sentence)
             if denial is None:
                 continue
             denials += 1
-            relative = path.relative_to(docs.parent).as_posix()
+            relative = path.relative_to(root).as_posix()
+            if _attributed(relative, sentence):
+                continue
             violations += [
                 f"{relative}:{line}: says {denial.group(0)!r} but cites {identifier}, "
                 f"which docs/{TODO_NAME} ticks as done"
                 for identifier in sorted(set(_TASK.findall(sentence)) & ticked)
             ]
 
-    if documents == 0:
+    unread = [name for name in ROOT_DOCUMENTS if not (root / name).is_file()]
+    if unread:
+        return [
+            f"{', '.join(unread)} absent from {root}, so the scan skipped the documents "
+            "read most often; a narrowed scan root is the defect TASK-0310 closed"
+        ]
+    if not any(path.relative_to(root).parts[0] == DOCS_DIRECTORY for path in paths):
         return [f"{docs} holds no documents to scan; the gate proved nothing"]
     if denials == 0:
         return [
-            f"scanned {documents} documents and matched no denial phrasing at all; "
+            f"scanned {len(paths)} documents and matched no denial phrasing at all; "
             "either every unbuilt capability has stopped being documented, or "
             "DENIAL_PATTERNS no longer matches how this repository writes"
         ]

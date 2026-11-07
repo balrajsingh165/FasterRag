@@ -295,6 +295,43 @@ async def test_retiring_ignores_collections_it_did_not_create() -> None:
     assert "unrelated" in backend.collections
 
 
+async def test_a_collection_it_did_not_create_is_reported_rather_than_skipped_in_silence(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """TASK-0317: a stamp format that stopped parsing would stop retention silently."""
+    import logging
+    import time
+
+    backend = adapter(**{"docs-vNOTASTAMP": 1, "docs-v20260801000000": 1})
+    backend.aliases["docs"] = "docs-v20260801000000"
+
+    with caplog.at_level(logging.WARNING, logger="fasterrag.services.reindex"):
+        dropped = await retire("docs", backend, settings(), now=time.time())
+
+    assert dropped == []
+    reported = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(reported) == 1
+    assert "rollback window is not being enforced over it" in reported[0].getMessage()
+    assert getattr(reported[0], "collection", None) == "docs-vNOTASTAMP"
+    assert getattr(reported[0], "stamp", None) == "NOTASTAMP"
+
+
+async def test_a_retirement_with_nothing_unparseable_stays_quiet(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The other polarity: an ordinary sweep must not warn about the names it understood."""
+    import logging
+    import time
+
+    backend = adapter(**{"docs-v20200101000000": 1, "docs-v20260801000000": 1})
+    backend.aliases["docs"] = "docs-v20260801000000"
+
+    with caplog.at_level(logging.WARNING, logger="fasterrag.services.reindex"):
+        await retire("docs", backend, settings(), now=time.time())
+
+    assert [record for record in caplog.records if record.levelno == logging.WARNING] == []
+
+
 async def test_a_zero_retention_window_still_spares_the_live_collection() -> None:
     import time
 

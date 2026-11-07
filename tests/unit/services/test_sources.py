@@ -1,4 +1,5 @@
 import base64
+import hashlib
 from collections.abc import AsyncIterator, Callable
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
@@ -353,6 +354,53 @@ async def test_traversal_out_of_an_allowed_root_is_refused(tmp_path: Path) -> No
     escape = str(allowed / ".." / "secret.env")
     with pytest.raises(IngestionError, match="outside every directory"):
         await resolve_sources([{"type": "path", "value": escape}], settings)
+
+
+def link(target: Path, name: Path) -> bool:
+    """Create a symlink, reporting whether this platform permitted one.
+
+    Windows refuses without ``SeCreateSymbolicLinkPrivilege``, so the callers skip
+    rather than assert; the Linux CI job is where this leg actually runs.
+    """
+    try:
+        name.symlink_to(target)
+    except (NotImplementedError, OSError):
+        return False
+    return True
+
+
+async def test_a_symlink_out_of_an_allowed_root_is_refused(tmp_path: Path) -> None:
+    """The other half of resolve-before-compare, which `..` alone does not prove.
+
+    A comparison made on the path as written accepts a link that sits inside the root,
+    and the read then follows it to whatever it points at.
+    """
+    allowed = tmp_path / "corpus"
+    allowed.mkdir()
+    (tmp_path / "secret.env").write_text("TOKEN=x", encoding="utf-8")
+    if not link(tmp_path / "secret.env", allowed / "innocent.md"):
+        pytest.skip("this platform does not permit creating a symlink")
+    configured = Settings.model_validate(
+        {"security": {"auth": True}, "ingestion": {"allowed_source_roots": [str(allowed)]}}
+    )
+
+    with pytest.raises(IngestionError, match="outside every directory"):
+        await resolve_sources([{"type": "path", "value": str(allowed / "innocent.md")}], configured)
+
+
+def test_a_symlink_out_of_an_allowed_archive_root_is_refused(tmp_path: Path) -> None:
+    """The same escape against the verb that WRITES the file the caller names."""
+    allowed = tmp_path / "archives"
+    allowed.mkdir()
+    (tmp_path / "config.yaml").write_text("app: {}", encoding="utf-8")
+    if not link(tmp_path / "config.yaml", allowed / "backup.fragx"):
+        pytest.skip("this platform does not permit creating a symlink")
+    configured = Settings.model_validate(
+        {"security": {"auth": True, "allowed_archive_roots": [str(allowed)]}}
+    )
+
+    with pytest.raises(FasterRagError, match="outside every directory"):
+        guard_archive_path(str(allowed / "backup.fragx"), configured)
 
 
 async def test_a_path_inside_an_allowed_root_is_accepted(tmp_path: Path) -> None:
@@ -725,6 +773,46 @@ async def test_a_uri_ending_in_a_bare_dot_stages_as_text(
 
     assert Path(resolved.locations["https://example.com/report."]).suffix == ".txt"
     resolved.cleanup()
+
+
+async def test_a_staged_file_is_named_by_a_truncated_digest_of_its_uri(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two sources staged for one job must not collide, and the filename is that promise.
+
+    The width is part of it: a collision silently serves one document's bytes under the
+    other's id, which nothing downstream can detect.
+    """
+    serve(lambda _: httpx.Response(200, content=b"body"), monkeypatch)
+    uri = "https://example.com/a.md"
+
+    resolved = await resolve_sources([{"type": "url", "value": uri}], settings())
+
+    assert Path(resolved.locations[uri]).stem == hashlib.sha256(uri.encode()).hexdigest()[:16]
+    resolved.cleanup()
+
+
+def test_cleanup_removes_what_it_can_rather_than_stopping_at_the_first_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One undeletable entry must not abandon the rest of the staged copy on disk.
+
+    `suppress(OSError)` hides the difference from every caller, so the flag that decides
+    whether removal continues is pinned here instead.
+    """
+    captured: dict[str, Any] = {}
+
+    def rmtree(path: Path, ignore_errors: bool = False) -> None:
+        captured["ignore_errors"] = ignore_errors
+
+    monkeypatch.setattr("fasterrag.services.sources.shutil.rmtree", rmtree)
+    resolved = ResolvedSources(staging=tmp_path)
+
+    resolved.cleanup()
+
+    assert captured["ignore_errors"] is True
+    assert resolved.staging is None
 
 
 async def test_plain_text_is_not_mistaken_for_base64() -> None:

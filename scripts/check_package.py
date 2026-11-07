@@ -36,9 +36,9 @@ PUBLIC_IMPORTS: Final = (
 EXTRA_ONLY_MODULES: Final = ("torch", "transformers", "sentence_transformers")
 
 
-def _run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-    """Run a command, capturing output, without raising on failure."""
-    return subprocess.run(command, capture_output=True, text=True, check=False, **kwargs)  # type: ignore[call-overload,no-any-return]
+def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run a command, capturing output as text, without raising on failure."""
+    return subprocess.run(command, capture_output=True, text=True, check=False)
 
 
 def _python_in(environment: Path) -> Path:

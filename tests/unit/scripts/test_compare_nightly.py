@@ -3,7 +3,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from compare_nightly import Verdict, compare, compare_files, main
+import yaml
+from compare_nightly import EXIT_CODES, Verdict, compare, compare_files, main
 
 MACHINE: dict[str, Any] = {
     "cpu": "x86_64",
@@ -315,3 +316,55 @@ def test_a_negative_tolerance_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit):
         main(["--previous", str(previous), "--current", str(current), "--tolerance", "-0.5"])
+
+
+def workflow(name: str) -> dict[str, Any]:
+    """Load a workflow from .github/workflows as a document."""
+    path = Path(__file__).resolve().parents[3] / ".github" / "workflows" / f"{name}.yml"
+    loaded: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def step(job: dict[str, Any], name: str) -> dict[str, Any]:
+    """Return the named step of a job, or an empty mapping when it is gone."""
+    return next((entry for entry in job["steps"] if entry.get("name") == name), {})
+
+
+def test_the_nightly_fails_on_the_not_comparable_verdict_as_the_eval_gate_does() -> None:
+    """One verdict, two callers: the asymmetry between them was the whole of TASK-0314.
+
+    The nightly mapped `not-comparable` to a warning and stayed green while ci.yml's
+    eval gate exited 1 on the same word, so a night that measured nothing read as a pass.
+    """
+    measure = workflow("nightly")["jobs"]["measure"]
+    body = step(measure, "Compare against the previous night")["run"]
+    branch = body.split("2)", 1)[1].split(";;", 1)[0]
+
+    assert "exit 1" in branch
+    assert "::warning::" not in body
+
+
+def test_every_exit_code_the_script_defines_has_a_branch_in_the_nightly() -> None:
+    """A verdict the workflow does not name falls to the catch-all and reads as a crash."""
+    measure = workflow("nightly")["jobs"]["measure"]
+    body = step(measure, "Compare against the previous night")["run"]
+
+    for code in EXIT_CODES.values():
+        assert f"{code})" in body
+
+
+def test_the_benchmark_step_does_not_suppress_its_own_failure() -> None:
+    """`continue-on-error` plus `|| true` hid a benchmark that had not run since August."""
+    measure = workflow("nightly")["jobs"]["measure"]
+    benchmark = step(measure, "Benchmark suite")
+
+    assert "|| true" not in benchmark["run"]
+    assert benchmark["continue-on-error"] is True
+
+
+def test_the_measure_job_reaches_the_same_backend_as_the_eval_gate() -> None:
+    """The job declared no service at all, so the benchmark could not have run."""
+    measure = workflow("nightly")["jobs"]["measure"]
+    gate = workflow("ci")["jobs"]["eval-gate"]
+
+    assert measure["services"] == gate["services"]

@@ -12,6 +12,7 @@ from check_package import (
     _check_core_stays_small,
     _check_imports,
     _python_in,
+    _run,
 )
 
 
@@ -80,3 +81,12 @@ def test_the_extra_only_modules_are_absent_from_the_core_dependencies() -> None:
     core = " ".join(manifest["project"]["dependencies"]).replace("-", "_").lower()
 
     assert [module for module in EXTRA_ONLY_MODULES if module in core] == []
+
+
+def test_a_failing_command_is_captured_as_text_rather_than_raised() -> None:
+    """TASK-0317: the contract the removed `# type: ignore` was papering over."""
+    completed = _run([sys.executable, "-c", "import sys; sys.stderr.write('broken'); sys.exit(3)"])
+
+    assert completed.returncode == 3
+    assert completed.stderr == "broken"
+    assert completed.stdout == ""

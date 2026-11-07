@@ -1,13 +1,39 @@
+"""The collection endpoints, over a stubbed backend.
+
+The create case carries TASK-0320: the response must describe the collection the backend
+actually has, not the configuration the request was made under. ``ExistingCollection`` is
+the fake that makes the difference visible — it mirrors Qdrant, which verifies an existing
+collection and returns without adding the keyword leg a create asked for.
+"""
+
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from fasterrag.adapters.vectordb.base import CollectionInfo
+from fasterrag.adapters.vectordb.base import CollectionInfo, CollectionSpec
 from fasterrag.api import collections as collections_router
 from fasterrag.api.problems import PROBLEM_MEDIA_TYPE
+from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 from tests.unit.api.conftest import StubVectorDB
+
+
+class ExistingCollection(StubVectorDB):
+    """A backend already holding a collection, whose layout a create leaves untouched."""
+
+    def __init__(self, *, sparse: bool, name: str = "docs") -> None:
+        super().__init__()
+        self.collections = [
+            CollectionInfo(name=name, vectors=10, dimensions=384, distance="cosine", sparse=sparse)
+        ]
+
+    async def create_collection(self, spec: CollectionSpec) -> None:
+        if any(info.name == spec.name for info in self.collections):
+            self.created.append(spec)
+            return
+        await super().create_collection(spec)
 
 
 class StubEmbedder:
@@ -178,3 +204,54 @@ def test_the_created_collection_carries_the_sparse_leg_when_hybrid(
 
     assert body["sparse"] is True
     assert vector_db.created[0].sparse is True
+
+
+def test_a_create_that_adds_no_keyword_leg_is_refused_rather_than_reported_as_hybrid(
+    client: TestClient, app: FastAPI, embedder: StubEmbedder
+) -> None:
+    """TASK-0320: a 201 saying ``"sparse": true`` over a dense-only collection is untrue."""
+    app.state.vector_db = ExistingCollection(sparse=False)
+
+    response = client.post("/v1/collections", json={"name": "docs"})
+
+    assert response.status_code == 409
+    assert response.headers["content-type"].startswith(PROBLEM_MEDIA_TYPE)
+    assert response.json()["code"] == ErrorCode.CONFLICT.value
+
+
+def test_the_refusal_names_the_collection_the_rebuild_and_the_opt_out(
+    client: TestClient, app: FastAPI, embedder: StubEmbedder
+) -> None:
+    """The same detail ``POST /v1/ingest`` returns, because it is the same mistake."""
+    app.state.vector_db = ExistingCollection(sparse=False)
+
+    detail = client.post("/v1/collections", json={"name": "docs"}).json()["detail"]
+
+    assert "'docs'" in detail
+    assert "fasterrag index reembed" in detail
+    assert "retrieval.hybrid" in detail
+
+
+def test_the_response_reports_the_live_keyword_leg_not_the_configuration(
+    client: TestClient, app: FastAPI, embedder: StubEmbedder
+) -> None:
+    """Dense-only configuration over a collection that has a keyword leg reports the leg."""
+    app.state.settings = Settings.model_validate({"retrieval": {"hybrid": False}})
+    app.state.vector_db = ExistingCollection(sparse=True)
+
+    body: dict[str, Any] = client.post("/v1/collections", json={"name": "docs"}).json()
+
+    assert body["sparse"] is True
+
+
+def test_a_dense_only_create_is_not_refused_when_hybrid_is_off(
+    client: TestClient, app: FastAPI, embedder: StubEmbedder
+) -> None:
+    """Only the mismatch is a conflict; a dense-only deployment creates dense-only."""
+    app.state.settings = Settings.model_validate({"retrieval": {"hybrid": False}})
+    app.state.vector_db = ExistingCollection(sparse=False)
+
+    response = client.post("/v1/collections", json={"name": "docs"})
+
+    assert response.status_code == 201
+    assert response.json()["sparse"] is False

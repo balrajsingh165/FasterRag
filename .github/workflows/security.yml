@@ -74,6 +74,18 @@ jobs:
   # history and still compromised; checking only the tip would call it clean. Duplicated
   # from ci.yml deliberately — a credential leaked in a commit nobody pushes afterwards
   # would otherwise go unscanned for as long as the repository stays quiet.
+  #
+  # The claim above was true of this job only on the `schedule` trigger (measured: 290
+  # commits, 6.26 MB), and false on the `push` trigger this workflow also declares, where
+  # gitleaks-action@v2 appends `--log-opts=-1` and scans one commit. Same defect as ci.yml,
+  # same fix (TASK-0315): the pinned binary, no --log-opts, so every trigger of both
+  # workflows runs one scan with one rule set over the whole history. Pinning also stops
+  # the action resolving "latest" at run time, which moved the rule set between runs
+  # without a commit.
+  #
+  # CRITICAL: ci.yml holds a byte-for-byte copy of this step. The two copies of the
+  # dependency audit drifted the day they diverged (TASK-0308) and this pair will too —
+  # it belongs in a composite action under .github/actions/ beside that one.
   secret-scan:
     runs-on: ubuntu-latest
     steps:
@@ -81,6 +93,5 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+      - name: Secret scan
+        uses: ./.github/actions/secret-scan

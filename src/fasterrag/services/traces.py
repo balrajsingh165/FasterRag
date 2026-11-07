@@ -99,6 +99,7 @@ class TraceStore:
         self.retention_days = retention_days
         self.exporters = list(exporters)
         self._writes = 0
+        self._unexported = 0
         self._exports: set[asyncio.Task[bool]] = set()
 
     def _path(self, trace_id: str) -> Path:
@@ -144,8 +145,18 @@ class TraceStore:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No loop: a CLI one-shot rather than the server. Exporting would need one
-            # started and torn down per trace, which costs more than the record is worth.
+            self._unexported += 1
+            report = _logger.warning if self._unexported == 1 else _logger.debug
+            report(
+                "no running event loop, so this trace reached the local store only and "
+                "every configured trace exporter received nothing; a CLI one-shot would "
+                "have to start and tear a loop down per trace",
+                extra={
+                    "trace_id": trace.trace_id,
+                    "unexported": self._unexported,
+                    "exporters": [type(exporter).__name__ for exporter in self.exporters],
+                },
+            )
             return
 
         for exporter in self.exporters:
@@ -210,13 +221,27 @@ class TraceStore:
 
         cutoff = time.time() - self.retention_days * 86400
         removed = 0
+        failures: list[str] = []
         for path in self.root.glob(f"*{_SUFFIX}"):
             try:
                 if path.stat().st_mtime < cutoff:
                     path.unlink(missing_ok=True)
                     removed += 1
-            except OSError:
-                continue
+            except OSError as exc:
+                failures.append(f"{path.name}: {exc}")
+
+        if failures:
+            _logger.warning(
+                "trace retention could not delete every expired trace; those files stay on "
+                "disk and the retention window is not being enforced over them",
+                extra={
+                    "failed": len(failures),
+                    "removed": removed,
+                    "retention_days": self.retention_days,
+                    "trace_root": str(self.root),
+                    "first_failure": failures[0],
+                },
+            )
 
         if removed:
             _logger.info(

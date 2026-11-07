@@ -374,8 +374,17 @@ async def retire(
         try:
             built = datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(tzinfo=UTC).timestamp()
         except ValueError:
-            # A name that does not carry a parseable stamp was not created by this code,
-            # and guessing its age in order to delete it would be reckless.
+            _logger.warning(
+                "a collection carrying the reindex prefix has no parseable build stamp, so "
+                "it is left in place rather than deleted on a guess at its age; the "
+                "rollback window is not being enforced over it",
+                extra={
+                    "alias": alias,
+                    "collection": info.name,
+                    "stamp": stamp,
+                    "expected_format": "%Y%m%d%H%M%S",
+                },
+            )
             continue
 
         if built < cutoff and await adapter.drop_collection(info.name):

@@ -30,7 +30,11 @@ The numbers compared here are not ledger-citable, and comparing them does not ma
 documented machine. A large night-over-night move is a signal to go and measure on real
 hardware, which is the whole of what this claims to be.
 
-Exit codes: ``0`` within tolerance, ``1`` regressed, ``2`` not comparable.
+Exit codes: ``0`` within tolerance, ``1`` regressed, ``2`` not comparable. ``2`` fails the
+nightly job as of 2026-11-08: it was mapped to a warning there while ``ci.yml`` exited 1 on
+the same verdict, and a benchmark that had run nothing since August reported success 95
+times out of 95 behind that warning (TASK-0314). The script never collapsed the case; its
+caller did.
 """
 
 from __future__ import annotations
@@ -220,8 +224,8 @@ def _number(value: Any) -> float | None:
 def load_document(path: Path) -> tuple[dict[str, Any] | None, str]:
     """Read a ``fasterrag benchmark --json`` document, or say why it cannot be read.
 
-    The nightly benchmark step runs under ``|| true``, so an empty or truncated file is an
-    ordinary outcome that has to be reported rather than crash the comparison.
+    The benchmark step carries ``continue-on-error``, so an empty or truncated file still
+    arrives here and has to be reported rather than crash the comparison.
     """
     if not path.is_file():
         return None, f"{path} does not exist, so there is nothing to compare against"

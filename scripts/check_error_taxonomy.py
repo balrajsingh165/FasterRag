@@ -93,18 +93,13 @@ BUILTIN_EXCEPTIONS: Final[frozenset[str]] = frozenset(
     and issubclass(getattr(builtins, name), BaseException)
 )
 
-# CRITICAL: a ratchet over violations already on `main`, not a permission to keep them.
-# Each entry is a (rule, path) that this gate measured on 2026-11-07 and that the agent who
-# built it was not authorised to edit; TASK-0317 clears them. A count here means "this many
-# are known", so the gate still fails the moment a file grows one more. Never raise a number
-# to make a new violation green — fix the violation, and lower the number when one goes.
-RATCHET: Final[dict[str, int]] = {
-    "swallow:src/fasterrag/cli/commands/pipeline.py": 1,
-    "swallow:src/fasterrag/services/reindex.py": 1,
-    "swallow:src/fasterrag/services/traces.py": 2,
-    "unjustified-ignore:scripts/check_package.py": 1,
-    "unjustified-ignore:src/fasterrag/cli/commands/pipeline.py": 1,
-}
+# CRITICAL: empty since 2026-11-08, and an empty ratchet is the only state that makes this
+# gate mean what it says. The six entries it shipped with on 2026-11-07 were violations the
+# gate's author was not authorised to edit; TASK-0317 fixed all six in `src/` and `scripts/`
+# rather than annotating them. An entry here means "this many are known", so the gate still
+# fails the moment a file grows one more. Never raise a number to make a new violation green
+# — fix the violation, and lower the number when one goes.
+RATCHET: Final[dict[str, int]] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _report(sys.stderr.write, "the typed error taxonomy is broken:", excess)
     _report(sys.stdout.write, "warnings (judge these, they do not fail the build):", warnings)
-    _report(sys.stdout.write, "known and ratcheted (TASK-0317 clears these):", known)
+    _report(sys.stdout.write, "known and ratcheted (a backlog, not a permission):", known)
 
     if excess:
         sys.stderr.write(

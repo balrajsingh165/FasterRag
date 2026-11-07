@@ -1,9 +1,13 @@
+import logging
 from typing import Any
+
+import pytest
 
 from fasterrag.adapters.llm.base import Completion
 from fasterrag.config.schema import Settings
 from fasterrag.core.chunking.enrichment import (
     ENRICHMENT_FAILED_FLAG,
+    P2_SYSTEM_PROMPT,
     P2_TEMPLATE_VERSION,
     build_enrichment_prompt,
     enrich_chunks,
@@ -167,3 +171,53 @@ async def test_a_quoted_preamble_is_stripped_in_either_nesting() -> None:
     for reply in ('Context: "the body."', '"Context: the body."', "'the body.'"):
         result = await enrich_chunks([chunk()], DOCUMENT, StubLLM(reply=reply), settings())  # type: ignore[arg-type]
         assert result[0].metadata["context_prefix"] == "the body."
+
+
+class CrashingLLM:
+    """Fails with something outside the taxonomy, as a driver bug or a bad SDK does."""
+
+    async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
+        """Raise an error the enrichment path is not written to absorb."""
+        raise RuntimeError("the adapter is broken")
+
+
+def test_the_shipped_system_prompt_asks_for_the_documented_budget() -> None:
+    """Every deployment that configures nothing gets this prompt, so the number in it ships."""
+    assert "about 75 tokens" in P2_SYSTEM_PROMPT
+    assert system_prompt(75) == P2_SYSTEM_PROMPT
+
+
+def test_the_document_is_truncated_at_exactly_the_documented_ceiling() -> None:
+    """One character either way is invisible; the ceiling is what keeps the cached prefix cheap."""
+    prompt = build_enrichment_prompt("x" * 200_000, "a chunk")
+
+    assert prompt.count("x") == 60_000
+
+
+async def test_a_failure_outside_the_taxonomy_is_raised_rather_than_prefixed() -> None:
+    """Collecting it instead puts the exception's own text in front of the chunk, silently."""
+    with pytest.raises(RuntimeError):
+        await enrich_chunks([chunk()], DOCUMENT, CrashingLLM(), settings())  # type: ignore[arg-type]
+
+
+async def test_the_enrichment_log_counts_the_chunks_that_went_unenriched(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """That count is the only signal that a document was indexed without its context."""
+    with caplog.at_level(logging.INFO, logger="fasterrag.core.chunking.enrichment"):
+        await enrich_chunks([chunk(0), chunk(1)], DOCUMENT, StubLLM(), settings())  # type: ignore[arg-type]
+
+    reports = [record for record in caplog.records if "enriched" in str(record.msg)]
+    assert [report.__dict__["failed"] for report in reports] == [0]
+    assert [report.__dict__["chunks"] for report in reports] == [2]
+
+
+async def test_the_enrichment_log_counts_a_chunk_that_went_unenriched(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Without the count a document that lost every prefix logs exactly like a clean one."""
+    with caplog.at_level(logging.INFO, logger="fasterrag.core.chunking.enrichment"):
+        await enrich_chunks([chunk(0), chunk(1)], DOCUMENT, FailingLLM(), settings())  # type: ignore[arg-type]
+
+    reports = [record for record in caplog.records if "enriched" in str(record.msg)]
+    assert [report.__dict__["failed"] for report in reports] == [2]

@@ -47,7 +47,7 @@ from fasterrag.services.traces import create_trace_store
 
 __all__ = ["run_index", "run_ingest", "run_query"]
 
-_DISTANCES: frozenset[str] = frozenset({"cosine", "dot", "euclid"})
+_DISTANCES: Mapping[str, Distance] = {"cosine": "cosine", "dot": "dot", "euclid": "euclid"}
 
 _WATCH_POLL_SECONDS = 1.0
 
@@ -129,7 +129,11 @@ async def _stop_following(follower: asyncio.Task[None], job_id: str, console: Co
     try:
         await follower
     except asyncio.CancelledError:
-        return
+        _logger.debug(
+            "the --watch progress follower ended on the cancellation this command sent it, "
+            "which is how it is meant to stop; the job's own outcome is unaffected",
+            extra={"job_id": job_id},
+        )
     except Exception as exc:
         _logger.warning(
             "the --watch progress follower failed; the job itself is unaffected",
@@ -441,7 +445,7 @@ def _distance_for(
     if args.distance not in _DISTANCES:
         console.error(f"--distance must be one of {', '.join(sorted(_DISTANCES))}")
         return None
-    return args.distance  # type: ignore[no-any-return]
+    return _DISTANCES[args.distance]
 
 
 async def _dimensions_of(embedder: EmbeddingAdapter) -> int | None:

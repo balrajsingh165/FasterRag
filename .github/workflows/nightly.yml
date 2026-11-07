@@ -17,6 +17,14 @@
 # and compares the two with scripts/compare_nightly.py, which reports three outcomes and
 # never collapses "nothing to compare against" into a pass.
 #
+# The script never did collapse it; this workflow did. Until 2026-11-08 the not-comparable
+# verdict was mapped to `::warning::` here while ci.yml's eval-gate exited 1 on the same
+# verdict — one concept, two callers, opposite consequences — and that asymmetry is what let
+# a benchmark that had measured nothing since at least 2026-08-16 report success 95 times
+# out of 95 (TASK-0314). Both callers now fail on it. The first night after this change is
+# expected to be red: the baseline it will find is the previous night's empty document, and
+# the comparison is supposed to say so rather than wave it through.
+#
 # It does NOT file a bug. docs/todo.md is the only task file in this repository, and a job
 # that opened an issue — or appended to the ledger — every night would be a second task list
 # written by a machine from numbers the header above says are not citable. A regression here
@@ -57,6 +65,32 @@ permissions:
 jobs:
   measure:
     runs-on: ubuntu-latest
+    # TASK-0314: this job declared no service at all, so every benchmark it ever ran died on
+    # an unreachable Qdrant while the job reported success 95 times out of 95. The block is
+    # copied verbatim from ci.yml's eval-gate rather than invented, so the two jobs address
+    # the same server on the same ports and a number taken here means what one taken there
+    # means.
+    #
+    # Honestly stated: with `--suite ingest` below, nothing in this job reaches it today —
+    # that suite parses and chunks, and ci.yml's `models` job runs the same eval marker
+    # against no service at all. It is declared because the suite this job is FOR is the
+    # query suite, which cannot run without both a backend and an LLM credential; the
+    # backend half is now here, and a job with no backend at all is how 83 days of nothing
+    # went unnoticed. If the credential half is never supplied, delete this block and say
+    # so, rather than leaving a service nobody can explain.
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.18.1
+        ports:
+          - 6333:6333
+          - 6334:6334
+    env:
+      # Config validation fails fast on any env var a config key references, so these have
+      # to be present before the CLI can load a config at all. Placeholders: nothing in this
+      # job calls a paid provider, and the suite that would is not run (see below).
+      FASTERRAG_API_KEY: ci-placeholder
+      QDRANT_API_KEY: ci-placeholder
+      OPENAI_API_KEY: ci-placeholder
     steps:
       - uses: actions/checkout@v4
 
@@ -70,23 +104,53 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,rerank,huggingface]"
 
+      # The image declares no HEALTHCHECK, so GitHub cannot wait on the service and the
+      # first request would race its start-up. Copied from ci.yml's eval-gate for the same
+      # reason it exists there.
+      - name: Wait for Qdrant
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -sf http://localhost:6333/readyz > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Qdrant did not become ready within 120 seconds"
+          exit 1
+
       - name: Retrieval eval harness
         run: pytest -m eval -q
 
-      # Continues past a failure so the artifact still uploads. A benchmark run that fails
-      # halfway is itself a result worth keeping, and losing it means re-running to find out
-      # what happened.
+      # `continue-on-error` stays, for the reason it was added: a run that fails halfway is
+      # still a result worth uploading, and losing it means re-running to find out what
+      # happened. The `|| true` that followed the command is GONE. Two suppressions on one
+      # step is how a benchmark that could not run for 83 days read as a success: the first
+      # keeps the job moving, the second hid the failure from the step as well, so nothing
+      # anywhere was marked red. One of them was always one too many (TASK-0314).
+      #
+      # `--suite ingest` rather than the default `all`: the query suite answers a question
+      # through the configured LLM, which config.yaml sets to openai/gpt-4o-mini against a
+      # key this runner holds only as a placeholder, and `all` runs it FIRST and returns on
+      # its failure — so `all` cannot reach the ingest suite and emits no document at all.
+      # The ingest suite parses and chunks a committed corpus, needs no credential, and is
+      # reproducible night over night. The query suite therefore stays unmeasured here: that
+      # is a gap, not a result, and it is not what this job may claim to have measured.
+      #
+      # `chunking.token_counter=estimate` is pinned for the reason ci.yml pins it: `auto`
+      # uses the embedding model's tokenizer when the machine has it cached and estimates
+      # when it does not, so the recorded token count — and with it the `dataset` field the
+      # comparison refuses to compare across — would depend on the runner's cache state.
       - name: Benchmark suite
         if: ${{ !cancelled() }}
         continue-on-error: true
-        env:
-          FASTERRAG_API_KEY: ci-placeholder
-          QDRANT_API_KEY: ci-placeholder
-          OPENAI_API_KEY: ci-placeholder
         run: |
           mkdir -p artifacts
           fasterrag config init --path artifacts/config.yaml
-          fasterrag --config artifacts/config.yaml benchmark --json > artifacts/benchmark.json || true
+          fasterrag --config artifacts/config.yaml \
+            --set vector_db.mode=external \
+            --set chunking.token_counter=estimate \
+            --json benchmark --suite ingest \
+            --sources tests/eval/datasets/handbook/corpus > artifacts/benchmark.json
 
       # The newest completed run of this workflow other than this one. Empty on the very
       # first run, which the comparison reports as not-comparable rather than as a pass.
@@ -117,6 +181,10 @@ jobs:
           run-id: ${{ steps.previous.outputs.run-id }}
           github-token: ${{ github.token }}
 
+      # Expect a red night when GitHub rolls the runner image: the comparison refuses a
+      # baseline taken on a different machine, and its fingerprint carries the kernel
+      # string. That is the rule working — a number from another machine measures the
+      # machine — and the answer is to re-read the artifact, not to relax the verdict.
       - name: Compare against the previous night
         if: ${{ !cancelled() }}
         run: |
@@ -133,7 +201,8 @@ jobs:
             0) ;;
             1) echo "::error::a tracked benchmark metric regressed beyond the tolerance against the previous nightly run; investigate on isolated hardware before trusting it"
                exit 1 ;;
-            2) echo "::warning::tonight's run could not be compared with the previous one, so no regression was ruled out" ;;
+            2) echo "::error::tonight's run could not be compared with the previous one, so no regression was ruled out; the benchmark document above says why — an empty or unreadable one means the benchmark did not run, which is a failure of this job and not a note on it"
+               exit 1 ;;
             *) echo "::error::scripts/compare_nightly.py exited ${verdict}, which is not a verdict it defines"
                exit 1 ;;
           esac
@@ -151,7 +220,18 @@ jobs:
     # A mutant costs one run of its target's suite. The budget below bounds the count, but a
     # pathological mutant can still hang, so the job carries a ceiling of its own on top of
     # the per-mutant --timeout.
-    timeout-minutes: 90
+    #
+    # TASK-0316: this job has never once succeeded. Both scheduled runs ended
+    # `##[error]The runner has received a shutdown signal` with exit 143, at 2m31s and
+    # 4m13s into the step, nowhere near the 90-minute ceiling that stood here — so the
+    # ceiling was never what killed it and raising or keeping it answers nothing. 45 is the
+    # ceiling a bounded run needs: at --budget 10 over six targets the run is 66 pytest
+    # invocations, and a job that overruns that has hung rather than slowed. What the
+    # ceiling CANNOT bound is memory, which is the leading hypothesis for the SIGTERM — a
+    # mutated comparison or arithmetic operator can turn a bounded loop into an unbounded
+    # one, and --timeout bounds a mutant's seconds, not its resident set. The sampler in the
+    # step below is there to say which resource it was, since the log said nothing at all.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -171,12 +251,47 @@ jobs:
       # takes a bounded time and two nights on the same code report the same mutants rather
       # than a different random slice. Raise it, or drop it for an exhaustive run, when
       # somebody is actually working through the survivor list.
+      #
+      # 40 became 10 for TASK-0316: 240 mutants is 246 pytest invocations, and a job that
+      # has never finished should first be made to finish once. The sample is seeded, so a
+      # different budget is a different ten mutants, not the first ten of the forty — the
+      # survivor list this produces is a subset in size, not a prefix.
+      #
+      # The scaffolding around the run exists because the two failed runs carried NO script
+      # output whatsoever before the kill, which is diagnosable only if something is
+      # printing. PYTHONUNBUFFERED stops Python block-buffering a non-tty stdout; note that
+      # it is necessary and not sufficient, because scripts/mutation_run.py writes its
+      # report only after every mutant has run, so there is nothing to flush until the end —
+      # the per-mutant progress line that would name the mutant in flight at the kill has to
+      # be added to the script itself, and that change is reported rather than made here.
+      # The sampler is what the workflow side CAN do: it streams free memory, free swap,
+      # free disk and the largest resident process into the live log every ten seconds, so
+      # the next SIGTERM leaves a record of which resource was gone when it arrived. It is
+      # killed on exit, or the step would never close its stdout. /usr/bin/time -v prints
+      # peak RSS for a run that completes, which is the measurement TASK-0316 asks for.
       - name: Mutate the targeted modules
+        env:
+          PYTHONUNBUFFERED: "1"
         run: |
           mkdir -p artifacts
+          ( while true; do
+              printf 'resources t=%ss mem_avail_kb=%s swap_free_kb=%s disk_avail_kb=%s largest=%s\n' \
+                "${SECONDS}" \
+                "$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)" \
+                "$(awk '/^SwapFree:/{print $2}' /proc/meminfo)" \
+                "$(df --output=avail -k / | tail -n 1 | tr -d ' ')" \
+                "$(ps -eo rss=,comm= --sort=-rss | head -n 1 | tr -s ' ')"
+              sleep 10
+            done ) &
+          sampler=$!
+          trap 'kill "${sampler}" 2>/dev/null || true' EXIT
+          runner=(python)
+          if [ -x /usr/bin/time ]; then
+            runner=(/usr/bin/time -v python)
+          fi
           set +e
-          python scripts/mutation_run.py \
-            --budget 40 \
+          "${runner[@]}" scripts/mutation_run.py \
+            --budget 10 \
             --timeout 300 \
             --json-out artifacts/mutation.json \
             --summary "$GITHUB_STEP_SUMMARY"

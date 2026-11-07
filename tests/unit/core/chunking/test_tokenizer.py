@@ -276,3 +276,26 @@ def test_the_overlap_is_measured_in_tokens_too() -> None:
 
     assert overlaps
     assert max(overlaps) <= 16
+
+
+def test_the_tokenizer_cache_is_bounded_and_evicts_the_oldest_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unbounded cache pins one whole vocabulary per model seen, in every worker process."""
+    loads: list[str] = []
+
+    class Recording:
+        @staticmethod
+        def from_pretrained(model: str, **_kwargs: Any) -> StubTokenizer:
+            loads.append(model)
+            return StubTokenizer()
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "transformers", type("m", (), {"AutoTokenizer": Recording})
+    )
+
+    for index in range(5):
+        tokenizer_module.load_tokenizer(f"some/model{index}")
+    tokenizer_module.load_tokenizer("some/model0")
+
+    assert loads == [f"some/model{index}" for index in range(5)] + ["some/model0"]

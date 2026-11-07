@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pytest
 from check_error_taxonomy import (
     BROAD_EXCEPT,
+    ERROR_RULES,
     RATCHET,
     REPOSITORY_ROOT,
     SWALLOW,
@@ -434,10 +436,15 @@ def test_a_tree_with_no_handler_at_all_fails(tmp_path: Path) -> None:
     assert "no 'except' handler" in findings[0].detail
 
 
-def test_the_ratchet_absorbs_a_known_violation_but_not_a_second_one() -> None:
+def test_the_ratchet_absorbs_a_known_violation_but_not_a_second_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A ratcheted file may not grow; the entry records a backlog, not a permission."""
-    known = Finding(SWALLOW, "src/fasterrag/services/traces.py", 146, "known")
-    extra = Finding(SWALLOW, "src/fasterrag/services/traces.py", 999, "new")
+    monkeypatch.setattr(
+        "check_error_taxonomy.RATCHET", {"swallow:src/fasterrag/services/legacy.py": 2}
+    )
+    known = Finding(SWALLOW, "src/fasterrag/services/legacy.py", 146, "known")
+    extra = Finding(SWALLOW, "src/fasterrag/services/legacy.py", 999, "new")
 
     assert over_ratchet([known, known]) == []
     assert over_ratchet([known, known, extra]) == [extra]
@@ -463,6 +470,14 @@ def test_every_ratchet_entry_still_describes_the_real_tree() -> None:
         counted[finding.key] = counted.get(finding.key, 0) + 1
 
     assert {key: counted.get(key, 0) for key in RATCHET} == RATCHET
+
+
+def test_the_real_tree_carries_no_error_severity_finding_at_all() -> None:
+    """The assertion an empty ratchet needs: emptiness must mean fixed, not unmeasured."""
+    findings = check(REPOSITORY_ROOT)
+
+    assert [finding for finding in findings if finding.rule in ERROR_RULES] == []
+    assert over_ratchet(findings) == []
 
 
 def test_the_real_tree_is_scanned_rather_than_skipped() -> None:

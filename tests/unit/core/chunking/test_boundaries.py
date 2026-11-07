@@ -27,10 +27,17 @@ from fasterrag.core.chunking import (
     SemanticChunker,
     create_chunker,
 )
-from fasterrag.core.chunking.models import EstimatingTokenCounter, TextChunk, assemble, hard_split
+from fasterrag.core.chunking.models import (
+    EstimatingTokenCounter,
+    TextChunk,
+    assemble,
+    hard_split,
+    within_budget,
+)
 from fasterrag.core.chunking.recursive import pack, split_span
 from fasterrag.core.chunking.semantic import _distance, _sentences, _threshold
 from fasterrag.core.parsing import parse_markdown, parse_plaintext
+from fasterrag.core.parsing.models import ParsedDocument
 
 WORDS = "alpha beta gamma delta"
 DENSE_BODY = "検索拡張生成" * 200
@@ -233,6 +240,8 @@ def test_the_distance_ignores_magnitude_and_separates_opposites() -> None:
     assert _distance([1.0, 0.0], [0.0, 1.0]) == pytest.approx(1.0)
     assert _distance([1.0, 0.0], [-1.0, 0.0]) == pytest.approx(2.0)
     assert _distance([0.0, 0.0], [1.0, 0.0]) == 1.0
+    assert _distance([1.0, 0.0], [3.0, 0.0]) == pytest.approx(0.0)
+    assert _distance([3.0, 4.0], [0.0, 2.0]) == pytest.approx(0.2)
 
 
 def test_the_semantic_boundary_lands_on_the_sentence_the_distance_spikes_at() -> None:
@@ -365,3 +374,186 @@ def test_a_strategy_that_emits_a_blank_segment_keeps_its_tiling() -> None:
     )
 
     assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 6), (6, 15), (15, 23), (23, 29)]
+
+
+class GlyphCounter:
+    """Charges two tokens per character, as a tokenizer does on an unfamiliar script."""
+
+    def count(self, text: str) -> int:
+        return 2 * len(text.strip())
+
+    @property
+    def chars_per_token(self) -> int:
+        return 4
+
+
+def test_the_budget_pass_stops_halving_on_the_minimum_limit() -> None:
+    """The floor is the only thing between a text no size satisfies and endless halving.
+
+    Forty characters that count a token each against a budget of one: the pass halves
+    40 to 20, then 20 to the floor, and must stop there rather than recurse on 16.
+    """
+    text = "a" * 40
+
+    segments = within_budget(
+        text, [(0, 40)], counter=DenseCounter(), budget=1, limit=40, split=split_span
+    )
+
+    assert segments == [(0, 16), (16, 20), (20, 36), (36, 40)]
+
+
+def test_a_reach_back_the_budget_cannot_afford_is_halved_away_entirely() -> None:
+    """Stopping one character short leaves an overlap the token budget has no room for."""
+    chunks = assemble(
+        "alphabeta",
+        [(0, 5), (5, 9)],
+        overlap_chars=4,
+        overlap_tokens=1,
+        strategy="fixed",
+        counter=GlyphCounter(),
+    )
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 5), (5, 9)]
+    assert [chunk.text for chunk in chunks] == ["alpha", "beta"]
+
+
+class UnitCounter:
+    """Counts one token per character, so a configured size is a character count."""
+
+    def count(self, text: str) -> int:
+        return len(text.strip())
+
+    @property
+    def chars_per_token(self) -> int:
+        return 1
+
+
+def test_a_document_without_blocks_is_chunked_from_its_first_character() -> None:
+    """The fallback path takes its own start offset, and losing it shifts every chunk id.
+
+    A parser that recovers no structure is the only way into this branch, so it needs a
+    document built with no blocks rather than a plaintext one, which always has them.
+    """
+    document = ParsedDocument(
+        text="alpha beta gamma delta", blocks=(), mime_type="text/plain", parser="stub"
+    )
+
+    chunks = LayoutChunker().split(document)
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 22)]
+    assert chunks[0].text == "alpha beta gamma delta"
+
+
+def test_layout_merges_a_block_that_lands_exactly_on_the_chunk_size() -> None:
+    """Refusing the exact fit starts a new chunk for a block that was always going to fit."""
+    document = parse_markdown(b"## S\n\naaaa\n\nbbbb\n\ncccc\n")
+
+    chunks = LayoutChunker(chunk_size=9, overlap=0, counter=UnitCounter()).split(document)
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 9), (9, 15), (15, 19)]
+
+
+def test_the_layout_strategy_ships_the_same_window_and_overlap_as_the_others() -> None:
+    """A deployment that configures nothing gets 768 tokens with 64 of overlap here too.
+
+    Both sections fit the default window, so the only boundary the defaults decide is
+    the second chunk's 256-character reach-back into the first.
+    """
+    body = " ".join(["constitutional"] * 30)
+    source = f"## Section A\n\n{body}\n\n## Section B\n\n{body}\n"
+
+    chunks = LayoutChunker().split(parse_markdown(source.encode()))
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 462), (206, 922)]
+
+
+def test_a_lookup_that_is_not_callable_is_ignored_rather_than_called() -> None:
+    """Both lookups arrive as plain objects, so the guard is all that stops a TypeError."""
+    chunks = assemble(
+        WORDS,
+        [(0, 11), (11, 22)],
+        overlap_chars=0,
+        strategy="fixed",
+        counter=EstimatingTokenCounter(),
+        page_at=7,
+        section_at="Section A",
+    )
+
+    assert [chunk.page for chunk in chunks] == [None, None]
+    assert [chunk.section for chunk in chunks] == [None, None]
+
+
+class CountingEmbedder(ShiftingEmbedder):
+    """Shifts like its parent, and records whether it was consulted at all."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def embed(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
+        self.calls += 1
+        return super().embed(texts)
+
+
+def test_three_sentences_are_grouped_by_similarity_rather_than_packed() -> None:
+    """Three is the shipped floor, and below it the embedder is never asked at all.
+
+    Raising the floor turns a three-sentence document into one packed chunk with no
+    topic boundary in it, and no failure anywhere to say the model was skipped.
+    """
+    embedder = CountingEmbedder()
+    document = parse_plaintext(b"First one. Second one. Third one.")
+
+    chunks = SemanticChunker(
+        embedder, chunk_size=200, overlap=0, counter=EstimatingTokenCounter()
+    ).split(document)
+
+    assert embedder.calls == 1
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 23), (23, 33)]
+
+
+class LateShiftingEmbedder:
+    """Reports a topic change at the final sentence, where the loop's last index decides."""
+
+    def embed(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
+        return [[1.0, 0.0]] * (len(texts) - 1) + [[0.0, 1.0]]
+
+
+class TwoTileEmbedder:
+    """Shifts at the third sentence, for documents that never reach three."""
+
+    def embed(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
+        return [[1.0, 0.0] if index < 2 else [0.0, 1.0] for index in range(len(texts))]
+
+
+def test_a_shift_at_the_last_sentence_still_opens_a_chunk() -> None:
+    """The final tile is the one index the grouping loop can silently drop.
+
+    Dropping it merges a changed topic back into the chunk before it; starting the
+    loop one tile early instead restates the first tile and breaks the tiling.
+    """
+    document = parse_plaintext(b"First one. Second one. Third one. Fourth one.")
+
+    chunks = SemanticChunker(
+        LateShiftingEmbedder(), chunk_size=200, overlap=0, counter=EstimatingTokenCounter()
+    ).split(document)
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 34), (34, 45)]
+
+
+def test_a_document_below_the_sentence_floor_is_packed_from_its_own_tiles() -> None:
+    """Packing the whole span instead loses the one sentence boundary the document has."""
+    document = parse_plaintext(b"AAAAAAAAAAAAAAAAAAAA. B.")
+
+    chunks = SemanticChunker(
+        TwoTileEmbedder(), chunk_size=4, overlap=0, counter=EstimatingTokenCounter()
+    ).split(document)
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 16), (16, 22), (22, 24)]
+
+
+def test_a_chunk_carries_no_attribute_dictionary() -> None:
+    """Slots are what keep a chunk to its declared fields as it crosses a pool boundary."""
+    chunk = TextChunk(text="a", start=0, end=1, chunk_index=0, token_count=1, strategy="fixed")
+
+    assert not hasattr(chunk, "__dict__")
+    assert hasattr(TextChunk, "__slots__")

@@ -168,8 +168,11 @@ def test_a_model_that_cannot_pool_is_refused() -> None:
 
 
 def test_a_document_with_no_tokens_is_refused() -> None:
-    with pytest.raises(EmbedError):
+    """Retrying a document the tokenizer returned nothing for would spin on the same answer."""
+    with pytest.raises(EmbedError) as caught:
         pool_spans(FakeModel(), "   ", [(0, 3)])
+
+    assert caught.value.retryable is False
 
 
 ONE_HOT_WIDTH = 8
@@ -347,3 +350,140 @@ def test_a_token_takes_its_vector_from_the_window_it_sits_deepest_inside() -> No
     assert vectors[1] == pytest.approx(from_window(2, 2))
     assert vectors[2] == pytest.approx(from_window(2, 9))
     assert vectors[3] == pytest.approx(from_window(3, 2))
+
+
+TIED_TEXT = " ".join(f"t{index:02d}" for index in range(8))
+
+
+def test_a_centrality_tie_is_kept_by_the_window_that_already_holds_the_token() -> None:
+    """A later window that ties is not more contextual, and the last one is the shortest.
+
+    Windows (0, 4), (3, 7) and (6, 8) tie on edge distance at tokens 3 and 6. Conceding
+    the tie hands token 6 to a two-token window instead of the four-token one holding it.
+    """
+    model = PositionModel(max_seq_length=6)
+
+    vectors = pool_spans(model, TIED_TEXT, [(12, 15), (24, 27)])
+
+    assert model.network.calls == 3
+    assert vectors[0] == pytest.approx(from_window(1, 4))
+    assert vectors[1] == pytest.approx(from_window(2, 4))
+
+
+class ContextlessModel:
+    """A stand-in that declares no context length, as a bare transformer module does not."""
+
+    def __init__(self) -> None:
+        self.tokenizer = FakeTokenizer()
+        self.network = FakeNetwork()
+
+    def __getitem__(self, index: int) -> Any:
+        """Return the transformer module, as sentence-transformers exposes it."""
+        return type("m", (), {"auto_model": self.network})()
+
+
+def test_a_model_that_declares_no_context_length_is_windowed_at_the_shipped_default() -> None:
+    """Guessing high feeds the model more tokens than it can take and the pass fails.
+
+    The default is 512 positions, of which the two sentinels take one each, so the
+    widest tensor the model is ever handed is exactly 512 wide.
+    """
+    model = ContextlessModel()
+    text = " ".join(f"w{index:04d}" for index in range(600))
+
+    pool_spans(model, text, [(0, len(text))])
+
+    assert len(model.network.windows) > 1
+    assert max(model.network.windows) == 512
+
+
+class SentinelBoundModel(OneHotModel):
+    """A one-hot stand-in whose whole context is spent on the two sentinels."""
+
+    def __init__(self) -> None:
+        """Build the model with a context length equal to the sentinel budget."""
+        super().__init__()
+        self.max_seq_length = 2
+
+
+def test_a_context_spent_entirely_on_sentinels_still_leaves_one_token_per_window() -> None:
+    """Without the floor the window is empty, no state is ever written and the vector is zero."""
+    vectors = pool_spans(SentinelBoundModel(), "alpha beta", [(0, 10)])
+
+    assert vectors[0] == pytest.approx(one_hot(1, 2))
+
+
+class ModuleListModel(OneHotModel):
+    """A one-hot stand-in whose modules differ, as a real sentence-transformers model's do."""
+
+    def __getitem__(self, index: int) -> Any:
+        """Return the transformer at module 0; everything after it is pooling."""
+        if index == 0:
+            return type("m", (), {"auto_model": self.network})()
+        return type("p", (), {"word_embedding_dimension": ONE_HOT_WIDTH})()
+
+
+def test_the_transformer_is_read_from_the_first_module_and_not_a_later_one() -> None:
+    """Module 0 is the transformer; the modules behind it pool and normalize its output.
+
+    Both other fakes answer every index with the transformer, so reading the wrong
+    module looks identical to reading the right one.
+    """
+    model = ModuleListModel()
+
+    assert supports_pooling(model) is True
+    assert pool_spans(model, TEXT, [(0, 5)])[0] == pytest.approx(one_hot(1))
+
+
+class TokenizerOnlyModel:
+    """Carries a tokenizer and no modules at all, as a hosted-provider wrapper does."""
+
+    tokenizer = FakeTokenizer()
+
+
+def test_a_model_whose_modules_cannot_be_indexed_is_refused() -> None:
+    """Answering yes here fails deep inside the pass instead of falling back to embedding."""
+    assert supports_pooling(TokenizerOnlyModel()) is False
+
+
+class StrictTokenizer(FakeTokenizer):
+    """Honours both flags: wraps the ids in sentinels, and withholds offsets unless asked."""
+
+    def __call__(
+        self, text: str, add_special_tokens: bool = True, return_offsets_mapping: bool = False
+    ) -> dict[str, Any]:
+        """Return the word tokens, wrapped and annotated only as the flags allow."""
+        base = super().__call__(text, False, True)
+        ids: list[int] = list(base["input_ids"])
+        offsets: list[tuple[int, int]] = list(base["offset_mapping"])
+        if add_special_tokens:
+            ids = [self.cls_token_id, *ids, self.sep_token_id]
+            offsets = [(0, 0), *offsets, (len(text), len(text))]
+        payload: dict[str, Any] = {"input_ids": ids}
+        if return_offsets_mapping:
+            payload["offset_mapping"] = offsets
+        return payload
+
+
+class StrictModel(OneHotModel):
+    """A one-hot stand-in whose tokenizer obeys the flags pooling passes it."""
+
+    def __init__(self) -> None:
+        """Build the model with the flag-honouring tokenizer and a short context."""
+        super().__init__()
+        self.tokenizer: Any = StrictTokenizer()
+        self.max_seq_length = 10
+
+
+def test_the_document_is_tokenized_without_the_models_own_sentinels() -> None:
+    """Pooling wraps every window itself, so a second pair eats two slots of each one.
+
+    Eight tokens fill one window of a ten-position context exactly; asking the
+    tokenizer for sentinels too pushes the document into a second, shorter window.
+    """
+    model = StrictModel()
+    text = " ".join(f"t{index:02d}" for index in range(8))
+
+    pool_spans(model, text, [(0, 3)])
+
+    assert model.network.windows == [10]

@@ -13,6 +13,7 @@ from fasterrag.adapters.vectordb.base import Point
 from fasterrag.config.schema import Settings
 from fasterrag.core.retrieval.bm25 import encode_document
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.services import archive_import
 from fasterrag.services.archive import (
     CHECKSUMS_NAME,
     CHUNKS_NAME,
@@ -25,6 +26,8 @@ from fasterrag.services.archive import (
     export_archive,
 )
 from fasterrag.services.archive_import import (
+    MAXIMUM_MEMBER_BYTES,
+    MAXIMUM_TOTAL_BYTES,
     VerificationError,
     import_archive,
     open_archive,
@@ -194,6 +197,7 @@ def test_a_vector_copy_needs_vectors(tmp_path: Path) -> None:
         reader.require_vector_copy_compatible(model="m", model_version="1", dimensions=2)
 
     assert caught.value.code is ErrorCode.CONFLICT
+    assert caught.value.retryable is False
     assert "carries no vectors" in caught.value.detail
 
 
@@ -223,6 +227,7 @@ def test_every_mismatch_is_named_at_once(tmp_path: Path) -> None:
         )
 
     detail = caught.value.detail
+    assert caught.value.retryable is False
     assert "model" in detail
     assert "model_version" in detail
     assert "dimensions" in detail
@@ -234,6 +239,7 @@ class RecordingAdapter:
     def __init__(self, *, existing: list[str] | None = None, fail_after: int | None = None) -> None:
         self.created: list[Any] = []
         self.points: list[Any] = []
+        self.batches: list[int] = []
         self.dropped: list[str] = []
         self.existing = existing or []
         self.fail_after = fail_after
@@ -253,6 +259,7 @@ class RecordingAdapter:
     async def upsert(self, points: list[Any]) -> Any:
         from fasterrag.adapters.vectordb.base import UpsertResult
 
+        self.batches.append(len(points))
         if self.fail_after is not None and len(self.points) >= self.fail_after:
             raise FasterRagError(
                 "the backend went away mid-import",
@@ -351,7 +358,7 @@ async def test_re_embedding_records_the_new_model(tmp_path: Path) -> None:
 
 
 async def test_re_embedding_without_a_router_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(FasterRagError, match="needs an embedding router"):
+    with pytest.raises(FasterRagError, match="needs an embedding router") as caught:
         await import_archive(
             Settings.model_validate({}),
             RecordingAdapter(),  # type: ignore[arg-type]
@@ -360,6 +367,9 @@ async def test_re_embedding_without_a_router_is_refused(tmp_path: Path) -> None:
             reembed=True,
             lock_root=tmp_path,
         )
+
+    assert caught.value.code is ErrorCode.VALIDATION_FAILED
+    assert caught.value.retryable is False
 
 
 async def test_a_vector_copy_from_a_vectorless_archive_is_refused(tmp_path: Path) -> None:
@@ -588,6 +598,7 @@ async def test_a_failed_import_never_drops_a_collection_it_found(tmp_path: Path)
 
     assert adapter.dropped == []
     assert caught.value.code is ErrorCode.CONFLICT
+    assert caught.value.retryable is False
     assert "re-running the same import is safe" in caught.value.detail
 
 
@@ -677,6 +688,355 @@ def test_a_decompression_bomb_is_refused_before_it_exhausts_memory(
         open_archive(archive)
 
 
+def test_the_decompression_ceilings_are_the_ones_the_security_doc_names() -> None:
+    """`docs/security.md` §5.2 states 1 GiB per member, 4 GiB per archive, 256 KiB blocks.
+
+    Both bomb tests lower the ceilings before they run, so every one of them passes at
+    whatever the shipped values happen to be — including values that bound nothing.
+    """
+    assert MAXIMUM_MEMBER_BYTES == 1024**3
+    assert MAXIMUM_TOTAL_BYTES == 4 * 1024**3
+    assert archive_import._BLOCK_BYTES == 256 * 1024
+
+
+def test_a_member_of_exactly_the_member_ceiling_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ceiling is the largest member allowed, not the smallest one refused.
+
+    Refusing it turns a legal archive into a corrupt-archive error message, and the
+    refusal test above cannot tell the two readings apart.
+    """
+    archive = make(tmp_path)
+    with tarfile.open(archive, "r:gz") as tar:
+        widest = max(member.size for member in tar.getmembers())
+    monkeypatch.setattr("fasterrag.services.archive_import.MAXIMUM_MEMBER_BYTES", widest)
+
+    with open_archive(archive) as reader:
+        assert reader.collection == "docs"
+
+
+def test_an_archive_that_exactly_fills_the_byte_budget_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget is what an archive may spend, so spending all of it is not a breach."""
+    archive = make(tmp_path)
+    with tarfile.open(archive, "r:gz") as tar:
+        total = sum(member.size for member in tar.getmembers())
+    monkeypatch.setattr("fasterrag.services.archive_import.MAXIMUM_TOTAL_BYTES", total)
+
+    with open_archive(archive) as reader:
+        assert reader.collection == "docs"
+
+
+def test_a_manifest_that_omits_a_row_count_is_refused(tmp_path: Path) -> None:
+    """A count nobody declared is not a count that happens to match.
+
+    The sentinel is what stops an absent `counts.vectors` reading as zero and agreeing
+    with an archive whose vectors member was lost in transfer.
+    """
+    manifest = {
+        "format_version": DENSE_ONLY_FORMAT_VERSION,
+        "collection": {"name": "docs"},
+        "embedding": {"model": "m", "model_version": "1", "dimensions": 2},
+        "counts": {"documents": 1, "chunks": 1},
+        "includes_vectors": False,
+    }
+
+    with pytest.raises(VerificationError, match="declares -1 vectors but contains 0"):
+        open_archive(make(tmp_path, manifest=manifest))
+
+
+def test_an_archive_that_declares_no_width_is_read_at_the_width_of_its_own_rows(
+    tmp_path: Path,
+) -> None:
+    """Zero means undeclared, and the first row is then what the rest must agree with.
+
+    Only the refusal is pinned above, and a reader that treated an undeclared width as
+    one would still refuse — for the wrong reason, on every archive of this shape.
+    """
+    manifest = {
+        "format_version": DENSE_ONLY_FORMAT_VERSION,
+        "collection": {"name": "docs"},
+        "embedding": {"model": "m", "model_version": "1", "dimensions": 0},
+        "counts": {"documents": 1, "chunks": 2, "vectors": 2},
+        "includes_vectors": True,
+    }
+    archive = make(
+        tmp_path,
+        chunks=[
+            {"chunk_id": "c_1", "document_id": "d_1"},
+            {"chunk_id": "c_2", "document_id": "d_1"},
+        ],
+        vectors=[
+            {"chunk_id": "c_1", "vector": [0.1, 0.2]},
+            {"chunk_id": "c_2", "vector": [0.3, 0.4]},
+        ],
+        manifest=manifest,
+    )
+
+    with open_archive(archive) as reader:
+        assert reader.embedding["dimensions"] == 0
+
+
+async def test_a_chunk_row_with_no_span_is_restored_at_a_zero_span(tmp_path: Path) -> None:
+    """A span is a character offset into the parsed document, and text starts at zero.
+
+    Any other default cites the wrong characters on every chunk that lost its span, and
+    the citation it produces still looks perfectly well formed.
+    """
+    archive = make(
+        tmp_path,
+        chunks=[{"chunk_id": "c_1", "document_id": "d_1", "text": "one", "metadata": {}}],
+        vectors=[{"chunk_id": "c_1", "vector": [0.1, 0.2]}],
+    )
+    adapter = RecordingAdapter()
+
+    await import_archive(
+        copy_settings(),
+        adapter,  # type: ignore[arg-type]
+        open_archive(archive),
+        collection="restored",
+        lock_root=tmp_path,
+    )
+
+    assert adapter.points[0].payload["span"] == {"start": 0, "end": 0}
+
+
+async def test_an_archived_span_is_restored_rather_than_defaulted(tmp_path: Path) -> None:
+    """Guards the test above: a writer that hard-coded zeroes would satisfy it too."""
+    archive = make(
+        tmp_path,
+        chunks=[
+            {
+                "chunk_id": "c_1",
+                "document_id": "d_1",
+                "text": "one",
+                "span": {"start": 17, "end": 42},
+                "metadata": {},
+            }
+        ],
+        vectors=[{"chunk_id": "c_1", "vector": [0.1, 0.2]}],
+    )
+    adapter = RecordingAdapter()
+
+    await import_archive(
+        copy_settings(),
+        adapter,  # type: ignore[arg-type]
+        open_archive(archive),
+        collection="restored",
+        lock_root=tmp_path,
+    )
+
+    assert adapter.points[0].payload["span"] == {"start": 17, "end": 42}
+
+
+async def test_a_full_batch_is_flushed_rather_than_allowed_to_overflow(tmp_path: Path) -> None:
+    """Batching bounds the set of points in flight, and a batch of `n + 1` is not bounded.
+
+    Counting chunks cannot see this: every row still arrives, in batches of the wrong size.
+    """
+    archive = make(
+        tmp_path,
+        chunks=[
+            {"chunk_id": f"c_{index}", "document_id": "d_1", "text": "t", "metadata": {}}
+            for index in range(4)
+        ],
+        vectors=[{"chunk_id": f"c_{index}", "vector": [0.1, 0.2]} for index in range(4)],
+    )
+    adapter = RecordingAdapter()
+
+    await import_archive(
+        copy_settings(),
+        adapter,  # type: ignore[arg-type]
+        open_archive(archive),
+        collection="restored",
+        batch_size=2,
+        lock_root=tmp_path,
+    )
+
+    assert adapter.batches == [2, 2]
+
+
+def test_the_readers_repr_does_not_dump_what_it_staged(tmp_path: Path) -> None:
+    """A reader reaches log lines and exception messages; the index it holds must not.
+
+    `vector_offsets` carries one entry per vector row, so a repr that included it turns
+    a single line about a large collection into megabytes of it.
+    """
+    with open_archive(make(tmp_path)) as reader:
+        reader.vector_offsets = {"c_1": 0}
+        shown = repr(reader)
+
+    assert "vector_offsets" not in shown
+    assert "workspace" not in shown
+    assert "handles" not in shown
+
+
+def test_a_sparse_entry_with_only_one_of_the_two_lists_is_refused(tmp_path: Path) -> None:
+    """Both halves are required, and a check that wanted both missing accepts a half one.
+
+    The entry below reaches the length comparison, which asks a float for its length.
+    """
+    with pytest.raises(VerificationError, match="indices and a values list"):
+        open_archive(keyworded(tmp_path, sparse={"indices": [7], "values": 0.5}, declared=True))
+
+
+def test_a_manifest_that_declares_no_width_matches_no_target_width(tmp_path: Path) -> None:
+    """A value nobody declared is not a value that happens to equal the target's.
+
+    An archive silent about its width must refuse every vector copy, including into the
+    one target width a default could accidentally agree with.
+    """
+    manifest = {
+        "format_version": DENSE_ONLY_FORMAT_VERSION,
+        "collection": {"name": "docs"},
+        "embedding": {"model": "m", "model_version": "1"},
+        "counts": {"documents": 1, "chunks": 1, "vectors": 1},
+        "includes_vectors": True,
+    }
+    archive = make(
+        tmp_path,
+        chunks=[{"chunk_id": "c_1", "document_id": "d_1"}],
+        vectors=[{"chunk_id": "c_1", "vector": [0.1]}],
+        manifest=manifest,
+    )
+
+    with pytest.raises(FasterRagError, match="dimensions None != 1"):
+        open_archive(archive).require_vector_copy_compatible(
+            model="m", model_version="1", dimensions=1
+        )
+
+
+async def test_an_archive_that_declares_no_width_is_imported_at_the_width_of_its_rows(
+    tmp_path: Path,
+) -> None:
+    """The collection is created at whatever width is settled on, so it must be the rows'.
+
+    Nothing here declares one — not the manifest, not the lockfile, not the settings — and
+    the only truthful answer is the vector that is actually about to be written.
+    """
+    manifest = {
+        "format_version": DENSE_ONLY_FORMAT_VERSION,
+        "collection": {"name": "docs"},
+        "embedding": {"model": "m", "model_version": "1"},
+        "counts": {"documents": 1, "chunks": 1, "vectors": 1},
+        "includes_vectors": True,
+    }
+    archive = make(
+        tmp_path,
+        chunks=[{"chunk_id": "c_1", "document_id": "d_1", "text": "one", "metadata": {}}],
+        vectors=[{"chunk_id": "c_1", "vector": [0.1, 0.2]}],
+        manifest=manifest,
+    )
+    adapter = RecordingAdapter()
+
+    await import_archive(
+        copy_settings(),
+        adapter,  # type: ignore[arg-type]
+        open_archive(archive),
+        collection="restored",
+        lock_root=tmp_path,
+    )
+
+    assert adapter.created[0].dimensions == 2
+
+
+async def test_the_archived_width_outranks_the_configured_one(tmp_path: Path) -> None:
+    """The archive says how wide its own vectors are; the config says what is wanted next.
+
+    A vector copy writes the archived vectors, so creating the collection at the configured
+    width builds one that no row about to be written fits into.
+    """
+    store = LockStore(tmp_path)
+    store.write(
+        build_lock(
+            "restored",
+            copy_settings(),
+            embedding_model="m",
+            embedding_model_version="1",
+            dimensions=2,
+        )
+    )
+    adapter = RecordingAdapter()
+
+    await import_archive(
+        Settings.model_validate({"embeddings": {"model": "m", "dimensions": 768}}),
+        adapter,  # type: ignore[arg-type]
+        open_archive(vectored(tmp_path)),
+        collection="restored",
+        lock_root=tmp_path,
+    )
+
+    assert adapter.created[0].dimensions == 2
+
+
+class WidthlessEmbedder:
+    """An embedder that declares no dimensionality, as a local model may not."""
+
+    model = "new-model"
+    model_version = "9"
+    dimensions: int | None = None
+
+
+class WidthlessRouter:
+    """A router whose default embedder declares no width."""
+
+    def __init__(self) -> None:
+        self.default = WidthlessEmbedder()
+
+
+async def test_an_unknown_target_width_is_refused_rather_than_guessed(tmp_path: Path) -> None:
+    """Nothing declares a width on the re-embed path, and a guess creates the wrong index.
+
+    Retrying cannot help: the configuration has to change, so the refusal says so.
+    """
+    with pytest.raises(FasterRagError, match="target vector size is unknown") as caught:
+        await import_archive(
+            Settings.model_validate({}),
+            RecordingAdapter(),  # type: ignore[arg-type]
+            open_archive(vectored(tmp_path)),
+            collection="restored",
+            reembed=True,
+            router=WidthlessRouter(),  # type: ignore[arg-type]
+            lock_root=tmp_path,
+        )
+
+    assert caught.value.code is ErrorCode.VALIDATION_FAILED
+    assert caught.value.retryable is False
+
+
+class UndroppableAdapter(RecordingAdapter):
+    """An adapter whose collections cannot be dropped, as a backend mid-outage cannot."""
+
+    async def drop_collection(self, name: str) -> bool:
+        raise FasterRagError(
+            "the backend refused the drop", code=ErrorCode.INTERNAL, retryable=True
+        )
+
+
+async def test_a_collection_that_cannot_be_dropped_is_named_for_a_human(tmp_path: Path) -> None:
+    """The rollback is the only thing standing between a failed import and a fake corpus.
+
+    When it fails too, the one useful act is to say which collection is now incomplete —
+    and to say that retrying will not clear it, because the drop is what failed.
+    """
+    adapter = UndroppableAdapter(fail_after=0)
+
+    with pytest.raises(FasterRagError, match="must be removed by hand") as caught:
+        await import_archive(
+            copy_settings(),
+            adapter,  # type: ignore[arg-type]
+            open_archive(vectored(tmp_path)),
+            collection="restored",
+            lock_root=tmp_path,
+        )
+
+    assert caught.value.code is ErrorCode.CONFLICT
+    assert caught.value.retryable is False
+    assert "restored" in caught.value.detail
+
+
 def test_closing_the_reader_releases_the_staging_directory(tmp_path: Path) -> None:
     """The members live on disk now, so something has to delete them."""
     reader = open_archive(make(tmp_path))
@@ -754,6 +1114,7 @@ async def test_a_chunk_missing_its_vector_is_refused_not_handed_its_neighbours(
         )
 
     assert caught.value.code is ErrorCode.CONFLICT
+    assert caught.value.retryable is False
     assert "no vector for chunk 'c_1'" in caught.value.detail
     assert adapter.points == []
 

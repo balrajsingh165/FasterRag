@@ -18,8 +18,11 @@ from fasterrag.services.archive import (
     LOCK_NAME,
     MANIFEST_NAME,
     VECTORS_NAME,
+    ArchiveCounts,
+    build_manifest,
     export_archive,
 )
+from fasterrag.services.lockfile import build_lock
 
 
 def point(
@@ -157,6 +160,50 @@ async def test_the_checksums_cover_every_data_member(tmp_path: Path) -> None:
     assert listed == {DOCUMENTS_NAME, CHUNKS_NAME, VECTORS_NAME, LOCK_NAME}
 
 
+async def test_the_checksums_list_the_data_members_in_the_order_the_spec_lays_them_out(
+    tmp_path: Path,
+) -> None:
+    """The set test above holds for any order, so the vectors member can drift anywhere.
+
+    The container listing puts `vectors.jsonl` between `chunks.jsonl` and `index.lock`,
+    and a fixed order is what keeps the member deterministic rather than incidental.
+    """
+    archive = await write(tmp_path, [point("c_1")], include_vectors=True)
+    listed = [
+        line.split("  ", 1)[1]
+        for line in members(archive)[CHECKSUMS_NAME].decode("utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert listed == [DOCUMENTS_NAME, CHUNKS_NAME, VECTORS_NAME, LOCK_NAME]
+
+
+async def test_a_chunk_with_no_recorded_span_exports_a_zero_span(tmp_path: Path) -> None:
+    """`span` is a character offset into the parsed document, and one is where text starts.
+
+    A default of anything else cites the wrong characters on every chunk that lost its
+    span, and the citation still looks perfectly well formed.
+    """
+    spanless = Point(
+        point_id="c_1",
+        collection="docs",
+        vector=[0.1, 0.2],
+        payload={"document_id": "d_1", "source_uri": "docs/a.md", "text": "body"},
+    )
+    archive = await write(tmp_path, [spanless])
+    row = json.loads(members(archive)[CHUNKS_NAME].decode("utf-8").strip())
+
+    assert row["span"] == {"start": 0, "end": 0}
+
+
+async def test_a_recorded_span_is_carried_rather_than_defaulted(tmp_path: Path) -> None:
+    """Guards the test above: a writer that hard-coded zeroes would satisfy it too."""
+    archive = await write(tmp_path, [point("c_1", span={"start": 17, "end": 42})])
+    row = json.loads(members(archive)[CHUNKS_NAME].decode("utf-8").strip())
+
+    assert row["span"] == {"start": 17, "end": 42}
+
+
 async def test_the_checksums_are_correct(tmp_path: Path) -> None:
     import hashlib
 
@@ -181,12 +228,208 @@ async def test_two_exports_of_an_unchanged_collection_are_byte_identical(
     assert first == second
 
 
+async def test_every_tar_header_is_normalised_so_the_archive_file_is_reproducible(
+    tmp_path: Path,
+) -> None:
+    """Equal member bytes are not byte-identity: a real mtime makes every backup file differ.
+
+    The identity test above compares extracted members, so it passes whatever the headers
+    say — and the headers are the half a `cmp` or an object-store dedup actually sees.
+    """
+    archive = await write(tmp_path, [point("c_1")], include_vectors=True)
+
+    with tarfile.open(archive, "r:gz") as tar:
+        headers = [
+            (member.mtime, member.uid, member.gid, member.uname, member.gname)
+            for member in tar.getmembers()
+        ]
+
+    assert len(headers) == 6
+    assert headers == [(0, 0, 0, "", "")] * 6
+
+
+async def test_a_document_with_no_recorded_version_exports_as_version_one(
+    tmp_path: Path,
+) -> None:
+    """The spec makes `version` a required int, and zero claims a document before its first."""
+    archive = await write(tmp_path, [point("c_1")])
+    row = json.loads(members(archive)[DOCUMENTS_NAME].decode("utf-8").strip())
+
+    assert row["version"] == 1
+
+
+async def test_a_recorded_document_version_is_carried_rather_than_defaulted(
+    tmp_path: Path,
+) -> None:
+    """A re-ingested document is on its second version, and an archive that forgets says one."""
+    archive = await write(tmp_path, [point("c_1", version=4)])
+    row = json.loads(members(archive)[DOCUMENTS_NAME].decode("utf-8").strip())
+
+    assert row["version"] == 4
+
+
 async def test_an_empty_collection_refuses_to_export(tmp_path: Path) -> None:
     """An empty archive imports cleanly and silently produces an empty collection."""
     with pytest.raises(FasterRagError) as caught:
         await write(tmp_path, [])
 
     assert caught.value.code is ErrorCode.NOT_FOUND
+    assert caught.value.retryable is False
+
+
+async def test_the_document_metadata_the_backend_held_survives_the_export(
+    tmp_path: Path,
+) -> None:
+    """Document metadata lives only here, and import rejoins it onto every chunk.
+
+    Losing it leaves every restored chunk with the right text and no idea which team,
+    matter or tenant it belonged to, which no count or checksum would notice.
+    """
+    archive = await write(
+        tmp_path, [point("c_1", document_metadata={"team": "legal", "matter": "a-1"})]
+    )
+    row = json.loads(members(archive)[DOCUMENTS_NAME].decode("utf-8").strip())
+
+    assert row["metadata"] == {"team": "legal", "matter": "a-1"}
+
+
+async def test_a_dense_only_export_declares_no_vectors_in_its_counts(tmp_path: Path) -> None:
+    """Import verifies this against the rows, so a count of vectors nobody carried refuses.
+
+    The counts test above only exercises `--include-vectors`, where the two agree anyway.
+    """
+    manifest = json.loads(members(await write(tmp_path, [point("c_1")]))[MANIFEST_NAME])
+
+    assert manifest["counts"]["vectors"] == 0
+
+
+async def test_a_row_is_key_sorted_whatever_order_the_payload_arrived_in(
+    tmp_path: Path,
+) -> None:
+    """Byte-identity across two exports is the point, and a backend's key order is not ours.
+
+    The identity test feeds both runs the same dict, so insertion order is identical and
+    sorting is never exercised.
+    """
+    first = await write(tmp_path / "a", [point("c_1", zebra=1, alpha=2)])
+    second = await write(tmp_path / "b", [point("c_1", alpha=2, zebra=1)])
+
+    assert members(first)[CHUNKS_NAME] == members(second)[CHUNKS_NAME]
+
+
+async def test_non_ascii_text_is_written_as_utf8_rather_than_escaped(tmp_path: Path) -> None:
+    """The spec says UTF-8, and an escaped archive is one no other tool greps or diffs."""
+    archive = await write(tmp_path, [point("c_1", text="café ☕ cœur")])
+
+    assert "café ☕ cœur".encode() in members(archive)[CHUNKS_NAME]
+
+
+async def test_a_destination_whose_directory_does_not_exist_yet_is_created(
+    tmp_path: Path,
+) -> None:
+    """An operator naming a backup directory that is not there should get one, not a trace."""
+    destination = tmp_path / "backups" / "2026" / "11" / "docs"
+    await export_archive(
+        Settings.model_validate({}),
+        FakeAdapter([point("c_1")]),  # type: ignore[arg-type]
+        collection="docs",
+        destination=destination,
+    )
+
+    assert destination.with_name(f"docs{ARCHIVE_SUFFIX}").is_file()
+
+
+async def test_the_first_observed_width_is_the_one_recorded(tmp_path: Path) -> None:
+    """`observed_dimensions` is a fallback for a collection that declares none.
+
+    A later row must not silently redefine it, because the recorded width is what import
+    creates the target collection at.
+    """
+    narrow = Point(point_id="c_1", collection="docs", vector=[0.1, 0.2], payload={})
+    wide = Point(point_id="c_2", collection="docs", vector=[0.1, 0.2, 0.3], payload={})
+    archive = await write(tmp_path, [narrow, wide])
+
+    assert json.loads(members(archive)[MANIFEST_NAME])["embedding"]["dimensions"] == 2
+
+
+async def test_a_staging_directory_that_cannot_be_removed_does_not_fail_the_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The archive is already written when cleanup runs; failing there discards a good backup.
+
+    On Windows an open handle makes the removal fail, and that must not turn a completed
+    export into an error an operator has to interpret.
+    """
+
+    def refuse(path: object, ignore_errors: bool = False) -> None:
+        if not ignore_errors:
+            raise OSError("the staging directory is in use")
+
+    monkeypatch.setattr("fasterrag.services.archive.shutil.rmtree", refuse)
+    archive = await write(tmp_path, [point("c_1")])
+
+    assert archive.is_file()
+
+
+def test_a_manifest_built_with_no_keyword_leg_declares_the_older_major() -> None:
+    """The default decides for every caller that does not pass the flag at all."""
+    manifest = build_manifest(
+        Settings.model_validate({}),
+        collection="docs",
+        lock=None,
+        counts=ArchiveCounts(chunks=1),
+        includes_vectors=False,
+        tenant=None,
+    )
+
+    assert manifest["format_version"] == DENSE_ONLY_FORMAT_VERSION
+    assert "includes_sparse" not in manifest
+
+
+def test_the_lockfiles_width_outranks_the_configured_one() -> None:
+    """The lock records what actually built the index; config records what is wanted next.
+
+    Recording the configured width would declare a collection at a size none of its own
+    vectors are, and import creates the target at whatever the manifest says.
+    """
+    settings = Settings.model_validate({"embeddings": {"dimensions": 768}})
+    lock = build_lock(
+        "docs",
+        settings,
+        embedding_model="m",
+        embedding_model_version="1",
+        dimensions=16,
+    )
+
+    manifest = build_manifest(
+        settings,
+        collection="docs",
+        lock=lock,
+        counts=ArchiveCounts(chunks=1),
+        includes_vectors=False,
+        tenant=None,
+        observed_dimensions=32,
+    )
+
+    assert manifest["embedding"]["dimensions"] == 16
+
+
+def test_a_width_nothing_knows_is_recorded_as_zero() -> None:
+    """Zero is the sentinel import reads as undeclared and infers from the rows themselves.
+
+    Any other number is a claim, and a wrong claim builds a collection no row fits into.
+    """
+    manifest = build_manifest(
+        Settings.model_validate({}),
+        collection="docs",
+        lock=None,
+        counts=ArchiveCounts(chunks=1),
+        includes_vectors=False,
+        tenant=None,
+        observed_dimensions=None,
+    )
+
+    assert manifest["embedding"]["dimensions"] == 0
 
 
 async def test_unnamed_payload_fields_survive_in_metadata(tmp_path: Path) -> None:

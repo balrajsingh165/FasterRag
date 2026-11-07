@@ -12,6 +12,17 @@ second — which is what the bounded queue between them exists to make safe
 The API accepts ingestion asynchronously and returns a job id immediately
 (``docs/api-reference.md``). This service is what a background runner drives; nothing here
 blocks an HTTP request.
+
+**Acceptance refuses a corpus the live index cannot hold** (TASK-0119, TASK-0320).
+:func:`~fasterrag.services.reindex.require_keyword_leg` runs in :meth:`IngestionService.accept`,
+before a job record exists, so configuring ``retrieval.hybrid`` over a collection indexed
+dense-only is a named refusal rather than a job that is accepted and then dies at its first
+upsert under ``EMBED_PROVIDER_ERROR`` — a code naming the embedding provider for a mistake
+the embedding provider did not make. ``accept`` is the one place that covers the REST route,
+the CLI and a direct library caller at once, which is why the gate is here rather than in
+each entry point. The cost is one metadata round trip **per job**, noise beside a corpus
+that takes minutes to hours; the same probe inside :meth:`run` would charge every document
+for a mistake made once, so nothing on the per-document path repeats it.
 """
 
 from __future__ import annotations
@@ -35,6 +46,7 @@ from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger, use_trace_id
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.lockfile import LockStore, build_lock
+from fasterrag.services.reindex import require_keyword_leg
 from fasterrag.services.sources import resolve_sources, typed_source
 from fasterrag.workers.cpu_pool import CpuWorkerPool
 from fasterrag.workers.embed_pool import EmbeddingWorkerPool
@@ -77,12 +89,19 @@ class IngestionService:
         tenant: str | None = None,
         idempotency_key: str | None = None,
     ) -> JobRecord:
-        """Record a job without doing any work."""
+        """Record a job without doing any work.
+
+        Refuses before the record exists if the live index cannot serve the configured
+        keyword leg — one metadata round trip per job, covering every caller (TASK-0320).
+        """
+        target = collection or self.settings.vector_db.collection.default_name
+        await require_keyword_leg(target, self.settings, self.adapter)
+
         typed = [
             typed_source(source) if isinstance(source, str) else dict(source) for source in sources
         ]
         return self.journal.create_job(
-            collection or self.settings.vector_db.collection.default_name,
+            target,
             typed,
             idempotency_key=idempotency_key,
             tenant=tenant,

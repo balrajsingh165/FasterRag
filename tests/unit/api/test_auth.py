@@ -1,4 +1,5 @@
 import logging
+import secrets
 
 import pytest
 from fastapi.testclient import TestClient
@@ -454,3 +455,71 @@ async def test_a_bound_key_acts_as_its_own_tenant(monkeypatch: pytest.MonkeyPatc
     )
 
     assert recorder.state["tenant"] == "acme"
+
+
+async def test_a_bound_key_may_not_act_for_a_tenant_that_merely_starts_the_same(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tenant comparison is equality, and a weaker one is a cross-tenant read.
+
+    Relaxing it to a prefix or containment test hands the key bound to `acme` every
+    collection belonging to `acme-corp`, with nothing in the response to show for it.
+    """
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{SECRET}:admin:acme")
+    settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}})
+    recorder = _Recorder()
+
+    await drive(
+        AuthMiddleware(recorder, settings),
+        [
+            (b"authorization", f"Bearer {SECRET}".encode("latin-1")),
+            (b"x-tenant-id", b"acme-corp"),
+        ],
+    )
+
+    assert recorder.state == {}
+
+
+class _CountingSecrets:
+    """Stands in for the `secrets` module so the comparison itself can be observed."""
+
+    def __init__(self) -> None:
+        """Start with nothing compared."""
+        self.compared: list[tuple[str, str]] = []
+
+    def compare_digest(self, stored: str, presented: str) -> bool:
+        """Record the pair, then answer exactly as the real function would."""
+        self.compared.append((stored, presented))
+        return secrets.compare_digest(stored, presented)
+
+
+def test_the_registry_compares_keys_in_constant_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`==` stops at the first differing byte, which turns the refusal into a key oracle.
+
+    No functional assertion can see the difference, so the call itself is what gets
+    pinned: swapping it for `==` leaves every other test in this file green.
+    """
+    counting = _CountingSecrets()
+    monkeypatch.setattr("fasterrag.api.auth.secrets", counting)
+    registry = KeyRegistry([ApiKey(secret="aaa", scopes=ALL_SCOPES)])
+
+    assert registry.resolve("aaa") is not None
+    assert counting.compared == [("aaa", "aaa")]
+
+
+def test_every_key_is_compared_even_after_one_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Returning on the first hit makes how long a lookup takes depend on key order.
+
+    That is the same oracle `compare_digest` closes, one level up, so the scan runs
+    to the end and keeps the match rather than short-circuiting on it.
+    """
+    counting = _CountingSecrets()
+    monkeypatch.setattr("fasterrag.api.auth.secrets", counting)
+    registry = KeyRegistry(
+        [ApiKey(secret="aaa", scopes=ALL_SCOPES), ApiKey(secret="bbb", scopes=ALL_SCOPES)]
+    )
+
+    assert registry.resolve("aaa") is not None
+    assert [stored for stored, _ in counting.compared] == ["aaa", "bbb"]

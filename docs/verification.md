@@ -75,7 +75,7 @@ Prereq: `fasterrag provision qdrant` after doctor passes. Run in order; each row
 
 ## Tier 5 — Observability & provisioning
 
-`observability.dashboard: true` → read-only UI on :8080, auth + tenant-scoped, zero mutating routes. `fasterrag provision langfuse` → six containers, `http://<host>:3000` healthy, bootstrapped keys authenticate, traces export (207-partial counts as failure). `fasterrag provision grafana` → provisioned datasource returns real series; panels move under ingest/query load. `observability.otel: true` → spans **and** metric catalogue arrive at the collector with the propagated trace id. *(REST-side provisioning of langfuse/grafana is TASK-0251 — verify via CLI until it lands.)*
+`observability.dashboard: true` → read-only UI on :8080, auth + tenant-scoped, zero mutating routes. `fasterrag provision langfuse` → six containers, `http://<host>:3000` healthy, bootstrapped keys authenticate, traces export (207-partial counts as failure). `fasterrag provision grafana` → provisioned datasource returns real series; panels move under ingest/query load. `observability.otel: true` → spans **and** metric catalogue arrive at the collector with the propagated trace id. *(REST-side provisioning of langfuse/grafana shipped 2026-08-11, TASK-0251 ✅ — verify over REST or CLI.)*
 
 ## Tier 6 — Packaging
 

@@ -5,13 +5,14 @@ import json
 import threading
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
 from fasterrag.adapters.vectordb.base import (
     CollectionInfo,
     CollectionSpec,
+    Distance,
     HealthStatus,
     Point,
     PointSelector,
@@ -292,6 +293,25 @@ async def test_an_unknown_distance_is_a_usage_error(
     assert code == ExitCode.USAGE
     assert adapter.created == []
     assert "--distance must be one of" in capsys.readouterr().err
+
+
+def test_every_distance_the_adapters_accept_is_reachable_through_the_flag() -> None:
+    """TASK-0317: the flag's table replaced a `# type: ignore`, so it must stay complete."""
+    assert set(pipeline._DISTANCES) == set(get_args(Distance))
+    assert all(name == value for name, value in pipeline._DISTANCES.items())
+
+
+def test_a_valid_distance_flag_comes_back_as_the_literal_it_names() -> None:
+    """Narrowing by lookup, not by assertion: an unlisted name can never reach an adapter."""
+    settings = Settings()
+    console = Console()
+
+    for name in get_args(Distance):
+        chosen = pipeline._distance_for(argparse.Namespace(distance=name), settings, console)
+        assert chosen == name
+
+    rejected = argparse.Namespace(distance="manhattan")
+    assert pipeline._distance_for(rejected, settings, console) is None
 
 
 class _StubEmbedder:
@@ -809,6 +829,27 @@ async def test_a_failing_follower_cannot_destroy_a_finished_ingest(
     assert "the journal directory vanished" in captured.err
     assert "Traceback" not in captured.err
     assert [getattr(record, "job_id", None) for record in caplog.records] == ["job-1"]
+
+
+async def test_the_follower_stopping_on_our_own_cancellation_leaves_a_record(
+    caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """TASK-0317: absorbing the cancellation is right, absorbing it without a word is not."""
+
+    async def forever() -> None:
+        await asyncio.Event().wait()
+
+    follower = asyncio.create_task(forever())
+
+    with caplog.at_level("DEBUG", logger="fasterrag.cli.commands.pipeline"):
+        await pipeline._stop_following(follower, "job-7", Console())
+
+    assert follower.cancelled()
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelname == "DEBUG"
+    assert "ended on the cancellation this command sent it" in caplog.records[0].getMessage()
+    assert getattr(caplog.records[0], "job_id", None) == "job-7"
+    assert capsys.readouterr().err == ""
 
 
 async def test_the_two_indexed_numbers_of_a_watched_run_cannot_be_confused(

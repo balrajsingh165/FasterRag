@@ -8,6 +8,17 @@ collection destroys every vector in it and the only way back is a full re-ingest
 from a request field. A caller-supplied dimension that disagreed with the model would produce
 a collection nothing can write to, and the error would surface at first ingest rather than at
 creation.
+
+**The creation response reports the live collection, not the request** (TASK-0320). It used
+to echo ``"sparse": settings.retrieval.hybrid`` whatever the backend did, so a backend that
+accepted the create over an existing dense-only collection — which Qdrant does, verifying
+compatibility and returning without adding a sparse vector — was reported as hybrid when it
+had no keyword leg at all. That is an affirmative untruth in a 201, not a deferred failure:
+the client is told the thing exists. The create is therefore followed by
+:func:`~fasterrag.services.reindex.require_keyword_leg`, which reads the collection back from
+the server, refuses the mismatch with the same 409 ``CONFLICT`` ``POST /v1/ingest`` returns,
+and otherwise supplies the ``sparse`` the response reports. ``fasterrag index create``
+re-checks after creating for the same reason.
 """
 
 from __future__ import annotations
@@ -26,6 +37,7 @@ from fasterrag.api.dependencies import (
 )
 from fasterrag.api.schemas import CollectionRequest
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.services.reindex import require_keyword_leg
 from fasterrag.services.tenancy import scoped_name, unscoped_name, visible_to
 
 __all__ = ["router"]
@@ -73,7 +85,11 @@ async def create_collection(
     adapter: CurrentVectorDB,
     tenant: CurrentTenant,
 ) -> dict[str, Any]:
-    """Create a collection sized from the configured embedding model."""
+    """Create a collection sized from the configured embedding model.
+
+    Reads the collection back afterwards, so the reported keyword leg is the one the
+    backend actually added and a backend that added none is a 409 rather than a 201.
+    """
     configured = settings.vector_db.collection
     embedding_router = build_embedding_router(settings)
     try:
@@ -81,9 +97,10 @@ async def create_collection(
     finally:
         await embedding_router.close()
 
+    target = scoped_name(body.name, tenant)
     await adapter.create_collection(
         CollectionSpec(
-            name=scoped_name(body.name, tenant),
+            name=target,
             dimensions=dimensions,
             distance=body.distance or configured.distance,
             shard_number=body.shard_number or configured.shard_number,
@@ -91,12 +108,13 @@ async def create_collection(
             sparse=settings.retrieval.hybrid,
         )
     )
+    audit = await require_keyword_leg(target, settings, adapter)
 
     return {
         "name": body.name,
         "dimensions": dimensions,
         "distance": body.distance or configured.distance,
-        "sparse": settings.retrieval.hybrid,
+        "sparse": audit.present,
     }
 
 

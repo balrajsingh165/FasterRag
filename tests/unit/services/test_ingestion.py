@@ -7,6 +7,12 @@ daemon the whole path went unexecuted and CI's unit leg never touched it.
 
 The vector database is faked here rather than run. What is being tested is the orchestration
 between the pieces, and a real backend adds a daemon dependency without exercising any of it.
+
+The fakes report each collection's keyword leg from the spec it was created with, because a
+fake that always answered ``sparse=False`` would make the acceptance preflight (TASK-0320)
+fire on every re-ingest, and one that always answered ``True`` could not show it firing at
+all. ``tests/unit/services/test_keyword_leg_write_paths.py`` holds the same cases against a
+live backend, skipped wherever Docker is not running.
 """
 
 from collections.abc import Sequence
@@ -18,8 +24,9 @@ import pytest
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.embeddings.tiering import TieringRouter
+from fasterrag.adapters.vectordb.base import CollectionInfo, CollectionSpec, Point, UpsertResult
 from fasterrag.config.schema import Settings
-from fasterrag.errors import EmbedError
+from fasterrag.errors import EmbedError, ErrorCode, FasterRagError
 from fasterrag.observability import metrics
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import Journal
@@ -77,6 +84,56 @@ class StubEmbedder(EmbeddingAdapter):
         return None
 
 
+class KeywordLegAdapter(RecordingAdapter):
+    """Reports each collection's keyword leg from the spec it was created with."""
+
+    async def list_collections(self) -> list[CollectionInfo]:
+        return [
+            CollectionInfo(name=spec.name, vectors=len(self.points), sparse=spec.sparse)
+            for spec in self.specs
+        ]
+
+
+class DenseOnlyAdapter(KeywordLegAdapter):
+    """A backend already holding a collection that was indexed without a keyword leg.
+
+    Creating over it leaves the layout alone and ``upsert`` raises what the Qdrant adapter
+    raises for a sparse point on a dense-only collection — the failure acceptance pre-empts.
+    """
+
+    def __init__(self, settings: Settings, *, collection: str = "default") -> None:
+        super().__init__(settings)
+        self.specs.append(CollectionSpec(name=collection, dimensions=DIMENSIONS, sparse=False))
+
+    async def create_collection(self, spec: CollectionSpec) -> None:
+        if any(existing.name == spec.name for existing in self.specs):
+            return
+        await super().create_collection(spec)
+
+    async def upsert(self, points: list[Point]) -> UpsertResult:
+        for point in points:
+            if point.sparse is not None:
+                raise EmbedError(
+                    f"point {point.point_id!r} carries a sparse vector but collection "
+                    f"{point.collection!r} has no sparse index; recreate it with sparse "
+                    "enabled",
+                    retryable=False,
+                )
+        return await super().upsert(points)
+
+
+class CountingAdapter(KeywordLegAdapter):
+    """Counts the metadata round trips the preflight costs."""
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(settings)
+        self.listings = 0
+
+    async def list_collections(self) -> list[CollectionInfo]:
+        self.listings += 1
+        return await super().list_collections()
+
+
 class RecordingCache:
     """Records invalidation, which is what a corpus change is supposed to trigger."""
 
@@ -119,20 +176,21 @@ def build(
     configured: Settings | None = None,
     *,
     embedder: StubEmbedder | None = None,
+    adapter: RecordingAdapter | None = None,
     **kwargs: Any,
 ) -> tuple[IngestionService, RecordingAdapter]:
     """Return a service and the adapter it writes through."""
     resolved = configured or settings()
-    adapter = RecordingAdapter(resolved)
+    backend = adapter or KeywordLegAdapter(resolved)
     service = IngestionService(
         resolved,
         journal=Journal(tmp_path / "journal", checkpoint_every=1),
-        adapter=adapter,
+        adapter=backend,
         router=TieringRouter(embedder or StubEmbedder(resolved)),
         executor_factory=threads,
         **kwargs,
     )
-    return service, adapter
+    return service, backend
 
 
 def sources(corpus: Path) -> list[str]:
@@ -301,3 +359,98 @@ async def test_replaying_an_idempotency_key_returns_the_first_job(
     second = await service.accept(sources(corpus), idempotency_key="abc")
 
     assert first.job_id == second.job_id
+
+
+async def test_a_dense_only_collection_is_refused_at_acceptance(
+    tmp_path: Path, corpus: Path
+) -> None:
+    """TASK-0320: the CLI and library paths were accepted and then died at first upsert."""
+    service, _ = build(tmp_path, adapter=DenseOnlyAdapter(settings()))
+
+    with pytest.raises(FasterRagError) as refused:
+        await service.accept(sources(corpus))
+
+    assert refused.value.code is ErrorCode.CONFLICT
+    assert "'default'" in refused.value.detail
+    assert "fasterrag index reembed" in refused.value.detail
+    assert "retrieval.hybrid" in refused.value.detail
+
+
+async def test_nothing_is_recorded_for_a_refused_job(tmp_path: Path, corpus: Path) -> None:
+    """A job record for a run that cannot start is a queued job nobody will ever settle."""
+    service, _ = build(tmp_path, adapter=DenseOnlyAdapter(settings()))
+
+    with pytest.raises(FasterRagError):
+        await service.accept(sources(corpus))
+
+    assert not list(service.journal.root.rglob("*.json"))
+
+
+async def test_the_refusal_replaces_the_embed_provider_error_the_operator_used_to_get(
+    tmp_path: Path, corpus: Path
+) -> None:
+    """The old failure names the embedding provider and a point id for an index mistake."""
+    service, _ = build(tmp_path, adapter=DenseOnlyAdapter(settings()))
+    bypassed = service.journal.create_job(
+        "default", [{"type": "path", "value": source} for source in sources(corpus)]
+    )
+
+    with pytest.raises(FasterRagError) as old:
+        await service.run(bypassed)
+
+    assert old.value.code is ErrorCode.EMBED_PROVIDER_ERROR
+    assert "fasterrag index reembed" not in old.value.detail
+
+    with pytest.raises(FasterRagError) as new:
+        await service.accept(sources(corpus))
+
+    assert new.value.code is ErrorCode.CONFLICT
+
+
+async def test_a_library_ingest_is_refused_before_a_document_is_read(
+    tmp_path: Path, corpus: Path
+) -> None:
+    """``ingest`` is what the facade and ``fasterrag ingest`` call, and it goes through accept."""
+    service, adapter = build(tmp_path, adapter=DenseOnlyAdapter(settings()))
+
+    with pytest.raises(FasterRagError) as refused:
+        await service.ingest(sources(corpus))
+
+    assert refused.value.code is ErrorCode.CONFLICT
+    assert adapter.points == []
+
+
+async def test_a_collection_nothing_has_indexed_yet_is_accepted(
+    tmp_path: Path, corpus: Path
+) -> None:
+    """The first ingest creates the collection with its keyword leg; it cannot mismatch."""
+    service, _ = build(tmp_path)
+
+    assert (await service.accept(sources(corpus))).status == "queued"
+
+
+async def test_a_dense_only_collection_is_accepted_when_hybrid_is_off(
+    tmp_path: Path, corpus: Path
+) -> None:
+    """Dense-only is a valid configuration, not a fault; only the mismatch is refused."""
+    configured = settings(retrieval={"hybrid": False})
+    service, _ = build(tmp_path, configured, adapter=DenseOnlyAdapter(configured))
+
+    settled = await service.run(await service.accept(sources(corpus)))
+
+    assert settled.status == "completed"
+
+
+async def test_the_preflight_costs_one_round_trip_per_job_not_per_document(
+    tmp_path: Path, corpus: Path
+) -> None:
+    """Per job it is noise beside a corpus; per document it would be a tax on every one."""
+    adapter = CountingAdapter(settings())
+    service, _ = build(tmp_path, adapter=adapter)
+
+    await service.accept(sources(corpus))
+    accepted = adapter.listings
+    await service.run(await service.accept(sources(corpus)))
+
+    assert accepted == 1
+    assert adapter.listings == 2

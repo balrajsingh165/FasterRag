@@ -69,6 +69,15 @@ jobs:
       - name: Task ids cited in code resolve
         run: python scripts/check_task_ids.py
 
+      # ruff's E722 catches a bare `except:` and stops there, so until this gate nothing
+      # checked the rule CLAUDE.md calls mandatory: that no exception is silently
+      # swallowed. In a RAG pipeline a swallowed exception does not surface as an error, it
+      # surfaces as a confident answer built from a silently shortened context. A code
+      # gate, not a doc gate, so the maintainer's pre-commit exclusion for doc gates does
+      # not apply. Measured at 1.67-1.83 s locally on Windows, interpreter start included.
+      - name: Typed error taxonomy holds
+        run: python scripts/check_error_taxonomy.py
+
       # The four mechanical places a version lives cannot be edited atomically by hand, and
       # a tree halfway through a stamp ships a wheel that contradicts its own README.
       - name: Version is coherent across the tree
@@ -191,10 +200,39 @@ jobs:
 
       # Scans full history, not the diff. A secret committed and later removed is still in
       # the history, and still compromised — checking only the tip would call it clean.
+      #
+      # That sentence stood here while the step did the opposite (TASK-0315). Measured on
+      # run 41865567333: `gitleaks detect ... --log-opts=-1`, 1 commits scanned, ~3188
+      # bytes, while the same action on security.yml's schedule scanned 290 commits and
+      # 6.26 MB of the same SHA. `fetch-depth: 0` above was paid and thrown away. The cause
+      # is in the action rather than in this file: gitleaks-action@v2 appends `--log-opts=-1`
+      # when a push event's base and head refs match, and offers no override for it — its
+      # only documented lever, BASE_REF, selects a RANGE (`--no-merges --first-parent
+      # base^..head`), which is still not the history. Read in its src/gitleaks.js at tag v2
+      # on 2026-11-08.
+      #
+      # So the comment could be corrected or the control could be. The control is corrected,
+      # because the alternative leaves a full clone fetched for a scan that does not use it,
+      # and leaves one secret-scan verdict that depends on which trigger fired — the two
+      # disagreed on the same commit, which is how this was found. Scanning history on push
+      # also catches the case the tip scan cannot: a multi-commit push whose middle commit
+      # carries the credential.
+      #
+      # Running the binary rather than the action also pins it. The action resolves
+      # "latest" at run time, so the rule set moves under the repository without a commit,
+      # and a scan whose rules change silently cannot be reproduced from a SHA. The archive
+      # is checksummed against the published gitleaks_8.30.1_checksums.txt before it runs.
+      # `gitleaks git` is the command `detect` was deprecated in favour of in v8.19.0, and
+      # with no --log-opts it walks the whole log, which is what security.yml's scheduled
+      # run already does through the action.
+      #
+      # CRITICAL: this is now the same control implemented twice, here and in security.yml.
+      # They must not be allowed to drift the way the dependency audit's two copies did —
+      # the fix is one composite action under .github/actions/, as that audit now uses.
       - name: Secret scan
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+        uses: ./.github/actions/secret-scan
+
+      # The action uploaded its SARIF; keeping that is the point of the step, since a
 
       - uses: astral-sh/setup-uv@v5
         with:
