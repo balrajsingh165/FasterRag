@@ -293,6 +293,28 @@ class StubRouter:
         self.default = StubEmbedder()
 
 
+class ShortEmbedder:
+    """An embedder that answers with fewer vectors than it was handed texts."""
+
+    model = "new-model"
+    model_version = "9"
+    dimensions = 2
+
+    async def embed_documents(self, texts: list[str]) -> Any:
+        from fasterrag.adapters.embeddings.base import EmbeddingResult
+
+        return EmbeddingResult(
+            vectors=[[0.9, 0.9] for _ in texts[:-1]], model=self.model, model_version="9"
+        )
+
+
+class ShortRouter:
+    """A router whose default embedder answers short."""
+
+    def __init__(self) -> None:
+        self.default = ShortEmbedder()
+
+
 def vectored(tmp_path: Path) -> Path:
     return make(
         tmp_path,
@@ -1013,6 +1035,31 @@ class UndroppableAdapter(RecordingAdapter):
         raise FasterRagError(
             "the backend refused the drop", code=ErrorCode.INTERNAL, retryable=True
         )
+
+
+async def test_a_provider_that_answers_short_fails_rather_than_dropping_chunks(
+    tmp_path: Path,
+) -> None:
+    """Pairing leniently upserts only the chunks that got a vector and reports success.
+
+    The written count comes back from the backend, so a batch silently shortened by one
+    is an import that loses rows and says it wrote them.
+    """
+    adapter = RecordingAdapter()
+
+    with pytest.raises(ValueError, match="argument 2 is shorter"):
+        await import_archive(
+            Settings.model_validate({}),
+            adapter,  # type: ignore[arg-type]
+            open_archive(vectored(tmp_path)),
+            collection="restored",
+            reembed=True,
+            router=ShortRouter(),  # type: ignore[arg-type]
+            lock_root=tmp_path,
+        )
+
+    assert adapter.points == []
+    assert adapter.dropped == ["restored"]
 
 
 async def test_a_collection_that_cannot_be_dropped_is_named_for_a_human(tmp_path: Path) -> None:
