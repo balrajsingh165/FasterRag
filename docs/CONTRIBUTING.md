@@ -38,8 +38,9 @@ Optional extras, needed only for what they name: `.[huggingface]` and `.[rerank]
 - NO inline comments and NO explanatory comments, with EXACTLY two permitted exceptions:
   - `# CRITICAL: <why this must not change>` — a super-critical requirement flagged directly in code.
   - `# TODO: <what remains>` / `# BLOCKED: <blocker + ticket/date>` — explicit pending/blocker markers.
-- A marker may open a **block**: `#` lines immediately following a `# CRITICAL:`/`# TODO:`/`# BLOCKED:` line continue that marker and count as part of it (this codifies the existing practice in `src/`).
-- Any `# type: ignore` requires an adjacent `# CRITICAL:` justification.
+- A marker may open a **block**: `#` lines immediately following a `# CRITICAL:`/`# TODO:`/`# BLOCKED:` line continue that marker and count as part of it (this codifies the existing practice in `src/`). A marker sharing a line with code opens nothing — only a standalone one introduces a block.
+- `scripts/check_comments.py` enforces all of the above over `src/` and `scripts/` in CI (not pre-commit), reading tokens so a `#` inside a string literal never matches. Tool directives — `# noqa`, `# type: ignore`, `# pragma:`, `# fmt:`, `# ruff:`, `# mypy:`, `# isort:` — need no marker: they address a tool rather than a reader and have nowhere else to live. A shebang and a PEP 263 encoding line are not comments for this purpose. `tests/` is out of scope, deliberately: the comments there label fixtures and scenarios rather than explaining production behaviour.
+- Any `# type: ignore` requires an adjacent `# CRITICAL:` justification. This is checked under `src/` and `scripts/` only; the ~141 in `tests/` are out of scope by the same reasoning (see TASK-0319).
 - A `# TODO:`/`# BLOCKED:` marker may only cite an **open** ledger entry. The marker says work remains and a ticked entry says it is finished, so the pair is always wrong one way or the other; `scripts/check_task_ids.py` fails on it. A `# CRITICAL:` block or a docstring may cite a completed task freely — that is history, correctly attributed.
 
 ## 3. One-todo-file rule

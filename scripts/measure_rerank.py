@@ -134,11 +134,6 @@ METRIC_LABELS: Final[dict[str, str]] = {
 NOISE_SIGMAS: Final = 2.0
 MINIMUM_PAIRS: Final = 2
 
-# What a sentence-transformers cross-encoder load never reads, and must therefore not be
-# charged to the model's size. Both halves are real: `cross-encoder/ms-marco-MiniLM-L-6-v2`
-# ships five ONNX builds and a Flax copy of the same 90 MB of weights, and
-# `BAAI/bge-reranker-v2-m3` ships a quarter of a megabyte of README screenshots. Counting
-# either would report a model as several times larger than the pipeline makes it.
 UNLOADED_DIRECTORIES: Final[frozenset[str]] = frozenset(
     {"onnx", "openvino", "coreml", "tflite", "rust_model", "assets", "imgs", "images"}
 )

@@ -697,8 +697,6 @@ async def tune(
         try:
             candidate_settings = candidate.apply(settings)
         except ValidationError:
-            # A candidate outside the schema's bounds is skipped, never fatal: one bad grid
-            # entry must not discard the trials that already ran.
             _logger.warning(
                 "autopilot skipped an invalid candidate",
                 extra={"overrides": candidate.overrides},

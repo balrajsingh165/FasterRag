@@ -116,14 +116,10 @@ def build_spans(trace: Trace) -> list[Any]:
     base = _epoch_nanoseconds(started)
 
     resource = sdk.Resource.create({"service.name": SERVICE_NAME})
-    # Named for the same reason the metric payload names its scope: a backend groups and
-    # filters by it, and spans arriving with an empty scope are attributed to nothing.
     scope = sdk.InstrumentationScope(SCOPE_NAME)
     trace_id = int(trace.trace_id, 16)
     root_id = span_id_for(trace.trace_id, _ROOT_SPAN)
 
-    # The root has to span every stage, and a query's own wall clock is not recorded
-    # separately — it is the envelope of what it did.
     last = max((span.end_ms for span in trace.spans), default=0.0)
 
     root_context = sdk.SpanContext(
@@ -249,9 +245,6 @@ class OtelExporter:
         try:
             result = await asyncio.to_thread(self._exporter.export, spans)
         except Exception as exc:
-            # Deliberately broad: this reaches a network through protobuf serialization and
-            # a vendor SDK, each raising its own types, and none of them should be able to
-            # affect a request that has already been answered.
             _logger.warning(
                 "could not export a trace over OTLP",
                 extra={
@@ -262,8 +255,6 @@ class OtelExporter:
             )
             return False
 
-        # Compared by name rather than by importing the enum, which keeps the SDK import
-        # lazy on a path that runs after every query.
         return str(getattr(result, "name", "")) == "SUCCESS"
 
     async def close(self) -> None:

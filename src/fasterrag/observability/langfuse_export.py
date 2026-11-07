@@ -98,9 +98,6 @@ def build_batch(trace: Trace, *, release: str | None = None) -> list[dict[str, A
             "metadata": span.attributes,
         }
 
-        # The generation stage is reported as a `generation` observation rather than a plain
-        # span: Langfuse derives model usage and cost only from that type, so sending it as a
-        # span would leave its own cost view empty while the data sat right there.
         if span.name == _GENERATION_SPAN:
             body["input"] = trace.prompt
             body["output"] = trace.response
@@ -175,8 +172,6 @@ class LangfuseExporter:
             )
             return False
 
-        # 207 is Langfuse's normal answer: the batch endpoint reports per-event results, so a
-        # partial accept is the expected shape rather than an error.
         if response.status_code not in (200, 201, 207):
             _logger.warning(
                 "langfuse rejected a trace export",
@@ -192,8 +187,6 @@ class LangfuseExporter:
         try:
             body = response.json()
         except ValueError:
-            # A 2xx whose body is not JSON is not something to fail a query over, but it is
-            # not evidence of storage either. Report it and move on.
             _logger.warning(
                 "langfuse answered a trace export with an unreadable body",
                 extra={"trace_id": trace.trace_id, "status": response.status_code},

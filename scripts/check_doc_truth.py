@@ -28,8 +28,6 @@ from typing import Final
 
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 
-# Phrases that assert there is no implementation code. Matched case-insensitively against
-# the always-loaded docs; any hit while `src/` holds modules is the audit's exact inversion.
 NO_CODE_CLAIMS: Final[tuple[str, ...]] = (
     r"documentation[\s-]only",
     r"no implementation code exists",
@@ -39,7 +37,6 @@ NO_CODE_CLAIMS: Final[tuple[str, ...]] = (
 
 GUARDED_DOCS: Final[tuple[str, ...]] = ("CLAUDE.md", "README.md")
 
-# A source tree this small is a scaffold, not an implementation; the claim would be fair.
 IMPLEMENTATION_THRESHOLD: Final = 20
 
 # CRITICAL: collisions already on `main`, recorded so the gate reports growth rather than
@@ -129,8 +126,6 @@ def main(argv: list[str] | None = None) -> int:
     for violation in violations:
         sys.stderr.write(f"  {violation}\n")
 
-    # The two violation classes have nothing to do with each other, and a gate that prints
-    # the wrong remedy teaches people to ignore the right one.
     if any("docs/todo.md:" in violation for violation in violations):
         sys.stderr.write(
             "\nfor a duplicate id: give the newer entry the next free TASK- id. Parallel "

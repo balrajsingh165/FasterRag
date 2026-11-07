@@ -114,7 +114,6 @@ def normalise_source(source_uri: str) -> str:
     normalised = source_uri.replace("\\", "/")
     drive, separator, rest = normalised.partition(":/")
     if separator and len(drive) == 1 and drive.isalpha():
-        # A Windows path. The whole thing is case-insensitive, not just the drive letter.
         return f"{drive.lower()}:/{rest}".lower()
     return normalised
 

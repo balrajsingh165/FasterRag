@@ -30,8 +30,6 @@ __all__ = ["BodyLimitMiddleware"]
 
 _MEGABYTE: Final = 1024 * 1024
 
-# Methods that carry no body worth bounding. A GET with a body is legal and meaningless, and
-# refusing one on size would be a surprising failure on a request nothing reads.
 _UNBOUNDED_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD", "OPTIONS", "DELETE"})
 
 

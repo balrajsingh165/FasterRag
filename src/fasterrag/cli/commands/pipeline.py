@@ -156,9 +156,6 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
     if metadata is None:
         return ExitCode.USAGE
 
-    # The routing class is ordinary chunk metadata, because that is what the tiering rules
-    # match on (`embeddings.tiering.rules[].match`). A separate channel would need every
-    # rule to know about a second source of truth.
     priority = getattr(args, "priority_class", None)
     if priority:
         metadata["priority_class"] = priority
@@ -301,10 +298,6 @@ async def run_query(args: argparse.Namespace, console: Console) -> ExitCode:
     chunks: list[Any] = []
     streamed = not (args.no_stream or console.as_json or args.show_chunks)
     try:
-        # Streaming is the default because time-to-first-token is what a person at a
-        # terminal actually waits on. It is skipped for --json, where a partial document is
-        # not a document, and for --show-chunks, which needs the candidate set the
-        # non-streaming call returns.
         if not streamed:
             if args.show_chunks:
                 answer, chunks = await service.answer_with_candidates(

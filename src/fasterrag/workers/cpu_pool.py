@@ -35,8 +35,6 @@ __all__ = ["CpuWorkerPool", "PoolReport", "parse_and_chunk", "resolve_pool_size"
 
 _MEGABYTE = 1024 * 1024
 
-# Below this, the load is the estimating counter or an already-warm cache and there is nothing
-# worth a log line. Above it, a slow start needs explaining.
 _SLOW_TOKENIZER_LOAD_SECONDS = 0.5
 
 _logger = get_logger(__name__)
@@ -96,9 +94,6 @@ def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
         parser=document.parser,
         mime_type=document.mime_type,
         parse_flags=document.flags,
-        # Carried only when something downstream reads it — contextual enrichment writes
-        # a per-chunk prefix from it, and late chunking pools vectors out of it. Otherwise
-        # this doubles what every parsed document sends back through IPC for nothing.
         document_text=(
             "\n\n".join(block.text for block in document.blocks)
             if settings.chunking.contextual_enrichment or settings.chunking.strategy == "late"

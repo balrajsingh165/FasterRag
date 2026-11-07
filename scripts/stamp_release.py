@@ -46,9 +46,6 @@ from typing import Final
 
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 
-# The SemVer shape the release procedure uses for tags and CHANGELOG headings. Deliberately
-# narrower than SemVer: only the pre-release labels PEP 440 has a direct spelling for, so the
-# two forms convert without a normalisation library and without ambiguity.
 _SEMVER: Final = re.compile(
     r"^(?P<release>\d+\.\d+\.\d+)(?:-(?P<label>alpha|beta|rc)\.(?P<number>\d+))?$"
 )
@@ -69,8 +66,6 @@ _STATUS_FOR: Final = {
 }
 _DEVELOPMENT_STATUS: Final = "2 - Pre-Alpha"
 
-# Each banner is identified by a phrase that exists only to be deleted at release; the check
-# looks for the phrase, not the sentence, so rewording around it does not defeat the gate.
 _BANNERS: Final = (
     ("README.md", "not yet on PyPI"),
     ("docs/python-api.md", "Not yet published"),

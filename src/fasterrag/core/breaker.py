@@ -150,8 +150,6 @@ class CircuitBreaker:
         # again on the very next call: one probe admitted per call instead of per timeout.
         current = self.state
 
-        # A failed probe re-opens immediately: half-open exists to test recovery with one
-        # request, not to grant a fresh threshold's worth of doomed calls.
         if current is CircuitState.HALF_OPEN:
             self._opened_at = time.monotonic()
             self._transition(CircuitState.OPEN)

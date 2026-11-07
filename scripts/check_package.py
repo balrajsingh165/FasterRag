@@ -16,9 +16,6 @@ from typing import Final
 
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 
-# Every symbol docs/python-api.md names as SemVer-stable. A name that stops importing from a
-# built wheel is a broken promise to an adopter, and nothing else in the suite would notice:
-# the unit run puts src/ on sys.path, so it imports the checkout rather than the package.
 PUBLIC_IMPORTS: Final = (
     "import fasterrag; assert fasterrag.__version__",
     "from fasterrag import FasterRag",
@@ -30,9 +27,6 @@ PUBLIC_IMPORTS: Final = (
     "from fasterrag.evals import evaluate",
 )
 
-# Imported lazily by design, so a core install must NOT pull them. Asserting their absence is
-# what keeps the dependency promise honest: `pip install fasterrag` claims not to drag in a
-# multi-gigabyte deep-learning stack, and only a core-only environment can prove it.
 EXTRA_ONLY_MODULES: Final = ("torch", "transformers", "sentence_transformers")
 
 

@@ -59,14 +59,8 @@ __all__ = [
 
 MANIFEST_NAME: Final = "manifest.json"
 
-# Every backup set directory starts with this, so a destination can hold sets alongside
-# whatever else an operator keeps there without retention ever considering those for deletion.
 SET_PREFIX: Final = "set-"
 
-# Fourteen days of daily backups, matching the documented default in
-# docs/disaster-recovery.md. Counted in *sets*, not days: fasterRag runs when it is invoked
-# and cannot know the cadence a scheduler was configured with, so counting days would mean
-# guessing at a number only the operator holds.
 DEFAULT_RETAIN: Final = 14
 
 # CRITICAL: `.env` is deliberately absent. Every other artifact is safe to copy; secrets are
@@ -168,9 +162,6 @@ async def prune(destination: Path, adapter: VectorDBAdapter, *, retain: int) -> 
         try:
             manifest = read_manifest(path)
         except FasterRagError:
-            # A set whose manifest is unreadable still has to be prunable, or one corrupt
-            # directory would pin retention forever and the destination would grow without
-            # bound. Its snapshots cannot be identified, so they are left and logged.
             _logger.warning(
                 "pruning a backup set with an unreadable manifest; any backend snapshots it "
                 "referenced cannot be identified and are left in place",
@@ -181,8 +172,6 @@ async def prune(destination: Path, adapter: VectorDBAdapter, *, retain: int) -> 
                 try:
                     await adapter.delete_snapshot(collection, snapshot)
                 except FasterRagError as exc:
-                    # A snapshot that will not delete must not stop the prune. The local set
-                    # still goes, and the leak is named rather than silent.
                     _logger.warning(
                         "could not delete a snapshot while pruning; it may be orphaned",
                         extra={
@@ -214,13 +203,9 @@ async def back_up(
     destination.mkdir(parents=True, exist_ok=True)
 
     started = datetime.now(tz=UTC)
-    # Colons are legal in a POSIX filename and illegal in a Windows one, so an ISO timestamp
-    # used verbatim would make every backup directory unopenable on Windows.
     stamp = started.strftime("%Y%m%dT%H%M%SZ")
     set_root = destination / f"{SET_PREFIX}{stamp}"
 
-    # A second run inside the same second must not merge into the first set, which would
-    # produce one directory holding two runs' files and a manifest describing only the later.
     suffix = 1
     while set_root.exists():
         suffix += 1

@@ -26,9 +26,6 @@ API_REFERENCE: Final = REPOSITORY_ROOT / "docs" / "api-reference.md"
 
 METHODS: Final = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
-# Routes that exist for machines rather than for API consumers. Documenting the schema
-# endpoint inside the document it describes is circular, and the exposition endpoint is
-# specified in observability.md instead.
 UNDOCUMENTED_BY_DESIGN: Final[frozenset[str]] = frozenset(
     {
         "GET /openapi.json",
@@ -84,8 +81,6 @@ def check(reference: Path = API_REFERENCE) -> list[str]:
     return [
         *(f"served but undocumented: {route}" for route in sorted(served - shipped - planned)),
         *(f"documented as shipped but not served: {route}" for route in sorted(shipped - served)),
-        # The reverse of the usual drift: something got built and the "not yet implemented"
-        # note was left behind, so the reference now understates the system.
         *(
             f"marked 'not yet implemented' but served: {route}"
             for route in sorted(planned & served)

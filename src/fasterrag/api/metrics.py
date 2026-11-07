@@ -80,9 +80,6 @@ class MetricsMiddleware:
             status = status_holder["status"]
             elapsed = time.perf_counter() - started
 
-            # The tenant is read from the scope the auth middleware populated, not from the
-            # header. Auth runs first and has already decided who the caller is; re-reading
-            # the header here would let an unauthenticated request label its own series.
             metrics.REQUESTS.increment(
                 endpoint=endpoint,
                 method=str(scope.get("method", "GET")),

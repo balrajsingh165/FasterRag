@@ -216,9 +216,6 @@ class MetricPusher:
         try:
             result = await asyncio.to_thread(self._exporter.export, data)
         except Exception as exc:
-            # Deliberately broad, for the same reason the trace exporter's is: this reaches
-            # a network through protobuf serialization and a vendor SDK, and none of it
-            # should be able to affect a process that is serving fine.
             _logger.warning(
                 "could not export metrics over OTLP",
                 extra={"endpoint": self.endpoint, "error": type(exc).__name__},

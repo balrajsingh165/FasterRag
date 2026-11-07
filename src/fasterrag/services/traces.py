@@ -50,8 +50,6 @@ __all__ = [
     "create_trace_store",
 ]
 
-# Names only. The values are generated into `.env` by the provisioner and read from the
-# environment, never from config.yaml.
 LANGFUSE_PUBLIC_KEY_VAR = "LANGFUSE_PUBLIC_KEY"
 LANGFUSE_SECRET_KEY_VAR = "LANGFUSE_SECRET_KEY"
 LANGFUSE_HOST_VAR = "LANGFUSE_HOST"

@@ -15,6 +15,18 @@ The numbering is the file's whole argument: a root is one decision that unblocks
     orphaned child breaks that — ``B7.2`` under no ``B7`` heading tells a reader there is a
     root to resolve and then gives them nothing to resolve.
 
+### `_ledger_state`
+
+> Return the open and completed ids the ledger declares.
+
+The id being *defined* is the first on the line; later ones are cross-references.
+
+### `check`
+
+> Return one message per drifting citation, empty when the view is faithful.
+
+A completed task is legitimate *context* — "TASK-0174 made the wait visible; this decides whether it should exist" is exactly the history a reader needs. It is marked with the same ✅ the ledger uses, so the claim is visible to a human rather than a silent exemption in this script.
+
 ## `scripts/check_claims.py`
 
 ### `_sentences`
@@ -61,6 +73,30 @@ Args:
         root: Repository to inspect. Parameterised so the gate itself can be tested against
             a constructed tree — a check nobody has watched fail is not a check.
 
+### `NO_CODE_CLAIMS`
+
+Phrases that assert there is no implementation code. Matched case-insensitively against the always-loaded docs; any hit while `src/` holds modules is the audit's exact inversion.
+
+### `IMPLEMENTATION_THRESHOLD`
+
+A source tree this small is a scaffold, not an implementation; the claim would be fair.
+
+### `main`
+
+> Run the check, reporting every contradiction at once.
+
+The two violation classes have nothing to do with each other, and a gate that prints the wrong remedy teaches people to ignore the right one.
+
+## `scripts/check_error_taxonomy.py`
+
+### `CONTROL_FLOW_SIGNALS`
+
+Termination signals, not failures: the iterator protocol raises these to say "done".
+
+### `RAISE_ALLOWED_BUILTINS`
+
+NotImplementedError is the abstract-method idiom, not an error crossing a boundary.
+
 ## `scripts/check_openapi_drift.py`
 
 ### `documented_routes`
@@ -74,6 +110,32 @@ A specification legitimately describes endpoints ahead of their implementation �
 
     Returns:
         The shipped set and the planned set, both as ``METHOD /path``.
+
+### `UNDOCUMENTED_BY_DESIGN`
+
+Routes that exist for machines rather than for API consumers. Documenting the schema endpoint inside the document it describes is circular, and the exposition endpoint is specified in observability.md instead.
+
+### `check`
+
+> Return one message per drifting route, empty when the two agree.
+
+The reverse of the usual drift: something got built and the "not yet implemented" note was left behind, so the reference now understates the system.
+
+## `scripts/check_package.py`
+
+### `PUBLIC_IMPORTS`
+
+Every symbol docs/python-api.md names as SemVer-stable. A name that stops importing from a built wheel is a broken promise to an adopter, and nothing else in the suite would notice: the unit run puts src/ on sys.path, so it imports the checkout rather than the package.
+
+### `EXTRA_ONLY_MODULES`
+
+Imported lazily by design, so a core install must NOT pull them. Asserting their absence is what keeps the dependency promise honest: `pip install fasterrag` claims not to drag in a multi-gigabyte deep-learning stack, and only a core-only environment can prove it.
+
+## `scripts/measure_rerank.py`
+
+### `UNLOADED_DIRECTORIES`
+
+What a sentence-transformers cross-encoder load never reads, and must therefore not be charged to the model's size. Both halves are real: `cross-encoder/ms-marco-MiniLM-L-6-v2` ships five ONNX builds and a Flax copy of the same 90 MB of weights, and `BAAI/bge-reranker-v2-m3` ships a quarter of a megabyte of README screenshots. Counting either would report a model as several times larger than the pipeline makes it.
 
 ## `scripts/stamp_release.py`
 
@@ -92,6 +154,14 @@ A Windows checkout under ``core.autocrlf`` holds CRLF; CI holds LF. ``write_text
 The banners are prose and are not rewritten here — ``check`` reports them until the
     release commit removes them by hand, which is the point: the stamp commit cannot be made
     while a document still says the package is unpublished.
+
+### `_SEMVER`
+
+The SemVer shape the release procedure uses for tags and CHANGELOG headings. Deliberately narrower than SemVer: only the pre-release labels PEP 440 has a direct spelling for, so the two forms convert without a normalisation library and without ambiguity.
+
+### `_BANNERS`
+
+Each banner is identified by a phrase that exists only to be deleted at release; the check looks for the phrase, not the sentence, so rewording around it does not defeat the gate.
 
 ## `src/fasterrag/adapters/embeddings/base.py`
 
@@ -245,6 +315,12 @@ Args:
 The client slot lives here because every provider needs one and every provider
         builds it lazily; keeping it in one place is what lets ``close`` mean the same
         thing everywhere.
+
+### `classify_llm_failure`
+
+> Translate a provider failure into a typed, correctly-classified error.
+
+A timeout gets its own code, mirroring the embedding side's split between EMBED_PROVIDER_TIMEOUT and EMBED_PROVIDER_ERROR. The two call for different actions — a timeout says raise reliability.timeouts.llm_ms or reduce the context, a hard failure says look at the provider — and one code for both cannot say which.
 
 ## `src/fasterrag/adapters/llm/factory.py`
 
@@ -813,11 +889,15 @@ Synchronous rather than a job id, unlike ingestion: an export reads what is alre
 
 ### `_parse_scopes`
 
-> Parse a comma-separated scope list, rejecting anything undefined.
+> Parse a present scope field, rejecting an undefined or an empty one.
 
 Raises:
         ConfigError: If a scope is not one of the four documented ones. A typo like
             ``collection`` would otherwise produce a key that silently permits nothing.
+        ConfigError: If the field is present but blank (``k:``, ``k::acme``, ``k: , ``).
+            It used to default to every scope, so the one spelling that could attach a
+            tenant was a silent ``admin`` key; ``*`` now says "all scopes" out loud
+            (TASK-0327).
 
 ### `load_keys`
 
@@ -847,6 +927,8 @@ Three rules, and the third is the one that matters: a key **bound to a tenant** 
     but must still say which — an unstated tenant would otherwise silently read and write
     the untenanted namespace while multi-tenancy is supposedly on.
 
+Deliberately does not echo the key's tenant: that would let a caller enumerate which tenants exist by trying values and reading the error.
+
 ### `KeyRegistry.resolve`
 
 > Return the matching key, or ``None``.
@@ -873,6 +955,18 @@ Raises:
             ConfigError: If auth is enabled with no usable key. Failing at construction
                 means a misconfigured deployment refuses to start rather than refusing
                 every request afterwards.
+
+### `_SCOPE_BY_PREFIX`
+
+The dashboard's own routes. It is a separate application, but it reads the same traces and metrics, so it needs the same scope rather than a weaker one of its own.
+
+### `AuthMiddleware.__call__`
+
+> Authenticate an HTTP request, or pass it through when auth is off.
+
+Deliberately identical in wording and timing to a revoked key: an attacker must not be able to tell a wrong key from an unknown one.
+
+Downstream reads the authenticated identity from here rather than re-parsing the header, so exactly one place decides who the caller is and which tenant they are.
 
 ## `src/fasterrag/api/collections.py`
 
@@ -949,6 +1043,12 @@ A background task has no caller to raise to, so a failure that escaped here woul
     with only a stack trace in the log and a job stuck at ``queued`` forever. Every outcome
     therefore lands in the journal.
 
+### `start_ingest`
+
+> Accept an ingestion job and return its id immediately.
+
+The routing class is ordinary chunk metadata, because that is what the tiering rules match on (`embeddings.tiering.rules[].match`). Merged here rather than threaded separately so the REST and CLI surfaces produce identical chunks.
+
 ## `src/fasterrag/api/limits.py`
 
 ### `_counted`
@@ -958,6 +1058,10 @@ A background task has no caller to raise to, so a failure that escaped here woul
 # CRITICAL: raising here rather than returning a truncated body. A handler handed a
     # short read would parse whatever arrived and answer as though the request were
     # complete, which turns a rejected upload into a silently partial one.
+
+### `_UNBOUNDED_METHODS`
+
+Methods that carry no body worth bounding. A GET with a body is legal and meaningless, and refusing one on size would be a surprising failure on a request nothing reads.
 
 ## `src/fasterrag/api/main.py`
 
@@ -990,6 +1094,12 @@ Args:
     Raises:
         ConfigError: If configuration is absent or invalid and none was supplied.
 
+### `lifespan`
+
+> Start and stop process-wide resources.
+
+Metrics are pushed on an interval rather than per request, so the pusher's lifetime is the process's. Started here and stopped below, which is also the only place that can send a final snapshot before the counters go with the process.
+
 ## `src/fasterrag/api/metrics.py`
 
 ### `_tenant_of`
@@ -999,6 +1109,12 @@ Args:
 ``none`` covers both a single-tenant deployment and an unauthenticated request, which is
     correct: neither belongs to a tenant, and inventing a label for them would split every
     series in a deployment that has no tenants at all.
+
+### `MetricsMiddleware.__call__`
+
+> Time the request and count its outcome.
+
+The tenant is read from the scope the auth middleware populated, not from the header. Auth runs first and has already decided who the caller is; re-reading the header here would let an unauthenticated request label its own series.
 
 ## `src/fasterrag/api/problems.py`
 
@@ -1071,6 +1187,12 @@ A misspelled field is a silent no-op under the permissive default: a caller who 
 Raises:
         FasterRagError: With ``NOT_FOUND`` when the trace is unknown, expired past
             ``traces.retention_days``, or never stored because ``traces.store`` is false.
+
+### `replay`
+
+> Re-execute a past query under a candidate configuration and diff the outcome.
+
+The two answer texts are the bulk of this response and the part a config sweep never reads — it is comparing whether the outcome moved, not reading both outcomes. Citations stay: they are how a caller finds which chunks changed.
 
 ## `src/fasterrag/cli/commands/autopilot.py`
 
@@ -1244,6 +1366,18 @@ A local model reports no dimension until its weights are loaded, and creating a
     is cheaper than a collection created at the wrong width, which cannot be widened later
     and forces a full re-embed to correct.
 
+### `run_ingest`
+
+> Ingest sources, or report what ingesting them would involve under ``--dry-run``.
+
+The routing class is ordinary chunk metadata, because that is what the tiering rules match on (`embeddings.tiering.rules[].match`). A separate channel would need every rule to know about a second source of truth.
+
+### `run_query`
+
+> Answer a question, streaming tokens unless ``--no-stream`` was given.
+
+Streaming is the default because time-to-first-token is what a person at a terminal actually waits on. It is skipped for --json, where a partial document is not a document, and for --show-chunks, which needs the candidate set the non-streaming call returns.
+
 ## `src/fasterrag/cli/commands/processes.py`
 
 ### `run_worker`
@@ -1348,6 +1482,12 @@ Anything that is not an existing directory passes through untouched, so URLs, in
         The expanded sources. Files from one directory are sorted, because document ids
         and job order derive from this list and an arbitrary filesystem order would make
         the same command produce a different job each run.
+
+A source the filesystem cannot even stat is not a directory; leave it for the pipeline to report as unreadable with its own reason code.
+
+### `SKIPPED_DIRECTORIES`
+
+Walking these wastes a full parse pass on files no corpus contains. Ingesting a project folder should not mean parsing its virtualenv.
 
 ## `src/fasterrag/config/loader.py`
 
@@ -1538,6 +1678,8 @@ Retryable by definition: the breaker's whole premise is that the provider is
         # the timeout, fail again, and re-open — presenting a permanent misconfiguration as
         # an intermittent outage and hiding the one error message that explains it.
 
+A failed probe re-opens immediately: half-open exists to test recovery with one request, not to grant a fresh threshold's worth of doomed calls.
+
 ## `src/fasterrag/core/cache/__init__.py`
 
 ### `_create`
@@ -1687,6 +1829,12 @@ Called on ingest, delete, and reindex. Deliberately total rather than selective:
         what each answer was derived from *and* what the new document says, and a cache that
         guesses wrong here serves a confidently stale answer.
 
+### `SemanticCache.store_response`
+
+> Remember ``response`` as the answer to anything close to ``vector``.
+
+The tenant is in the key as well as the entry: without it two tenants asking the same question collide and the second silently overwrites the first.
+
 ## `src/fasterrag/core/cache/store.py`
 
 ### `MemoryStore`
@@ -1760,6 +1908,8 @@ The target is interpolated rather than hardcoded because the key exists and is
 Instructions reduce this; they do not eliminate it. An unstripped ``"Here is the
     context:"`` becomes part of the embedded text on every chunk, which is noise added to
     the exact field the feature exists to improve.
+
+Looped, because the two forms nest: a model writes `Context: "…"` as readily as `"Context: …"`, and stripping in one fixed order leaves the other's residue behind — a stray quote that then travels into every embedding.
 
 ### `enrich_chunks`
 
@@ -1896,6 +2046,10 @@ Every chunker sizes its first pass in *characters*, because a character tiling i
     Returns:
         A tiling no coarser than the input, with every over-budget segment re-split.
 
+### `MINIMUM_LIMIT`
+
+The character limit below which the budget pass stops halving. Without a floor a text the counter never reports as fitting — a single glyph tokenizing to several tokens — would recurse until the segments were one character wide.
+
 ## `src/fasterrag/core/chunking/pooling.py`
 
 ### `_sentinels`
@@ -1916,6 +2070,8 @@ A token appearing in several windows is kept from the window where it sits furth
     from an edge: that is the copy that saw context on both sides, which is the entire
     reason the document is embedded whole rather than in pieces.
 
+Drop the sentinels so positions line up with the document's own token indices.
+
 ### `pool_spans`
 
 > Return one pooled, normalized vector per span of ``text``.
@@ -1931,6 +2087,12 @@ Args:
     Raises:
         EmbedError: If the model cannot supply token-level output, or the document
             produces no tokens at all.
+
+A span holding only whitespace or characters the tokenizer dropped. Its chunk still needs a vector, and a zero one would rank against every query, so it falls back to the document's own mean.
+
+### `WINDOW_OVERLAP_FRACTION`
+
+How much of each window repeats the one before it. A token at a window's edge sees context on one side only, so windows overlap and every token is scored by how centred it is — a quarter is enough for the edges to lose to a neighbouring window's middle.
 
 ## `src/fasterrag/core/chunking/recursive.py`
 
@@ -2245,6 +2407,8 @@ Two spellings of one local file must produce one document id. On Windows the fil
 
     URLs are left exactly as given. Their paths are case-*sensitive* by specification, so
     folding one would merge two genuinely different resources.
+
+A Windows path. The whole thing is case-insensitive, not just the drive letter.
 
 ### `job_id`
 
@@ -2760,6 +2924,8 @@ Pure and side-effect free so the wire format can be asserted in a unit test with
     running Langfuse — the mapping is where this integration is most likely to be wrong, and
     it is invisible until someone opens the dashboard.
 
+The generation stage is reported as a `generation` observation rather than a plain span: Langfuse derives model usage and cost only from that type, so sending it as a span would leave its own cost view empty while the data sat right there.
+
 ### `LangfuseExporter.export`
 
 > Send one trace, reporting whether it landed.
@@ -2768,6 +2934,8 @@ Returns:
             ``True`` when Langfuse accepted the batch. A ``False`` is logged with the reason
             and otherwise ignored — the query it describes was answered long before this ran,
             and a failed export must never surface to the caller.
+
+207 is Langfuse's normal answer: the batch endpoint reports per-event results, so a partial accept is the expected shape rather than an error.
 
 ### `LangfuseExporter._all_events_accepted`
 
@@ -2782,6 +2950,8 @@ Returns:
         # This is exactly the failure a field-name mismatch produces, which is what made the
         # export unverifiable against anything but a stub (blocker B7.1) — a stub accepts what
         # the real server would reject, and the old check could not tell the difference.
+
+A 2xx whose body is not JSON is not something to fail a query over, but it is not evidence of storage either. Report it and move on.
 
 ## `src/fasterrag/observability/logging.py`
 
@@ -2900,6 +3070,10 @@ Pure and side-effect free so the mapping can be asserted without a collector run
     Raises:
         ConfigError: If the OpenTelemetry SDK is not installed.
 
+Named for the same reason the metric payload names its scope: a backend groups and filters by it, and spans arriving with an empty scope are attributed to nothing.
+
+The root has to span every stage, and a query's own wall clock is not recorded separately — it is the envelope of what it did.
+
 ### `OtelExporter.__init__`
 
 > Build the exporter without connecting.
@@ -2911,6 +3085,14 @@ Args:
 
         Raises:
             ConfigError: If the OTLP exporter is not installed.
+
+### `OtelExporter.export`
+
+> Send one trace, reporting whether the collector accepted it.
+
+Deliberately broad: this reaches a network through protobuf serialization and a vendor SDK, each raising its own types, and none of them should be able to affect a request that has already been answered.
+
+Compared by name rather than by importing the enum, which keeps the SDK import lazy on a path that runs after every query.
 
 ## `src/fasterrag/observability/otel_metrics.py`
 
@@ -2965,6 +3147,12 @@ Args:
 # CRITICAL: the task is retained on the instance. asyncio holds only a weak
         # reference to a running task, so one that nothing keeps can be collected
         # mid-flight and the pushes stop with no error anywhere.
+
+### `MetricPusher.push`
+
+> Send one snapshot, reporting whether the collector accepted it.
+
+Deliberately broad, for the same reason the trace exporter's is: this reaches a network through protobuf serialization and a vendor SDK, and none of it should be able to affect a process that is serving fine.
 
 ## `src/fasterrag/services/archive.py`
 
@@ -3095,6 +3283,8 @@ Args:
             Tuning is a risky feature behind a flag defaulting to false, and running it
             because someone typed the command would defeat the flag.
 
+A candidate outside the schema's bounds is skipped, never fatal: one bad grid entry must not discard the trials that already ran.
+
 ## `src/fasterrag/services/backup.py`
 
 ### `read_manifest`
@@ -3132,6 +3322,10 @@ Args:
     Raises:
         FasterRagError: If ``retain`` is less than one.
 
+A set whose manifest is unreadable still has to be prunable, or one corrupt directory would pin retention forever and the destination would grow without bound. Its snapshots cannot be identified, so they are left and logged.
+
+A snapshot that will not delete must not stop the prune. The local set still goes, and the leak is named rather than silent.
+
 ### `back_up`
 
 > Capture every documented artifact into a new timestamped set under ``destination``.
@@ -3149,6 +3343,10 @@ Args:
 
     Returns:
         The manifest describing what was captured.
+
+Colons are legal in a POSIX filename and illegal in a Windows one, so an ISO timestamp used verbatim would make every backup directory unopenable on Windows.
+
+A second run inside the same second must not merge into the first set, which would produce one directory holding two runs' files and a manifest describing only the later.
 
 ### `restore`
 
@@ -3170,6 +3368,14 @@ Args:
         vector count differs from what the manifest recorded — a mismatch is reported rather
         than raised, because a partial restore an operator can see beats one that aborts
         halfway with no report of how far it got.
+
+### `SET_PREFIX`
+
+Every backup set directory starts with this, so a destination can hold sets alongside whatever else an operator keeps there without retention ever considering those for deletion.
+
+### `DEFAULT_RETAIN`
+
+Fourteen days of daily backups, matching the documented default in docs/disaster-recovery.md. Counted in *sets*, not days: fasterRag runs when it is invoked and cannot know the cadence a scheduler was configured with, so counting days would mean guessing at a number only the operator holds.
 
 ## `src/fasterrag/services/benchmark.py`
 
@@ -3239,6 +3445,10 @@ Recorded after the call rather than at the check, so a tenant is charged what th
         query really cost rather than the ceiling it was admitted against. Admitting on the
         worst case and charging the real one is the combination that neither overspends nor
         over-refuses.
+
+### `ROLLING_WINDOW_SECONDS`
+
+The documented budget is "rolling" without naming a period, and a rolling window means nothing without one. A day is the shortest period over which a spend cap is normally reasoned about, and it is stated in config-reference.md rather than left to be inferred.
 
 ## `src/fasterrag/services/doctor.py`
 
@@ -3453,6 +3663,12 @@ Args:
         The estimate. Documents that cannot be parsed are counted as unreadable rather
         than raising, because an estimate over a messy corpus is still useful.
 
+Enrichment sends the whole parent document once per chunk, so the prompt cost is the document's own token count multiplied by how many chunks it produced — the term that makes this expensive, and the one a per-chunk figure would hide.
+
+### `GENERATION_PRICES`
+
+Two rates per generation model, not one: a model charges differently for the prompt it reads and the answer it writes, so pricing a completion at the input rate understates every query.
+
 ## `src/fasterrag/services/evaluation.py`
 
 ### `load_dataset`
@@ -3613,6 +3829,8 @@ With ``generation.grounded_or_refuse`` enabled, no ``token`` event is emitted un
         as a single ``token`` event after ``meta`` — the event contract holds and a client
         needs no separate code path for a cached response.
 
+Outside the try for the same reason as the non-streaming path: a budget refusal is a 402 the caller must see, not an `error` event mid-stream after `meta` has already promised an answer.
+
 ### `GenerationService.close`
 
 > Release the generation provider.
@@ -3717,6 +3935,8 @@ Returns:
     Raises:
         ProvisioningError: If the doctor preflight fails, before anything is created.
 
+The same gate the Qdrant provisioner uses. A port conflict reported as a fix-it string before anything starts beats a container that exits seconds later for a reason only `docker logs` can tell you.
+
 ## `src/fasterrag/services/ingestion.py`
 
 ### `_status_for`
@@ -3766,6 +3986,8 @@ Returns immediately so the API can answer ``202 Accepted`` with a job id. Replay
 Resumes from the job's checkpoint, so re-running after a crash continues rather
         than restarting. Deduplication makes any documents that were replayed anyway into
         no-ops (D3).
+
+The enrichment model is built only when the toggle is on: constructing an LLM adapter for every ingest would open a provider client that most jobs never use.
 
 ### `IngestionService._publish_metrics`
 
@@ -3861,6 +4083,8 @@ Returns:
         Every value the stack needs, and the *names* of the ones newly generated. Values are
         returned for injection into the subprocess environment and are never logged.
 
+Langfuse requires exactly 256 bits of hex here.
+
 ### `compose_arguments`
 
 > Return the ``docker compose`` argv for a verb.
@@ -3902,6 +4126,12 @@ Returns:
     Raises:
         ProvisioningError: If the doctor preflight fails, before any secret is generated.
 
+Gated before any secret is generated. This stack claims eight host ports — the widest surface of any toggle — and a conflict discovered mid-`compose up` leaves some containers running and some not.
+
+### `LANGFUSE_PORTS`
+
+Every port the stack publishes, in the order doctor should check them.
+
 ## `src/fasterrag/services/lockfile.py`
 
 ### `build_lock`
@@ -3928,6 +4158,8 @@ Args:
         The drift report. A missing lockfile is reported as ``missing_lock`` rather than as
         drift: nothing has changed, there is simply nothing to compare against, and calling
         that "drift" would make an un-locked index indistinguishable from a corrupted one.
+
+Checked first and reported like any other drift, because an id-scheme change makes every document in the collection unaddressable at once. Without it the symptom is a recall of 0.0 that looks like a broken retriever rather than a renamed corpus.
 
 ### `IndexLock.summary`
 
@@ -4380,6 +4612,10 @@ Filtering happens after sorting rather than by scanning until ``limit`` is reach
         so a tenant's newest traces are returned even when another tenant wrote more
         recently — the alternative silently hides a tenant behind a noisier one.
 
+### `LANGFUSE_PUBLIC_KEY_VAR`
+
+Names only. The values are generated into `.env` by the provisioner and read from the environment, never from config.yaml.
+
 ## `src/fasterrag/sync.py`
 
 ### `FasterRag`
@@ -4459,6 +4695,8 @@ Runs inside a worker process, so it takes only picklable arguments and returns o
     Raises:
         ParseError: If the document cannot be read or parsed.
         IngestionError: If the document exceeds ``ingestion.max_document_mb``.
+
+Carried only when something downstream reads it — contextual enrichment writes a per-chunk prefix from it, and late chunking pools vectors out of it. Otherwise this doubles what every parsed document sends back through IPC for nothing.
 
 ### `_unguarded_entry_point_error`
 
@@ -4553,6 +4791,10 @@ Args:
                 source itself — a staged URL or inline payload. Absent entries read from
                 the source directly.
 
+### `_SLOW_TOKENIZER_LOAD_SECONDS`
+
+Below this, the load is the estimating counter or an already-warm cache and there is nothing worth a log line. Above it, a slow start needs explaining.
+
 ## `src/fasterrag/workers/embed_pool.py`
 
 ### `PoolingAdapter`
@@ -4594,6 +4836,12 @@ Args:
 One pass per document rather than one per chunk: that single pass is the whole
         point, and it is what makes each chunk's vector carry context from beyond its own
         boundaries.
+
+### `EmbeddingWorkerPool._charge`
+
+> Account for one embedded batch, in tokens and in money.
+
+Recorded, never checked: a budget that refuses mid-ingest would abandon a job half-indexed, so ingestion spends and reports, and the cap bites the next query.
 
 ## `src/fasterrag/workers/indexer.py`
 

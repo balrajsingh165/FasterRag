@@ -45,7 +45,6 @@ def _ledger_state(todo: Path) -> tuple[set[str], set[str]]:
         stripped = line.strip()
         if not stripped.startswith(("- [ ]", "- [x]")):
             continue
-        # The id being *defined* is the first on the line; later ones are cross-references.
         found = _ID.search(stripped)
         if found is None:
             continue
@@ -89,10 +88,6 @@ def check(todo: Path = TODO, blockers: Path = BLOCKERS) -> list[str]:
 
     open_ids, done_ids = _ledger_state(todo)
 
-    # A completed task is legitimate *context* — "TASK-0174 made the wait visible; this
-    # decides whether it should exist" is exactly the history a reader needs. It is marked
-    # with the same ✅ the ledger uses, so the claim is visible to a human rather than a
-    # silent exemption in this script.
     body = blockers.read_text(encoding="utf-8")
     cited: set[str] = set()
     for line in body.splitlines():

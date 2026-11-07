@@ -14,8 +14,6 @@ from pathlib import Path
 
 __all__ = ["SKIPPED_DIRECTORIES", "expand_sources"]
 
-# Walking these wastes a full parse pass on files no corpus contains. Ingesting a project
-# folder should not mean parsing its virtualenv.
 SKIPPED_DIRECTORIES: frozenset[str] = frozenset(
     {".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache"}
 )
@@ -41,8 +39,6 @@ def expand_sources(sources: Sequence[str], *, recursive: bool = False) -> list[s
             path = Path(source)
             is_directory = path.is_dir()
         except OSError:
-            # A source the filesystem cannot even stat is not a directory; leave it for
-            # the pipeline to report as unreadable with its own reason code.
             expanded.append(source)
             continue
 

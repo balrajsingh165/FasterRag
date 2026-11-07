@@ -731,9 +731,6 @@ class GenerationService:
             },
         )
 
-        # Outside the try for the same reason as the non-streaming path: a budget
-        # refusal is a 402 the caller must see, not an `error` event mid-stream after
-        # `meta` has already promised an answer.
         self._charge_budget(prepared)
 
         started = time.perf_counter()

@@ -58,7 +58,6 @@ __all__ = [
 WEB_PORT: Final = 3000
 WORKER_PORT: Final = 3030
 
-# Every port the stack publishes, in the order doctor should check them.
 LANGFUSE_PORTS: Final[tuple[int, ...]] = (3000, 3030, 5432, 6379, 8123, 9000, 9090, 9091)
 
 DEFAULT_LANGFUSE_ROOT: Final = Path(".fasterrag") / "langfuse"
@@ -158,7 +157,6 @@ def ensure_secrets(env_file: Path) -> tuple[dict[str, str], list[str]]:
         if values.get(name):
             continue
         if name.endswith("ENCRYPTION_KEY"):
-            # Langfuse requires exactly 256 bits of hex here.
             values[name] = secrets.token_hex(32)
         elif name == "LANGFUSE_PUBLIC_KEY":
             values[name] = f"pk-lf-{secrets.token_hex(16)}"
@@ -388,9 +386,6 @@ async def provision_langfuse(
             detail="docker is not running; start it and re-run",
         )
 
-    # Gated before any secret is generated. This stack claims eight host ports — the widest
-    # surface of any toggle — and a conflict discovered mid-`compose up` leaves some
-    # containers running and some not.
     await require_provisioning_gate(settings)
 
     _, created = ensure_secrets(plan.env_file)

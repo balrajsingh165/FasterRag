@@ -187,8 +187,6 @@ class SemanticCache:
             return
 
         try:
-            # The tenant is in the key as well as the entry: without it two tenants asking
-            # the same question collide and the second silently overwrites the first.
             await self.store.set(
                 f"sem:{tenant or '-'}:{question}",
                 _encode(question, vector, response, tenant),

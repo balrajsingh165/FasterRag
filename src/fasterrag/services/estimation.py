@@ -120,8 +120,6 @@ EMBEDDING_PRICES: Final[dict[str, TokenPrice]] = {
     ),
 }
 
-# Two rates per generation model, not one: a model charges differently for the prompt it reads
-# and the answer it writes, so pricing a completion at the input rate understates every query.
 GENERATION_PRICES: Final[dict[str, TokenPrice]] = {
     **_table(
         "openai",
@@ -440,9 +438,6 @@ def estimate_sources(
         tokens += document_chunk_tokens
         read += Path(task.source).stat().st_size
 
-        # Enrichment sends the whole parent document once per chunk, so the prompt cost is
-        # the document's own token count multiplied by how many chunks it produced — the
-        # term that makes this expensive, and the one a per-chunk figure would hide.
         if settings.chunking.contextual_enrichment:
             document_tokens = len(outcome.document_text) // _CHARS_PER_TOKEN
             enrichment_prompt_tokens += document_tokens * len(outcome.chunks)

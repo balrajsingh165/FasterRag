@@ -213,9 +213,6 @@ def detect_drift(
     fields: list[str] = []
     details: list[dict[str, Any]] = []
 
-    # Checked first and reported like any other drift, because an id-scheme change makes
-    # every document in the collection unaddressable at once. Without it the symptom is a
-    # recall of 0.0 that looks like a broken retriever rather than a renamed corpus.
     _compare("identity_version", lock.identity_version, IDENTITY_VERSION, fields, details)
     _compare("config_hash", lock.config_hash, retrieval_config_hash(settings), fields, details)
     _compare("chunker_strategy", lock.chunker_strategy, settings.chunking.strategy, fields, details)
