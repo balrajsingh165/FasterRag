@@ -55,12 +55,33 @@ exists to detect. The price is roughly a second of copying per run and a recompi
 mutated package per mutant; the breaker target's verdict was unchanged across the fix (34
 mutants, 32 killed, the same two survivors), and no wall-clock comparison taken on a machine
 running ten agents at once is worth quoting.
+
+**A pathological mutant is a verdict, not a dead runner** (TASK-0321). A mutated comparison
+can turn a bounded loop into an unbounded one, and ``--timeout`` bounds a mutant's seconds
+rather than its resident set: the nightly job was SIGTERMed twice with no output at all, so
+nobody could name the mutant that did it. Four things answer that. Every mutant is announced
+on a flushed stdout line *before* it runs, so the last line printed before a kill names the
+mutant in flight. ``--memory-mb`` caps the child's address space through ``RLIMIT_AS``, which
+converts a runaway into a ``MemoryError`` inside its own pytest run — recorded as killed,
+campaign continuing — rather than into a dead runner; it is POSIX-only and refused rather
+than silently ignored where ``resource`` does not exist. The artifact carries the peak
+resident size of the worst child reaped so far, so a run that came close to the ceiling says
+so. And ``--json-out`` is rewritten after every target, so a killed run leaves the targets it
+finished instead of nothing, with ``complete: false`` saying it is a partial.
+
+**A timeout is counted as a kill and named as a timeout.** It stays inside ``killed`` because
+``executed == killed + survived`` is what every consumer of this artifact adds up, and
+because the alternative — calling it a survivor — would publish "no test defends this line"
+about a line whose test never finished. But a timeout is not evidence that a test caught
+anything, so each timed-out mutant is now listed by file, line and substitution exactly as a
+survivor is: a run reporting 214 kills of which 4 were timeouts now says which 4.
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import importlib
 import json
 import os
 import random
@@ -70,9 +91,11 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Final
 
 __all__ = [
@@ -81,18 +104,22 @@ __all__ = [
     "COMPARISON_SWAPS",
     "DEFAULT_TARGETS",
     "EXIT_CODES",
+    "STAGED_ROOTS",
     "Mutation",
     "RunReport",
     "Target",
     "TargetResult",
     "Verdict",
     "apply",
+    "child_peak_rss",
     "decide",
     "generate",
     "load_targets",
     "main",
     "markdown",
+    "memory_limiter",
     "render",
+    "resource_module",
     "restrict",
     "run",
     "select",
@@ -111,6 +138,23 @@ DEFAULT_SEED: Final = 0
 # shadow the mutation entirely and the run reports a verdict for a mutant it never executed.
 _IGNORED: Final = shutil.ignore_patterns("__pycache__")
 
+# CRITICAL: every repository directory a staged test may read through ``__file__``. ``tests``
+# carries the fixtures and eval datasets a test reaches for sideways; ``docs`` is here
+# because ``tests/unit/services/test_archive_format_spec.py`` reads
+# ``docs/archive-format.md`` and the whole archive suite reported `not-run` without it
+# (TASK-0331). Everything else at the repository root is deliberately absent — a target
+# whose tests read `config.yaml`, `.github/` or `src/` under that name must extend this
+# tuple, and will see a hard failure rather than a silent wrong verdict if it does not.
+STAGED_ROOTS: Final[tuple[str, ...]] = ("tests", "docs")
+
+_MEGABYTE: Final = 1024 * 1024
+
+# CRITICAL: ``ru_maxrss`` is kilobytes on Linux and bytes on macOS. Reporting the raw number
+# would misstate a Linux peak by three orders of magnitude, which is the direction that makes
+# a memory pathology look harmless.
+_RSS_SCALE: Final[dict[str, int]] = {"darwin": 1}
+_RSS_SCALE_DEFAULT: Final = 1024
+
 
 class Verdict(StrEnum):
     """What a mutation run concluded."""
@@ -125,6 +169,51 @@ EXIT_CODES: Final[dict[Verdict, int]] = {
     Verdict.SURVIVORS: 1,
     Verdict.NOT_RUN: 2,
 }
+
+
+def resource_module() -> ModuleType | None:
+    """Import POSIX ``resource``, or report that this platform has none.
+
+    Imported by name rather than at module scope so the rest of the runner keeps
+    working on Windows, where the module does not exist at all.
+    """
+    try:
+        return importlib.import_module("resource")
+    except ImportError:
+        return None
+
+
+def memory_limiter(megabytes: int | None, limits: ModuleType | None) -> Callable[[], None] | None:
+    """Build the ``preexec_fn`` capping a child's address space, or ``None`` for no cap.
+
+    A cap asked for on a platform without ``resource`` is refused here rather than
+    dropped, because a limit silently not applied is the pathology it was meant to catch.
+    """
+    if megabytes is None or megabytes <= 0:
+        return None
+    if limits is None:
+        raise ValueError(
+            "--memory-mb needs POSIX resource limits, which this platform does not provide"
+        )
+    ceiling = megabytes * _MEGABYTE
+
+    def apply_limit() -> None:
+        """Run in the forked child, before ``exec``, so the cap binds the pytest process."""
+        limits.setrlimit(limits.RLIMIT_AS, (ceiling, ceiling))
+
+    return apply_limit
+
+
+def child_peak_rss(limits: ModuleType | None, platform: str = sys.platform) -> int | None:
+    """Peak resident bytes of the worst child reaped so far, or ``None`` off POSIX.
+
+    ``getrusage`` reports a high-water mark across every reaped child, so the number
+    only ever rises and says how close the campaign came to the ceiling.
+    """
+    if limits is None:
+        return None
+    usage = limits.getrusage(limits.RUSAGE_CHILDREN)
+    return int(usage.ru_maxrss) * _RSS_SCALE.get(platform, _RSS_SCALE_DEFAULT)
 
 
 @dataclass(frozen=True)
@@ -256,6 +345,7 @@ class TargetResult:
     timed_out: int = 0
     duration_s: float = 0.0
     survivors: list[Mutation] = field(default_factory=list)
+    timeouts: list[Mutation] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -269,6 +359,7 @@ class TargetResult:
             "timed_out": self.timed_out,
             "duration_s": round(self.duration_s, 1),
             "survivors": [mutation.as_dict() for mutation in self.survivors],
+            "timeouts": [mutation.as_dict() for mutation in self.timeouts],
             "problems": list(self.problems),
         }
 
@@ -279,6 +370,18 @@ class RunReport:
 
     verdict: Verdict
     results: list[TargetResult]
+    planned: int = 0
+    peak_child_rss_bytes: int | None = None
+
+    @property
+    def complete(self) -> bool:
+        """Whether every target the run was asked for actually produced a result."""
+        return self.planned <= len(self.results)
+
+    @property
+    def timed_out(self) -> int:
+        """Total mutants the clock ended rather than a test."""
+        return sum(result.timed_out for result in self.results)
 
     @property
     def executed(self) -> int:
@@ -302,6 +405,10 @@ class RunReport:
             "executed": self.executed,
             "killed": self.killed,
             "survived": self.survived,
+            "timed_out": self.timed_out,
+            "complete": self.complete,
+            "planned": max(self.planned, len(self.results)),
+            "peak_child_rss_bytes": self.peak_child_rss_bytes,
             "targets": [result.as_dict() for result in self.results],
         }
 
@@ -473,14 +580,16 @@ def source_files(root: Path, source: str) -> list[Path]:
 
 
 def stage_suite(workspace: Path) -> None:
-    """Copy the test tree and pytest's configuration beside the mutated sources.
+    """Copy ``STAGED_ROOTS`` and pytest's configuration beside the mutated sources.
 
-    The whole tree goes, not only the paths a target names, so a test that reaches
-    for a fixture or dataset beside it finds the snapshot's copy rather than nothing.
+    Each root is copied whole rather than only the paths a target names, so a test
+    that reaches past itself into one of them reads the snapshot. No other root is
+    staged, and a test that reaches for one of those reads the live working tree.
     """
-    shutil.copytree(
-        REPOSITORY_ROOT / "tests", workspace / "tests", dirs_exist_ok=True, ignore=_IGNORED
-    )
+    for root in STAGED_ROOTS:
+        source = REPOSITORY_ROOT / root
+        if source.is_dir():
+            shutil.copytree(source, workspace / root, dirs_exist_ok=True, ignore=_IGNORED)
     configuration = REPOSITORY_ROOT / "pyproject.toml"
     if configuration.is_file():
         shutil.copy2(configuration, workspace / configuration.name)
@@ -548,6 +657,10 @@ def decide(results: list[TargetResult]) -> Verdict:
 def render(report: RunReport) -> str:
     """Render the human report: counts per target, then every survivor in full."""
     lines = [f"mutation run: {report.verdict.value}"]
+    if not report.complete:
+        lines.append(
+            f"  PARTIAL: {len(report.results)} of {report.planned} targets ran before the end"
+        )
     for result in report.results:
         lines.append(
             f"  {result.name}: {result.executed}/{result.generated} run, "
@@ -556,11 +669,18 @@ def render(report: RunReport) -> str:
         )
         for problem in result.problems:
             lines.append(f"    [not-run] {problem}")
+    if report.peak_child_rss_bytes is not None:
+        lines.append(f"  peak child RSS: {report.peak_child_rss_bytes // _MEGABYTE} MiB")
     survivors = [(result.name, m) for result in report.results for m in result.survivors]
     if survivors:
         lines.append("")
         lines.append("surviving mutants (each one is a line no test defends):")
         lines.extend(f"  [{name}] {mutation.describe()}" for name, mutation in survivors)
+    timeouts = [(result.name, m) for result in report.results for m in result.timeouts]
+    if timeouts:
+        lines.append("")
+        lines.append("timed-out mutants (counted as killed; the clock ended them, not a test):")
+        lines.extend(f"  [{name}] {mutation.describe()}" for name, mutation in timeouts)
     return "\n".join(lines)
 
 
@@ -580,6 +700,12 @@ def markdown(report: RunReport) -> str:
         f"| {result.timed_out} | {result.duration_s:.0f} |"
         for result in report.results
     )
+    if not report.complete:
+        lines.extend(
+            ["", f"**Partial:** {len(report.results)} of {report.planned} targets ran.", ""]
+        )
+    if report.peak_child_rss_bytes is not None:
+        lines.extend(["", f"Peak child RSS: {report.peak_child_rss_bytes // _MEGABYTE} MiB.", ""])
     problems = [p for result in report.results for p in result.problems]
     if problems:
         lines.extend(["", "**Could not run:**", ""])
@@ -588,10 +714,36 @@ def markdown(report: RunReport) -> str:
     if survivors:
         lines.extend(["", "**Surviving mutants** — each is a line no test defends:", ""])
         lines.extend(f"- `{name}` {mutation.describe()}" for name, mutation in survivors)
+    timeouts = [(result.name, m) for result in report.results for m in result.timeouts]
+    if timeouts:
+        lines.extend(
+            [
+                "",
+                f"**Timed out** — {report.timed_out} of the {report.killed} kills were the "
+                "clock rather than a test:",
+                "",
+            ]
+        )
+        lines.extend(f"- `{name}` {mutation.describe()}" for name, mutation in timeouts)
     return "\n".join(lines) + "\n"
 
 
-def _pytest(tests: tuple[str, ...], workspace: Path, timeout: float) -> int | None:
+def _progress(line: str) -> None:
+    """Announce one step on stdout and flush it, so a killed run still names it.
+
+    Flushing here rather than trusting ``PYTHONUNBUFFERED`` is deliberate: the report
+    is written only at the end, so without this a SIGTERM leaves no record at all.
+    """
+    sys.stdout.write(f"{line}\n")
+    sys.stdout.flush()
+
+
+def _pytest(
+    tests: tuple[str, ...],
+    workspace: Path,
+    timeout: float,
+    limiter: Callable[[], None] | None = None,
+) -> int | None:
     """Run one target's staged tests against the mutated copy; ``None`` means it timed out.
 
     ``-o pythonpath=`` empties the ini setting that would otherwise put the real ``src``
@@ -621,6 +773,7 @@ def _pytest(tests: tuple[str, ...], workspace: Path, timeout: float) -> int | No
             capture_output=True,
             timeout=timeout,
             check=False,
+            preexec_fn=limiter,
         )
     except subprocess.TimeoutExpired:
         return None
@@ -628,7 +781,13 @@ def _pytest(tests: tuple[str, ...], workspace: Path, timeout: float) -> int | No
 
 
 def _run_target(
-    target: Target, workspace: Path, *, budget: int | None, seed: int, timeout: float
+    target: Target,
+    workspace: Path,
+    *,
+    budget: int | None,
+    seed: int,
+    timeout: float,
+    limiter: Callable[[], None] | None = None,
 ) -> TargetResult:
     """Mutate one target in the workspace copy and record what its tests caught.
 
@@ -649,7 +808,8 @@ def _run_target(
         result.problems.append(f"{target.name}: its tests could not be snapshotted: {exc}")
         return result
 
-    baseline = _pytest(tests, workspace, timeout)
+    _progress(f"[{target.name}] baseline: {len(tests)} staged test path(s)")
+    baseline = _pytest(tests, workspace, timeout, limiter)
     if baseline != 0:
         result.problems.append(
             f"{target.name}: the unmutated suite exited {baseline}, so every mutant would "
@@ -667,18 +827,21 @@ def _run_target(
         result.problems.append(f"{target.name}: no mutant could be generated from {target.source}")
         return result
 
-    for mutation in select(mutations, budget, seed):
+    chosen = select(mutations, budget, seed)
+    for index, mutation in enumerate(chosen, start=1):
+        _progress(f"[{target.name}] {index}/{len(chosen)} {mutation.describe()}")
         copied = workspace / Path(mutation.path).relative_to("src")
         original = copied.read_text(encoding="utf-8")
         copied.write_text(apply(original, mutation), encoding="utf-8")
         try:
-            code = _pytest(tests, workspace, timeout)
+            code = _pytest(tests, workspace, timeout, limiter)
         finally:
             copied.write_text(original, encoding="utf-8")
         result.executed += 1
         if code is None:
             result.timed_out += 1
             result.killed += 1
+            result.timeouts.append(mutation)
         elif code == 0:
             result.survived += 1
             result.survivors.append(mutation)
@@ -686,20 +849,45 @@ def _run_target(
             result.killed += 1
 
     result.duration_s = time.monotonic() - started
+    _progress(
+        f"[{target.name}] done: {result.executed}/{result.generated} run, {result.killed} killed "
+        f"({result.timed_out} by the clock), {result.survived} survived, "
+        f"{result.duration_s:.0f}s"
+    )
     return result
 
 
 def run(
-    targets: list[Target], *, budget: int | None, seed: int, timeout: float, workspace: Path
+    targets: list[Target],
+    *,
+    budget: int | None,
+    seed: int,
+    timeout: float,
+    workspace: Path,
+    limiter: Callable[[], None] | None = None,
+    limits: ModuleType | None = None,
+    after_target: Callable[[RunReport], None] | None = None,
 ) -> RunReport:
-    """Snapshot ``src/``, ``tests/`` and the ini, then run every target against the copy."""
+    """Snapshot ``src/``, the staged roots and the ini, then run every target against the copy.
+
+    ``after_target`` sees the report as it grows, one call per finished target, so a
+    campaign that is killed mid-run still leaves the targets it completed.
+    """
     shutil.copytree(REPOSITORY_ROOT / "src", workspace, dirs_exist_ok=True, ignore=_IGNORED)
     stage_suite(workspace)
-    results = [
-        _run_target(target, workspace, budget=budget, seed=seed, timeout=timeout)
-        for target in targets
-    ]
-    return RunReport(decide(results), results)
+    results: list[TargetResult] = []
+    report = RunReport(Verdict.NOT_RUN, results, planned=len(targets))
+    for target in targets:
+        results.append(
+            _run_target(
+                target, workspace, budget=budget, seed=seed, timeout=timeout, limiter=limiter
+            )
+        )
+        report.verdict = decide(results)
+        report.peak_child_rss_bytes = child_peak_rss(limits)
+        if after_target is not None:
+            after_target(report)
+    return report
 
 
 def _write(path: Path, body: str, *, append: bool) -> None:
@@ -710,6 +898,21 @@ def _write(path: Path, body: str, *, append: bool) -> None:
             handle.write(body)
     except OSError as exc:
         sys.stderr.write(f"could not write {path}: {exc}\n")
+
+
+def _write_json(path: Path, report: RunReport) -> None:
+    """Replace the JSON artifact atomically, so a kill mid-write cannot truncate it.
+
+    The artifact is rewritten once per target, which is the whole point of it: a run
+    that dies leaves the targets it finished, and a half-written file would leave none.
+    """
+    payload = json.dumps(report.as_dict(), indent=2, sort_keys=True)
+    staging = path.with_name(f"{path.name}.partial")
+    _write(staging, f"{payload}\n", append=False)
+    try:
+        os.replace(staging, path)
+    except OSError as exc:
+        sys.stderr.write(f"could not replace {path}: {exc}\n")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -732,6 +935,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="sampling seed")
     parser.add_argument(
         "--timeout", type=float, default=DEFAULT_TIMEOUT_S, help="seconds allowed per mutant"
+    )
+    parser.add_argument(
+        "--memory-mb",
+        type=int,
+        default=None,
+        help="cap each mutant's address space in MiB (POSIX only; a runaway dies as a kill)",
     )
     parser.add_argument("--list", action="store_true", help="count the mutants and run none")
     parser.add_argument("--json-out", type=Path, default=None, help="write the report as JSON")
@@ -765,6 +974,18 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(f"{target.name}: {total} mutants from {target.source}\n")
         return EXIT_CODES[Verdict.CLEAN]
 
+    limits = resource_module()
+    try:
+        limiter = memory_limiter(args.memory_mb, limits)
+    except ValueError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return EXIT_CODES[Verdict.NOT_RUN]
+
+    def snapshot(partial: RunReport) -> None:
+        """Rewrite the JSON artifact after every target, so a kill leaves what finished."""
+        if args.json_out is not None:
+            _write_json(args.json_out, partial)
+
     with tempfile.TemporaryDirectory(prefix="fasterrag-mutation-") as directory:
         report = run(
             targets,
@@ -772,12 +993,14 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             timeout=args.timeout,
             workspace=Path(directory),
+            limiter=limiter,
+            limits=limits,
+            after_target=snapshot,
         )
 
     sys.stdout.write(f"{render(report)}\n")
     if args.json_out is not None:
-        payload = json.dumps(report.as_dict(), indent=2, sort_keys=True)
-        _write(args.json_out, f"{payload}\n", append=False)
+        _write_json(args.json_out, report)
     if args.summary is not None:
         _write(args.summary, markdown(report), append=True)
     return EXIT_CODES[report.verdict]

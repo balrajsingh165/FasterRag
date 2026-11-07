@@ -29,16 +29,15 @@ SPEC_RELATIVE = Path("docs") / "archive-format.md"
 
 
 def _spec_path() -> Path:
-    """Locate the specification from the test file, else from the working directory.
+    """Locate the specification from this file, and from nowhere else.
 
-    `scripts/mutation_run.py` snapshots `tests/` without `docs/`, so a lookup anchored
-    only on `__file__` makes the whole archive suite red there and every mutant vacuous.
+    The working-directory fallback went with TASK-0331: `scripts/mutation_run.py` now
+    stages `docs/`, and a fallback would read the live tree whenever staging regressed.
     """
-    for anchor in (Path(__file__).resolve(), Path.cwd().resolve() / "_"):
-        for parent in anchor.parents:
-            if (parent / SPEC_RELATIVE).is_file():
-                return parent / SPEC_RELATIVE
-    raise FileNotFoundError(f"{SPEC_RELATIVE} was not found from {__file__} or {Path.cwd()}")
+    for parent in Path(__file__).resolve().parents:
+        if (parent / SPEC_RELATIVE).is_file():
+            return parent / SPEC_RELATIVE
+    raise FileNotFoundError(f"{SPEC_RELATIVE} was not found above {__file__}")
 
 
 SPEC = _spec_path()

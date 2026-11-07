@@ -2,7 +2,11 @@ import ast
 import importlib.util
 import json
 import py_compile
+import subprocess
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 from mutation_run import (
@@ -11,18 +15,22 @@ from mutation_run import (
     DEFAULT_TARGETS,
     EXIT_CODES,
     REPOSITORY_ROOT,
+    STAGED_ROOTS,
     Mutation,
     RunReport,
     Target,
     TargetResult,
     Verdict,
     apply,
+    child_peak_rss,
     decide,
     generate,
     load_targets,
     main,
     markdown,
+    memory_limiter,
     render,
+    resource_module,
     restrict,
     run,
     select,
@@ -238,6 +246,7 @@ def result(
     killed: int = 4,
     survived: int = 0,
     survivors: list[Mutation] | None = None,
+    timeouts: list[Mutation] | None = None,
     problems: list[str] | None = None,
 ) -> TargetResult:
     """Build a TargetResult for the verdict and rendering tests."""
@@ -247,7 +256,9 @@ def result(
         executed=executed,
         killed=killed,
         survived=survived,
+        timed_out=len(timeouts or []),
         survivors=survivors or [],
+        timeouts=timeouts or [],
         problems=problems or [],
     )
 
@@ -560,3 +571,303 @@ class TestIsolation:
 
         assert outcome.executed == 0
         assert any("could not be snapshotted" in problem for problem in outcome.problems)
+
+
+def fake_limits(recorder: list[tuple[int, tuple[int, int]]], maxrss: int = 0) -> ModuleType:
+    """A stand-in for POSIX ``resource``, so the branch Windows cannot run is still tested."""
+    module = ModuleType("fake_resource")
+    module.RLIMIT_AS = 9  # type: ignore[attr-defined]
+    module.RUSAGE_CHILDREN = -1  # type: ignore[attr-defined]
+    module.setrlimit = lambda which, pair: recorder.append((which, pair))  # type: ignore[attr-defined]
+    module.getrusage = lambda who: SimpleNamespace(ru_maxrss=maxrss)  # type: ignore[attr-defined]
+    return module
+
+
+def spy(seen: dict[str, Any]) -> Any:
+    """Replace ``subprocess.run`` with a recorder, so the child's arguments are inspectable."""
+
+    def record(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    return record
+
+
+class TestResourceLimits:
+    """TASK-0321: the POSIX branch is injected, because this machine cannot execute it."""
+
+    def test_no_limit_is_asked_for_means_no_preexec_hook(self) -> None:
+        assert memory_limiter(None, fake_limits([])) is None
+        assert memory_limiter(0, fake_limits([])) is None
+        assert memory_limiter(-1, fake_limits([])) is None
+
+    def test_a_limit_caps_the_address_space_in_both_rlimit_fields(self) -> None:
+        recorded: list[tuple[int, tuple[int, int]]] = []
+        limiter = memory_limiter(64, fake_limits(recorded))
+
+        assert limiter is not None
+        limiter()
+
+        assert recorded == [(9, (64 * 1024 * 1024, 64 * 1024 * 1024))]
+
+    def test_a_limit_on_a_platform_without_resource_is_refused_not_ignored(self) -> None:
+        with pytest.raises(ValueError, match="POSIX resource limits"):
+            memory_limiter(64, None)
+
+    def test_the_resource_module_is_present_exactly_where_the_platform_has_it(self) -> None:
+        assert (resource_module() is None) is (sys.platform == "win32")
+
+    def test_the_peak_rss_is_scaled_by_the_unit_the_platform_reports(self) -> None:
+        limits = fake_limits([], maxrss=2048)
+        assert child_peak_rss(limits, "linux") == 2048 * 1024
+        assert child_peak_rss(limits, "darwin") == 2048
+        assert child_peak_rss(None, "linux") is None
+
+    def test_the_limiter_reaches_the_child_as_its_preexec_hook(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import mutation_run
+
+        seen: dict[str, Any] = {}
+        monkeypatch.setattr("mutation_run.subprocess.run", spy(seen))
+        limiter = memory_limiter(64, fake_limits([]))
+
+        assert mutation_run._pytest(("tests",), tmp_path, 1.0, limiter) == 0
+        assert seen["preexec_fn"] is limiter
+
+    def test_no_limit_leaves_the_hook_unset_so_windows_can_spawn_at_all(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import mutation_run
+
+        seen: dict[str, Any] = {}
+        monkeypatch.setattr("mutation_run.subprocess.run", spy(seen))
+
+        assert mutation_run._pytest(("tests",), tmp_path, 1.0, None) == 0
+        assert seen["preexec_fn"] is None
+
+    def test_a_memory_limit_off_posix_exits_not_run_rather_than_running_uncapped(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mutation_run
+
+        monkeypatch.setattr(mutation_run, "resource_module", lambda: None)
+
+        assert main(["--only", "breaker", "--memory-mb", "512"]) == EXIT_CODES[Verdict.NOT_RUN]
+        assert "POSIX resource limits" in capsys.readouterr().err
+
+    def test_the_baseline_runs_under_the_same_cap_as_every_mutant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mutation_run
+
+        root = tmp_path / "root"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+        monkeypatch.setattr("mutation_run.REPOSITORY_ROOT", root)
+        limiter = memory_limiter(64, fake_limits([]))
+        given: list[Any] = []
+
+        def record(
+            tests: tuple[str, ...], workspace: Path, timeout: float, hook: Any = None
+        ) -> int | None:
+            given.append(hook)
+            return 1 if given[1:] else 0
+
+        monkeypatch.setattr(mutation_run, "_pytest", record)
+        run(
+            [Target(name="x", source="src/pkgy/mod.py", tests=("tests/test_mod.py",))],
+            budget=None,
+            seed=0,
+            timeout=120.0,
+            workspace=tmp_path / "workspace",
+            limiter=limiter,
+        )
+
+        assert given == [limiter, limiter]
+
+
+class TestTimeouts:
+    """A timeout is counted as a kill and named as a timeout, never absorbed into a score."""
+
+    def test_a_timed_out_mutant_is_named_as_well_as_counted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mutation_run
+
+        root = tmp_path / "root"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+        calls: list[int] = []
+
+        def never_finishes(
+            tests: tuple[str, ...], workspace: Path, timeout: float, limiter: Any = None
+        ) -> int | None:
+            calls.append(1)
+            return 0 if len(calls) == 1 else None
+
+        monkeypatch.setattr(mutation_run, "_pytest", never_finishes)
+
+        outcome = mutate(root, tmp_path / "workspace", "pkgy", monkeypatch)
+
+        assert (outcome.executed, outcome.killed, outcome.survived) == (1, 1, 0)
+        assert outcome.timed_out == 1
+        assert [item.line for item in outcome.timeouts] == [6]
+
+    def test_the_killed_count_still_accounts_for_every_mutant_executed(self) -> None:
+        outcome = result(executed=5, killed=3, survived=2, timeouts=[mutation()])
+        assert outcome.killed + outcome.survived == outcome.executed
+
+    def test_the_human_report_says_which_kills_were_the_clock(self) -> None:
+        timed = mutation(path="src/fasterrag/core/breaker.py", line=82, column=67)
+        text = render(RunReport(Verdict.CLEAN, [result(timeouts=[timed])]))
+        assert "timed-out mutants" in text
+        assert "src/fasterrag/core/breaker.py:82:67" in text
+
+    def test_the_markdown_summary_lists_the_timed_out_mutants(self) -> None:
+        timed = mutation(path="src/fasterrag/core/breaker.py", line=82, column=67)
+        body = markdown(RunReport(Verdict.CLEAN, [result(timeouts=[timed])]))
+        assert "**Timed out**" in body
+        assert "src/fasterrag/core/breaker.py:82:67" in body
+
+    def test_the_json_artifact_names_the_timed_out_mutants(self) -> None:
+        timed = mutation(path="src/fasterrag/core/breaker.py", line=82, column=67)
+        document = RunReport(Verdict.CLEAN, [result(timeouts=[timed])]).as_dict()
+        assert document["timed_out"] == 1
+        assert document["targets"][0]["timeouts"] == [timed.as_dict()]
+
+
+class TestProgress:
+    """A SIGTERM must leave the name of the mutant that was in flight when it arrived."""
+
+    def test_every_mutant_is_announced_before_it_runs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        root = tmp_path / "root"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+
+        mutate(root, tmp_path / "workspace", "pkgy", monkeypatch)
+
+        printed = capsys.readouterr().out.splitlines()
+        assert "[x] baseline: 1 staged test path(s)" in printed
+        assert any(line.startswith("[x] 1/1 src/pkgy/mod.py:6:") for line in printed)
+        assert any(
+            line.startswith("[x] done: 1/1 run, 1 killed (0 by the clock)") for line in printed
+        )
+
+    def test_the_announcement_precedes_the_run_it_names(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import mutation_run
+
+        root = tmp_path / "root"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+        announced: list[str] = []
+        real = mutation_run._pytest
+
+        def watched(
+            tests: tuple[str, ...], workspace: Path, timeout: float, limiter: Any = None
+        ) -> int | None:
+            announced.append(capsys.readouterr().out)
+            return real(tests, workspace, timeout, limiter)
+
+        monkeypatch.setattr(mutation_run, "_pytest", watched)
+        mutate(root, tmp_path / "workspace", "pkgy", monkeypatch)
+
+        assert "1/1 src/pkgy/mod.py" in announced[-1]
+
+
+class TestIncrementalArtifact:
+    """A campaign that is killed leaves the targets it finished rather than nothing."""
+
+    def test_the_report_grows_one_target_at_a_time(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "root"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+        monkeypatch.setattr("mutation_run.REPOSITORY_ROOT", root)
+        targets = [
+            Target(name=name, source="src/pkgy/mod.py", tests=("tests/test_mod.py",))
+            for name in ("a", "b")
+        ]
+        seen: list[dict[str, Any]] = []
+
+        report = run(
+            targets,
+            budget=None,
+            seed=0,
+            timeout=120.0,
+            workspace=tmp_path / "workspace",
+            after_target=lambda partial: seen.append(partial.as_dict()),
+        )
+
+        assert [len(document["targets"]) for document in seen] == [1, 2]
+        assert seen[0]["complete"] is False
+        assert seen[0]["planned"] == 2
+        assert seen[-1]["complete"] is True
+        assert report.complete is True
+
+    def test_a_partial_report_says_so_in_both_renderings(self) -> None:
+        report = RunReport(Verdict.CLEAN, [result()], planned=3)
+        assert "PARTIAL: 1 of 3 targets ran" in render(report)
+        assert "**Partial:** 1 of 3 targets ran." in markdown(report)
+        assert report.as_dict()["complete"] is False
+
+    def test_a_whole_run_is_never_labelled_partial(self) -> None:
+        report = RunReport(Verdict.CLEAN, [result()], planned=1)
+        assert "PARTIAL" not in render(report)
+        assert report.as_dict()["complete"] is True
+
+    def test_the_peak_child_rss_reaches_the_artifact_when_the_platform_reports_one(self) -> None:
+        report = RunReport(Verdict.CLEAN, [result()], peak_child_rss_bytes=3 * 1024 * 1024)
+        assert report.as_dict()["peak_child_rss_bytes"] == 3 * 1024 * 1024
+        assert "peak child RSS: 3 MiB" in render(report)
+
+    def test_a_platform_without_rusage_reports_no_peak_rather_than_zero(self) -> None:
+        document = RunReport(Verdict.CLEAN, [result()]).as_dict()
+        assert document["peak_child_rss_bytes"] is None
+
+    def test_the_artifact_is_replaced_whole_and_leaves_no_half_written_file(
+        self, tmp_path: Path
+    ) -> None:
+        import mutation_run
+
+        path = tmp_path / "mutation.json"
+        mutation_run._write_json(path, RunReport(Verdict.CLEAN, [result()], planned=2))
+        mutation_run._write_json(path, RunReport(Verdict.SURVIVORS, [result(), result("y")]))
+
+        assert json.loads(path.read_text(encoding="utf-8"))["verdict"] == "survivors"
+        assert list(tmp_path.iterdir()) == [path]
+
+    def test_an_artifact_that_cannot_be_written_is_reported_and_never_raises(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import mutation_run
+
+        (tmp_path / "blocked").write_text("not a directory", encoding="utf-8")
+
+        mutation_run._write_json(
+            tmp_path / "blocked" / "mutation.json", RunReport(Verdict.CLEAN, [result()])
+        )
+
+        printed = capsys.readouterr().err
+        assert "could not write" in printed
+        assert "could not replace" in printed
+
+
+class TestStagingScope:
+    """TASK-0331: what the snapshot holds, and what a test reaching past itself will not find."""
+
+    def test_the_docs_tree_is_staged_so_a_test_that_reads_a_spec_finds_it(
+        self, tmp_path: Path
+    ) -> None:
+        stage_suite(tmp_path)
+
+        assert (tmp_path / "docs" / "archive-format.md").is_file()
+
+    def test_only_the_named_roots_and_the_ini_are_staged(self, tmp_path: Path) -> None:
+        stage_suite(tmp_path)
+
+        assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+            [*STAGED_ROOTS, "pyproject.toml"]
+        )
+        for absent in ("config.yaml", "scripts", ".github", "README.md", "src"):
+            assert not (tmp_path / absent).exists(), absent
