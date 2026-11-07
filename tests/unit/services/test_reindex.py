@@ -425,3 +425,37 @@ async def test_a_physical_collection_is_audited_without_an_alias() -> None:
 
     assert audit.live == "docs"
     assert audit.missing is False
+
+
+async def test_the_refusal_shows_the_display_name_not_the_scoped_one() -> None:
+    """TASK-0324: the lookup name is the backend's; the shown name is the caller's."""
+    backend = adapter(**{"acme__docs": 10})
+
+    with pytest.raises(FasterRagError) as failure:
+        await require_keyword_leg("acme__docs", settings(), backend, display="docs")
+
+    assert "acme" not in failure.value.detail
+    assert "fasterrag index reembed docs" in failure.value.detail
+
+
+async def test_a_derived_live_collection_keeps_its_suffix_under_the_display_name() -> None:
+    """The green suffix is what distinguishes the build; only the prefix is hidden."""
+    backend = adapter(**{"acme__docs-v20260101000000": 10})
+    backend.aliases["acme__docs"] = "acme__docs-v20260101000000"
+
+    audit = await audit_keyword_leg("acme__docs", settings(), backend, display="docs")
+
+    assert audit.live == "docs-v20260101000000"
+    assert "acme" not in audit.detail
+    assert "acme" not in str(audit.as_dict())
+
+
+async def test_a_single_tenant_audit_still_names_the_physical_collection() -> None:
+    """Without a display name nothing changes, which is why single-tenant was unaffected."""
+    backend = adapter(**{"docs-v20260101000000": 10})
+    backend.aliases["docs"] = "docs-v20260101000000"
+
+    audit = await audit_keyword_leg("docs", settings(), backend)
+
+    assert audit.live == "docs-v20260101000000"
+    assert "served as 'docs'" in audit.detail

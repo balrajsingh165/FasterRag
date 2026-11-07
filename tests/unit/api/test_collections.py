@@ -4,6 +4,9 @@ The create case carries TASK-0320: the response must describe the collection the
 actually has, not the configuration the request was made under. ``ExistingCollection`` is
 the fake that makes the difference visible — it mirrors Qdrant, which verifies an existing
 collection and returns without adding the keyword leg a create asked for.
+
+The tenant cases carry TASK-0324: the create must be audited under the scoped backend name
+and refused under the caller's own, and only a response body shows both at once.
 """
 
 from typing import Any
@@ -14,10 +17,14 @@ from fastapi.testclient import TestClient
 
 from fasterrag.adapters.vectordb.base import CollectionInfo, CollectionSpec
 from fasterrag.api import collections as collections_router
+from fasterrag.api.main import create_app
 from fasterrag.api.problems import PROBLEM_MEDIA_TYPE
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.services.tenancy import SEPARATOR
 from tests.unit.api.conftest import StubVectorDB
+
+TENANT_SECRET = "acme-key"
 
 
 class ExistingCollection(StubVectorDB):
@@ -242,6 +249,55 @@ def test_the_response_reports_the_live_keyword_leg_not_the_configuration(
     body: dict[str, Any] = client.post("/v1/collections", json={"name": "docs"}).json()
 
     assert body["sparse"] is True
+
+
+def test_a_tenant_refusal_never_names_the_backend_prefixed_collection(
+    monkeypatch: pytest.MonkeyPatch, embedder: StubEmbedder
+) -> None:
+    """TASK-0324: the 409 detail is a response body, and the prefix is not the tenant's.
+
+    Asserted on the body rather than on the audit, because the audit is the only place the
+    scoped name is correct — the leak exists precisely where the two namings meet.
+    """
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{TENANT_SECRET}:admin:acme")
+    settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}})
+    app = create_app(settings)
+    app.state.vector_db = ExistingCollection(sparse=False, name=f"acme{SEPARATOR}docs")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/collections",
+            json={"name": "docs"},
+            headers={"Authorization": f"Bearer {TENANT_SECRET}", "X-Tenant-ID": "acme"},
+        )
+
+    body: dict[str, Any] = response.json()
+    assert response.status_code == 409
+    assert body["code"] == ErrorCode.CONFLICT.value
+    assert SEPARATOR not in body["detail"]
+    assert "'docs'" in body["detail"]
+    assert "fasterrag index reembed docs" in body["detail"]
+
+
+def test_a_tenant_create_still_audits_the_scoped_collection(
+    monkeypatch: pytest.MonkeyPatch, embedder: StubEmbedder
+) -> None:
+    """Hiding the prefix must not move the audit onto the unscoped name nobody created."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{TENANT_SECRET}:admin:acme")
+    settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}})
+    app = create_app(settings)
+    backend = ExistingCollection(sparse=False, name="docs")
+    app.state.vector_db = backend
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/collections",
+            json={"name": "docs"},
+            headers={"Authorization": f"Bearer {TENANT_SECRET}", "X-Tenant-ID": "acme"},
+        )
+
+    assert response.status_code == 201
+    assert backend.created[0].name == f"acme{SEPARATOR}docs"
 
 
 def test_a_dense_only_create_is_not_refused_when_hybrid_is_off(

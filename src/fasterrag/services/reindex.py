@@ -41,6 +41,12 @@ no new adapter method and no new config key. It is a live-backend call and may r
 any other: a caller that treats "unreachable" as "misconfigured" turns a transient outage
 into a refusal, so a caller that must not fail closed — a startup probe, a dashboard panel
 — uses :func:`audit_keyword_leg` and carries on with the verdict unknown.
+
+**The verdict names the collection the way its caller does** (TASK-0324). A multi-tenant
+``POST /v1/collections`` must audit the tenant-scoped backend name — that is the collection
+the create touched — while its refusal is an API response body, where the scope prefix is
+the one thing `api/collections` promises never appears. The lookup name and the shown name
+are therefore separate arguments rather than one, and ``display`` supplies the second.
 """
 
 from __future__ import annotations
@@ -85,9 +91,24 @@ def green_name(alias: str, stamp: str | None = None) -> str:
     return f"{alias}{GREEN_SUFFIX}{moment}"
 
 
+def _named_for_caller(backend: str, lookup: str, display: str) -> str:
+    """Return a backend collection name under the naming its caller used.
+
+    The tenant prefix is a backend detail, so a derived name keeps whatever suffix
+    distinguishes it while the part the caller never chose is replaced (TASK-0324).
+    """
+    if backend.startswith(lookup):
+        return f"{display}{backend[len(lookup) :]}"
+    return backend if lookup == display else display
+
+
 @dataclass(frozen=True, slots=True)
 class KeywordLegAudit:
-    """Whether the live index behind a served name can answer the configured keyword leg."""
+    """Whether the live index behind a served name can answer the configured keyword leg.
+
+    ``name`` and ``live`` carry the caller's own naming rather than the backend's, because
+    :attr:`detail` reaches an API response body and a scope prefix must not (TASK-0324).
+    """
 
     name: str
     live: str | None
@@ -104,8 +125,9 @@ class KeywordLegAudit:
         """Return the operator-facing explanation, naming the collection and the way out."""
         if not self.missing:
             return f"{self.name!r} matches the configured retrieval mode"
+        served = "" if self.live == self.name else f" (served as {self.name!r})"
         return (
-            f"retrieval.hybrid is on, but collection {self.live!r} (served as {self.name!r}) "
+            f"retrieval.hybrid is on, but collection {self.live!r}{served} "
             "was indexed without a keyword leg, and a sparse vector cannot be attached to an "
             "existing collection. Rebuild it with "
             f"`fasterrag index reembed {self.name} <sources>`, which builds a hybrid "
@@ -126,38 +148,39 @@ class KeywordLegAudit:
 
 
 async def audit_keyword_leg(
-    name: str, settings: Settings, adapter: VectorDBAdapter
+    name: str, settings: Settings, adapter: VectorDBAdapter, *, display: str | None = None
 ) -> KeywordLegAudit:
     """Report whether the index behind ``name`` carries the configured keyword leg.
 
-    Resolves ``name`` through any alias first, so the verdict is about the collection
-    queries actually reach. A name nothing has indexed yet is never a mismatch.
+    Resolves ``name`` through any alias; ``display`` is the caller's own name for a scoped
+    ``name`` and is what the verdict shows. A name nothing has indexed yet is no mismatch.
     """
+    shown = display or name
     target = await adapter.alias_target(name) or name
     live = next((info for info in await adapter.list_collections() if info.name == target), None)
     audit = KeywordLegAudit(
-        name=name,
-        live=live.name if live is not None else None,
+        name=shown,
+        live=_named_for_caller(live.name, name, shown) if live is not None else None,
         required=settings.retrieval.hybrid,
         present=live is not None and live.sparse,
     )
     if audit.missing:
         _logger.warning(
             "the live index has no keyword leg but hybrid retrieval is configured",
-            extra={"alias": name, "live": audit.live},
+            extra={"alias": name, "live": live.name if live is not None else None},
         )
     return audit
 
 
 async def require_keyword_leg(
-    name: str, settings: Settings, adapter: VectorDBAdapter
+    name: str, settings: Settings, adapter: VectorDBAdapter, *, display: str | None = None
 ) -> KeywordLegAudit:
     """Refuse a configuration whose keyword leg the live index cannot serve.
 
     For ``fasterrag doctor`` and the CLI, where a human is waiting and can act on it.
     Startup calls :func:`audit_keyword_leg` instead, which warns without refusing to boot.
     """
-    audit = await audit_keyword_leg(name, settings, adapter)
+    audit = await audit_keyword_leg(name, settings, adapter, display=display)
     if audit.missing:
         raise FasterRagError(audit.detail, code=ErrorCode.CONFLICT, retryable=False)
     return audit

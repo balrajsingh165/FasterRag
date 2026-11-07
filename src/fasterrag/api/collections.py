@@ -108,7 +108,7 @@ async def create_collection(
             sparse=settings.retrieval.hybrid,
         )
     )
-    audit = await require_keyword_leg(target, settings, adapter)
+    audit = await require_keyword_leg(target, settings, adapter, display=body.name)
 
     return {
         "name": body.name,

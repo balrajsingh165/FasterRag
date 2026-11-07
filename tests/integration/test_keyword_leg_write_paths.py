@@ -5,12 +5,11 @@ a real backend shows that a dense-only collection reads back as one — the pref
 premise is that ``CollectionInfo.sparse`` reflects the server rather than what creation was
 asked for.
 
-**These have never run.** There is no Docker daemon on the build machine, so every case here
-skips. They also skip when Docker is up but no fasterRag-managed Qdrant is: this module
-provisions nothing and removes nothing, because a second place that creates containers is a
-second place that can leak them. Running them means bringing Qdrant up first — which
-``pytest -m integration tests/integration`` does — or moving this module beside that
-directory's session fixture.
+**Moved here from ``tests/unit/services`` on 2026-11-08** (TASK-0324). The session ``qdrant``
+fixture lives beside this module and is unreachable from ``tests/unit``, so every case here
+skipped unconditionally wherever it was run. It provisions nothing of its own: a second place
+that creates containers is a second place that can leak them, so it depends on that one
+fixture and skips with it when Docker is unavailable.
 """
 
 from collections.abc import AsyncIterator, Iterator
@@ -30,8 +29,6 @@ from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import Journal
-from fasterrag.services.provisioning import container_state, docker_available
-from tests.integration.conftest import TEST_API_KEY
 from tests.unit.services.test_ingestion import DIMENSIONS, StubEmbedder
 
 pytestmark = pytest.mark.integration
@@ -61,18 +58,8 @@ class StubRouter:
 
 
 @pytest.fixture
-async def dense_only() -> AsyncIterator[QdrantAdapter]:
-    """Leave one dense-only collection on a running Qdrant, and take it away after."""
-    import os
-
-    if not await docker_available():
-        pytest.skip("docker daemon is not available")
-    if not (await container_state()).running:
-        pytest.skip(
-            "no managed qdrant is running; `pytest -m integration tests/integration` starts one"
-        )
-
-    os.environ.setdefault("QDRANT_API_KEY", TEST_API_KEY)
+async def dense_only(qdrant: Settings) -> AsyncIterator[QdrantAdapter]:
+    """Leave one dense-only collection on the session's Qdrant, and take it away after."""
     adapter = QdrantAdapter(configured(hybrid=False))
     await adapter.create_collection(
         CollectionSpec(name=COLLECTION, dimensions=DIMENSIONS, sparse=False)
