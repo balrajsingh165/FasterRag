@@ -1,9 +1,10 @@
 import base64
 import hashlib
+import sys
 from collections.abc import AsyncIterator, Callable
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import httpx
 import pytest
@@ -356,16 +357,23 @@ async def test_traversal_out_of_an_allowed_root_is_refused(tmp_path: Path) -> No
         await resolve_sources([{"type": "path", "value": escape}], settings)
 
 
-def link(target: Path, name: Path) -> bool:
-    """Create a symlink, reporting whether this platform permitted one.
+_REFUSAL_IS_REPORTABLE: Final = sys.platform == "win32"
+"""Whether a refused symlink is a privilege the account lacks rather than a defect."""
 
-    Windows refuses without ``SeCreateSymbolicLinkPrivilege``, so the callers skip
-    rather than assert; the Linux CI job is where this leg actually runs.
+
+def link(target: Path, name: Path) -> bool:
+    """Create a symlink; refusal is reportable on Windows and nowhere else.
+
+    A local Windows account without ``SeCreateSymbolicLinkPrivilege`` refuses and the
+    callers skip. Catching the same error on POSIX would let the confinement guard's
+    symlink leg vanish into a silent skip on the only runners that prove it (TASK-0328).
     """
     try:
         name.symlink_to(target)
     except (NotImplementedError, OSError):
-        return False
+        if _REFUSAL_IS_REPORTABLE:
+            return False
+        raise
     return True
 
 
@@ -379,7 +387,10 @@ async def test_a_symlink_out_of_an_allowed_root_is_refused(tmp_path: Path) -> No
     allowed.mkdir()
     (tmp_path / "secret.env").write_text("TOKEN=x", encoding="utf-8")
     if not link(tmp_path / "secret.env", allowed / "innocent.md"):
-        pytest.skip("this platform does not permit creating a symlink")
+        pytest.skip(
+            "this Windows account lacks SeCreateSymbolicLinkPrivilege; both CI runners "
+            "create the link and run this case"
+        )
     configured = Settings.model_validate(
         {"security": {"auth": True}, "ingestion": {"allowed_source_roots": [str(allowed)]}}
     )
@@ -394,7 +405,10 @@ def test_a_symlink_out_of_an_allowed_archive_root_is_refused(tmp_path: Path) -> 
     allowed.mkdir()
     (tmp_path / "config.yaml").write_text("app: {}", encoding="utf-8")
     if not link(tmp_path / "config.yaml", allowed / "backup.fragx"):
-        pytest.skip("this platform does not permit creating a symlink")
+        pytest.skip(
+            "this Windows account lacks SeCreateSymbolicLinkPrivilege; both CI runners "
+            "create the link and run this case"
+        )
     configured = Settings.model_validate(
         {"security": {"auth": True, "allowed_archive_roots": [str(allowed)]}}
     )

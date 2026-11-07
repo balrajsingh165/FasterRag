@@ -78,13 +78,27 @@ jobs:
       - name: Typed error taxonomy holds
         run: python scripts/check_error_taxonomy.py
 
+      # ruff has no rule for "this comment is prose" and mypy never reads one, so until this
+      # gate nothing checked CLAUDE.md's docstrings-only rule: a 2026-11-08 scan found 130
+      # prose comment lines in 30 of src/'s 151 modules. Reasoning in a comment is reasoning
+      # nobody greps and nothing keeps true; the same words in docs/code-notes.md show up in
+      # a documentation diff. A code gate, not a doc gate, so the pre-commit exclusion does
+      # not apply. Measured at 0.37-0.39 s locally on Windows, interpreter start included.
+      - name: Only permitted comments exist
+        run: python scripts/check_comments.py
+
       # The four mechanical places a version lives cannot be edited atomically by hand, and
       # a tree halfway through a stamp ships a wheel that contradicts its own README.
       - name: Version is coherent across the tree
         run: python scripts/stamp_release.py --check
 
+      # `-rs` prints every skip with its reason. A test that skips on every platform is
+      # indistinguishable from a test that does not exist, and the only way anyone found
+      # that out before was by reading the progress dots character by character against a
+      # local collection count (TASK-0328). Measured on run 42411261475: 7 of 3486 selected
+      # tests skip here, and the same 7 skip on the windows job.
       - name: Unit tests
-        run: pytest -m "not integration and not eval" --cov --cov-report=term-missing
+        run: pytest -m "not integration and not eval" -rs --cov --cov-report=term-missing
 
       # Scoped to the packages docs/testing-strategy.md gates, not the whole tree. A
       # repository-wide threshold is diluted by CLI plumbing and API wiring, so it can stay
@@ -152,8 +166,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      # `-rs` for the reason the quality job carries it: the two platforms' skip lists are
+      # only comparable when both are printed (TASK-0328).
       - name: Unit tests
-        run: pytest -m "not integration and not eval"
+        run: pytest -m "not integration and not eval" -rs
 
   # The only job that exercises what a `pip install fasterrag` user actually receives.
   # Nothing else can: pytest puts src/ on sys.path, so the whole suite imports the checkout
@@ -266,8 +282,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      # `-rs` because this job's skip list is the largest in the repository and was invisible
+      # until TASK-0328 counted it: on run 42411261475, 98 of 380 selected cases skipped, all
+      # of them the Milvus (45) and Weaviate (53) contract suites. The job is green either
+      # way, so the only thing distinguishing "two adapters verified" from "two adapters not
+      # reached" is this line.
       - name: Adapter contract suite against real backends
-        run: pytest -m integration
+        run: pytest -m integration -rs
 
   models:
     runs-on: ubuntu-latest
@@ -284,8 +305,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,rerank]"
 
+      # `-rs` is load-bearing here rather than informational: docs/testing-strategy.md §1.11
+      # says a green `pytest -m eval` with no credentials proves nothing about any provider,
+      # and names pytest's own SKIPPED line as the record that makes it legible. Without
+      # `-rs` that line is not printed and the record does not exist (TASK-0328).
       - name: Verify against real embedding and reranking models
-        run: pytest -m eval
+        run: pytest -m eval -rs
 
   # The D7 retrieval regression gate (docs/testing-strategy.md §2 gate 6). Its own job
   # rather than a step on `models`: that job runs the eval-marked tests, while this one

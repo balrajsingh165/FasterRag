@@ -3,9 +3,9 @@
 # to a benchmark-ledger entry (docs/benchmarks.md), and a ledger nobody regenerates goes
 # stale silently.
 #
-# Deliberately not part of `ci`. The `measure` job's two suites download model weights and
-# run for minutes, so gating every push on them would trade a fast feedback loop for numbers
-# that only matter once a day.
+# Deliberately not part of `ci`. The `measure` job's eval harness downloads model weights and
+# the two jobs run for minutes, so gating every push on them would trade a fast feedback loop
+# for numbers that only matter once a day.
 #
 # The numbers produced here are NOT citable as benchmark-ledger entries on their own: a
 # shared GitHub runner has neighbours, and docs/performance.md requires an isolated,
@@ -49,12 +49,39 @@
 # own suite was already red, or no mutant could be generated — and it is the vacuity defect
 # (rebuild-playbook T12) this repository treats as a bug: a red baseline kills every mutant
 # for free and would otherwise report a perfect score.
+#
+# WHAT THIS JOB MEASURES, stated so that no reader has to infer it (TASK-0323): the INGEST
+# suite only — parse and chunk over tests/eval/datasets/handbook/corpus. Not retrieval, not
+# embedding, not indexing, not generation. docs/performance.md §3.7 says the same thing in
+# the same words, and the ledger rules in docs/benchmarks.md still refuse every number this
+# job produces, for the isolation reason above.
+#
+# TASK-0323 re-audited every place this file could report success without measuring, on the
+# principle that a nightly that cannot fail is not a nightly. What it changed: the unused
+# Qdrant service is deleted (see the measure job); a step that reads the benchmark document
+# and fails when it is empty or does not carry the ingest suite now stands between the
+# `continue-on-error` benchmark step and everything downstream; both uploads carry
+# `if-no-files-found: error`, since the default `warn` would leave a green run with no
+# artifact AND rob the next night of its baseline; the comparison distinguishes a crashed
+# script from a judged regression, because an unhandled traceback also exits 1; the eval
+# harness runs with `-rs`, since pytest exits 0 when every test skips; and the job carries a
+# timeout so a hang is bounded. What it deliberately did NOT change: the two
+# `continue-on-error` flags and the mutation job's survivors-are-a-warning rule, each of
+# which is justified where it stands and each of whose justification now names the
+# downstream step it depends on.
 name: nightly
 
 on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
+
+# Two runs at once would each pick the other as "the previous nightly", and compare a run
+# against its own sibling on an arbitrary machine. Queued rather than cancelled: a nightly
+# that cancels itself measures nothing, which is the failure mode this whole file is about.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
 
 # `actions: read` is what lets the default token list this workflow's earlier runs and pull
 # an artifact from one of them; nothing here writes.
@@ -65,29 +92,31 @@ permissions:
 jobs:
   measure:
     runs-on: ubuntu-latest
-    # TASK-0314: this job declared no service at all, so every benchmark it ever ran died on
-    # an unreachable Qdrant while the job reported success 95 times out of 95. The block is
-    # copied verbatim from ci.yml's eval-gate rather than invented, so the two jobs address
-    # the same server on the same ports and a number taken here means what one taken there
-    # means.
+    # Observed at 2m35s-5m06s across the fifteen runs listed on 2026-11-08. The ceiling is a
+    # bound on a hang, not a budget: GitHub's default is 360 minutes, and a job that can burn
+    # six hours before anyone is told is a job whose failure is invisible for six hours.
+    timeout-minutes: 30
+    # TASK-0323: the Qdrant service block that stood here is GONE, and this is the record of
+    # why. TASK-0314 added it after finding that every benchmark this job ever ran died on an
+    # unreachable Qdrant — but the fix that landed with it, `--suite ingest`, measures parse
+    # and chunk through `estimate_sources`, which constructs no vector-db adapter and opens
+    # no socket. `pytest -m eval` below is the same marker ci.yml's `models` job runs
+    # against no service at all. So nothing in this job contacted the server, and a declared
+    # dependency that nothing uses is the same class of thing as the eighty-three days of
+    # measuring nothing: it tells a reader the job reached a backend it never reached.
     #
-    # Honestly stated: with `--suite ingest` below, nothing in this job reaches it today —
-    # that suite parses and chunks, and ci.yml's `models` job runs the same eval marker
-    # against no service at all. It is declared because the suite this job is FOR is the
-    # query suite, which cannot run without both a backend and an LLM credential; the
-    # backend half is now here, and a job with no backend at all is how 83 days of nothing
-    # went unnoticed. If the credential half is never supplied, delete this block and say
-    # so, rather than leaving a service nobody can explain.
-    services:
-      qdrant:
-        image: qdrant/qdrant:v1.18.1
-        ports:
-          - 6333:6333
-          - 6334:6334
+    # The ledger offered two honest endings — supply a credential and restore the query
+    # suite, or delete the service and say the nightly measures ingestion only. The second is
+    # taken here because the first is not ours to take: the query suite answers through the
+    # configured LLM, and a hosted runner holds no paid key. docs/performance.md §3.7 carries
+    # the credential decision for the maintainer, with the cost of the offline alternative
+    # (Ollama) priced out. When that decision is made, the service block comes back WITH the
+    # step that contacts it, in the same commit.
     env:
       # Config validation fails fast on any env var a config key references, so these have
-      # to be present before the CLI can load a config at all. Placeholders: nothing in this
-      # job calls a paid provider, and the suite that would is not run (see below).
+      # to be present before the CLI can load a config at all. Placeholders, and that is not
+      # a shortcut: no step below calls a provider or a backend. QDRANT_API_KEY is still
+      # required because the shipped config.yaml names it, not because anything connects.
       FASTERRAG_API_KEY: ci-placeholder
       QDRANT_API_KEY: ci-placeholder
       OPENAI_API_KEY: ci-placeholder
@@ -104,26 +133,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,rerank,huggingface]"
 
-      # The image declares no HEALTHCHECK, so GitHub cannot wait on the service and the
-      # first request would race its start-up. Copied from ci.yml's eval-gate for the same
-      # reason it exists there.
-      - name: Wait for Qdrant
-        run: |
-          for attempt in $(seq 1 60); do
-            if curl -sf http://localhost:6333/readyz > /dev/null; then
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "::error::Qdrant did not become ready within 120 seconds"
-          exit 1
-
+      # `-rs` is not cosmetic. pytest exits 0 when every selected test SKIPS, so this step
+      # can be green having verified nothing — the vacuity class (rebuild-playbook T12) that
+      # docs/testing-strategy.md §1.11 already names for the live-provider checks, which skip
+      # here because no credential is present. Without `-rs` the log says "21 passed, 9
+      # skipped" and never which nine. With it, every skip prints its reason, so a run that
+      # skipped everything is legible on the run page instead of being inferred later.
       - name: Retrieval eval harness
-        run: pytest -m eval -q
+        run: pytest -m eval -q -rs
 
-      # `continue-on-error` stays, for the reason it was added: a run that fails halfway is
-      # still a result worth uploading, and losing it means re-running to find out what
-      # happened. The `|| true` that followed the command is GONE. Two suppressions on one
+      # `continue-on-error` stays, and TASK-0323 re-audited it rather than inheriting it. It
+      # is safe here for one specific reason: the step that follows reads the document and
+      # fails the job when it is empty, and the comparison after that fails again on the same
+      # evidence. The suppression buys the upload of a half-finished run without buying
+      # silence. If either of those two steps is ever deleted or reordered, this flag becomes
+      # a swallow again — that is the dependency, written down so a later editor sees it.
+      #
+      # The `|| true` that followed the command is GONE. Two suppressions on one
       # step is how a benchmark that could not run for 83 days read as a success: the first
       # keeps the job moving, the second hid the failure from the step as well, so nothing
       # anywhere was marked red. One of them was always one too many (TASK-0314).
@@ -140,6 +166,11 @@ jobs:
       # uses the embedding model's tokenizer when the machine has it cached and estimates
       # when it does not, so the recorded token count — and with it the `dataset` field the
       # comparison refuses to compare across — would depend on the runner's cache state.
+      #
+      # `vector_db.mode=external` is NOT a backend this step reaches — the ingest suite
+      # builds no adapter at all. It is here so the loaded config never names the
+      # docker-managed mode, which is the mode whose provisioning path this job has no
+      # business entering. Said plainly rather than left to look like a connection.
       - name: Benchmark suite
         if: ${{ !cancelled() }}
         continue-on-error: true
@@ -151,6 +182,45 @@ jobs:
             --set chunking.token_counter=estimate \
             --json benchmark --suite ingest \
             --sources tests/eval/datasets/handbook/corpus > artifacts/benchmark.json
+
+      # The redirect above creates artifacts/benchmark.json whether or not the command
+      # succeeded, so a failed run leaves a zero-byte file that looks like an output. The
+      # comparison already refuses it, but only two steps later and under the name "not
+      # comparable", which describes the baseline as much as the run. This step names the
+      # failure where it happened and is the reason `continue-on-error` above is not a
+      # swallow. It asserts the one thing this job claims to have done: that a document
+      # exists and that it carries the ingest suite with a warmed median in it.
+      - name: The benchmark produced a document
+        if: ${{ !cancelled() }}
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+          import sys
+
+
+          def refuse(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          path = pathlib.Path("artifacts/benchmark.json")
+          if not path.is_file() or path.stat().st_size == 0:
+              refuse(f"{path} is missing or empty, so the benchmark did not run")
+          try:
+              document = json.loads(path.read_text(encoding="utf-8"))
+          except (OSError, ValueError) as exc:
+              refuse(f"{path} is not a readable benchmark document ({exc})")
+          raw = document.get("suites") if isinstance(document, dict) else None
+          entries = raw if isinstance(raw, list) else []
+          suites = {e.get("suite"): e for e in entries if isinstance(e, dict)}
+          ingest = suites.get("ingest")
+          if ingest is None:
+              refuse(f"{path} records {sorted(k for k in suites if k)} and not the ingest suite")
+          if not ingest.get("median"):
+              refuse("the ingest suite recorded no warmed median, so it measured nothing")
+          print(f"ingest suite measured: {ingest['median']}")
+          PY
 
       # The newest completed run of this workflow other than this one. Empty on the very
       # first run, which the comparison reports as not-comparable rather than as a pass.
@@ -197,6 +267,15 @@ jobs:
             --summary "$GITHUB_STEP_SUMMARY"
           verdict=$?
           set -e
+          # An unhandled traceback also exits 1, and reporting that as "a metric regressed"
+          # would send a reader to look for a performance change that never happened. The
+          # script writes --json-out before it returns any verdict, so a missing or
+          # non-matching document distinguishes a crash from a judgement (TASK-0323).
+          recorded=$(python -c "import json,sys;print((json.load(open('artifacts/comparison.json')) or {}).get('verdict',''))" 2>/dev/null || echo "")
+          if [ "${verdict}" -le 2 ] && [ -z "${recorded}" ]; then
+            echo "::error::scripts/compare_nightly.py exited ${verdict} without writing a comparison document, so it crashed rather than judged; the traceback is above"
+            exit 1
+          fi
           case "${verdict}" in
             0) ;;
             1) echo "::error::a tracked benchmark metric regressed beyond the tolerance against the previous nightly run; investigate on isolated hardware before trusting it"
@@ -207,12 +286,18 @@ jobs:
                exit 1 ;;
           esac
 
+      # `if-no-files-found` defaults to `warn`, which uploads nothing and annotates a run
+      # that stays green — and this artifact is the NEXT night's baseline, so the absence
+      # would surface a day later as "not comparable" and be read as a problem with the
+      # baseline. `error` makes an empty artifacts/ a failure of the night that produced it
+      # (TASK-0323).
       - name: Upload ledger-format artifacts
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: nightly-measurements
           path: artifacts/
+          if-no-files-found: error
           retention-days: 30
 
   mutation:
@@ -306,10 +391,14 @@ jobs:
                exit 1 ;;
           esac
 
+      # Same reason as the measure job's upload: the default `warn` would leave a green run
+      # whose survivor list does not exist, and the survivor list is the whole output of this
+      # job (TASK-0323).
       - name: Upload the survivor list
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: mutation-survivors
           path: artifacts/
+          if-no-files-found: error
           retention-days: 30

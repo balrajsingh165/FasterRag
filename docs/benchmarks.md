@@ -15,6 +15,8 @@
 
 `.github/workflows/nightly.yml` compares each night's `fasterrag benchmark --json` with the previous night's using `scripts/compare_nightly.py`, and fails when a tracked metric moves more than 10% in the worse direction ([performance.md](performance.md) §3.7). **This changes nothing about what qualifies for this ledger.** Those runs happen on a shared GitHub runner and fail the same isolation requirement that makes BENCH-0001 and BENCH-0002 non-citable, and a comparison is a change detector rather than a measurement: it reports whether two non-citable numbers moved relative to each other, which is a reason to go and measure, not a measurement.
 
+**What it compares is the ingest suite, and only that** (2026-11-08, TASK-0323). `--suite ingest` is parse-and-chunk; the query suite needs an LLM credential a hosted runner does not hold, and is not run. So the nightly watches chunking throughput for night-over-night movement and watches nothing else — no retrieval, no embedding, no indexing, no generation. A reader looking here for evidence that query latency has not regressed will not find it, and the nightly is not where it will appear. [performance.md](performance.md) §3.7 carries the credential decision this is waiting on.
+
 The job therefore never writes to this file. Appending an entry stays a human act performed against a run on documented, isolated hardware (TASK-0084), and the one mechanism that produces entries is still `fasterrag benchmark --ledger` under rule 5.
 
 ## Entry template

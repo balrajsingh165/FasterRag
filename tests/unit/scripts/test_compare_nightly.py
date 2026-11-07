@@ -362,9 +362,18 @@ def test_the_benchmark_step_does_not_suppress_its_own_failure() -> None:
     assert benchmark["continue-on-error"] is True
 
 
-def test_the_measure_job_reaches_the_same_backend_as_the_eval_gate() -> None:
-    """The job declared no service at all, so the benchmark could not have run."""
-    measure = workflow("nightly")["jobs"]["measure"]
-    gate = workflow("ci")["jobs"]["eval-gate"]
+def test_the_measure_job_declares_no_backend_because_it_reaches_none() -> None:
+    """A declared dependency nothing uses is how 83 days of measuring nothing hid.
 
-    assert measure["services"] == gate["services"]
+    The job ran `--suite ingest`, which builds no vector-db adapter, while declaring a
+    Qdrant service it never opened a socket to (TASK-0323). The service is gone; this
+    pins the honest state rather than the symmetry with the eval gate it once asserted.
+    """
+    measure = workflow("nightly")["jobs"]["measure"]
+
+    assert "services" not in measure, (
+        "the measure job declares a service again; either it now reaches that backend "
+        "-- in which case assert the contact, not the declaration -- or the declaration "
+        "is decoration and the next reader will believe it"
+    )
+    assert "--suite ingest" in step(measure, "Benchmark suite")["run"]
