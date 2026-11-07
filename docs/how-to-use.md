@@ -74,7 +74,7 @@ Piecemeal use works without the engine: `from fasterrag.chunking import Recursiv
 | Answer quality | `retrieval.rerank`, `rerank_top_n`, `chunking.strategy`, `chunk_size` (default 768; tune per corpus — no published optimum), `chunking.contextual_enrichment` | Enrichment costs LLM calls at ingest — `estimate` prices it first. Changing chunking/embedding needs a reindex (§6) |
 | Honesty | `generation.grounded_or_refuse`, `faithfulness_threshold` | Below threshold you get structured `insufficient_evidence`, not a guess |
 | Latency | `rerank_top_n` (the main dial), `llm.streaming`, `cache.semantic` + `cache.backend` | `disk` persists across CLI runs; `redis` is the multi-replica backend |
-| Cost | `embeddings.provider` (local = zero token cost), `embeddings.tiering`, `cache.semantic` | The runtime budget keys refuse startup until the governor ships (TASK-0242) — the estimator is the shipped cost tool |
+| Cost | `embeddings.provider` (local = zero token cost), `embeddings.tiering`, `cache.semantic` | Both runtime budget keys are enforced before a provider is called (TASK-0242 ✅, `BUDGET_EXCEEDED`/402); the per-tenant counter is per-replica, so size it for your replica count |
 | Scale | `workers.*`, `vector_db.collection.shard_number`/`replication_factor`, remote `vector_db.host` | Both Qdrant ports (6333 **and** 6334) must be reachable remotely |
 
 Ready-made profiles (air-gapped, max-accuracy, cost-optimized, multi-tenant, retrieval-only, CI-gated…): [cookbook.md](cookbook.md).

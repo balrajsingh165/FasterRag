@@ -39,7 +39,7 @@ Rules: add nothing without a `TASK-` id; delete an entry when its blocker clears
 
 ## B4 — No isolated reference hardware (TASK-0084)
 
-Load, soak, and chaos runs need a documented, isolated machine. `BENCH-0001` and `BENCH-0002` are committed and **explicitly marked not citable**: taken on a developer laptop with Docker, an IDE, and co-tenant load, failing benchmark-ledger rule 5. Run-to-run variance on one commit was 5.5 s vs 8.7 s.
+Load, soak, and chaos runs need a documented, isolated machine. `BENCH-0001`, `BENCH-0002` and `BENCH-0003` are committed and **explicitly marked not citable**: all taken on a developer workstation under co-tenant load, failing benchmark-ledger rule 5 — BENCH-0003 additionally for a reason this hardware would not cure, its quality deltas being smaller than their own standard error. Run-to-run variance on one commit was 5.5 s vs 8.7 s.
 
 The nightly CI job produces numbers but its own header states they are not citable either — a shared GitHub runner has neighbours. It is a regression signal, not evidence.
 

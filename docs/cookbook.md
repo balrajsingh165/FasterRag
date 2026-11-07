@@ -125,7 +125,7 @@ Serving many customers from one deployment.
 
 > ✅ **The security half of this recipe is enforced** (corrected 2026-08-09; the warning that stood here said the opposite and was two slices out of date). `security.auth` shipped with TASK-0046 ✅ and `security.multi_tenancy` with TASK-0179–0181 ✅: authentication, scopes, per-key rate limiting, and tenant isolation run as ASGI middleware, `max_request_mb` is enforced before the body is read (TASK-0199 ✅), and enabling auth without a usable key refuses to start.
 >
-> ⚠️ **Two real limits remain.** The per-key rate limiter is an **in-process fixed window**, so N replicas grant N times the configured limit (TASK-0216). And `cost.per_tenant_token_budget` is **not enforced by anything** — the runtime governor is unbuilt, so setting it raises `ConfigError` at startup (TASK-0242); it is omitted below for that reason.
+> ⚠️ **Two real limits remain.** The per-key rate limiter is an **in-process fixed window**, so N replicas grant N times the configured limit (TASK-0216). And `cost.per_tenant_token_budget` **is** enforced now (TASK-0242 ✅, `services/budget.py`: `BUDGET_EXCEEDED`/402 before the provider is called) — but its counter is in-process, like the rate limiter above, so N replicas grant N times the budget; it is omitted below only because sizing it correctly depends on your replica count.
 
 ```yaml
 security:

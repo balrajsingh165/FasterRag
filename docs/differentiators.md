@@ -4,7 +4,7 @@ This file is the uniqueness contract: each capability below is what makes faster
 
 > **How to read this file** (clarified by the 2026-08-09 claims audit, TASK-0238):
 > - **"Acceptance test"** and **"Proof metric"** state the bar a capability *must* clear. They are the contract, **not a report that it has been cleared.** Where the named test does not exist yet, the bullet says so.
-> - **"Proof metric ... (ledger)"** means the number belongs in [benchmarks.md](benchmarks.md) once measured. The ledger currently holds **two entries, both explicitly non-citable** (non-isolated hardware), so **no proof metric in this file has a measured value yet** — TASK-0084 is the entry that needs real hardware.
+> - **"Proof metric ... (ledger)"** means the number belongs in [benchmarks.md](benchmarks.md) once measured. The ledger currently holds **three entries, all explicitly non-citable** — BENCH-0001 and BENCH-0002 for non-isolated hardware, BENCH-0003 for that *and* for quality deltas smaller than their own standard error — so **no proof metric in this file has a measured value yet**. TASK-0084 is the entry that needs real hardware; BENCH-0003's second reason needs a larger golden set instead (TASK-0297).
 > - **"Why it is unique"** is positioning based on our own reading of other frameworks. It is **not** a measured competitive comparison, and ledger rule 3 forbids treating it as one: a "faster/better than X" claim may only cite an entry that measured X itself.
 
 Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys live in [config-reference.md](config-reference.md); CLI/API surfaces in [cli-reference.md](cli-reference.md) / [api-reference.md](api-reference.md); tests in [testing-strategy.md](testing-strategy.md) and [failure-modes.md](failure-modes.md).
@@ -13,7 +13,7 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 
 ## D1 — Index Lockfile & Reproducible Builds
 
-- **What it is.** Every index build writes `index.lock`: config hash, embedding model name + version, chunker strategy + version, and per-document content hashes. Every subsequent operation compares live state to the lockfile; any drift (model version change, config change, corpus change) is detected and reported. A stale or irreproducible index becomes impossible to have *silently*.
+- **What it is.** Every index build writes `index.lock`: config hash, embedding model name + version, chunker strategy + version, and per-document content hashes. Every subsequent operation compares live state to the lockfile; any drift (model version change, config change, corpus change) is detected and reported. A stale or irreproducible index is hard to have *silently*: every single-field edit of the hashed config subset is covered by a schema-derived mutation suite, while two-field edits and non-config drift routes are sampled rather than enumerated (see Proof metric).
 - **Pain point it kills.** #4 stale indexes, #20 embedding drift.
 - **Why it is unique.** Existing frameworks let you re-embed with a different model or tweak chunking and keep serving mixed vectors without a word; drift discovery is manual archaeology. fasterRag makes the index a reproducible build artifact with a lockfile, like a package manager.
 - **Config keys.** `index.lockfile` (bool, default `true`).
@@ -29,7 +29,7 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 - **Config keys.** `index.reindex.strategy` (`blue_green`|`in_place`, default `blue_green`), `index.reindex.eval_gate` (default `true`), `index.reindex.rollback_retention_hours` (default `72`).
 - **CLI / API surface.** `fasterrag index reembed NAME`, `fasterrag index rollback NAME`; `POST /v1/collections/{name}/reindex`, `POST /v1/collections/{name}/rollback`.
 - **Acceptance test.** Alias swap atomicity and rollback are covered by the shared adapter contract suite and `tests/unit/services/test_reindex.py`. The **continuous-query-load-during-reindex** drill landed 2026-11-02 as `tests/chaos/test_reindex_under_load.py` (8 cases), closing TASK-0241. One bound it measured rather than fixed: a *hybrid* query issues its dense and sparse legs as two searches that resolve the alias independently, so a swap landing between them returns one result fused across both generations — the either-old-or-new guarantee holds per retrieval leg, not per hybrid query. Recorded in [failure-modes.md](failure-modes.md) with a `# TODO:` at the seam.
-- **Proof metric.** *(Target, not a result.)* Queries dropped during reindex — target 0, **not yet measured**, since the load test above is what would measure it; swap latency; ledger entry with corpus size + hardware.
+- **Proof metric.** *(Target, not a result.)* Queries dropped during reindex — target 0. The drill above observes zero against an **in-process adapter double** that resolves the alias per search call the way Qdrant does; that is evidence about fasterRag's orchestration, not about a live backend under concurrent writes. Unmeasured against real infrastructure, and no swap-latency or corpus-size figure exists; both need a ledger entry.
 
 ## D3 — Checkpointed, Idempotent Ingestion
 
@@ -121,8 +121,8 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 - **Why it is unique.** Export elsewhere means writing a scraper against the vector DB. Here the portable archive + migration path is part of the product contract.
 - **Config keys.** None required (always available); `--include-vectors` at call time. Archive format specified in [archive-format.md](archive-format.md).
 - **CLI / API surface.** `fasterrag export --out <archive> [--include-vectors]`, `fasterrag import <archive> [--reembed] [--target-collection]`; `POST /v1/admin/export`, `POST /v1/admin/import`.
-- **Acceptance test.** *(Half satisfied.)* Qdrant → Qdrant vector copy round-trips against a **live** backend — `tests/integration/test_archive_round_trip.py`, six cases covering a 12-point collection, refusal of a corrupted archive, and refusal of a dimension mismatch (TASK-0214 ✅). The **Qdrant → pgvector `--reembed`** leg is still unrun (TASK-0079).
-- **Proof metric.** *(Partly a result.)* Round-trip fidelity: chunk/metadata loss = 0, verified on the Qdrant leg. Export/import throughput: **no ledger entry**.
+- **Acceptance test.** *(Half satisfied.)* Qdrant → Qdrant vector copy ran once against a **live** backend (TASK-0214 ✅) and that run found three defects the fake adapter had hidden: a vector-copy guard that compared the archive to itself, provenance (`source_uri`, `content_hash`) discarded on import, and no `index.lock` written. All three are fixed, and the fixes are **re-verified against a fake adapter only** — `tests/integration/test_archive_round_trip.py` (12 cases) skips without a Docker daemon, so nothing has round-tripped through a real Qdrant since the change (TASK-0079). The **Qdrant → pgvector `--reembed`** leg is still unrun.
+- **Proof metric.** *(Not yet a result.)* Round-trip fidelity target: chunk/metadata loss = 0. The one live Qdrant run measured loss **greater than zero** — `source_uri` and `content_hash` were dropped on every import — and the fix for it has only been exercised against a fake adapter (TASK-0079). Export/import throughput: **no ledger entry**.
 
 ## D12 — Chaos-Certified
 

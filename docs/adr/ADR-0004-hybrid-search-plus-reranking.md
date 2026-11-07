@@ -28,7 +28,7 @@ Retrieval accuracy is the highest-stakes pain point (#2): a RAG system that retr
 
 ### Consequences
 
-- Good: best-known-practice retrieval quality out of the box; every stage is config-toggleable (`retrieval.hybrid`, `retrieval.rerank`) for latency-sensitive deployments.
+- Good: the retrieval configuration the cited literature recommends, on by default — its quality effect *here* is unmeasured, and BENCH-0003 found the rerank half inside the noise of the committed golden sets; every stage is config-toggleable (`retrieval.hybrid`, `retrieval.rerank`) for latency-sensitive deployments.
 - Good: rank-based fusion is backend-agnostic — it works identically across all vector DB adapters.
 - Bad: BM25 index maintenance alongside the vector index (storage + ingest cost); accepted.
 - Bad: reranker adds latency and a local model dependency; mitigated by the degradation ladder (`hybrid_only` mode, D4) and config toggle.

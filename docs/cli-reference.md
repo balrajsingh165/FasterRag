@@ -263,7 +263,7 @@ Unlike `config validate`, a referenced-but-missing environment variable does **n
 
 | Flag | Description |
 |---|---|
-| `--changed` | List only settings that differ from their default — the fastest way to see what a deployment customised. |
+| `--changed` | List only settings that differ from their default — the quickest way to see what a deployment customised. |
 
 ```console
 $ fasterrag config show --changed

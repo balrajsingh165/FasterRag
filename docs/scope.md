@@ -6,7 +6,7 @@
 
 fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generation (RAG) solution engineered for very, very large datasets. The goal of this repository is to ship the **first beta version** of an all-in-one RAG system that aims to be the fastest, most efficient, and most optimized RAG project available.
 
-Speed and efficiency come from three pillars:
+Speed and efficiency are *targeted* through three pillars — none of them yet measured against a baseline (TASK-0084):
 
 1. **Multi-worker parallel processing** across ingestion, chunking, embedding, and indexing — a CPU worker pool streams into a GPU/embedding worker pool, so expensive workers wait on parsing only when the bounded queue runs dry. How often that happens is unmeasured (TASK-0084).
 2. **Maximum chunking quality as the goal**, via a configurable chunking pipeline (fixed, recursive, semantic, layout-aware, late chunking, contextual enrichment) whose defaults are configurable engineering choices, tunable per corpus with the eval harness, and **not** claimed to be measured optima. Where a setting does rest on published evidence, that evidence is catalogued in [references.md](references.md); R3, the one chunk-size study we cite, recommends 150–300 tokens on its own single setup and is treated as directional, not settled.
@@ -36,7 +36,7 @@ Speed and efficiency come from three pillars:
 - Parsing pipeline for PDF (incl. tables and scanned/OCR), HTML, Markdown, DOCX, TXT, CSV/JSON.
 - Configurable chunking: fixed, recursive/hierarchical, semantic, layout/structure-aware, late chunking, contextual-retrieval-style enrichment.
 - Parallel workers: CPU pool (load/parse/chunk) → queue → stateful GPU/embedding pool (batch embed) → indexer.
-- Vector DB adapters: Qdrant (reference) and pgvector are **built and pass the shared contract suite**; Milvus, Weaviate, Pinecone, and Chroma are in scope for beta but **not yet built** (TASK-0049) and are refused by name at config load.
+- Vector DB adapters: Qdrant (reference), pgvector, and Chroma are **built and pass the shared contract suite**; Milvus, Weaviate, and Pinecone are in scope for beta but **not yet built** (TASK-0049) and are refused by name at config load.
 - Embedding providers: OpenAI, Cohere, HuggingFace/sentence-transformers, Ollama/local; tiered embedding.
 - LLM providers: any, via config (OpenAI, Anthropic, Cohere, Ollama/local, OpenAI-compatible endpoints).
 - Hybrid retrieval (dense + BM25), RRF fusion (k=60), cross-encoder reranking, metadata filtering.
