@@ -116,7 +116,10 @@ async def replay(
     # CRITICAL: no cache and no trace store. A replay that populated the cache would make
     # the next real query answer from an experiment, and one that stored its own trace would
     # add to the record it was called to investigate.
-    service = build_generation(candidate, adapter, embedding_router, cache=None)
+    # CRITICAL: the replay retrieves as the tenant whose trace it is. Without the tenant a
+    # replay under `security.tenant_scoped_retrieval` is refused outright, and the spend it
+    # costs is charged to the untenanted bucket rather than to the tenant that caused it.
+    service = build_generation(candidate, adapter, embedding_router, cache=None, tenant=tenant)
 
     try:
         result = await replay_trace(trace, candidate, service)

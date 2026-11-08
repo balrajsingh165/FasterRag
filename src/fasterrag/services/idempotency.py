@@ -30,22 +30,37 @@ request — replay protection that silently does nothing N-1 times out of N. A s
 filesystem covers one host; a deployment spread over several hosts needs a shared volume, and
 that is a documented limit rather than a solved problem (``docs/api-reference.md``).
 
+**The store is an interface, so that limit is answerable without touching a caller**
+(TASK-0357). :class:`IdempotencyStore` is abstract and names four things —
+``enabled``/``begin``/``commit``/``release`` — exactly as ``core.rate_limit`` does for the
+other control with a one-host window; :class:`FileIdempotencyStore` is the one
+implementation that ships, and a shared backend is a second class plus a branch in
+:func:`create_idempotency_store`. Two things make that substitution real rather than
+nominal. The interface is **async**, because a network backend cannot be made synchronous
+and offloading to a thread is the *file* store's business, not its caller's. And a
+:class:`Reservation` carries no path: it names the claim, and each backend works out where
+that lives, so nothing filesystem-shaped reaches the middleware.
+
 Expiry is lazy: a record older than its lifetime is taken over by the next request that
 reaches it, so nothing has to sweep the directory. An in-flight reservation uses a much
 shorter lease than a completed record, so a worker that died mid-request frees its key in
-minutes rather than holding it for the full day.
+minutes rather than holding it for the full day. Both durations, and the kill switch, come
+from ``reliability.idempotency`` (TASK-0356); the constants below are their defaults.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from secrets import token_hex
 from typing import Any, Final
 
+from fasterrag.config.schema import IdempotencySettings, Settings
 from fasterrag.core.identity import text_hash
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
@@ -58,6 +73,7 @@ __all__ = [
     "MAXIMUM_KEY_LENGTH",
     "MAXIMUM_STORED_BODY_BYTES",
     "REPLAYED_HEADER",
+    "FileIdempotencyStore",
     "IdempotencyStore",
     "Reservation",
     "StoredResponse",
@@ -75,7 +91,9 @@ DEFAULT_TTL_SECONDS: Final = 24 * 60 * 60
 # CRITICAL: an in-flight reservation is held under this lease, not under the record
 # lifetime. A worker killed between taking the key and writing its response would otherwise
 # make that key answer 409 for a full day, and the client's only remedy would be to invent a
-# new key — which is exactly the duplicate request the key existed to prevent.
+# new key — which is exactly the duplicate request the key existed to prevent. Operators may
+# retune both through `reliability.idempotency`, which is why the schema refuses a lease
+# longer than the lifetime rather than letting that inversion be configured.
 IN_FLIGHT_LEASE_SECONDS: Final = 15 * 60
 
 _RECORDS_DIR: Final = "idempotency"
@@ -113,31 +131,25 @@ class StoredResponse:
 
 @dataclass(frozen=True, slots=True)
 class Reservation:
-    """A claim on one key, held while the original request runs."""
+    """A claim on one key, held while the original request runs.
+
+    It names the claim and nothing about where the claim is kept, so a store that is not a
+    directory can honour it unchanged.
+    """
 
     key: str
     tenant: str | None
     fingerprint: str
     owner: str
-    path: Path
 
 
-class IdempotencyStore:
-    """Remembers what each ``Idempotency-Key`` did, so a replay repeats nothing."""
+class IdempotencyStore(ABC):
+    """Remembers what each ``Idempotency-Key`` did, wherever a deployment keeps that."""
 
-    def __init__(
-        self,
-        root: str | Path = DEFAULT_JOURNAL_ROOT,
-        *,
-        ttl_seconds: int = DEFAULT_TTL_SECONDS,
-        enabled: bool = True,
-    ) -> None:
-        """Open a store rooted beside ``root``."""
-        self.root = Path(root) / _RECORDS_DIR
-        self.ttl_seconds = ttl_seconds
-        self.enabled = enabled
+    enabled: bool = True
 
-    def begin(
+    @abstractmethod
+    async def begin(
         self, key: str, *, tenant: str | None, fingerprint: str
     ) -> Reservation | StoredResponse:
         """Claim ``key`` for this request, or return what it returned the first time.
@@ -146,9 +158,59 @@ class IdempotencyStore:
             FasterRagError: ``IDEMPOTENCY_KEY_REUSED`` for a different request under the
                 same key, ``IDEMPOTENCY_IN_PROGRESS`` while the original is still running.
         """
-        path = self._path(key, tenant)
+
+    @abstractmethod
+    async def commit(self, reservation: Reservation, response: StoredResponse) -> None:
+        """Store the response ``reservation``'s request produced, for later replays."""
+
+    @abstractmethod
+    async def release(self, reservation: Reservation) -> None:
+        """Free ``reservation``'s key, so the client may retry it immediately."""
+
+
+class FileIdempotencyStore(IdempotencyStore):
+    """Keeps each record as one file, which every worker on the host can read."""
+
+    def __init__(
+        self,
+        root: str | Path = DEFAULT_JOURNAL_ROOT,
+        *,
+        ttl_seconds: int = DEFAULT_TTL_SECONDS,
+        lease_seconds: int = IN_FLIGHT_LEASE_SECONDS,
+        enabled: bool = True,
+    ) -> None:
+        """Open a store rooted beside ``root``."""
+        self.root = Path(root) / _RECORDS_DIR
+        self.ttl_seconds = ttl_seconds
+        self.lease_seconds = lease_seconds
+        self.enabled = enabled
+
+    async def begin(
+        self, key: str, *, tenant: str | None, fingerprint: str
+    ) -> Reservation | StoredResponse:
+        """Claim ``key`` for this request, or return what it returned the first time."""
+        return await asyncio.to_thread(self.claim, key, tenant=tenant, fingerprint=fingerprint)
+
+    async def commit(self, reservation: Reservation, response: StoredResponse) -> None:
+        """Store the response ``reservation``'s request produced, for later replays."""
+        await asyncio.to_thread(self.keep, reservation, response)
+
+    async def release(self, reservation: Reservation) -> None:
+        """Free ``reservation``'s key, so the client may retry it immediately."""
+        await asyncio.to_thread(self.discard, reservation)
+
+    def claim(
+        self, key: str, *, tenant: str | None, fingerprint: str
+    ) -> Reservation | StoredResponse:
+        """Take the key on disk, blocking; :meth:`begin` is this off the event loop.
+
+        Raises:
+            FasterRagError: ``IDEMPOTENCY_KEY_REUSED`` for a different request under the
+                same key, ``IDEMPOTENCY_IN_PROGRESS`` while the original is still running.
+        """
+        path = self.path_for(key, tenant)
         reservation = Reservation(
-            key=key, tenant=tenant, fingerprint=fingerprint, owner=token_hex(8), path=path
+            key=key, tenant=tenant, fingerprint=fingerprint, owner=token_hex(8)
         )
         record = {
             "tenant": tenant,
@@ -170,13 +232,13 @@ class IdempotencyStore:
 
         return reservation
 
-    def commit(self, reservation: Reservation, response: StoredResponse) -> None:
-        """Store the response ``reservation``'s request produced, for later replays."""
+    def keep(self, reservation: Reservation, response: StoredResponse) -> None:
+        """Write the stored response, blocking; :meth:`commit` is this off the event loop."""
         if not self._owned(reservation):
             return
 
         self.write_record(
-            reservation.path,
+            self.path_for(reservation.key, reservation.tenant),
             {
                 "tenant": reservation.tenant,
                 "fingerprint": reservation.fingerprint,
@@ -191,20 +253,20 @@ class IdempotencyStore:
             },
         )
 
-    def release(self, reservation: Reservation) -> None:
-        """Free ``reservation``'s key, so the client may retry it immediately."""
+    def discard(self, reservation: Reservation) -> None:
+        """Delete the record, blocking; :meth:`release` is this off the event loop."""
         if not self._owned(reservation):
             return
 
         try:
-            reservation.path.unlink(missing_ok=True)
+            self.path_for(reservation.key, reservation.tenant).unlink(missing_ok=True)
         except OSError as exc:
             _logger.warning(
                 "an idempotency reservation could not be released; it expires on its lease",
                 extra={"detail": str(exc)},
             )
 
-    def _path(self, key: str, tenant: str | None) -> Path:
+    def path_for(self, key: str, tenant: str | None) -> Path:
         """Return the record path, hashed so a client-chosen key cannot escape the root."""
         bucket = text_hash(tenant) if tenant else _UNTENANTED
         return self.root / bucket / f"{text_hash(key)}.json"
@@ -242,12 +304,12 @@ class IdempotencyStore:
             return True
 
         completed = existing.get("state") == _COMPLETED
-        lease = self.ttl_seconds if completed else IN_FLIGHT_LEASE_SECONDS
+        lease = self.ttl_seconds if completed else self.lease_seconds
         return _now() - float(created) > lease
 
     def _owned(self, reservation: Reservation) -> bool:
         """Return whether this reservation still holds its key."""
-        existing = self.read_record(reservation.path)
+        existing = self.read_record(self.path_for(reservation.key, reservation.tenant))
         return existing is not None and existing.get("owner") == reservation.owner
 
     def read_record(self, path: Path) -> dict[str, Any] | None:
@@ -312,6 +374,18 @@ def _unwritable(path: Path, exc: OSError) -> FasterRagError:
     )
 
 
-def create_idempotency_store(root: str | Path = DEFAULT_JOURNAL_ROOT) -> IdempotencyStore:
-    """Build the store that serves one application, rooted beside its journal."""
-    return IdempotencyStore(root)
+def create_idempotency_store(
+    root: str | Path = DEFAULT_JOURNAL_ROOT, settings: Settings | None = None
+) -> IdempotencyStore:
+    """Return the store ``reliability.idempotency`` configures, rooted beside the journal.
+
+    ``root`` is what the filesystem backend needs and what a shared one would ignore; the
+    settings are what would choose between them, as ``create_rate_limiter`` already does.
+    """
+    configured = IdempotencySettings() if settings is None else settings.reliability.idempotency
+    return FileIdempotencyStore(
+        root,
+        ttl_seconds=configured.ttl_seconds,
+        lease_seconds=configured.in_flight_lease_seconds,
+        enabled=configured.enabled,
+    )

@@ -72,7 +72,7 @@ Shipped by TASK-0318 (✅ 2026-11-08). Implemented in `api/idempotency.py` (tran
 
 **Scope is `(tenant, key)`.** A key names *one request*, not one endpoint's namespace. The request's method, path, query string and body are fingerprinted and stored beside the response, so reusing a key for anything else — a different body, or the same key on another endpoint — is `422 IDEMPOTENCY_KEY_REUSED` rather than a silent wrong answer. The tenant (as `security.multi_tenancy` resolved it) is part of the record path, so two tenants that both pick `retry-1` never meet.
 
-**Lifetime.** A completed record is replayable for **24 hours**; an unfinished reservation is held for a **15-minute lease**, so a worker that died mid-request frees its key in minutes instead of holding it for a day. Expiry is lazy — the next request to reach an expired record takes it over — so nothing has to sweep the directory. Neither duration is configurable yet (NEW-1).
+**Lifetime, and the kill switch.** A completed record is replayable for `reliability.idempotency.ttl_seconds` (**24 hours** by default); an unfinished reservation is held for `reliability.idempotency.in_flight_lease_seconds` (**15 minutes**), so a worker that died mid-request frees its key in minutes instead of holding it for a day. The loader refuses a lease longer than the lifetime. Expiry is lazy — the next request to reach an expired record takes it over — so nothing has to sweep the directory. **A record whose key never returns is therefore never reclaimed**, and a client using a fresh UUID per request never returns one: the record directory grows with keyed traffic until something prunes it. Lowering `ttl_seconds` shortens how long a record is *replayable*, not how long its file exists. Open, found 2026-11-09. Both became configurable with TASK-0356, together with `reliability.idempotency.enabled`, which **defaults to `true`**: it is a kill switch for a misbehaving store, and defaulting it off would make this section untrue for every deployment that never read the setting. With it `false`, a keyed request is passed straight through — nothing recorded, nothing replayed, nothing refused.
 
 **Replay signal.** A replayed response is the original one byte for byte — same status, same body — plus `Idempotent-Replayed: true`. Every keyed response, replayed or not, echoes `Idempotency-Key`. A client can therefore tell "this already happened" from "this just happened", which a bare repeated `201` cannot.
 
@@ -84,7 +84,9 @@ Shipped by TASK-0318 (✅ 2026-11-08). Implemented in `api/idempotency.py` (tran
 
 **Deliberately not covered**, because they are `POST` for the body and not for an effect: `/v1/query`, `/v1/retrieve`, `/v1/estimate`, `/v1/replay`. A key sent to one of them is ignored rather than refused, so a client that sets the header on every request keeps working. `/v1/query` can also be a `text/event-stream`, which cannot be captured and handed back.
 
-**Storage, and its limit.** Records are files under the ingestion journal root (`.fasterrag/journal/idempotency/`), *not* process memory — production runs Gunicorn with several Uvicorn workers, and a per-process map would make a key hold only for the worker that served the first request. A shared filesystem therefore covers every worker on one host. **Several hosts behind a load balancer need that directory on shared storage**; without it, idempotency is per host. This is a documented limit, not a solved problem (NEW-2).
+**Storage, and its limit.** Records are files under the ingestion journal root (`.fasterrag/journal/idempotency/`), *not* process memory — production runs Gunicorn with several Uvicorn workers, and a per-process map would make a key hold only for the worker that served the first request. A shared filesystem therefore covers every worker on one host. **Several hosts behind a load balancer need that directory on shared storage**; without it, idempotency is per host. This is a documented limit, not a solved problem (TASK-0357).
+
+**The backend is substitutable.** `IdempotencyStore` is an abstract interface — `enabled`, `begin`, `commit`, `release` — and `FileIdempotencyStore` is the one implementation that ships, in the shape `security.rate_limit_backend` already uses for the other control with a one-host window. The interface is `async` and a reservation carries no path, so a shared backend is a second class and a branch in `create_idempotency_store`, with no change to the middleware or to any behaviour described above. Which backend to add, and whether to require shared storage instead, is TASK-0357's open decision; nothing in this section changes either way.
 
 ### Deprecated: the `idempotency_key` body field
 
@@ -159,7 +161,7 @@ Re-enqueues dead-lettered documents of the job. `202`, or `409 CONFLICT` under t
 | `query` | str | yes | 1–8192 chars. |
 | `collection` | str | no | Defaults to configured default. |
 | `top_k` | int | no | Overrides `retrieval.top_k`; same bounds. |
-| `filters` | object | no | Metadata filter expression, pushed down to both retrieval legs. |
+| `filters` | object | no | Metadata filter expression, pushed down to both retrieval legs. With `security.tenant_scoped_retrieval` on, a `tenant` key here is refused with `403 TENANT_FORBIDDEN`: the tenant a retrieval runs as comes from the credential and is injected below this expression ([security.md](security.md) §3). |
 | `stream` | bool | no (default per `llm.streaming`) | `true` → SSE response. |
 | `include_chunks` | bool | no | Include full retrieved chunk texts in the (non-streamed) response. |
 
@@ -233,6 +235,8 @@ Retrieval without generation, for callers bringing their own LLM step. Same requ
 ```
 
 Responds `200` with `{"chunks": [...], "trace_id": "..."}`. No generation happens, so no LLM cost is incurred and `INSUFFICIENT_EVIDENCE` cannot apply.
+
+**Tenancy.** Both `/v1/query` and `/v1/retrieve` address the collection the body names, unprefixed — neither applies the `<tenant>__` scoping `/v1/collections` uses. Retrieval is filtered by tenant only when `security.tenant_scoped_retrieval` is on, and `403 TENANT_FORBIDDEN` is then also possible on both endpoints. See [security.md](security.md) §3 for what is enforced today and what the flag changes (TASK-0339).
 
 ## Collections
 

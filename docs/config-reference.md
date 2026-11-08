@@ -149,6 +149,10 @@ reliability:
     enabled: true
     failure_threshold: 5
     reset_timeout_ms: 30000
+  idempotency:
+    enabled: true
+    ttl_seconds: 86400
+    in_flight_lease_seconds: 900
   degradation_ladder: true
 
 traces:
@@ -183,6 +187,10 @@ security:
   api_key_env: FASTERRAG_API_KEY
   multi_tenancy: false
   tenant_header: X-Tenant-ID
+  # Push the caller's tenant into both retrieval legs as a mandatory filter. Requires auth
+  # and multi_tenancy. Off by default: chunks indexed before multi_tenancy was enabled
+  # carry no tenant field, and an absent field never matches -- see docs/security.md.
+  tenant_scoped_retrieval: false
   rate_limit_per_minute: 600
   rate_limit_backend: memory
   rate_limit_redis_url: redis://localhost:6379/0
@@ -402,6 +410,9 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | `reliability.circuit_breaker.enabled` | bool | `true` | — | Per-provider circuit breakers (LLM, embeddings, vector DB); state exported as a metric. |
 | `reliability.circuit_breaker.failure_threshold` | int | `5` | ≥ 1 | Consecutive failures that open the circuit. |
 | `reliability.circuit_breaker.reset_timeout_ms` | int | `30000` | ≥ 1000 | Half-open probe interval. |
+| `reliability.idempotency.enabled` | bool | `true` | — | Honour the `Idempotency-Key` header on mutating endpoints ([api-reference.md](api-reference.md#idempotency)). **Defaults to `true`, deliberately against the default-false rule for risky features** (TASK-0356): the feature starts nothing on its own — a request without the header touches no store and writes no byte — while defaulting it off would make a published contract false for every deployment that never read this setting, and a client whose retry silently executed twice has no way to notice. It is a kill switch for a store that is misbehaving, not a feature gate. Setting it to `false` passes keyed requests straight through: nothing is recorded, nothing is replayed, and no request is refused. |
+| `reliability.idempotency.ttl_seconds` | int | `86400` | 1–604800 | How long a completed record stays replayable. Raise it only as far as your clients actually retry. **It does not bound disk use**: expiry is lazy, so a record is only reclaimed when the same key comes back, and a client using fresh UUID keys never returns — the record directory grows until something prunes it. |
+| `reliability.idempotency.in_flight_lease_seconds` | int | `900` | ≥ 1, ≤ `ttl_seconds` | How long an unfinished reservation holds its key before another request may take it over. A worker killed mid-request frees its key on this lease rather than holding it for the full lifetime — which would force the client to invent a new key, the exact duplicate the header exists to prevent. The loader refuses a lease longer than `ttl_seconds`, because an unfinished request outliving a completed one inverts the intent. |
 | `reliability.degradation_ladder` | bool | `true` | — | D4: graceful fallbacks (reranker down → hybrid-only; vector DB down → semantic-cache-only; LLM down → extractive answers). Every degraded response carries `degraded: true` + `mode`. |
 
 ## `traces`
@@ -418,7 +429,7 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 |---|---|---|---|---|
 | `cost.estimator` | bool | `true` | — | D9: enable `fasterrag estimate`, `POST /v1/estimate`, `fasterrag ingest --dry-run`, and `FasterRag.estimate` (token counts, projected embedding cost per provider, BEFORE ingestion). When `false` each refuses with `VALIDATION_FAILED` naming this setting, rather than reporting an estimate of zero. `benchmark --suite ingest` is unaffected: it times the same parse-and-chunk work and reports no cost. |
 | `cost.per_query_token_budget` | int | `0` | ≥ 0 (0 = unlimited) | Hard token budget per query, checked before the provider is called against the prompt plus `llm.max_tokens` — the ceiling the call can reach, because a completion length is unknown until the tokens are spent. Exceeding it returns `BUDGET_EXCEEDED` (402), which is non-retryable so the degradation ladder cannot absorb it into an extractive answer. Exact and identical on every replica. |
-| `cost.per_tenant_token_budget` | int | `0` | ≥ 0 (0 = unlimited) | Per-tenant token budget over a **rolling 24-hour window** (the documented "rolling" needs a period to mean anything). Charged the actual tokens a query cost, admitted against the ceiling. Without `security.multi_tenancy: true` all traffic shares one bucket, which is what a per-tenant budget means for a single-tenant deployment. **Counted in-process**, like the per-key rate limiter (TASK-0216): N replicas grant N times this budget, so size it for your replica count. **Embedding spend is charged as of TASK-0312**, from the provider's reported token count where there is one — an ingest records against the window but is never refused mid-job, because abandoning a half-indexed corpus is worse than letting the cap bite later. **It does not yet constrain queries**: ingest records into the process-wide `shared_governor`, while `GenerationService` builds its own governor through `create_governor` on every request, so the query window is discarded between requests and never sees the embedding spend. The ceiling therefore cannot be reached through the REST API at all — the "N replicas grant N times this budget" caveat above is optimistic, since the real multiplier is one per request. Open as TASK-0337. |
+| `cost.per_tenant_token_budget` | int | `0` | ≥ 0 (0 = unlimited) | Per-tenant token budget over a **rolling 24-hour window** (the documented "rolling" needs a period to mean anything). Charged the actual tokens a query cost, admitted against the ceiling. Without `security.multi_tenancy: true` all traffic shares one bucket, which is what a per-tenant budget means for a single-tenant deployment. **Counted in-process**, like the per-key rate limiter (TASK-0216): N replicas grant N times this budget, so size it for your replica count. **Embedding spend is charged as of TASK-0312**, from the provider's reported token count where there is one — an ingest records against the window but is never refused mid-job, because abandoning a half-indexed corpus is worse than letting the cap bite later. **Ingest and query share one window as of TASK-0337**: both charge the process-wide governor, so a query is refused on what ingestion already spent, and the cap is reachable through the REST API. Until then `GenerationService` built its own governor on every request, so the window was discarded between requests and the ceiling could not be reached at all. |
 
 ### Which models carry a price
 
@@ -469,7 +480,8 @@ All integration toggles default `false`.
 |---|---|---|---|---|
 | `security.auth` | bool | `false` | — | API-key authentication on all control-plane endpoints (keys carry scopes; see [security.md](security.md)). |
 | `security.api_key_env` | str | `FASTERRAG_API_KEY` | valid env-var name | Env var holding the API key material (never the key itself in YAML). |
-| `security.multi_tenancy` | bool | `false` | — | Tenant-scoped collections and API keys; isolation enforced at the service layer; tenant tag on every trace/metric. |
+| `security.multi_tenancy` | bool | `false` | — | Resolves a tenant per request and scopes collection, trace, job, metric and semantic-cache access to it. It does **not** by itself scope retrieval — see `security.tenant_scoped_retrieval` and [security.md](security.md) §3. |
+| `security.tenant_scoped_retrieval` | bool | `false` | requires `auth` and `multi_tenancy` | Pushes the caller's tenant into **both** retrieval legs as a mandatory `tenant` equality filter, injected below any `filters` in the request body; a body that names the `tenant` field is refused with `TENANT_FORBIDDEN` rather than overridden. **Off by default because turning it on changes what an existing corpus answers**: chunks indexed before `multi_tenancy` was enabled carry no `tenant` payload field, and an absent field never matches, so an unbackfilled collection returns empty results. Backfill first, and add a payload index on `tenant` in the backend or every query pays an unindexed filter. Combining it with `auth: false` or `multi_tenancy: false` is refused at load (TASK-0339). |
 | `security.tenant_header` | str | `X-Tenant-ID` | valid HTTP header name | Header carrying the tenant identifier when multi-tenancy is on. |
 | `security.rate_limit_per_minute` | int | `600` | ≥ 1 | Per-key request rate limit (on by default once `auth` is enabled). Counted in the window named by `security.rate_limit_backend`. |
 | `security.rate_limit_backend` | str | `memory` | `memory`, `redis` | Where the per-key window is counted. `memory` is per process: with N API workers or replicas the effective ceiling is `rate_limit_per_minute × N`, which is correct only for a single-process deployment. `redis` counts every replica into one shared fixed window (`INCR` + `EXPIRE` in one transaction, keyed by a SHA-256 fingerprint of the API key, never the key). Needs `pip install fasterrag[redis]`. **The Redis backend has never been exercised against a live Redis server** — only against an in-memory double (TASK-0216); see [security.md](security.md) §2. |

@@ -113,11 +113,18 @@ JournalDep = Annotated[Journal, Depends(get_journal)]
 
 
 def build_retrieval(
-    settings: Settings, adapter: VectorDBAdapter, router: TieringRouter
+    settings: Settings,
+    adapter: VectorDBAdapter,
+    router: TieringRouter,
+    tenant: str | None = None,
 ) -> RetrievalService:
-    """Assemble hybrid retrieval, with reranking only when configuration asks for it."""
+    """Assemble hybrid retrieval, with reranking only when configuration asks for it.
+
+    The tenant is passed in rather than read here, so the one middleware that decided who
+    the caller is stays the only thing that decides it (``security.tenant_scoped_retrieval``).
+    """
     reranker = CrossEncoderReranker(settings) if settings.retrieval.rerank else None
-    return RetrievalService(settings, adapter, router, reranker)
+    return RetrievalService(settings, adapter, router, reranker, tenant=tenant)
 
 
 def build_generation(
@@ -131,7 +138,7 @@ def build_generation(
     """Assemble the query path the CLI also assembles, so the two cannot diverge."""
     return GenerationService(
         settings,
-        build_retrieval(settings, adapter, router),
+        build_retrieval(settings, adapter, router, tenant),
         create_llm_adapter(settings),
         cache=cache,
         traces=traces,

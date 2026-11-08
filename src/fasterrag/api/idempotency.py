@@ -19,12 +19,15 @@ refusal carries the same trace id as everything else.
 
 **The header is optional and inert.** A request without it is passed straight through and
 touches no store, so this changes nothing for any existing client; only a request that opts
-in pays a buffered body and two small file writes.
+in pays a buffered body and two small file writes. That is the argument for
+``reliability.idempotency.enabled`` defaulting to **true** rather than following the
+default-false rule for risky features (TASK-0356): the feature starts nothing on its own,
+and defaulting it off would make a published contract false for every deployment that never
+read the setting. The flag is a kill switch, recorded in ``config/schema.py``.
 """
 
 from __future__ import annotations
 
-import asyncio
 from typing import Final
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -91,8 +94,7 @@ class IdempotencyMiddleware:
         try:
             _validate(key)
             body = await _buffer(receive)
-            outcome = await asyncio.to_thread(
-                store.begin,
+            outcome = await store.begin(
                 key,
                 tenant=_tenant(scope),
                 fingerprint=request_fingerprint(
@@ -128,11 +130,11 @@ class IdempotencyMiddleware:
         try:
             await self.app(scope, _rewound(body), recorder)
             if recorder.storable:
-                await asyncio.to_thread(store.commit, reservation, recorder.captured())
+                await store.commit(reservation, recorder.captured())
                 committed = True
         finally:
             if not committed:
-                await asyncio.to_thread(store.release, reservation)
+                await store.release(reservation)
 
 
 class _Recorder:
@@ -218,13 +220,13 @@ def _tenant(scope: Scope) -> str | None:
 
 
 def _store_for(scope: Scope) -> IdempotencyStore:
-    """Return the application's store, built once and rooted beside its journal."""
+    """Return the application's store, built once from ``reliability.idempotency``."""
     state = scope["app"].state
     store: IdempotencyStore | None = getattr(state, "idempotency", None)
     if store is None:
         journal = getattr(state, "journal", None)
         root = DEFAULT_JOURNAL_ROOT if journal is None else journal.root
-        store = create_idempotency_store(root)
+        store = create_idempotency_store(root, getattr(state, "settings", None))
         state.idempotency = store
     return store
 

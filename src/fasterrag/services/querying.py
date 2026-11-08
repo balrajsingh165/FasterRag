@@ -14,6 +14,14 @@ Three properties the documentation asks for, and how they hold here:
 * **Fusion happens here, with the configured ``retrieval.rrf_k``**, rather than in the
   backend, because a backend's built-in fusion does not expose that constant.
 
+**Tenant scoping rides on that second property.** With
+``security.tenant_scoped_retrieval`` on, the caller's tenant is injected into the filter
+*here*, below anything the request body supplied, because this is the one place a single
+filter object reaches both legs — scoping a router argument instead would leave whichever
+leg a later change forgets. A body that names the tenant field at all is refused rather
+than overridden. The flag defaults to false and ``docs/security.md`` §3 records what it
+does and what an existing corpus needs before it is turned on.
+
 Reranking runs last, over the fused shortlist, and truncates to ``retrieval.top_k``. A
 reranker that cannot load or score degrades the response to ``hybrid_only`` rather than
 failing the query, because unranked results beat no answer (D4).
@@ -41,8 +49,9 @@ from fasterrag.core.rerank import Reranker
 from fasterrag.core.retrieval.bm25 import encode_query
 from fasterrag.core.retrieval.fusion import Ranking, rrf_fuse
 from fasterrag.core.retrieval.models import DENSE_LEG, SPARSE_LEG, ScoredChunk
-from fasterrag.errors import FasterRagError
+from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
+from fasterrag.services.tenancy import TENANT_PAYLOAD_KEY
 
 FULL_MODE = "full"
 HYBRID_ONLY_MODE = "hybrid_only"
@@ -75,12 +84,14 @@ class RetrievalService:
         router: TieringRouter,
         reranker: Reranker | None = None,
         breaker: CircuitBreaker | None = None,
+        tenant: str | None = None,
     ) -> None:
         """Build the service."""
         self.settings = settings
         self.adapter = adapter
         self.router = router
         self.reranker = reranker
+        self.tenant = tenant
         # CRITICAL: one breaker for the life of the service, as in GenerationService and
         # EmbeddingPool. A breaker rebuilt per query counts to one forever and never opens.
         self.breaker = breaker or CircuitBreaker(
@@ -115,12 +126,13 @@ class RetrievalService:
         as one rather than passed off as a full-quality result (D4).
         """
         validate_filter(filters)
+        scoped = self._tenant_scoped(filters)
         retrieval = self.settings.retrieval
         target = collection or self.settings.vector_db.collection.default_name
         limit = top_k or retrieval.top_k
         candidates = max(retrieval.rerank_top_n, limit) if self._reranking else limit
 
-        legs = await self._run_legs(text, target, candidates, filters)
+        legs = await self._run_legs(text, target, candidates, scoped)
         fused = self._fuse(legs)
         shortlist = self._assemble(fused, legs, candidates)
 
@@ -137,6 +149,35 @@ class RetrievalService:
             },
         )
         return Retrieval(chunks=results, mode=mode)
+
+    def _tenant_scoped(self, filters: Filter | None) -> Filter | None:
+        """Return the filter both legs receive, carrying the caller's tenant when scoped.
+
+        The injection happens here rather than in a router because this is the single place
+        one filter object reaches *both* legs, so neither can be scoped without the other.
+        """
+        if not self.settings.security.tenant_scoped_retrieval:
+            return filters
+
+        if self.tenant is None:
+            raise FasterRagError(
+                "security.tenant_scoped_retrieval is on, so a retrieval must be made on "
+                "behalf of a tenant",
+                code=ErrorCode.TENANT_FORBIDDEN,
+                retryable=False,
+            )
+        # CRITICAL: refused, never merged. Overwriting a caller-supplied `tenant` silently
+        # would be safe for the result set but would let a caller probe isolation without
+        # ever being told it exists; widening it is what must never happen, and the two are
+        # indistinguishable to the caller unless one of them is an error.
+        if filters is not None and TENANT_PAYLOAD_KEY in filters:
+            raise FasterRagError(
+                f"a query may not filter on {TENANT_PAYLOAD_KEY!r}; the tenant a retrieval "
+                "runs as comes from the credential, not from the request body",
+                code=ErrorCode.TENANT_FORBIDDEN,
+                retryable=False,
+            )
+        return {**(filters or {}), TENANT_PAYLOAD_KEY: self.tenant}
 
     @property
     def _reranking(self) -> bool:

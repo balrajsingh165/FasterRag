@@ -81,7 +81,7 @@ Enabling auth with no usable key **refuses to start**. Starting would refuse eve
 ## 3. Multi-tenancy isolation
 
 - `security.multi_tenancy: true` scopes collections and API keys to tenants; the tenant id arrives via `security.tenant_header` (default `X-Tenant-ID`) and must match the key's tenant.
-- **Isolation is enforced at the service layer** (the only writer of state): every collection operation, query, cache entry, trace, and metric is tenant-tagged; cross-tenant access is `TENANT_FORBIDDEN` regardless of endpoint.
+- **Isolation is enforced at the service layer** (the only writer of state) for every collection operation, cache entry, trace, job, and metric; cross-tenant access to those is `TENANT_FORBIDDEN` regardless of endpoint. **Retrieval is the exception and is opt-in** — see "What retrieval actually enforces" below.
 
 **Shipped so far** (TASK-0179): the tenant is resolved once, in `AuthMiddleware`, from the key's own tenant and the request header, and placed on the request scope — one place decides who the caller is, so a second reader cannot disagree with the first. Three rules:
 
@@ -91,19 +91,56 @@ Enabling auth with no usable key **refuses to start**. Starting would refuse eve
 
 **Semantic-cache isolation is the part that matters most, and it is enforced on the entry rather than the key.** Lookup compares the query vector against *every* stored entry, so a key prefix alone would not help — the scan ignores keys. Each entry carries its owning tenant and a mismatch is skipped, so a sufficiently similar question from one tenant can never return another's answer at a cache hit's latency with no error anywhere. The tenant is also part of the key, because otherwise two tenants asking the same question collide and the second write silently overwrites the first.
 
-**Collections are scoped by name, not by a filter.** A vector database has no notion of our tenants, so isolation cannot be a field check — a tenant's collections carry a `<tenant>__` prefix and a tenant may only address names carrying its own. That makes isolation a property of the identifier: a missing filter fails open, a name that does not resolve fails closed. The prefix never appears in a response — a tenant that created `docs` sees `docs`. A tenant id may not itself contain the separator, or `acme__x` could address `acme`'s collection `x`; ids are validated and refused with `TENANT_FORBIDDEN`.
+**Collections are scoped by name, not by a filter — in the two routers that do it.** A vector database has no notion of our tenants, so collection isolation cannot be a field check — a tenant's collections carry a `<tenant>__` prefix and a tenant may only address names carrying its own. **`/v1/collections` and `/v1/admin` apply this; the ingest and query paths do not** (TASK-0339, below). That makes isolation a property of the identifier: a missing filter fails open, a name that does not resolve fails closed. The prefix never appears in a response — a tenant that created `docs` sees `docs`. A tenant id may not itself contain the separator, or `acme__x` could address `acme`'s collection `x`; ids are validated and refused with `TENANT_FORBIDDEN`.
 
 **Traces and metrics are tagged too.** A trace records the query text and every retrieved chunk, so `GET /v1/traces/{id}`, `GET /v1/traces`, and `POST /v1/replay` all report another tenant's trace as **absent** rather than forbidden — a distinct error would confirm the id is real, and trace ids are guessable from a caller's own listing. The same reasoning applies to `GET /v1/collections/{name}`. Metric series carry the tenant resolved by the middleware, not one re-read from the header, so an unauthenticated request cannot label its own series.
 
 **Ingestion jobs are scoped too.** A job record carries the source paths of the corpus it ingested, and job ids sort chronologically — so a caller holding one of their own can guess at neighbours. Another tenant's job therefore raises the same `NOT_FOUND` an unknown id does, with the same message. The tenant is recorded when the job is *created*: without that every job would be written untenanted and scoping the read path would refuse a tenant access to the job it had just started, presenting as an outage rather than as isolation.
 
-With this, every tenant-visible surface is scoped: queries, the semantic cache, collections, traces, replay, metrics, and ingestion jobs.
+With this, these tenant-visible surfaces are scoped: the semantic cache, collections, traces, replay, metrics, and ingestion jobs. **Retrieval itself is not among them by default** — §3's closing subsection, "What retrieval actually enforces", says exactly what it does and does not do.
 
 **A tenant id may not contain `__` nor end with `_`.** Both rules exist for the same reason and neither is redundant: collection isolation is carried by the name (`<tenant>__<name>`), so an id that can reconstruct the separator against a caller-supplied collection name breaks it. An id *ending* in `_` did exactly that — `scoped_name("_b", "a")` and `scoped_name("b", "a_")` both produced `a___b`, giving two tenants one backend collection with read *and* write, and `visible_to` returning true for both. Fixed 2026-08-06 (TASK-0211); with both rules the encoding is injective.
 
 `POST /v1/replay` is scoped for the same reason the read endpoints are, and it is the easier one to overlook: replay re-executes the stored question and returns a diff, so an unscoped lookup discloses another tenant's query and retrieved chunks through a write-shaped endpoint rather than a read-shaped one. It looked its trace up unscoped until 2026-08-06 (TASK-0194).
 - Semantic-cache entries are tenant-scoped — a cache hit can never leak another tenant's answer.
 - Per-tenant token budgets (D9, `cost.per_tenant_token_budget`) are **enforced** (TASK-0242 ✅) over a rolling 24-hour window, per tenant, checked before the provider is called. **The counter is in-process**, exactly like the per-key rate limiter's default `memory` backend: N replicas grant N times the configured budget, and for a spend cap that error permits more than was asked for rather than less. Size the value accordingly, or run one replica, until a shared counter lands — the limiter has one (`security.rate_limit_backend: redis`); the budget does not.
+
+### What retrieval actually enforces (corrected 2026-11-09, TASK-0339)
+
+**Until this entry, this section claimed retrieval was scoped and it was not.** The claim above read "every tenant-visible surface is scoped: queries, …"; `services/querying.py` contained the string `tenant` zero times. Two tenancy models had grown side by side and neither covered the query path:
+
+- **Collection-name scoping** (`services/tenancy.scoped_name`) is applied by `/v1/collections` and `/v1/admin` and **by nothing else**. The ingest path and the query path both address the raw name, so a collection created through the API as `acme__docs` is ingested into and queried as `docs`.
+- **A payload tag.** `workers/indexer.chunk_payload` writes `tenant` into every vector payload when the job carries one, and until TASK-0339 nothing ever filtered on it.
+
+Executed, not inferred. `tests/unit/api/test_query_tenancy.py` drives the real router, the real `AuthMiddleware` and an in-memory adapter holding one chunk per tenant. With `auth` and `multi_tenancy` on, a valid `acme` key presenting `X-Tenant-ID: acme` observed all three of:
+
+| Request | Observed |
+|---|---|
+| `POST /v1/retrieve {"collection": "globex__docs"}` | `200`, `globex`'s chunk and its text |
+| `POST /v1/retrieve` with no collection | `200`, **both** tenants' chunks from the one shared collection |
+| `POST /v1/query` with no collection | `200`, the other tenant's chunk in the answer context **and in `citations`** |
+
+In every case the filter each retrieval leg received was `None`. `/v1/retrieve` took no tenant dependency at all; `/v1/query` took one and spent it only on the semantic-cache key, the cost governor and the trace.
+
+**`security.tenant_scoped_retrieval` (default `false`) is what enforces it now.** With the flag on, `RetrievalService` injects `{"tenant": <caller's tenant>}` into the filter it pushes down, and a retrieval with no tenant is refused with `TENANT_FORBIDDEN`. Four properties, each pinned by a test:
+
+- **Below the caller, not beside it.** The injection happens in `services/querying.py`, after `validate_filter`, at the single point where one filter object is handed to *both* legs — so a caller-supplied `filters` cannot widen it and no future change can scope one leg and forget the other. The module's own rule, that a filter applied to one leg returns an inconsistent candidate set, now carries the tenant too.
+- **A body naming the tenant field is refused, never merged.** `{"tenant": "globex"}`, `{"tenant": {"$in": [...]}}` and `{"tenant": {"$ne": "acme"}}` all return `403 TENANT_FORBIDDEN` before either leg runs. Silently overriding would be equally safe for the result set and would let a caller probe isolation without ever being told it exists.
+- **The caller cannot plant the field either.** `workers/indexer.chunk_payload` merged the job's `metadata` *after* writing the tenant, so an ingest carrying `metadata={"tenant": "globex"}` overwrote the tenant the credential set and dropped its chunks into another tenant's filtered view. The credential now wins: the tenant is written last. A job with no tenant is unchanged, so an untenanted deployment that uses `tenant` as an ordinary metadata label keeps it.
+- **The field has one spelling.** `services/tenancy.TENANT_PAYLOAD_KEY` is now what the indexer writes and what the filter reads; they named the same string independently before, and a writer and a reader that disagree make a filter that silently matches nothing.
+
+With the flag on, the three rows above become: no chunks, the caller's chunk only, and an answer citing the caller's chunk only.
+
+**Why it is off by default, and what to do before turning it on.** The flag changes what an already-ingested corpus answers, so it cannot be a default:
+
+1. **Backfill the tag.** Chunks indexed before `multi_tenancy` was enabled carry no `tenant` payload field at all, and an absent field never matches a filter. Enabling the flag over an unbackfilled collection returns **empty results, not wrong ones** — fail-closed, but silent, which is harder to diagnose than an error. Use the adapters' metadata-only `PointUpdate` path, then enable.
+2. **Index the field in the backend.** Nothing in this repository creates a payload index; `CollectionSpec` has no field for one. Without it, every query pays an unindexed filter on both legs, which on a large collection is the worst case rather than the cheap one. Create it with the backend's own tooling (Qdrant: a tenant-optimised payload index on `tenant`).
+3. **Clear the semantic cache.** The cache is looked up *before* retrieval and its entries are tenant-tagged, so it cannot serve one tenant another's answer — but an entry written **before** the flag was enabled was produced by a cross-tenant retrieval and is tagged with the tenant that asked. Turning the flag on does not re-derive it, so a stale hit can still carry another tenant's content to the tenant it was already leaked to. The embedding cache is keyed on the query text alone and is unaffected: an embedding is derived from the caller's own input and carries no corpus content.
+4. **Expect in-process callers to be refused.** The Python facade and the CLI build retrieval with no credential, so with the flag on they raise `TENANT_FORBIDDEN`. That is the safe direction and it is loud, but it means the flag is API-only until the facade grows a tenant argument. `POST /v1/replay` **is** wired: it now retrieves as the tenant whose trace it is replaying, which also means its spend is charged to that tenant's budget rather than to the untenanted bucket.
+
+The flag requires `security.auth` **and** `security.multi_tenancy`; combining it with either off is refused at configuration load, because the tenant it filters on is resolved by the authentication middleware and without one every retrieval would be refused at runtime instead.
+
+**What is still open.** The flag is the filter half of the choice; it does not make the ingest and query paths use `scoped_name`, so the two tenancy models still coexist and a tenant's chunks still share one physical collection. Which model the project commits to — name scoping everywhere, or one collection with this filter — remains a maintainer decision, and until it is made a deployment that uses `/v1/collections` to create `acme__docs` is still ingesting into `docs`.
 
 ## 4. Vector DB security (Qdrant reference)
 

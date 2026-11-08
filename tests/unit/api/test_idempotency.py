@@ -2,7 +2,9 @@
 
 The cases that matter are the ones a naive implementation gets wrong: a replay with a
 *different* body, a key reused on another endpoint, one tenant reaching another's record,
-and two copies of one request arriving before either has finished.
+and two copies of one request arriving before either has finished. Three later cases cover
+the configuration (TASK-0356) and the backend seam (TASK-0357): a shortened lease, the kill
+switch writing nothing, and a store that is not a directory standing in unchanged.
 """
 
 import asyncio
@@ -24,9 +26,11 @@ from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.idempotency import (
     IN_FLIGHT_LEASE_SECONDS,
+    FileIdempotencyStore,
     IdempotencyStore,
     Reservation,
     StoredResponse,
+    create_idempotency_store,
     request_fingerprint,
 )
 from fasterrag.services.journal import JobRecord, Journal
@@ -318,62 +322,99 @@ async def test_a_concurrent_duplicate_is_refused_rather_than_executed(app: FastA
     assert duplicate.headers["Retry-After"] == "1"
 
 
-def test_the_store_serialises_two_simultaneous_claims(tmp_path: Path) -> None:
+async def test_the_store_serialises_two_simultaneous_claims(tmp_path: Path) -> None:
     """The reservation, without HTTP: the second claim never gets a lease of its own."""
-    store = IdempotencyStore(tmp_path)
+    store = FileIdempotencyStore(tmp_path)
 
-    first = store.begin(KEY, tenant=None, fingerprint=DIGEST)
+    first = await store.begin(KEY, tenant=None, fingerprint=DIGEST)
     with pytest.raises(FasterRagError) as caught:
-        store.begin(KEY, tenant=None, fingerprint=DIGEST)
+        await store.begin(KEY, tenant=None, fingerprint=DIGEST)
 
     assert isinstance(first, Reservation)
     assert caught.value.code is ErrorCode.IDEMPOTENCY_IN_PROGRESS
     assert caught.value.retryable is True
 
 
-def test_a_tenants_key_is_invisible_to_another_tenant(tmp_path: Path) -> None:
-    store = IdempotencyStore(tmp_path)
+async def test_a_tenants_key_is_invisible_to_another_tenant(tmp_path: Path) -> None:
+    store = FileIdempotencyStore(tmp_path)
 
-    store.begin(KEY, tenant="acme", fingerprint=DIGEST)
-    other = store.begin(KEY, tenant="globex", fingerprint=DIGEST)
+    await store.begin(KEY, tenant="acme", fingerprint=DIGEST)
+    other = await store.begin(KEY, tenant="globex", fingerprint=DIGEST)
 
     assert isinstance(other, Reservation)
 
 
-def test_an_abandoned_reservation_frees_its_key_on_the_lease(tmp_path: Path) -> None:
+async def test_an_abandoned_reservation_frees_its_key_on_the_lease(tmp_path: Path) -> None:
     """A worker killed mid-request must not hold a key for the full record lifetime."""
-    store = IdempotencyStore(tmp_path)
-    reservation = store.begin(KEY, tenant=None, fingerprint=DIGEST)
+    store = FileIdempotencyStore(tmp_path)
+    reservation = await store.begin(KEY, tenant=None, fingerprint=DIGEST)
     assert isinstance(reservation, Reservation)
 
     _age(store, reservation, IN_FLIGHT_LEASE_SECONDS + 1)
 
-    assert isinstance(store.begin(KEY, tenant=None, fingerprint=DIGEST), Reservation)
+    assert isinstance(await store.begin(KEY, tenant=None, fingerprint=DIGEST), Reservation)
 
 
-def test_a_completed_record_outlives_the_in_flight_lease(tmp_path: Path) -> None:
+async def test_a_completed_record_outlives_the_in_flight_lease(tmp_path: Path) -> None:
     """A replay has to keep working long after the request that produced it finished."""
-    store = IdempotencyStore(tmp_path)
-    reservation = store.begin(KEY, tenant=None, fingerprint=DIGEST)
+    store = FileIdempotencyStore(tmp_path)
+    reservation = await store.begin(KEY, tenant=None, fingerprint=DIGEST)
     assert isinstance(reservation, Reservation)
-    store.commit(
+    await store.commit(
         reservation,
         StoredResponse(status=201, media_type="application/json", body=b'{"ok":true}'),
     )
 
     _age(store, reservation, IN_FLIGHT_LEASE_SECONDS + 1)
 
-    replayed = store.begin(KEY, tenant=None, fingerprint=DIGEST)
+    replayed = await store.begin(KEY, tenant=None, fingerprint=DIGEST)
     assert not isinstance(replayed, Reservation)
     assert replayed.body == b'{"ok":true}'
 
 
-def _age(store: IdempotencyStore, reservation: Reservation, seconds: float) -> None:
+async def test_a_configured_lifetime_replaces_the_default_lease(tmp_path: Path) -> None:
+    """The lease is configurable (TASK-0356), and a shorter one has to actually be shorter."""
+    settings = Settings.model_validate(
+        {"reliability": {"idempotency": {"in_flight_lease_seconds": 60}}}
+    )
+    store = create_idempotency_store(tmp_path, settings)
+    reservation = await store.begin(KEY, tenant=None, fingerprint=DIGEST)
+    assert isinstance(reservation, Reservation)
+    assert isinstance(store, FileIdempotencyStore)
+
+    _age(store, reservation, 61)
+
+    assert isinstance(await store.begin(KEY, tenant=None, fingerprint=DIGEST), Reservation)
+
+
+async def test_the_kill_switch_passes_a_keyed_request_straight_through(tmp_path: Path) -> None:
+    """``enabled: false`` must not half-apply: no record is written and nothing is refused."""
+    settings = Settings.model_validate({"reliability": {"idempotency": {"enabled": False}}})
+    application = create_app(settings)
+    application.state.vector_db = StubVectorDB()
+    application.state.journal = Journal(tmp_path / "off-journal")
+
+    with TestClient(application) as client:
+        first = client.post("/v1/collections", json={"name": "docs"}, headers=keyed())
+        second = client.post("/v1/collections", json={"name": "docs"}, headers=keyed())
+
+    assert first.status_code == second.status_code
+    assert "Idempotent-Replayed" not in second.headers
+    assert not (tmp_path / "off-journal" / "idempotency").exists()
+
+
+def test_the_default_keeps_the_documented_contract_true() -> None:
+    """A published header contract must not be switched off by a default nobody set."""
+    assert Settings().reliability.idempotency.enabled is True
+
+
+def _age(store: FileIdempotencyStore, reservation: Reservation, seconds: float) -> None:
     """Rewind a record's clock, which is the only way to reach an expiry in a unit test."""
-    record = store.read_record(reservation.path)
+    path = store.path_for(reservation.key, reservation.tenant)
+    record = store.read_record(path)
     assert record is not None
     record["created_at"] = float(record["created_at"]) - seconds
-    store.write_record(reservation.path, record)
+    store.write_record(path, record)
 
 
 def test_an_oversized_keyed_body_is_still_a_413_problem_document(
@@ -425,3 +466,65 @@ def test_an_admin_route_is_covered_too(client: TestClient, monkeypatch: pytest.M
     assert calls == 1
     assert second.json() == first.json()
     assert second.headers["Idempotent-Replayed"] == "true"
+
+
+class MemoryIdempotencyStore(IdempotencyStore):
+    """A backend that is not a directory, so the seam is proven rather than asserted.
+
+    It is deliberately the *whole* interface and nothing else: if the middleware still knew
+    anything about files, paths or threads, this class could not stand in for the one that
+    ships (TASK-0357).
+    """
+
+    def __init__(self) -> None:
+        self.records: dict[tuple[str | None, str], dict[str, Any]] = {}
+
+    async def begin(
+        self, key: str, *, tenant: str | None, fingerprint: str
+    ) -> Reservation | StoredResponse:
+        existing = self.records.get((tenant, key))
+        if existing is None:
+            self.records[(tenant, key)] = {"fingerprint": fingerprint, "response": None}
+            return Reservation(key=key, tenant=tenant, fingerprint=fingerprint, owner="memory")
+
+        if existing["fingerprint"] != fingerprint:
+            raise FasterRagError(
+                "this key was already used for a different request",
+                code=ErrorCode.IDEMPOTENCY_KEY_REUSED,
+                retryable=False,
+            )
+
+        stored = existing["response"]
+        if stored is None:
+            raise FasterRagError(
+                "a request with this key is still in flight",
+                code=ErrorCode.IDEMPOTENCY_IN_PROGRESS,
+            )
+        assert isinstance(stored, StoredResponse)
+        return stored
+
+    async def commit(self, reservation: Reservation, response: StoredResponse) -> None:
+        self.records[(reservation.tenant, reservation.key)]["response"] = response
+
+    async def release(self, reservation: Reservation) -> None:
+        self.records.pop((reservation.tenant, reservation.key), None)
+
+
+def test_a_foreign_backend_drops_in_without_touching_the_middleware(
+    app: FastAPI, tmp_path: Path
+) -> None:
+    """What answers TASK-0357's question: is the store substitutable, or only called one?"""
+    store = MemoryIdempotencyStore()
+    app.state.idempotency = store
+
+    with TestClient(app) as client:
+        first = client.post("/v1/collections", json=body(), headers=keyed())
+        second = client.post("/v1/collections", json=body(), headers=keyed())
+        conflicting = client.post("/v1/collections", json=body("other"), headers=keyed())
+
+    assert second.headers["Idempotent-Replayed"] == "true"
+    assert second.json() == first.json()
+    assert conflicting.status_code == 422
+    assert conflicting.json()["code"] == ErrorCode.IDEMPOTENCY_KEY_REUSED.value
+    assert list(store.records) == [(None, KEY)]
+    assert not (tmp_path / "journal" / "idempotency").exists()

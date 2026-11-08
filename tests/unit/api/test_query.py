@@ -318,7 +318,9 @@ def test_retrieve_returns_every_leg_rank(
     )
     stub_shared(app)
     monkeypatch.setattr(
-        query_router, "build_retrieval", lambda settings, adapter, router: StubRetrieval([chunk])
+        query_router,
+        "build_retrieval",
+        lambda settings, adapter, router, tenant=None: StubRetrieval([chunk]),
     )
 
     body = client.post("/v1/retrieve", json={"query": "q"}).json()
@@ -335,7 +337,9 @@ def test_retrieve_omits_chunk_text_unless_asked(
     chunk = ScoredChunk(chunk_id="c_a", text="secret body", rrf_score=0.5)
     stub_shared(app)
     monkeypatch.setattr(
-        query_router, "build_retrieval", lambda settings, adapter, router: StubRetrieval([chunk])
+        query_router,
+        "build_retrieval",
+        lambda settings, adapter, router, tenant=None: StubRetrieval([chunk]),
     )
 
     without = client.post("/v1/retrieve", json={"query": "q"}).json()
@@ -352,7 +356,7 @@ def test_retrieve_reports_a_degraded_mode(
     monkeypatch.setattr(
         query_router,
         "build_retrieval",
-        lambda settings, adapter, router: StubRetrieval([], HYBRID_ONLY_MODE),
+        lambda settings, adapter, router, tenant=None: StubRetrieval([], HYBRID_ONLY_MODE),
     )
 
     body = client.post("/v1/retrieve", json={"query": "q"}).json()

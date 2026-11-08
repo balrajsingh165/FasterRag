@@ -142,6 +142,10 @@ reliability:
     enabled: true
     failure_threshold: 5
     reset_timeout_ms: 30000
+  idempotency:
+    enabled: true
+    ttl_seconds: 86400
+    in_flight_lease_seconds: 900
   degradation_ladder: true
 
 traces:
@@ -176,6 +180,10 @@ security:
   api_key_env: FASTERRAG_API_KEY
   multi_tenancy: false
   tenant_header: X-Tenant-ID
+  # Push the caller's tenant into both retrieval legs as a mandatory filter. Requires auth
+  # and multi_tenancy. Off by default: chunks indexed before multi_tenancy was enabled
+  # carry no tenant field, and an absent field never matches -- see docs/security.md.
+  tenant_scoped_retrieval: false
   rate_limit_per_minute: 600
   rate_limit_backend: memory
   rate_limit_redis_url: redis://localhost:6379/0

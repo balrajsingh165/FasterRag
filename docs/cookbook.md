@@ -125,6 +125,8 @@ Serving many customers from one deployment.
 
 > ✅ **The security half of this recipe is enforced** (corrected 2026-08-09; the warning that stood here said the opposite and was two slices out of date). `security.auth` shipped with TASK-0046 ✅ and `security.multi_tenancy` with TASK-0179–0181 ✅: authentication, scopes, per-key rate limiting, and tenant isolation run as ASGI middleware, `max_request_mb` is enforced before the body is read (TASK-0199 ✅), and enabling auth without a usable key refuses to start.
 >
+> ⚠️ **Retrieval is not tenant-scoped unless you say so (TASK-0339, 2026-11-09).** `multi_tenancy: true` scopes collections, caches, traces, jobs and metrics — it does **not** scope the query path. Without the `tenant_scoped_retrieval` line below, a valid key for one tenant retrieves another tenant's chunks from the shared collection, and `POST /v1/query` puts them in the answer; this was observed, not inferred ([security.md](security.md) §3). The flag is off by default because it changes what an existing corpus answers — backfill the `tenant` payload field and add a backend payload index on it **before** turning it on.
+>
 > ⚠️ **Two real limits remain.** The per-key rate limiter is an **in-process fixed window**, so N replicas grant N times the configured limit (TASK-0216). And `cost.per_tenant_token_budget` **is** enforced now (TASK-0242 ✅, `services/budget.py`: `BUDGET_EXCEEDED`/402 before the provider is called) — but its counter is in-process, like the rate limiter above, so N replicas grant N times the budget; it is omitted below only because sizing it correctly depends on your replica count.
 
 ```yaml
@@ -132,6 +134,7 @@ security:
   auth: true
   multi_tenancy: true
   tenant_header: X-Tenant-ID
+  tenant_scoped_retrieval: true  # read the warning above before enabling on existing data
   rate_limit_per_minute: 300
   max_request_mb: 10
 cache:
@@ -143,7 +146,7 @@ observability:
   dashboard: false               # shows prompts/responses — never expose to tenants
 ```
 
-**Why:** isolation is enforced at the service layer, so collections, caches, traces, metrics, and ingestion jobs are all tenant-tagged ([security.md](security.md)) — budgets are not, because they do not exist yet. **Trade-off:** the dashboard is operator-only by construction — it renders every tenant's LLM I/O history, so it belongs on an internal network, never in a tenant-facing surface.
+**Why:** isolation is enforced at the service layer, so collections, caches, traces, metrics, and ingestion jobs are all tenant-tagged ([security.md](security.md)), and `tenant_scoped_retrieval` extends that to the one surface it did not cover — retrieval itself. **Trade-off:** the dashboard is operator-only by construction — it renders every tenant's LLM I/O history, so it belongs on an internal network, never in a tenant-facing surface.
 
 ## R6 — Retrieval only (bring your own LLM)
 

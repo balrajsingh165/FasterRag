@@ -619,12 +619,42 @@ class CircuitBreakerSettings(Section):
     reset_timeout_ms: Annotated[int, Field(ge=1000)] = 30000
 
 
+class IdempotencySettings(Section):
+    """``Idempotency-Key`` record lifetime and the switch that turns the feature off."""
+
+    # CRITICAL: `enabled` defaults to **true**, deviating from the default-false rule for
+    # risky features, and the deviation is the decision rather than an oversight. The rule
+    # exists for features that start doing something — provisioning writes to external
+    # systems, the dashboard opens a port. This one starts nothing: a request without the
+    # header touches no store and writes no byte. Defaulting it off would instead make a
+    # published contract false, since `docs/api-reference.md` tells clients the header is
+    # honoured, and a client whose retry silently executed twice has no way to notice. The
+    # flag is a kill switch for a store that is misbehaving, and a kill switch that ships
+    # already pulled is not one. Turning it off is a deliberate, documented downgrade.
+    enabled: bool = True
+    ttl_seconds: Annotated[int, Field(ge=1, le=7 * 24 * 60 * 60)] = 24 * 60 * 60
+    in_flight_lease_seconds: Annotated[int, Field(ge=1)] = 15 * 60
+
+    @model_validator(mode="after")
+    def _check_lease_fits_the_lifetime(self) -> Self:
+        """Require the in-flight lease to be no longer than the record lifetime."""
+        if self.in_flight_lease_seconds > self.ttl_seconds:
+            raise ValueError(
+                f"reliability.idempotency.in_flight_lease_seconds "
+                f"({self.in_flight_lease_seconds}) must be less than or equal to "
+                f"ttl_seconds ({self.ttl_seconds}); an unfinished request would otherwise "
+                "hold its key longer than a completed one can be replayed"
+            )
+        return self
+
+
 class ReliabilitySettings(Section):
-    """Timeouts, retries, circuit breakers, and the degradation ladder."""
+    """Timeouts, retries, circuit breakers, idempotency, and the degradation ladder."""
 
     timeouts: TimeoutSettings = TimeoutSettings()
     retries: RetrySettings = RetrySettings()
     circuit_breaker: CircuitBreakerSettings = CircuitBreakerSettings()
+    idempotency: IdempotencySettings = IdempotencySettings()
     degradation_ladder: bool = True
 
 
@@ -696,6 +726,13 @@ class SecuritySettings(Section):
     api_key_env: str = "FASTERRAG_API_KEY"
     multi_tenancy: bool = False
     tenant_header: str = "X-Tenant-ID"
+
+    # CRITICAL: off by default because turning it on changes what an already-ingested
+    # corpus answers. Chunks written before `multi_tenancy` was enabled carry no `tenant`
+    # payload key at all, and an absent key never matches a filter, so enabling this over
+    # unbackfilled data returns empty results rather than wrong ones. Default-off keeps
+    # every existing deployment on exactly the behaviour it has today (TASK-0339).
+    tenant_scoped_retrieval: bool = False
     rate_limit_per_minute: Annotated[int, Field(ge=1)] = 600
     rate_limit_backend: Literal["memory", "redis"] = "memory"
     rate_limit_redis_url: str = DEFAULT_REDIS_URL
@@ -733,6 +770,17 @@ class SecuritySettings(Section):
         if not _HTTP_HEADER_RE.match(value):
             raise ValueError(f"{value!r} is not a valid HTTP header name")
         return value
+
+    @model_validator(mode="after")
+    def _check_tenant_scoped_retrieval(self) -> Self:
+        """Refuse retrieval scoping without the tenancy that supplies the tenant."""
+        if self.tenant_scoped_retrieval and not (self.auth and self.multi_tenancy):
+            raise ValueError(
+                "security.tenant_scoped_retrieval requires security.auth and "
+                "security.multi_tenancy, because the tenant it filters on is resolved by "
+                "the authentication middleware; without them every retrieval is refused"
+            )
+        return self
 
 
 class Settings(BaseSettings):

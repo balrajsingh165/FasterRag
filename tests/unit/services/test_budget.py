@@ -113,3 +113,24 @@ def test_the_governor_reads_its_budgets_from_configuration() -> None:
 
     assert (governor.per_query, governor.per_tenant) == (7, 9)
     assert governor.enabled is True
+
+
+def test_a_tenant_whose_spend_aged_out_is_forgotten() -> None:
+    """The governor outlives the process's first request, so its map must not only grow.
+
+    A tenant id is chosen by the caller, so a window kept per identity forever is a slow
+    leak keyed on client input (found while closing TASK-0337).
+    """
+    governor = CostGovernor(per_tenant=1000)
+    governor.record(100, tenant="acme", now=0.0)
+
+    assert governor.spent("acme", now=ROLLING_WINDOW_SECONDS + 1) == 0
+    assert governor._spent == {}
+
+
+def test_asking_about_an_unknown_tenant_records_nothing() -> None:
+    """A read must not create the entry it is reading, or every probe would leak one."""
+    governor = CostGovernor(per_tenant=1000)
+
+    assert governor.spent("never-seen") == 0
+    assert governor._spent == {}

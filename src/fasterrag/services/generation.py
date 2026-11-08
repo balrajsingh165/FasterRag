@@ -62,7 +62,7 @@ from fasterrag.core.tracing import SpanRecorder, Trace, config_snapshot, record_
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import current_trace_id, get_logger
-from fasterrag.services.budget import create_governor
+from fasterrag.services.budget import CostGovernor, shared_governor
 from fasterrag.services.estimation import price_generation
 from fasterrag.services.querying import FULL_MODE, RetrievalService
 from fasterrag.services.traces import TraceStore, now
@@ -303,6 +303,7 @@ class GenerationService:
         counter: TokenCounter | None = None,
         context_budget_tokens: int | None = None,
         breaker: CircuitBreaker | None = None,
+        governor: CostGovernor | None = None,
     ) -> None:
         """Build the service."""
         self.settings = settings
@@ -319,11 +320,17 @@ class GenerationService:
             if context_budget_tokens is None
             else context_budget_tokens
         )
+        # CRITICAL: the process-wide governor, not a fresh one (TASK-0337). `api/query.py`
+        # builds this service per request, so a `create_governor` call here rebuilt and
+        # discarded the rolling 24-hour window on every request and made
+        # `cost.per_tenant_token_budget` unreachable through the REST API. It is also the
+        # instance the embedding pool records ingest spend into, which is the only way a
+        # query's check can see what ingestion already spent.
+        self.governor = governor or shared_governor(settings)
         # CRITICAL: built here rather than fetched from `create_breakers`, matching how the
         # embedding pool builds its own. One service instance owns one breaker for the whole
         # of its life, which is what makes consecutive failures countable — a breaker rebuilt
         # per query counts to one forever and can never open.
-        self.governor = create_governor(settings)
         self.breaker = breaker or CircuitBreaker(
             provider="llm",
             failure_threshold=settings.reliability.circuit_breaker.failure_threshold,

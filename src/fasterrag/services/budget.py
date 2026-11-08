@@ -25,6 +25,14 @@ Two budgets, with deliberately different characters:
 # precisely what it configured, and because refusing to start was the previous behaviour and
 # taught operators nothing. Anyone running replicas must size the value accordingly until a
 # shared counter lands. The per-query budget has no such caveat.
+#
+# CRITICAL: "per replica" only holds while every spender inside one replica shares one
+# instance, which is what `shared_governor` is for. Until TASK-0337 the generation service
+# built its own through `create_governor` on every request, so the real multiplier was one
+# window per request and the ceiling could not be reached at all — a cap that cannot be
+# reached is not a weak cap, it is an absent one. `create_governor` therefore stays an
+# explicitly unshared constructor for tests and injection; production paths call
+# `shared_governor`, and the embedding pool and the generation service both do.
 
 A refused request raises ``BUDGET_EXCEEDED``, which the problem table renders as 402 and
 marks **non-retryable**. That last part is load-bearing: the degradation ladder in
@@ -37,7 +45,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Final
 
 from fasterrag.config.schema import Settings
@@ -55,6 +63,10 @@ ROLLING_WINDOW_SECONDS: Final = 86_400.0
 
 _UNLIMITED: Final = 0
 
+# CRITICAL: the one field that is accumulated spend rather than configuration. Keying a
+# shared governor on it would make every instance unique and share nothing.
+_STATE_FIELDS: Final[frozenset[str]] = frozenset({"_spent"})
+
 
 @dataclass
 class CostGovernor:
@@ -70,6 +82,19 @@ class CostGovernor:
         """Return whether any budget is set, so callers can skip the work entirely."""
         return self.per_query > _UNLIMITED or self.per_tenant > _UNLIMITED
 
+    @property
+    def identity(self) -> tuple[object, ...]:
+        """Return every configured field, which is what a shared instance is keyed on.
+
+        Read off the dataclass rather than listed by hand, so a field added here joins the
+        key instead of letting two differently-configured governors quietly become one.
+        """
+        return tuple(
+            getattr(self, declared.name)
+            for declared in fields(self)
+            if declared.name not in _STATE_FIELDS
+        )
+
     def check(self, tokens: int, *, tenant: str | None = None, now: float | None = None) -> None:
         """Refuse a request that would exceed either budget."""
         if self.per_query > _UNLIMITED and tokens > self.per_query:
@@ -84,7 +109,7 @@ class CostGovernor:
             return
 
         moment = time.monotonic() if now is None else now
-        already = self._spent_since(self._bucket(tenant), moment)
+        already = self._spent_since(_key(tenant), moment)
         if already + tokens > self.per_tenant:
             raise FasterRagError(
                 f"{self._describe(tenant)} has spent {already} tokens of the "
@@ -100,23 +125,33 @@ class CostGovernor:
             return
 
         moment = time.monotonic() if now is None else now
-        window = self._bucket(tenant)
-        self._spent_since(window, moment)
-        window.append((moment, tokens))
+        key = _key(tenant)
+        self._spent_since(key, moment)
+        self._spent.setdefault(key, deque()).append((moment, tokens))
 
     def spent(self, tenant: str | None = None, *, now: float | None = None) -> int:
         """Return a tenant's spend inside the current window, for tests and diagnostics."""
         moment = time.monotonic() if now is None else now
-        return self._spent_since(self._bucket(tenant), moment)
+        return self._spent_since(_key(tenant), moment)
 
-    def _bucket(self, tenant: str | None) -> deque[tuple[float, int]]:
-        """Return the recorded spend for one tenant, creating it on first use."""
-        return self._spent.setdefault(tenant or "", deque())
+    def _spent_since(self, key: str, moment: float) -> int:
+        """Drop everything older than the window and return what is left.
 
-    def _spent_since(self, window: deque[tuple[float, int]], moment: float) -> int:
-        """Drop everything older than the window and return what is left."""
+        A tenant whose spend has aged out is **forgotten**, not left holding an empty
+        window: this instance now lives as long as the process (TASK-0337), and a tenant
+        id is chosen by the caller, so a dictionary that only ever grew would be a slow
+        leak keyed on client input.
+        """
+        window = self._spent.get(key)
+        if window is None:
+            return 0
+
         while window and moment - window[0][0] >= self.window_seconds:
             window.popleft()
+
+        if not window:
+            del self._spent[key]
+            return 0
         return sum(tokens for _, tokens in window)
 
     @staticmethod
@@ -125,15 +160,20 @@ class CostGovernor:
         return f"tenant {tenant!r}" if tenant else "this deployment"
 
 
+def _key(tenant: str | None) -> str:
+    """Return the name a tenant's spend is recorded under; unset traffic shares one."""
+    return tenant or ""
+
+
 def create_governor(settings: Settings) -> CostGovernor:
-    """Build the governor from ``cost.*``."""
+    """Build an **unshared** governor from ``cost.*``, for tests and explicit injection."""
     return CostGovernor(
         per_query=settings.cost.per_query_token_budget,
         per_tenant=settings.cost.per_tenant_token_budget,
     )
 
 
-_SHARED: Final[dict[tuple[int, int], CostGovernor]] = {}
+_SHARED: Final[dict[tuple[object, ...], CostGovernor]] = {}
 
 
 def shared_governor(settings: Settings) -> CostGovernor:
@@ -142,11 +182,16 @@ def shared_governor(settings: Settings) -> CostGovernor:
     A rolling per-tenant window is memory, and memory a caller rebuilds per unit of work
     remembers nothing; sharing one instance is what makes spend accumulate at all.
     """
-    key = (settings.cost.per_query_token_budget, settings.cost.per_tenant_token_budget)
-    governor = _SHARED.get(key)
+    # CRITICAL: the candidate is built first and keyed on its own `identity`, so the cache
+    # key can never cover less than the governor's configuration. Keying on a hand-written
+    # subset of `cost.*` was correct only by coincidence, and keying on the whole `cost`
+    # section would split the window over `cost.estimator` — two windows, twice the budget,
+    # in the direction that permits more than was configured.
+    candidate = create_governor(settings)
+    governor = _SHARED.get(candidate.identity)
     if governor is None:
-        governor = create_governor(settings)
-        _SHARED[key] = governor
+        governor = candidate
+        _SHARED[candidate.identity] = governor
     return governor
 
 

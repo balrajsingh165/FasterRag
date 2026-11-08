@@ -20,9 +20,15 @@ from typing import Final
 
 from fasterrag.errors import ErrorCode, FasterRagError
 
-__all__ = ["SEPARATOR", "scoped_name", "unscoped_name", "visible_to"]
+__all__ = ["SEPARATOR", "TENANT_PAYLOAD_KEY", "scoped_name", "unscoped_name", "visible_to"]
 
 SEPARATOR: Final = "__"
+
+# CRITICAL: the one spelling of the payload field that carries a chunk's owning tenant.
+# `workers.indexer` writes it and `services.querying` filters on it; the two named the same
+# string independently until TASK-0339, and a writer and a reader that disagree about a
+# field name make an isolation filter that silently matches nothing.
+TENANT_PAYLOAD_KEY: Final = "tenant"
 
 # CRITICAL: the separator must not be legal inside a tenant id, or `a__b` and `a` owning a
 # collection called `b` become the same string and one tenant can address the other's data.

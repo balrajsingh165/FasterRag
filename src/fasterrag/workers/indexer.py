@@ -28,6 +28,7 @@ from fasterrag.adapters.vectordb.base import (
 from fasterrag.config.schema import Settings
 from fasterrag.core.retrieval.bm25 import encode_document
 from fasterrag.observability.logging import get_logger
+from fasterrag.services.tenancy import TENANT_PAYLOAD_KEY
 from fasterrag.workers.queues import ChunkPayload, EmbeddedBatch
 
 __all__ = ["Indexer", "chunk_payload"]
@@ -55,10 +56,15 @@ def chunk_payload(payload: ChunkPayload, *, model: str, model_version: str) -> d
         stored["page"] = chunk.page
     if chunk.section is not None:
         stored["section"] = chunk.section
-    if payload.tenant is not None:
-        stored["tenant"] = payload.tenant
-
     stored.update(dict(payload.metadata))
+
+    # CRITICAL: written *after* the caller's metadata, not before. The tenant is the field
+    # `security.tenant_scoped_retrieval` filters on, so a job carrying
+    # `metadata={"tenant": ...}` could otherwise relabel its own chunks into another
+    # tenant's filtered view. The credential the job was created with wins (TASK-0339).
+    if payload.tenant is not None:
+        stored[TENANT_PAYLOAD_KEY] = payload.tenant
+
     return stored
 
 

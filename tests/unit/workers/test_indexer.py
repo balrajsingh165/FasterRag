@@ -336,3 +336,22 @@ def test_absent_structure_is_omitted_rather_than_stored_as_null(field: str) -> N
     )
 
     assert field not in chunk_payload(bare, model="m", model_version="v")
+
+
+def test_the_jobs_tenant_outranks_a_tenant_in_caller_metadata() -> None:
+    """A job may not relabel its own chunks into another tenant's filtered view."""
+    stored = chunk_payload(
+        payload(metadata={"tenant": "globex", "department": "legal"}, tenant="acme"),
+        model="m",
+        model_version="v",
+    )
+
+    assert stored["tenant"] == "acme"
+    assert stored["department"] == "legal"
+
+
+def test_caller_metadata_still_sets_the_tenant_when_the_job_has_none() -> None:
+    """An untenanted deployment keeps today's behaviour exactly."""
+    stored = chunk_payload(payload(metadata={"tenant": "labelled"}), model="m", model_version="v")
+
+    assert stored["tenant"] == "labelled"

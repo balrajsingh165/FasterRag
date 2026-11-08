@@ -129,6 +129,21 @@ def test_replay_reaches_the_owner_s_own_trace(
     assert response.status_code != 404
 
 
+def test_replay_retrieves_as_the_trace_s_own_tenant(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Replay must carry the tenant, or tenant-scoped retrieval refuses it (TASK-0339)."""
+    client = tenanted(
+        monkeypatch,
+        tmp_path,
+        security={"auth": True, "multi_tenancy": True, "tenant_scoped_retrieval": True},
+    )
+
+    response = client.post("/v1/replay", json={"trace_id": TRACE_ID}, headers=owner())
+
+    assert response.status_code != 403
+
+
 def test_replay_reports_an_unknown_trace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     client = tenanted(monkeypatch, tmp_path)
 

@@ -130,9 +130,10 @@ async def run_retrieve(
     settings: CurrentSettings,
     adapter: CurrentVectorDB,
     embeddings: CurrentEmbeddings,
+    tenant: CurrentTenant,
 ) -> dict[str, Any]:
     """Return the retrieved chunks without generating an answer."""
-    retrieval = build_retrieval(settings, adapter, embeddings)
+    retrieval = build_retrieval(settings, adapter, embeddings, tenant)
     result = await retrieval.search(
         body.query,
         collection=body.collection,

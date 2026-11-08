@@ -1,12 +1,14 @@
 """Test-suite-wide configuration.
 
-Two concerns: Hypothesis's per-example deadline, and the provenance header that says which
-tree a run's counts describe.
+Three concerns: Hypothesis's per-example deadline, the provenance header that says which
+tree a run's counts describe, and the process-wide cost governors, which are reset around
+every test so a rolling spend window cannot leak between them.
 """
 
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
 
@@ -14,6 +16,7 @@ import pytest
 from hypothesis import HealthCheck, settings
 
 import fasterrag
+from fasterrag.services.budget import reset_shared_governors
 
 REPO_ROOT: Final = Path(__file__).resolve().parent.parent
 
@@ -105,3 +108,17 @@ def pytest_report_header() -> list[str]:
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
     """Repeat the provenance beside the counts, where ``-q`` cannot hide it."""
     terminalreporter.write_line(provenance_summary())
+
+
+# CRITICAL: `services.budget.shared_governor` is a process-wide cache, and a rolling spend
+# window that outlives the test which filled it is cross-test state leakage — the exact
+# class of defect TASK-0322 spent a session ruling out of this suite. Resetting it around
+# every test, autouse, is what keeps the singleton an implementation detail: before, so a
+# test never inherits another's spend, and after, so a test that deliberately exhausts a
+# budget cannot hand a refusal to whatever runs next.
+@pytest.fixture(autouse=True)
+def _unspent_governors() -> Iterator[None]:
+    """Give every test an empty shared-governor cache, and leave one behind it."""
+    reset_shared_governors()
+    yield
+    reset_shared_governors()
