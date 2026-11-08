@@ -23,7 +23,7 @@ If you want library-style composition back, you still have it: `fasterrag.parsin
 | `DocumentLoader` / `Reader` | Ingestion sources (`path`, `url`, `inline`) + the parsing stage | Parser selection is automatic by MIME type; OCR and layout extraction are built in |
 | `TextSplitter` / `NodeParser` | `chunking.strategy` (`fixed`, `recursive`, `semantic`, `layout`, `late`) | Behavior is property-tested: offsets in-bounds, overlap respected, no empty chunks |
 | `Embeddings` class | `embeddings.provider` + `model` | Plus tiered routing by document class, which most frameworks leave to you |
-| `VectorStore` | `vector_db.provider` via `VectorDBAdapter` | Every implementation passes one shared contract suite |
+| `VectorStore` | `vector_db.provider` via `VectorDBAdapter` | One shared contract suite, passed against a running store by Qdrant, pgvector and Chroma; written and skipped for Milvus and Weaviate |
 | `Retriever` | `retrieval.*` (hybrid legs, RRF, filters) | Hybrid + RRF(k=60) is the default, not an add-on |
 | `EnsembleRetriever` / manual fusion | `retrieval.hybrid` + `rrf_k` | Rank-based fusion; no score normalization to tune |
 | Reranker wrapper | `retrieval.rerank` + `reranker_model` | Same cross-encoder idea, config-gated with a degradation path |
@@ -68,7 +68,7 @@ Stated plainly, because a migration guide that only lists wins is marketing:
 - **Arbitrary in-code pipeline surgery.** If your value comes from a bespoke chain (custom routing between multiple indexes, agentic multi-hop retrieval, tool-calling mid-retrieval), fasterRag's fixed pipeline will feel restrictive. Use it as the retrieval engine (R6) and keep your orchestration above it.
 - **Agent frameworks.** fasterRag answers queries over corpora; it is not an agent framework, and that is an explicit non-goal ([scope.md](scope.md)).
 - **Multi-modal retrieval.** Text only in beta; images/audio are future scope.
-- **The ecosystem's long tail.** Mature frameworks ship hundreds of integrations. We ship **three** vector DBs today — Qdrant, pgvector, and Chroma, with Milvus, Weaviate, and Pinecone specified but unbuilt (TASK-0049) — four embedding providers, and any OpenAI-compatible LLM endpoint, plus an entry-point plugin contract so the tail is addable without forking ([python-api.md](python-api.md)). If your exotic connector matters more than reliability guarantees, stay where you are.
+- **The ecosystem's long tail.** Mature frameworks ship hundreds of integrations. We ship **five** vector DB adapters today — Qdrant, pgvector, and Chroma proven against a running store, Milvus and Weaviate shipped but never run against a server ([integrations.md](integrations.md)), with Pinecone specified but unbuilt (TASK-0049) — four embedding providers, and any OpenAI-compatible LLM endpoint, plus an entry-point plugin contract so the tail is addable without forking ([python-api.md](python-api.md)). If your exotic connector matters more than reliability guarantees, stay where you are.
 - **Maturity.** fasterRag is pre-beta and has no measured production track record yet. The [benchmark ledger](benchmarks.md) holds **three entries, all explicitly non-citable** (taken on a loaded developer laptop), so there is no citable performance figure for fasterRag anywhere — [performance.md](performance.md) is goals and method only, and every SLO target in [slo.md](slo.md) is still `TBD-until-measured`. Where a doc quotes a wall-clock number it is a dated one-off observation, labelled as such, never a benchmark.
 
 ## Coming from a hand-rolled stack

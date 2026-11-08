@@ -23,7 +23,7 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 
 ## D2 — Zero-Downtime Reindexing
 
-- **What it is.** Re-embedding a huge corpus never takes queries down: build the new collection in parallel (blue/green), validate it against the eval set, then atomically switch via a collection alias. The old collection is retained for instant rollback for `index.reindex.rollback_retention_hours`.
+- **What it is.** Re-embedding a huge corpus never takes queries down: build the new collection in parallel (blue/green), validate it against the eval set, then atomically switch via a collection alias. The old collection is retained for `index.reindex.rollback_retention_hours`, so rolling back is one alias flip and no rebuild — the flip's own latency is this differentiator's proof metric and is unmeasured.
 - **Pain point it kills.** #4 stale indexes, #20 embedding drift, #13 very large datasets (reindex at scale).
 - **Why it is unique.** The common path elsewhere is "drop and re-ingest" with hours of downtime, or hand-rolled alias juggling. Here blue/green + eval gate + one-command rollback is the built-in default.
 - **Config keys.** `index.reindex.strategy` (`blue_green`|`in_place`, default `blue_green`), `index.reindex.eval_gate` (default `true`), `index.reindex.rollback_retention_hours` (default `72`).

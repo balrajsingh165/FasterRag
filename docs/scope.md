@@ -36,7 +36,7 @@ Speed and efficiency are *targeted* through three pillars — none of them yet m
 - Parsing pipeline for PDF (incl. tables and scanned/OCR), HTML, Markdown, DOCX, TXT, CSV/JSON.
 - Configurable chunking: fixed, recursive/hierarchical, semantic, layout/structure-aware, late chunking, contextual-retrieval-style enrichment.
 - Parallel workers: CPU pool (load/parse/chunk) → queue → stateful GPU/embedding pool (batch embed) → indexer.
-- Vector DB adapters: Qdrant (reference), pgvector, and Chroma are **built and pass the shared contract suite**; Milvus, Weaviate, and Pinecone are in scope for beta but **not yet built** (TASK-0049) and are refused by name at config load.
+- Vector DB adapters: Qdrant (reference), pgvector, and Chroma are **built and pass the shared contract suite** against a running store; Milvus and Weaviate are **built and registered** but their contract subclasses skip for want of a server ([integrations.md](integrations.md)); Pinecone is in scope for beta but **not yet built** (TASK-0049) and is refused by name at config load.
 - Embedding providers: OpenAI, Cohere, HuggingFace/sentence-transformers, Ollama/local; tiered embedding.
 - LLM providers: any, via config (OpenAI, Anthropic, Cohere, Ollama/local, OpenAI-compatible endpoints).
 - Hybrid retrieval (dense + BM25), RRF fusion (k=60), cross-encoder reranking, metadata filtering.

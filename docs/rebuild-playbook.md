@@ -12,7 +12,7 @@ Reproduce the *process*, not just the artifact — the process is why the artifa
 
 1. **Rules first**: CLAUDE.md (comment policy, single-line Conventional Commits, one task file, provable-claims), the ledger (`docs/todo.md`), and the enforcement scripts (`scripts/check_commit_message.py`, later `check_doc_truth.py`, `check_blockers.py`, `check_openapi_drift.py`). A rule without a gate decays; every rule here got a gate.
 2. **Contract docs before implementation** (Gate B): config-reference, api-reference, data-model, prompts, differentiators, reliability, failure-modes. The build then satisfies a reviewed spec instead of improvising one — several defects below were caught precisely because a doc predicted different behavior.
-3. **Build in slices** (Gate C), each landing with its tests and doc updates in the same commit series, trunk-based, every commit green.
+3. **Build in slices** (Gate C), each landing with its tests and doc updates in the same commit series, every commit green on its branch before it is made (branch-and-PR since 2026-10-28; see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## 2. Build order (S1–S14) with the load-bearing dependencies
 

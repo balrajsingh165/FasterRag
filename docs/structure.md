@@ -51,30 +51,31 @@ fasterRag/
 │       │   ├── main.py           # App factory, lifespan, correlation middleware
 │       │   ├── problems.py       # RFC 9457 problem documents + exception handlers
 │       │   ├── health.py         # /healthz, /readyz (registry of dependency checks)
-│       │   ├── ingest.py         # POST /v1/ingest, job status (pending)
-│       │   ├── query.py          # POST /v1/query (+ SSE streaming) (pending)
-│       │   ├── collections.py    # Collections CRUD (pending)
-│       │   └── admin.py          # Provisioning + admin endpoints (pending)
+│       │   ├── ingest.py         # POST /v1/ingest, job status
+│       │   ├── query.py          # POST /v1/query (+ SSE streaming)
+│       │   ├── collections.py    # Collections CRUD
+│       │   └── admin.py          # Provisioning + admin endpoints
 │       ├── services/             # Business logic / use cases (orchestration)
 │       │   ├── provisioning.py   # Config-driven auto-provisioning (Qdrant/Langfuse/Grafana)
 │       │   ├── doctor.py         # D10 preflight checks; gates provisioning
 │       │   ├── journal.py        # D3 checkpoints, content-hash dedup, dead-letter queue
 │       │   ├── estimation.py     # D9 preflight token counts and projected cost
 │       │   ├── ingestion.py      # Job lifecycle: run both pools, checkpoint, settle
-│       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate (pending)
+│       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate
 │       │   └── collections.py    # Collection lifecycle (pending)
 │       ├── core/                 # RAG pipeline (pure domain logic)
 │       │   ├── identity.py       # Deterministic document, chunk, and config hashes
 │       │   ├── parsing/          # PDF/HTML/MD/DOCX/OCR parsers, table extraction
 │       │   ├── chunking/         # fixed, recursive, semantic, layout, late, contextual
-│       │   ├── retrieval/        # bm25.py sparse encoding; fusion and filters (pending)
+│       │   ├── retrieval/        # bm25.py sparse encoding; fusion and filters
+│       │   ├── cache/            # Embedding cache, semantic response cache
 │       │   ├── rerank/           # cross-encoder reranking
 │       │   ├── context.py        # Context assembly, token budgeting, citations
 │       │   └── generation.py     # Prompt building + streaming generation
 │       ├── adapters/             # Vendor isolation (nothing vendor-specific escapes)
 │       │   ├── vectordb/         # base.py (VectorDBAdapter), factory.py,
 │       │   │                     # qdrant.py, milvus.py, weaviate.py,
-│       │   │                     # pinecone.py, pgvector.py, chroma.py
+│       │   │                     # pgvector.py, chroma.py (pinecone.py pending)
 │       │   ├── embeddings/       # base, factory, huggingface, openai, cohere, ollama,
 │       │   │                     # tiering (metadata-routed model selection), sync bridge
 │       │   └── llm/              # base, factory, provider clients (streaming)
@@ -86,12 +87,11 @@ fasterRag/
 │       ├── config/               # Loaders + schema
 │       │   ├── schema.py         # Pydantic v2 models mirroring config-reference.md
 │       │   └── loader.py         # pydantic-settings YAML source + .env; fail-fast
-│       ├── cache/                # Embedding cache, semantic response cache
 │       ├── observability/        # Metrics, tracing, dashboard
 │       │   ├── logging.py        # Structured JSON logging + correlation ids
-│       │   ├── otel.py           # Span helpers (retrieval/reranker/context/generation)
+│       │   ├── otel_export.py    # Span helpers (retrieval/reranker/context/generation)
 │       │   ├── metrics.py        # Metrics catalogue export
-│       │   └── dashboard/        # Read-only inspection UI (observability ONLY)
+│       │   └── dashboard.py      # Read-only inspection UI (observability ONLY)
 │       └── cli/                  # Terminal entry points
 │           └── main.py           # fasterrag ingest|query|index|provision|status|benchmark|serve|worker
 └── tests/
@@ -112,7 +112,7 @@ fasterRag/
 | `adapters/` | All vendor code (vector DBs, embedding providers, LLM providers). Each adapter implements a base interface; a factory instantiates the concrete one from config. Vendor types never leak past this boundary. |
 | `workers/` | Parallel execution: CPU pool for parse/chunk, stateful embedding pool, bounded queues, batch indexer. Owns backpressure and retry policy. |
 | `config/` | Pydantic schema + pydantic-settings loader (YAML config, `.env` secrets). Validates on startup and fails fast with a clear error. Sensitive area — see [CLAUDE.md](../CLAUDE.md) folder boundaries. |
-| `cache/` | Embedding cache and semantic response cache (similarity-keyed), TTL + event-driven invalidation. |
+| `core/cache/` | Embedding cache and semantic response cache (similarity-keyed), TTL + event-driven invalidation. |
 | `observability/` | OTel spans, metrics export, and the read-only dashboard. The dashboard renders data; it exposes zero control endpoints. |
 | `cli/` | Terminal control plane. Thin command layer calling the same services as the API. |
 | `docs/adr/` | MADR decision records, sequentially numbered, never deleted (superseded ADRs get a "Superseded by ADR-XXXX" status). |

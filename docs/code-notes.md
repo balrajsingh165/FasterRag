@@ -1497,13 +1497,21 @@ Walking these wastes a full parse pass on files no corpus contains. Ingesting a 
 
 Args:
         path: Path to ``config.yaml``.
-        env_file: Optional ``.env`` file loaded into the environment before the
-            presence check. Existing environment variables always win; ``None`` skips
-            the file and checks the process environment as-is.
+        env_file: The ``.env`` file read when ``export_env`` is on. Existing environment
+            variables always win over it; ``None`` means there is no file to read.
         require_env: Whether a referenced-but-absent environment variable is an error.
         overrides: ``dotted.key=value`` strings applied over the file's contents before
             validation, so an override is held to exactly the same schema, range, and
             cross-field rules a file value is.
+        export_env: Whether to copy ``env_file`` into the real ``os.environ``. Defaults
+            to ``False``: loading configuration is a read, and until TASK-0341 it was not
+            — the copy was permanent, process-wide and never undone, which is how a
+            ``.env`` key reached the billed live-provider probes during a plain
+            ``pytest``. The copy is still needed by anything that goes on to build
+            adapters, because credentials are resolved through ``os.environ``, so the
+            CLI, the API, the facade, the replay command and the doctor all pass
+            ``True``. A call that does not export is checked against the process
+            environment alone, so it can never pass a check a later lookup would fail.
 
     Returns:
         The validated, immutable settings.
@@ -1511,7 +1519,8 @@ Args:
     Raises:
         ConfigError: If the file is missing or unreadable, the YAML is malformed, any
             key violates the schema or a cross-field rule, an override is malformed or
-            names an unknown key, or a referenced environment variable is absent or blank.
+            names an unknown key, the dotenv file cannot be read, or a referenced
+            environment variable is absent or blank.
 
 ### `env_overrides`
 

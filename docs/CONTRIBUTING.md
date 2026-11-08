@@ -28,7 +28,7 @@ Optional extras, needed only for what they name: `.[huggingface]` and `.[rerank]
 - **No trailers of any kind.** Absolutely no AI attribution: no `Co-Authored-By: Claude`, no `Generated with Claude Code`, no AI signatures.
 - Write imperative descriptions: `feat(cache): invalidate semantic entries on corpus change`.
 - Enforced by `scripts/check_commit_message.py`, which runs as a `commit-msg` hook locally and over the pull-request range in CI.
-- **Trunk-based development: all work lands on `main`.** No feature branches (maintainer instruction, 2026-07-30). Because there is no branch to hide behind, every commit must leave `main` green: lint, types, and tests pass before you commit.
+- **A PR per reviewable change, small fixes direct to `main`** (maintainer instruction, 2026-10-28, superseding the trunk-only rule of 2026-07-30). Anything a reviewer would want to see as a unit goes through a branch and a PR, which is also what TASK-0098's branch protection will require. Because there is no branch to hide behind, every commit must leave `main` green: lint, types, and tests pass before you commit.
 - Commit frequently — small, coherent, revertable commits; the repo must always be revertible via `git revert`.
 
 ## 2. Comment rules (code)

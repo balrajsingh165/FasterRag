@@ -62,6 +62,14 @@ jobs:
       - name: Denials still cite open work
         run: python scripts/check_claims.py
 
+      # The gate above asks the ledger; this one asks the tree, because an umbrella id keeps
+      # every denial citing it green. TASK-0049 covers six adapters and stayed correctly open
+      # while Chroma, Milvus and Weaviate shipped under it, so five documents called built
+      # adapters unbuilt on three separate days and every check passed. A factory registry and
+      # a filesystem decide existence without reading a task id at all.
+      - name: Denials match the tree, not just the ledger
+        run: python scripts/check_unbuilt_claims.py
+
       # The sibling gates above all scan docs/ and none opens a .py file, so a docstring or
       # a `# TODO:` marker could cite a ticked, superseded or invented task and stay green —
       # which is how three rate-limit modules kept pointing at finished work. CI only: the

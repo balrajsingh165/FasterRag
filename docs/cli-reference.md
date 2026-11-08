@@ -89,8 +89,8 @@ Run a query (same path as `POST /v1/query`).
 | `list` | Collections with vector counts, embedding model+version, drift status. |
 | `create NAME` | Create a collection (`--distance`, `--shards`, `--replicas`). |
 | `delete NAME` | Drop a collection (`--force` required if alias target). |
-| `reembed NAME` | D2 zero-downtime re-embed: blue/green build → eval gate → alias swap (`--no-eval-gate` for dev). `--recursive` expands directory sources; `--watch` follows the green build the same way `ingest --watch` does, printing the build's job id and a `progress` line per tally change before the gate and the swap are reported. |
-| `rollback NAME` | Alias flip back to the retained previous collection (within `index.reindex.rollback_retention_hours`). |
+| `reembed NAME <sources...>` | D2 zero-downtime re-embed: blue/green build → eval gate → alias swap (`--no-eval-gate` for dev, `--dataset PATH` to gate on a specific eval dataset). `--recursive` expands directory sources; `--watch` follows the green build the same way `ingest --watch` does, printing the build's job id and a `progress` line per tally change before the gate and the swap are reported. |
+| `rollback NAME` | Alias flip back to the retained previous collection (within `index.reindex.rollback_retention_hours`); `--to NAME` restores a specific retained build rather than the most recent. |
 | `lock verify [NAME]` | D1: verify `index.lock` against current config/corpus; report any drift (model version, config hash, content hashes). Exit 1 on drift. |
 
 ## `fasterrag provision <tool>`
@@ -205,7 +205,9 @@ Run the benchmark suite from [performance.md](performance.md) and print/append l
 | Flag | Description |
 |---|---|
 | `--suite ingest\|query\|eval\|all` | Which suite (default `all`). |
-| `--dataset NAME` | Named dataset fixture. |
+| `--dataset NAME` | Dataset name recorded in the ledger entry. |
+| `--query TEXT` | The question the `query` suite asks. Required for that suite; it has no default, because a benchmark that invents its own query measures nothing a reader can reproduce. |
+| `--iterations N` | Calls per repetition (default `20`). |
 | `--ledger` | Emit a ready-to-commit benchmark ledger entry (includes hardware fingerprint + commit hash). |
 | `--sources PATH [...]` | Corpus the `ingest` suite measures against. Directories are expanded to the files inside them; an expansion that finds nothing is refused rather than measured, because a ledger entry for a corpus of zero documents is a published number backed by nothing. |
 
@@ -273,12 +275,13 @@ $ fasterrag config show --changed
 
 ## `fasterrag autopilot run`
 
-D6 eval-driven auto-tuning (requires `autopilot.enabled: true`). Generates a golden Q&A set from the corpus, searches the query-time parameters it can score without a rebuild — hybrid weights, `rrf_k` and rerank settings (`top_k` is deliberately excluded: measuring recall@k retrieves exactly k, so a top_k candidate cannot change the score; chunk size and overlap need the separate, priced index-time sweep and have no CLI surface yet, TASK-0145), and writes a **suggested config diff with measured deltas** (e.g. recall@10 before/after) to stdout and `autopilot-suggestion.yaml`. **Never applies changes** — a human reviews and applies the diff.
+D6 eval-driven auto-tuning (requires `autopilot.enabled: true`). Scores against the golden set `--dataset` names — it generates nothing and refuses to run without one — searches the query-time parameters it can score without a rebuild — hybrid weights, `rrf_k` and rerank settings (`top_k` is deliberately excluded: measuring recall@k retrieves exactly k, so a top_k candidate cannot change the score; chunk size and overlap need the separate, priced index-time sweep and have no CLI surface yet, TASK-0145), and writes a **suggested config diff with measured deltas** (e.g. recall@10 before/after) to stdout and `autopilot-suggestion.yaml`. **Never applies changes** — a human reviews and applies the diff.
 
 | Flag | Description |
 |---|---|
 | `--budget-minutes N` | Search time budget. |
-| `--golden-set PATH` | Reuse an existing golden set instead of generating one. |
+| `--dataset PATH` | **Required.** Directory holding the golden set to score against. The command does not generate one — run `autopilot generate-golden-set` first, or point at `tests/eval/datasets/handbook`. |
+| `--out PATH` | Where the suggestion is written (default `autopilot-suggestion.yaml`). It is never applied; a human does that. |
 
 ## `fasterrag autopilot generate-golden-set <sources...>`
 
