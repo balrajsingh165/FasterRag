@@ -10,6 +10,7 @@ from check_error_taxonomy import (
     SWALLOW_DOCUMENTED,
     SWALLOW_FALLBACK,
     UNJUSTIFIED_IGNORE,
+    UNREADABLE,
     UNTYPED_RAISE,
     VACUOUS,
     Finding,
@@ -17,14 +18,31 @@ from check_error_taxonomy import (
     over_ratchet,
 )
 
+CLEAN_SCRIPT = '"""A gate script with nothing wrong in it."""\n'
 
-def build(root: Path, **modules: str) -> Path:
-    """Write a fake package, mapping a dotted-free relative path to its source."""
+
+def package_only(root: Path, **modules: str) -> Path:
+    """Write the package without a ``scripts/`` root, for the per-root vacuity guard."""
     for relative, source in modules.items():
         path = root / "src" / "fasterrag" / relative.replace("__", "/")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source, encoding="utf-8")
     return root
+
+
+def with_scripts(root: Path, **modules: str) -> Path:
+    """Write modules into the ``scripts/`` root the handler scan also reads."""
+    directory = root / "scripts"
+    directory.mkdir(parents=True, exist_ok=True)
+    for relative, source in modules.items():
+        (directory / relative).write_text(source, encoding="utf-8")
+    return root
+
+
+def build(root: Path, **modules: str) -> Path:
+    """Write a fake package, plus the clean ``scripts/`` root every scan root guard needs."""
+    package_only(root, **modules)
+    return with_scripts(root, **{"gate.py": CLEAN_SCRIPT})
 
 
 def rules(findings: list[Finding], rule: str) -> list[Finding]:
@@ -614,12 +632,71 @@ def test_every_ratchet_entry_still_describes_the_real_tree() -> None:
     assert {key: counted.get(key, 0) for key in RATCHET} == RATCHET
 
 
-def test_the_real_tree_carries_no_error_severity_finding_at_all() -> None:
-    """The assertion an empty ratchet needs: emptiness must mean fixed, not unmeasured."""
+def test_the_real_tree_carries_no_error_severity_finding_beyond_the_ratchet() -> None:
+    """Every error finding must be one the ratchet names and measured; nothing else passes."""
     findings = check(REPOSITORY_ROOT)
+    errors = [finding for finding in findings if finding.rule in ERROR_RULES]
 
-    assert [finding for finding in findings if finding.rule in ERROR_RULES] == []
+    assert {finding.key for finding in errors} <= set(RATCHET)
     assert over_ratchet(findings) == []
+
+
+def test_the_real_tree_holds_no_unreadable_file() -> None:
+    """The scan roots must be readable; a file nothing can parse is not a clean file."""
+    assert rules(check(REPOSITORY_ROOT), UNREADABLE) == []
+
+
+def test_the_scripts_root_is_scanned_for_handlers_not_only_for_ignores(tmp_path: Path) -> None:
+    """TASK-0338: four of five rules used to stop at the package boundary."""
+    root = with_scripts(
+        build(tmp_path, **{"a.py": HANDLER}),
+        **{
+            "swallower.py": """
+def read() -> None:
+    \"\"\"Read something.\"\"\"
+    try:
+        step()
+    except OSError:
+        pass
+"""
+        },
+    )
+
+    found = rules(check(root), SWALLOW)
+
+    assert len(found) == 1
+    assert found[0].path == "scripts/swallower.py"
+
+
+def test_a_scan_root_that_matches_nothing_fails(tmp_path: Path) -> None:
+    """A root that quietly stops matching shrinks the scan without failing it."""
+    root = package_only(tmp_path, **{"a.py": HANDLER})
+
+    findings = check(root)
+
+    assert len(findings) == 1
+    assert findings[0].rule == VACUOUS
+    assert findings[0].path == "scripts"
+
+
+def test_a_file_ast_cannot_parse_is_a_finding_rather_than_a_silent_skip(tmp_path: Path) -> None:
+    """TASK-0342: a gate that reports a file clean because it could not open it is worse."""
+    root = with_scripts(build(tmp_path, **{"a.py": HANDLER}), **{"broken.py": "def oops(\n"})
+
+    findings = check(root)
+    found = rules(findings, UNREADABLE)
+
+    assert [finding.path for finding in found] == ["scripts/broken.py"]
+    assert over_ratchet(findings) == found
+
+
+def test_an_unreadable_file_is_reported_once_not_once_per_scan(tmp_path: Path) -> None:
+    """The ignore scan reads the same roots; one broken file must not read as two."""
+    root = build(tmp_path, **{"a.py": HANDLER, "broken.py": "def oops(\n"})
+
+    found = rules(check(root), UNREADABLE)
+
+    assert [finding.path for finding in found] == ["src/fasterrag/broken.py"]
 
 
 def test_the_real_tree_is_scanned_rather_than_skipped() -> None:

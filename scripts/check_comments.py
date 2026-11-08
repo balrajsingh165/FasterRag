@@ -26,6 +26,11 @@ The rules:
 * ``prose-comment`` (error) — a comment that is not a marker, not a continuation of one, and
   not a tool directive. Reported once per contiguous block, since a four-line explanation is
   one defect rather than four.
+* ``unreadable`` (error) — a file whose tokenizing broke off. The comments past that point
+  were never read, so the file was reported clean because it could not be opened: a vacuous
+  pass of exactly the kind the guard below exists to prevent, one file at a time instead of
+  the whole tree (TASK-0342). A finding rather than a log line, because this gate runs in
+  CI where nothing reads a log and only the exit code is read.
 * ``vacuous-scan`` (error) — the scan matched no files, tokenized no comments at all, or
   recognised no markers anywhere. Any of the three means the gate proved nothing, and a gate
   that cannot tell "clean" from "broken" is worse than no gate (rebuild-playbook trap T12).
@@ -66,6 +71,7 @@ REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 SCANNED_TREES: Final[tuple[str, ...]] = ("src", "scripts")
 
 PROSE_COMMENT: Final = "prose-comment"
+UNREADABLE: Final = "unreadable"
 VACUOUS: Final = "vacuous-scan"
 
 # CRITICAL: these three keywords are the entire permission CLAUDE.md grants, and a marker may
@@ -139,8 +145,12 @@ def _sources(root: Path, *parts: str) -> list[Path]:
     return sorted(path for path in base.rglob("*.py") if "__pycache__" not in path.parts)
 
 
-def _comments(source: str) -> list[Comment]:
-    """Return the real comment tokens, so a ``#`` inside a string literal never matches."""
+def _comments(source: str) -> tuple[list[Comment], str | None]:
+    """Return the real comment tokens, and why tokenizing stopped if it did.
+
+    A ``#`` inside a string literal never matches, and a partial read is reported as one
+    rather than passed off as a file with nothing left in it (TASK-0342).
+    """
     found: list[Comment] = []
     try:
         for token in tokenize.generate_tokens(io.StringIO(source).readline):
@@ -152,9 +162,9 @@ def _comments(source: str) -> list[Comment]:
                         standalone=token.line.strip().startswith("#"),
                     )
                 )
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        return found
-    return found
+    except (tokenize.TokenError, IndentationError, SyntaxError) as error:
+        return found, type(error).__name__
+    return found, None
 
 
 def _interpreter_line(comment: Comment) -> bool:
@@ -201,11 +211,21 @@ def _blocks(comments: list[Comment]) -> list[list[Comment]]:
 
 def _scan_file(relative: str, source: str, tally: Tally) -> list[Finding]:
     """Return one finding per disallowed block in a file, updating the scan's tally."""
-    comments = _comments(source)
+    comments, unreadable = _comments(source)
     tally.comments += len(comments)
     tally.markers += sum(1 for comment in comments if _MARKER.match(comment.text))
 
     findings: list[Finding] = []
+    if unreadable is not None:
+        findings.append(
+            Finding(
+                UNREADABLE,
+                relative,
+                0,
+                f"tokenizing stopped at a {unreadable}, so every comment past that point "
+                "went unread and this file is clean only as far as the gate could see",
+            )
+        )
     for block in _blocks(comments):
         span = "1 line" if len(block) == 1 else f"{len(block)} lines"
         findings.append(

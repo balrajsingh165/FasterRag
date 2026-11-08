@@ -52,6 +52,13 @@ and separates what it is certain about from what a human must judge:
   untyped error crossing a boundary ``docs/reliability.md`` says only typed errors cross.
 * ``unjustified-ignore`` (error) — ``# type: ignore`` with no ``# CRITICAL:`` on the same
   line or in the comment block directly above it.
+* ``unreadable`` (error) — a file under a scan root that ``ast`` cannot parse or
+  ``tokenize`` cannot read. Every rule above is then silently unenforced on it, and a gate
+  that reports a file clean because it could not open it is the vacuous pass this file
+  exists to prevent. It is a finding rather than a log because these gates run in CI,
+  where a log line is invisible and only an exit code is read. Measured 2026-11-09: 0 of
+  the 394 files under ``src/``, ``tests/`` and ``scripts/`` fail either, so it blocks from
+  a clean base.
 
 What it CANNOT do, said plainly because a gate that oversells its coverage is the same
 defect in miniature:
@@ -67,14 +74,26 @@ defect in miniature:
 * ``swallow-fallback`` reads the returned expression lexically. ``return _recover(exc)`` is
   exempt because it mentions the exception, whether or not ``_recover`` reports anything,
   and a fallback assembled over two statements is not a lone ``return`` at all;
-* every handler rule reads ``src/fasterrag`` and nothing else. ``scripts/`` is parsed only
-  for ``# type: ignore`` comments, so three of the seven true positives the 2026-11-08
-  fallback measurement found live in gate scripts this gate cannot see (TASK-0333).
+* ``untyped-raise`` is gated on a ``services`` or ``adapters`` path component, so widening
+  the handler scan to ``scripts/`` (TASK-0338) gave that one rule no new coverage at all:
+  a gate script has no such boundary and never will. Four rules reached ``scripts/``; this
+  one did not, and saying otherwise would oversell the widening.
 
-A vacuity guard is mandatory (rebuild-playbook trap T12): a run that matches no files,
-parses no handlers, or never puts a lone fallback ``return`` in front of the
-``swallow-fallback`` matcher, fails rather than reporting a clean tree. A blocking rule
-whose matcher never runs is the vacuous pass it exists to prevent.
+The handler rules read every root in ``HANDLER_SCAN_ROOTS``. ``scripts/`` was added on
+2026-11-09 (TASK-0338) after all five rules were measured over it: 14 modules, 19 handlers,
+5 lone-fallback candidates, **0 broad catches and 0 boundary paths**, so ``swallow-fallback``,
+``broad-except`` and ``untyped-raise`` are structurally silent there. ``swallow`` found one
+site, ``mutation_run.py:536``, hand-classified as a **false positive** — an unparseable
+mutant is not a mutant, so the ``except SyntaxError: continue`` is the third of four filters
+in that loop and the exception *is* the answer. One of one is 100%, so that rule does not
+block there: it is ratcheted by path below, and the ratchet still fails the file's second
+swallow. ``swallow-documented`` found two, both false positives and both already warnings.
+
+A vacuity guard is mandatory (rebuild-playbook trap T12): a run in which any scan root
+matches no file, or which parses no handlers, or which never puts a lone fallback ``return``
+in front of the ``swallow-fallback`` matcher, fails rather than reporting a clean tree. A
+blocking rule whose matcher never runs is the vacuous pass it exists to prevent, and a root
+that quietly stops matching is how a scan shrinks without anyone noticing.
 
 Exit codes: ``0`` when no error-severity finding exceeds the ratchet, ``1`` otherwise.
 """
@@ -95,6 +114,7 @@ from typing import Final
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 
 PACKAGE_PARTS: Final = ("src", "fasterrag")
+HANDLER_SCAN_ROOTS: Final[tuple[tuple[str, ...], ...]] = (PACKAGE_PARTS, ("scripts",))
 IGNORE_SCAN_ROOTS: Final[tuple[str, ...]] = ("src", "scripts")
 BOUNDARY_PARTS: Final[tuple[str, ...]] = ("services", "adapters")
 
@@ -104,10 +124,11 @@ SWALLOW_FALLBACK: Final = "swallow-fallback"
 BROAD_EXCEPT: Final = "broad-except"
 UNTYPED_RAISE: Final = "untyped-raise"
 UNJUSTIFIED_IGNORE: Final = "unjustified-ignore"
+UNREADABLE: Final = "unreadable"
 VACUOUS: Final = "vacuous-scan"
 
 ERROR_RULES: Final[frozenset[str]] = frozenset(
-    {SWALLOW, SWALLOW_FALLBACK, UNJUSTIFIED_IGNORE, VACUOUS}
+    {SWALLOW, SWALLOW_FALLBACK, UNJUSTIFIED_IGNORE, UNREADABLE, VACUOUS}
 )
 
 BROAD_EXCEPTIONS: Final[frozenset[str]] = frozenset({"Exception", "BaseException"})
@@ -125,13 +146,16 @@ BUILTIN_EXCEPTIONS: Final[frozenset[str]] = frozenset(
     and issubclass(getattr(builtins, name), BaseException)
 )
 
-# CRITICAL: empty since 2026-11-08, and an empty ratchet is the only state that makes this
-# gate mean what it says. The six entries it shipped with on 2026-11-07 were violations the
-# gate's author was not authorised to edit; TASK-0317 fixed all six in `src/` and `scripts/`
-# rather than annotating them. An entry here means "this many are known", so the gate still
-# fails the moment a file grows one more. Never raise a number to make a new violation green
-# — fix the violation, and lower the number when one goes.
-RATCHET: Final[dict[str, int]] = {}
+# CRITICAL: an entry here means "this many are known", so the gate still fails the moment a
+# file grows one more. Never raise a number to make a new violation green — fix the
+# violation, and lower the number when one goes. The ratchet was empty from 2026-11-08; the
+# six entries it shipped with on 2026-11-07 were violations TASK-0317 fixed rather than
+# annotated. The one entry it carries now is NOT a violation and not a backlog: widening the
+# handler scan to `scripts/` (TASK-0338) measured `swallow` at one hit there, hand-classified
+# as a false positive the rule cannot see around — `mutation_run.py:536` probes whether a
+# textual mutant parses, and `continue` on a SyntaxError is the answer, not a swallow. The
+# entry is keyed by path and never by line, so the file may not grow a second one.
+RATCHET: Final[dict[str, int]] = {"swallow:scripts/mutation_run.py": 1}
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,22 +453,36 @@ class _ModuleScan:
         )
 
 
-def _comments(source: str) -> dict[int, tuple[str, bool]]:
-    """Return each real comment by line as (text, stands alone), so literals never match."""
+def _comments(source: str) -> tuple[dict[int, tuple[str, bool]], str | None]:
+    """Return each real comment by line as (text, stands alone), and why reading stopped.
+
+    The second element names the failure when tokenizing broke off, because the comments
+    collected up to that point are a partial read, not an empty file (TASK-0342).
+    """
     found: dict[int, tuple[str, bool]] = {}
     try:
         for token in tokenize.generate_tokens(io.StringIO(source).readline):
             if token.type == tokenize.COMMENT:
                 found[token.start[0]] = (token.string, token.line.strip().startswith("#"))
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        return found
-    return found
+    except (tokenize.TokenError, IndentationError, SyntaxError) as exc:
+        return found, type(exc).__name__
+    return found, None
 
 
 def _unjustified_ignores(path: Path, relative: str) -> list[Finding]:
     """Return one finding per ``# type: ignore`` comment with no ``# CRITICAL:`` beside it."""
-    comments = _comments(path.read_text(encoding="utf-8"))
+    comments, unreadable = _comments(path.read_text(encoding="utf-8"))
     findings: list[Finding] = []
+    if unreadable is not None:
+        findings.append(
+            Finding(
+                UNREADABLE,
+                relative,
+                0,
+                f"tokenizing stopped at a {unreadable}, so the comments past that point "
+                "were never read and a '# type: ignore' there cannot be seen",
+            )
+        )
     for line, (text, _) in sorted(comments.items()):
         if "type: ignore" not in text or "CRITICAL:" in text:
             continue
@@ -470,23 +508,47 @@ def _unjustified_ignores(path: Path, relative: str) -> list[Finding]:
 
 def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
     """Return every finding in ``root``, including the vacuity guard's own."""
-    modules = _sources(root, *PACKAGE_PARTS)
-    if not modules:
-        where = Path(*PACKAGE_PARTS).as_posix()
-        return [Finding(VACUOUS, where, 0, "the scan matched no Python module; it proved nothing")]
+    modules: list[Path] = []
+    for parts in HANDLER_SCAN_ROOTS:
+        under = _sources(root, *parts)
+        if not under:
+            return [
+                Finding(
+                    VACUOUS,
+                    Path(*parts).as_posix(),
+                    0,
+                    "this scan root matched no Python module; a root that quietly stops "
+                    "matching is how a scan shrinks without anyone noticing",
+                )
+            ]
+        modules += under
 
     findings: list[Finding] = []
+    unreadable: set[str] = set()
     handlers = 0
     fallbacks = 0
     for path in modules:
         relative = path.relative_to(root).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except SyntaxError as exc:
+            unreadable.add(relative)
+            findings.append(
+                Finding(
+                    UNREADABLE,
+                    relative,
+                    exc.lineno or 0,
+                    f"'ast' cannot parse this file ({type(exc).__name__}), so every handler "
+                    "rule is silently unenforced on it",
+                )
+            )
+            continue
         scan = _ModuleScan(relative, tree)
         findings.extend(scan.findings)
         handlers += scan.handlers
         fallbacks += scan.fallbacks
 
-    where = Path(*PACKAGE_PARTS).as_posix()
+    where = ", ".join(Path(*parts).as_posix() for parts in HANDLER_SCAN_ROOTS)
     if handlers == 0:
         return [
             Finding(
@@ -512,7 +574,10 @@ def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
 
     for name in IGNORE_SCAN_ROOTS:
         for path in _sources(root, name):
-            findings.extend(_unjustified_ignores(path, path.relative_to(root).as_posix()))
+            relative = path.relative_to(root).as_posix()
+            if relative in unreadable:
+                continue
+            findings.extend(_unjustified_ignores(path, relative))
 
     return findings
 

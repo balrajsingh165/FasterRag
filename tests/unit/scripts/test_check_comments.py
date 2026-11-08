@@ -5,6 +5,7 @@ from check_comments import (
     PROSE_COMMENT,
     RATCHET,
     REPOSITORY_ROOT,
+    UNREADABLE,
     VACUOUS,
     Finding,
     check,
@@ -253,6 +254,25 @@ def test_a_scan_that_tokenizes_no_comment_fails(tmp_path: Path) -> None:
     assert len(findings) == 1
     assert findings[0].rule == VACUOUS
     assert "no comment at all" in findings[0].detail
+
+
+def test_a_file_that_does_not_tokenize_is_reported_rather_than_read_as_clean(
+    tmp_path: Path,
+) -> None:
+    """TASK-0342: a partial read used to pass as a file with nothing left in it."""
+    root = build(
+        tmp_path,
+        **{
+            "a.py": ANCHOR,
+            "broken.py": 'TEXT = """unterminated\n# this prose comment is never reached\n',
+        },
+    )
+
+    findings = check(root, trees=("src",))
+    unreadable = [finding for finding in findings if finding.rule == UNREADABLE]
+
+    assert [finding.path for finding in unreadable] == ["src/fasterrag/broken.py"]
+    assert over_ratchet(findings) == unreadable
 
 
 def test_a_scan_that_recognises_no_marker_fails(tmp_path: Path) -> None:

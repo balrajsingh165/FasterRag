@@ -1,4 +1,7 @@
+import logging
+
 import pytest
+from markdown_it.token import Token
 
 from fasterrag.core.parsing import (
     parse_csv,
@@ -9,6 +12,7 @@ from fasterrag.core.parsing import (
     parse_pdf,
     parse_plaintext,
 )
+from fasterrag.core.parsing.markdown import _heading_level
 from fasterrag.core.parsing.models import ParsedDocument, ParseFlag
 from fasterrag.errors import ParseError
 from tests.unit.core.parsing.conftest import (
@@ -60,6 +64,20 @@ def test_markdown_builds_a_nested_heading_path() -> None:
     )
 
     assert body.section == "Vendor Agreement > 3. Termination > 3.2 Notice"
+
+
+def test_an_unreadable_heading_tag_is_logged_rather_than_silently_made_h1(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Unlogged, the substitution moves every heading beneath it with nothing said."""
+    with caplog.at_level(logging.WARNING, logger="fasterrag.core.parsing.markdown"):
+        level = _heading_level(Token("heading_open", "hx", 1))
+
+    reports = [record for record in caplog.records if "heading tag" in str(record.msg)]
+    assert level == 1
+    assert len(reports) == 1
+    assert reports[0].__dict__["tag"] == "hx"
+    assert reports[0].__dict__["error"] == "ValueError"
 
 
 def test_markdown_table_keeps_rows_separate() -> None:

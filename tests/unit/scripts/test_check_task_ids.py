@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from check_task_ids import check
+from check_task_ids import check, main
 
 LEDGER = (
     "- [ ] TASK-0001: still open, work remains\n"
@@ -248,7 +248,51 @@ def test_a_file_that_does_not_parse_is_not_a_crash(tmp_path: Path) -> None:
         },
     )
 
-    assert check(root) == []
+    assert [violation for violation in check(root) if "broken.py" not in violation] == []
+
+
+def test_a_file_that_does_not_parse_is_reported_rather_than_skipped(tmp_path: Path) -> None:
+    """TASK-0342: a gate that reports a file clean because it could not read it is worse."""
+    root = build(
+        tmp_path,
+        files={
+            "src/fasterrag/good.py": '"""Shipped under TASK-0002."""\n',
+            "src/fasterrag/broken.py": '"""Shipped under TASK-0404."""\ndef oops(\n',
+        },
+    )
+
+    violations = check(root)
+
+    assert violations != []
+    assert any(
+        "src/fasterrag/broken.py" in violation and "went unchecked" in violation
+        for violation in violations
+    )
+
+
+def test_a_file_that_does_not_tokenize_is_reported_rather_than_skipped(tmp_path: Path) -> None:
+    """An unterminated literal hides every comment after it, markers included."""
+    root = build(
+        tmp_path,
+        files={
+            "src/fasterrag/good.py": '"""Shipped under TASK-0002."""\n',
+            "src/fasterrag/broken.py": 'TEXT = """unterminated\n# TODO: TASK-0002 remains\n',
+        },
+    )
+
+    violations = check(root)
+
+    assert any(
+        "src/fasterrag/broken.py" in violation and "tokenizing stopped" in violation
+        for violation in violations
+    )
+
+
+def test_an_unreadable_file_fails_the_gate_rather_than_reporting_clean(tmp_path: Path) -> None:
+    """The proof that matters: the exit code, which is all CI reads."""
+    root = build(tmp_path, files={"src/fasterrag/broken.py": "def oops(\n"})
+
+    assert main(["--root", str(root)]) == 1
 
 
 def test_this_repository_passes_its_own_gate() -> None:

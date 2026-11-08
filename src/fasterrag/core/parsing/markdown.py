@@ -15,17 +15,29 @@ from markdown_it.token import Token
 
 from fasterrag.core.parsing.models import DocumentBuilder, ParsedDocument, ParseFlag
 from fasterrag.core.parsing.plaintext import decode
+from fasterrag.observability.logging import get_logger
 
 __all__ = ["parse_markdown"]
 
 _MAX_HEADING_LEVEL: Final = 6
 
+_logger = get_logger(__name__)
+
 
 def _heading_level(token: Token) -> int:
-    """Return the heading depth encoded in an ``h1`` to ``h6`` tag."""
+    """Return the heading depth encoded in an ``h1`` to ``h6`` tag.
+
+    A tag that is not ``h1`` to ``h6`` falls back to depth 1, which moves every heading
+    beneath it in the path, so the substitution is logged rather than assumed harmless.
+    """
     try:
         return min(int(token.tag[1:]), _MAX_HEADING_LEVEL)
-    except ValueError:
+    except ValueError as exc:
+        _logger.warning(
+            "a heading tag could not be read as a depth; treating it as h1, so the "
+            "heading path under it is this document's structure only by assumption",
+            extra={"tag": token.tag, "error": type(exc).__name__},
+        )
         return 1
 
 

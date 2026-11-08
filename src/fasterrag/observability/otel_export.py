@@ -72,11 +72,21 @@ def _started_at(trace: Trace) -> datetime:
     """Return the trace's start time, falling back to now when it is unusable.
 
     A malformed timestamp must not cost the whole export: a trace in the wrong place on a
-    timeline is recoverable, a dropped one is not.
+    timeline is recoverable, a dropped one is not. The substitution is logged because an
+    export full of substituted timestamps is otherwise indistinguishable from a correct one.
     """
     try:
         parsed = datetime.fromisoformat(trace.created_at)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        _logger.warning(
+            "a trace's created_at could not be read; exporting it at the current time, so "
+            "this trace sits on the OTLP timeline where it was exported, not where it ran",
+            extra={
+                "trace_id": trace.trace_id,
+                "created_at": trace.created_at,
+                "error": type(exc).__name__,
+            },
+        )
         return datetime.now(tz=UTC)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 

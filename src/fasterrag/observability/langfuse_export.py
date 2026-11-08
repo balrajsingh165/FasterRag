@@ -47,21 +47,31 @@ def _isoformat(base: datetime, offset_ms: float) -> str:
     return (base + timedelta(milliseconds=offset_ms)).isoformat()
 
 
-def _parse_created_at(value: str) -> datetime:
+def _parse_created_at(value: str, trace_id: str) -> datetime:
     """Return the trace's start time, falling back to now when it is unusable.
 
     A malformed timestamp must not cost the whole export: an observation in the wrong place on
-    a timeline is recoverable, a dropped trace is not.
+    a timeline is recoverable, a dropped trace is not. The substitution is logged because an
+    export full of substituted timestamps is otherwise indistinguishable from a correct one.
     """
     try:
         return datetime.fromisoformat(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        _logger.warning(
+            "a trace's created_at could not be read; exporting it at the current time, so "
+            "this trace sits on the Langfuse timeline where it was exported, not where it ran",
+            extra={
+                "trace_id": trace_id,
+                "created_at": value,
+                "error": type(exc).__name__,
+            },
+        )
         return datetime.now(tz=UTC)
 
 
 def build_batch(trace: Trace, *, release: str | None = None) -> list[dict[str, Any]]:
     """Return the ingestion events for one trace."""
-    started = _parse_created_at(trace.created_at)
+    started = _parse_created_at(trace.created_at, trace.trace_id)
     usage = trace.result.get("usage") or {}
 
     events: list[dict[str, Any]] = [

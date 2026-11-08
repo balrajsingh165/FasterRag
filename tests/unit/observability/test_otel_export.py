@@ -5,6 +5,7 @@ likely to be wrong and it is invisible until someone opens a trace viewer.
 """
 
 import gzip
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -132,6 +133,17 @@ def test_an_unusable_timestamp_does_not_lose_the_trace() -> None:
 
     assert len(spans) == 5
     assert spans[0].start_time > 0
+
+
+def test_a_substituted_timestamp_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """Unlogged, an export full of substituted timestamps looks exactly like a correct one."""
+    with caplog.at_level(logging.WARNING, logger="fasterrag.observability.otel_export"):
+        build_spans(trace(created_at="not a timestamp"))
+
+    reports = [record for record in caplog.records if "created_at" in str(record.msg)]
+    assert len(reports) == 1
+    assert reports[0].__dict__["created_at"] == "not a timestamp"
+    assert reports[0].__dict__["error"] == "ValueError"
 
 
 def test_the_root_carries_what_the_query_did() -> None:

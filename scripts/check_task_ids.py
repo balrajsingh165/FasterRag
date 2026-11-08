@@ -15,7 +15,7 @@ gap to TASK-0290. Both ids exist, so no spelling check would have helped; the po
 simply aimed at finished work, and a reader following it would have concluded the gap was
 closed. Both gates passed.
 
-Two rules, and they fail for different reasons:
+Three rules, and they fail for different reasons:
 
 * **An undefined id is a dangling reference.** A reader who greps the ledger for it finds
   nothing and cannot tell whether the task was renumbered, never filed, or imagined. There
@@ -28,6 +28,14 @@ Two rules, and they fail for different reasons:
   and every resolution is cheap and local — repoint the marker at the open task, delete it
   because the work really did land, or untick the entry. The thing that gets a gate
   disabled is firing on honest code, and honest code cannot hold this pair.
+* **A file this gate cannot read is a vacuous pass, not a clean file.** Until 2026-11-09 an
+  untokenizable or unparseable file was silently treated as having no comments and no
+  docstrings, so every id it cited went unchecked and the gate reported green — the exact
+  defect class this repository keeps finding, inside a tool that exists to find it
+  (TASK-0342). It is a finding rather than a log line because this gate runs in CI, where
+  nothing reads a log and only the exit code is read. Measured 2026-11-09: 0 of the 394
+  files under ``src/``, ``tests/`` and ``scripts/`` fail either step, so it blocks from a
+  clean base, and a half-written file still does not crash the run.
 
 A docstring citing a ticked id is NOT a violation. Docstrings carry history on purpose
 ("extracted behind a RateLimiter ABC under TASK-0216"), and a completed task is the correct
@@ -114,16 +122,16 @@ def _source_files(root: Path) -> list[Path]:
     return files
 
 
-def _comments(text: str) -> dict[int, tuple[str, bool]]:
-    """Return each comment keyed by its line, flagged when it belongs to a pending block.
+def _comments(text: str) -> tuple[dict[int, tuple[str, bool]], str | None]:
+    """Return each comment keyed by its line, and why tokenizing stopped if it did.
 
     A marker opens a block: every ``#`` line immediately following it continues that marker,
     until a blank line, code, or a different marker ends it.
     """
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        return {}
+    except (tokenize.TokenError, IndentationError, SyntaxError) as error:
+        return {}, type(error).__name__
 
     comments: dict[int, tuple[str, bool]] = {}
     open_block = False
@@ -139,15 +147,15 @@ def _comments(text: str) -> dict[int, tuple[str, bool]]:
             open_block = False
         comments[line] = (token.string, open_block)
         previous = line
-    return comments
+    return comments, None
 
 
-def _docstring_lines(text: str) -> set[int]:
-    """Return every source line covered by a module, class or function docstring."""
+def _docstring_lines(text: str) -> tuple[set[int], str | None]:
+    """Return every line covered by a docstring, and why parsing stopped if it did."""
     try:
         tree = ast.parse(text)
-    except SyntaxError:
-        return set()
+    except SyntaxError as error:
+        return set(), type(error).__name__
 
     covered: set[int] = set()
     for node in ast.walk(tree):
@@ -162,13 +170,29 @@ def _docstring_lines(text: str) -> set[int]:
         if not isinstance(first.value.value, str):
             continue
         covered.update(range(first.value.lineno, (first.value.end_lineno or 0) + 1))
-    return covered
+    return covered, None
 
 
-def _citations(relative: str, text: str) -> list[Citation]:
-    """Return every ``TASK-`` id written in a comment or a docstring of one file."""
-    comments = _comments(text)
-    docstrings = _docstring_lines(text)
+def _citations(relative: str, text: str) -> tuple[list[Citation], list[str]]:
+    """Return every ``TASK-`` id written in a comment or a docstring, and what went unread.
+
+    A file this gate cannot tokenize or parse holds no citations *as far as the gate can
+    tell*, which is a vacuous pass, so the failure is reported rather than skipped.
+    """
+    comments, untokenizable = _comments(text)
+    docstrings, unparseable = _docstring_lines(text)
+
+    unread: list[str] = []
+    if untokenizable is not None:
+        unread.append(
+            f"{relative}: tokenizing stopped at a {untokenizable}, so no comment in this "
+            "file was read and any TASK- id it cites went unchecked"
+        )
+    if unparseable is not None:
+        unread.append(
+            f"{relative}: 'ast' cannot parse this file ({unparseable}), so no docstring in "
+            "it was read and any TASK- id it cites went unchecked"
+        )
 
     found: list[Citation] = []
     for number, line in enumerate(text.splitlines(), 1):
@@ -182,7 +206,7 @@ def _citations(relative: str, text: str) -> list[Citation]:
             Citation(relative, number, identifier, pending)
             for identifier in sorted(set(_TASK.findall(source)))
         ]
-    return found
+    return found, unread
 
 
 def check(root: Path = REPOSITORY_ROOT) -> list[str]:
@@ -203,7 +227,9 @@ def check(root: Path = REPOSITORY_ROOT) -> list[str]:
     violations: list[str] = []
     for path in files:
         relative = path.relative_to(root).as_posix()
-        citations += _citations(relative, path.read_text(encoding="utf-8"))
+        found, unread = _citations(relative, path.read_text(encoding="utf-8"))
+        citations += found
+        violations += unread
 
     for citation in citations:
         if citation.identifier not in defined:
@@ -219,9 +245,10 @@ def check(root: Path = REPOSITORY_ROOT) -> list[str]:
 
     if not citations:
         return [
+            *violations,
             f"scanned {len(files)} Python files and matched no TASK- id at all; either the "
             "code has stopped citing the ledger, or this scan no longer reads comments and "
-            "docstrings the way they are written"
+            "docstrings the way they are written",
         ]
     return violations
 
@@ -256,6 +283,11 @@ def main(argv: list[str] | None = None) -> int:
             "\nfor a pending marker on a ticked id: the marker says work remains and the "
             "ledger says it is finished, so one of the two is wrong. Repoint the marker at "
             "the open entry, delete it if the work landed, or untick the entry.\n"
+        )
+    if any("went unchecked" in violation for violation in violations):
+        sys.stderr.write(
+            "\nfor a file this gate could not read: fix the file. A green run on a file "
+            "nothing could open proves nothing about it, which is worse than a red one.\n"
         )
     return 1
 

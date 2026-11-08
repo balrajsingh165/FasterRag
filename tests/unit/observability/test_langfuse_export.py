@@ -1,4 +1,5 @@
 import base64
+import logging
 from datetime import UTC, datetime
 
 import pytest
@@ -110,6 +111,21 @@ def test_a_malformed_created_at_does_not_lose_the_trace() -> None:
     batch = build_batch(broken)
 
     assert events_by_type(batch, "trace-create")
+
+
+def test_a_substituted_created_at_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """Unlogged, an export full of substituted timestamps looks exactly like a correct one."""
+    broken = trace()
+    object.__setattr__(broken, "created_at", "not-a-timestamp")
+
+    with caplog.at_level(logging.WARNING, logger="fasterrag.observability.langfuse_export"):
+        build_batch(broken)
+
+    reports = [record for record in caplog.records if "created_at" in str(record.msg)]
+    assert len(reports) == 1
+    assert reports[0].__dict__["trace_id"] == "a" * 32
+    assert reports[0].__dict__["created_at"] == "not-a-timestamp"
+    assert reports[0].__dict__["error"] == "ValueError"
 
 
 def test_the_credentials_are_sent_as_basic_auth_and_not_stored_in_the_url() -> None:
