@@ -638,7 +638,9 @@ async def diagnose(
 ) -> DoctorReport:
     """Diagnose an installation starting from its configuration file."""
     try:
-        settings = load_settings(config_path, env_file=env_file, overrides=overrides)
+        settings = load_settings(
+            config_path, env_file=env_file, overrides=overrides, export_env=True
+        )
     except ConfigError as exc:
         return _config_failure(exc)
 
@@ -653,7 +655,9 @@ async def diagnose_and_fix(
 ) -> FixOutcome:
     """Diagnose an installation, repair what is safe to repair, and check it again."""
     try:
-        settings = load_settings(config_path, env_file=env_file, overrides=overrides)
+        settings = load_settings(
+            config_path, env_file=env_file, overrides=overrides, export_env=True
+        )
     except ConfigError as exc:
         report = _config_failure(exc)
         return FixOutcome(

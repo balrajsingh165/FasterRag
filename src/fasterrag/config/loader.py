@@ -8,6 +8,18 @@ offending key or variable — startup aborts rather than serving a misconfigured
 Secret values are never read, echoed, or logged here: the loader only ever asserts that
 a named variable exists and is non-blank.
 
+**Loading configuration does not change the process environment unless the caller asks.**
+Until TASK-0341 the dotenv file was copied into the real ``os.environ`` as a side effect of
+every ``load_settings`` call — process-wide, permanently, never undone — which is how a
+bare ``pytest`` run from the repository root put ``OPENAI_API_KEY`` in front of the
+live-provider probes and billed the maintainer. The copy is now ``export_env``, defaulting
+to off, and the entry points that go on to build adapters pass it explicitly: adapters
+resolve credentials through ``os.environ`` (the LLM and embedding adapter bases, every
+vector-db adapter, ``api/auth.py`` and ``services/doctor.py``), so the CLI, the API, the
+facade, the replay command and the doctor all need the export and say so. A
+call that does not export is validated against the process environment alone, so it can
+never pass a check that a later credential lookup would fail.
+
 **A setting the schema accepts but no code reads must not start silently.** Until
 TASK-0242 the loader carried a list of such keys and refused to start on any of them,
 because an operator who sets ``security.auth: true`` reads that as authentication being
@@ -27,7 +39,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Final
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from pydantic import ValidationError
 from pydantic_settings import YamlConfigSettingsSource
 from yaml import YAMLError, safe_load
@@ -61,8 +73,13 @@ def load_settings(
     env_file: str | Path | None = DEFAULT_ENV_FILE,
     require_env: bool = True,
     overrides: Sequence[str] | None = None,
+    export_env: bool = False,
 ) -> Settings:
-    """Load and validate configuration, or fail with a ``ConfigError``."""
+    """Load and validate configuration, or fail with a ``ConfigError``.
+
+    ``export_env`` copies ``env_file`` into ``os.environ``; without it the process
+    environment is left exactly as it was found.
+    """
     config_path = Path(path)
     raw = _read_yaml(config_path)
 
@@ -74,13 +91,19 @@ def load_settings(
         raw = apply_overrides(raw, combined)
     settings = _validate(raw, config_path)
 
+    # CRITICAL: the export happens before the check and never after it. The check's whole
+    # job is to prove that the environment the process will go on to read credentials from
+    # is complete, so it has to run against the environment as the export leaves it.
+    if export_env:
+        _export_env_file(env_file)
+
     # CRITICAL: `require_env` defaults to True and every execution path must leave it
     # there. It exists for read-only inspection — `config show` is most useful on exactly
     # the broken installation whose missing variables would otherwise stop it from
     # printing anything. Passing False anywhere that goes on to serve, ingest, or query
     # would trade a startup failure naming the variable for a runtime one that does not.
     if require_env:
-        _require_referenced_env_vars(settings, env_file)
+        _require_referenced_env_vars(settings, env_file, exported=export_env)
 
     _warn_about_risky_settings(settings)
     return settings
@@ -188,27 +211,64 @@ def _format_violations(exc: ValidationError) -> str:
     return "\n".join(lines)
 
 
-def _require_referenced_env_vars(settings: Settings, env_file: str | Path | None) -> None:
-    """Enforce cross-field rule 9: every referenced environment variable must be set."""
-    if env_file is not None:
-        env_path = Path(env_file)
-        if env_path.is_file():
-            load_dotenv(env_path, override=False)
+def _dotenv_variables(env_file: str | Path | None) -> dict[str, str]:
+    """Return the variables the dotenv file defines, or nothing when there is no file.
+
+    Values are returned so the caller can export them and are never logged or echoed.
+    """
+    if env_file is None:
+        return {}
+
+    env_path = Path(env_file)
+    if not env_path.is_file():
+        return {}
+
+    try:
+        parsed = dotenv_values(env_path)
+    except OSError as exc:
+        raise ConfigError(f"{env_path} could not be read: {exc}") from exc
+
+    return {name: value for name, value in parsed.items() if value is not None}
+
+
+def _export_env_file(env_file: str | Path | None) -> None:
+    """Copy the dotenv file into ``os.environ``, never overwriting what is already set."""
+    for name, value in _dotenv_variables(env_file).items():
+        os.environ.setdefault(name, value)
+
+
+def _require_referenced_env_vars(
+    settings: Settings, env_file: str | Path | None, *, exported: bool
+) -> None:
+    """Enforce cross-field rule 9: every referenced environment variable must be set.
+
+    ``exported`` says whether the dotenv file is already in ``os.environ``; when it is not,
+    a variable found only there is reported as missing and told why.
+    """
+    unexported = {} if exported else _dotenv_variables(env_file)
+    env_label = str(Path(env_file)) if env_file is not None else str(DEFAULT_ENV_FILE)
 
     missing: list[str] = []
     for name, config_key in sorted(settings.referenced_env_vars().items()):
         value = os.environ.get(name)
-        if value is None or not value.strip():
-            missing.append(f"  - {name} (referenced by {config_key})")
+        if value is not None and value.strip():
+            continue
+        note = ""
+        if (unexported.get(name) or "").strip():
+            note = f"; defined in {env_label}, which this call did not export"
+        missing.append(f"  - {name} (referenced by {config_key}{note})")
 
-    if missing:
-        listed = "\n".join(missing)
-        raise ConfigError(
-            "required environment variables are missing or blank:\n"
-            f"{listed}\n"
-            "set them in .env (never in config.yaml) or unset the config keys that "
-            "reference them"
+    if not missing:
+        return
+
+    listed = "\n".join(missing)
+    hint = "set them in .env (never in config.yaml) or unset the config keys that reference them"
+    if not exported and unexported:
+        hint += (
+            "; a dotenv file reaches the process environment only through "
+            "load_settings(..., export_env=True), which the CLI, the API and the facade pass"
         )
+    raise ConfigError(f"required environment variables are missing or blank:\n{listed}\n{hint}")
 
 
 def _warn_about_risky_settings(settings: Settings) -> None:

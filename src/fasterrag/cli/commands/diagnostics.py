@@ -139,7 +139,7 @@ def _redacted(name: str, value: Any) -> Any:
 async def run_config_show(args: argparse.Namespace, console: Console) -> ExitCode:
     """Print every setting with its effective value and its default."""
     try:
-        settings = settings_from(args, require_env=False)
+        settings = settings_from(args, require_env=False, export_env=False)
     except ConfigError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE

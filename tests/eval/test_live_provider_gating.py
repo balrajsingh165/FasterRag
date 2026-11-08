@@ -17,19 +17,26 @@ value this module chose, so a failure message can never carry a secret.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 
 import pytest
 
+from fasterrag.config.schema import Settings
 from tests.eval.test_live_providers import (
     ALL_CHECKS,
     EMBEDDING_CHECKS,
+    LIVE_TESTS_VAR,
     LLM_CHECKS,
+    LiveCheck,
     LiveLedger,
     _credential,
     _endpoint,
     _gate,
     _model,
+    _require_opt_in,
+    embedding_settings,
+    llm_settings,
 )
 
 OPENAI = LLM_CHECKS[0]
@@ -221,6 +228,62 @@ def test_an_empty_run_reports_nothing_reached() -> None:
     assert "VERIFIED" not in report
     for check in ALL_CHECKS:
         assert f"{check.name}: NOT RUN" in report
+
+
+@pytest.mark.parametrize("absent", ["", "   ", "0", "false", "no", "off", "maybe"])
+def test_a_credential_alone_does_not_authorise_a_billed_call(
+    monkeypatch: pytest.MonkeyPatch, ledger: LiveLedger, absent: str
+) -> None:
+    """TASK-0341: having a key exported is not the same as asking to spend money."""
+    monkeypatch.setenv(OPENAI.env_var, SENTINEL)
+    monkeypatch.setenv(LIVE_TESTS_VAR, absent)
+
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        _require_opt_in(OPENAI)
+
+    assert LIVE_TESTS_VAR in str(skipped.value)
+    assert f"{LIVE_TESTS_VAR}=1" in str(skipped.value)
+    assert SENTINEL not in str(skipped.value)
+    assert ledger.unverified[OPENAI.name] == str(skipped.value)
+
+
+def test_an_unset_opt_in_skips_exactly_as_a_falsey_one_does(
+    monkeypatch: pytest.MonkeyPatch, ledger: LiveLedger
+) -> None:
+    monkeypatch.delenv(LIVE_TESTS_VAR, raising=False)
+
+    with pytest.raises(pytest.skip.Exception):
+        _require_opt_in(OPENAI)
+
+    assert OPENAI.name in ledger.unverified
+
+
+@pytest.mark.parametrize("present", ["1", "true", "TRUE", " yes ", "on"])
+def test_an_explicit_opt_in_lets_the_probe_through(
+    monkeypatch: pytest.MonkeyPatch, ledger: LiveLedger, present: str
+) -> None:
+    monkeypatch.setenv(LIVE_TESTS_VAR, present)
+
+    _require_opt_in(OPENAI)
+
+    assert ledger.unverified == {}
+    assert ledger.verified() == ()
+
+
+@pytest.mark.parametrize("build", [llm_settings, embedding_settings])
+def test_no_probe_can_reach_a_provider_without_the_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    ledger: LiveLedger,
+    build: Callable[[LiveCheck], Settings],
+) -> None:
+    """The opt-in is checked before the credential, the SDK and the endpoint, not after."""
+    monkeypatch.setenv(OPENAI.env_var, SENTINEL)
+    monkeypatch.delenv(LIVE_TESTS_VAR, raising=False)
+
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        build(OPENAI)
+
+    assert LIVE_TESTS_VAR in str(skipped.value)
 
 
 def test_a_check_cannot_be_rewritten_by_the_test_that_uses_it() -> None:

@@ -192,7 +192,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build the API application."""
-    resolved = settings if settings is not None else load_settings(_configured_path())
+    resolved = (
+        settings if settings is not None else load_settings(_configured_path(), export_env=True)
+    )
     configure_logging(resolved.app.log_level)
 
     app = FastAPI(

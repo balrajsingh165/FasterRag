@@ -68,6 +68,8 @@ if __name__ == "__main__":
 
 The same `config.yaml` + `.env` contract applies ([config-reference.md](config-reference.md)): config drives all behavior, secrets come only from the environment, validation fails fast at `from_config()` with a `ConfigError` naming the offending key.
 
+**`.env` is read only when a caller asks for it (TASK-0341, 2026-11-09).** `FasterRag.from_config()` asks, so the walkthrough above is unchanged. The lower-level `load_settings()` no longer does: it used to copy the dotenv file into the real `os.environ` permanently, process-wide, as a side effect of being called, which is how a `.env` key reached a billed test run. A caller that loads settings itself and then builds components — `load_settings(...)` followed by `FasterRag.from_settings(...)` — must now pass `load_settings(..., export_env=True)`, because adapters resolve credentials through `os.environ`. Forgetting it is loud, not silent: the load fails with a `ConfigError` naming the variable and saying that the dotenv file was not exported.
+
 ## Public API surface (beta contract)
 
 Everything importable from the top-level `fasterrag` namespace is public and stable; anything under `fasterrag._internal` or not exported in `__all__` is private and may change without notice.

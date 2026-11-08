@@ -4,13 +4,47 @@ from pathlib import Path
 import pytest
 
 import fasterrag
+from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ConfigError, FasterRagError
 from fasterrag.facade import FasterRag
+from fasterrag.services import doctor
+from fasterrag.services.provisioning import ContainerState
 
 
 def settings() -> Settings:
     return Settings.model_validate({})
+
+
+class StubAdapter:
+    """Stands in for the vector-db adapter so doctor reaches no server."""
+
+    def __init__(self) -> None:
+        """Start unclosed, so a test can assert the adapter was released."""
+        self.closed = False
+
+    async def health(self) -> HealthStatus:
+        """Report an unreachable backend without opening a socket."""
+        return HealthStatus(healthy=False, detail="stubbed", latency_ms=1.0)
+
+    async def close(self) -> None:
+        """Record that doctor released the adapter it built."""
+        self.closed = True
+
+
+async def _false() -> bool:
+    """Stand in for a probe that must report absence without touching the machine."""
+    return False
+
+
+async def _volume_absent(volume: str) -> bool:
+    """Report no Docker volume without shelling out to a daemon."""
+    return False
+
+
+async def _no_container(name: str = "fasterrag-qdrant") -> ContainerState:
+    """Report no container without shelling out to a daemon."""
+    return ContainerState(name=name, exists=False)
 
 
 def test_the_facade_is_exported_from_the_package_root() -> None:
@@ -175,11 +209,29 @@ def test_the_remaining_documented_surface_exists() -> None:
         assert hasattr(FasterRag, member), member
 
 
-async def test_doctor_runs_without_starting_the_facade() -> None:
-    """Doctor diagnoses environments that may not work; needing a working one defeats it."""
+async def test_doctor_runs_without_starting_the_facade(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Doctor diagnoses environments that may not work; needing a working one defeats it.
+
+    Every probe is stubbed because this asserts the facade's wiring, not the machine's.
+    """
+    adapter = StubAdapter()
+    monkeypatch.setattr(doctor, "create_vector_db_adapter", lambda settings: adapter)
+    # CRITICAL: TASK-0353. Unstubbed, `create_vector_db_adapter` built a real
+    # AsyncQdrantClient, whose constructor starts a daemon thread that GETs the server
+    # version — a unit test on the network, and a UserWarning raised on no test's thread
+    # that surfaced on stderr after the run finished, in 1 of 6 runs. The Docker and port
+    # probes beside it are the same class of defect as TASK-0324: unstubbed, this result is
+    # a function of what happens to be running on the developer's machine.
+    monkeypatch.setattr(doctor, "docker_available", _false)
+    monkeypatch.setattr(doctor, "volume_exists", _volume_absent)
+    monkeypatch.setattr(doctor, "container_state", _no_container)
+    monkeypatch.setattr(doctor, "port_is_free", lambda host, port: True)
+    monkeypatch.setattr(doctor, "port_is_reachable", lambda host, port: False)
+
     report = await FasterRag.from_settings(settings()).doctor()
 
     assert report.checks
+    assert adapter.closed
 
 
 @pytest.mark.parametrize("name", ["collections", "drop_collection", "replay"])

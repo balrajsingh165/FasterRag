@@ -23,10 +23,17 @@ def overrides_from(args: argparse.Namespace) -> list[str]:
     return list(overrides) if overrides else []
 
 
-def settings_from(args: argparse.Namespace, *, require_env: bool = True) -> Settings:
-    """Load configuration named by ``--config``, with any ``--set`` overrides applied."""
+def settings_from(
+    args: argparse.Namespace, *, require_env: bool = True, export_env: bool = True
+) -> Settings:
+    """Load configuration named by ``--config``, with any ``--set`` overrides applied.
+
+    ``export_env`` is on because a command is about to build adapters that resolve their
+    credentials from ``os.environ``; only a command that builds nothing turns it off.
+    """
     return load_settings(
         args.config,
         require_env=require_env,
         overrides=overrides_from(args),
+        export_env=export_env,
     )

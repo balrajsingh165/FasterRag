@@ -24,8 +24,17 @@ What a green run does and does not establish:
   launder it; and the summary test at the bottom is green only when *every* provider was
   reached, skipping with the per-provider report otherwise.
 
-Run with ``pytest -m eval tests/eval/test_live_providers.py -rs`` — ``-rs`` prints the skip
-reasons, which is where the report lives.
+Run with ``FASTERRAG_LIVE_PROVIDER_TESTS=1 pytest -m eval tests/eval/test_live_providers.py
+-rs`` — ``-rs`` prints the skip reasons, which is where the report lives.
+
+**The opt-in variable is the gate; a credential is not.** Until TASK-0341 these probes ran
+whenever a key happened to be in the environment, and the environment is not a statement of
+intent: a developer with ``OPENAI_API_KEY`` exported for unrelated work, or a process that
+loaded a ``.env`` on the way past, spent money by typing a test command. Every probe now
+skips unless ``FASTERRAG_LIVE_PROVIDER_TESTS`` is one of ``1``, ``true``, ``yes`` or ``on``,
+and the skip reason says how to turn it on. The marker filter in ``pyproject.toml`` keeps
+these out of a bare ``pytest``; this gate is what stands behind that filter when someone
+runs ``pytest -m eval``.
 
 Ollama has no credential, so its gate is an explicit opt-in: ``OLLAMA_HOST`` pointing at a
 running server. Gating it on nothing would mean a connection attempt on every run and a
@@ -70,6 +79,9 @@ PROMPT = "Reply with the single word: ok"
 SYSTEM = "You are a connectivity probe. Answer in one word."
 PASSAGE = "fasterRag live provider check."
 MAX_TOKENS = 16
+
+LIVE_TESTS_VAR = "FASTERRAG_LIVE_PROVIDER_TESTS"
+LIVE_TESTS_ON = frozenset({"1", "true", "yes", "on"})
 
 VERIFIED = "VERIFIED"
 NOT_CHECKED = "NOT CHECKED"
@@ -273,6 +285,23 @@ def _gate(check: LiveCheck, variable: str) -> str:
     return value
 
 
+def _require_opt_in(check: LiveCheck) -> None:
+    """Record and skip unless the run explicitly asked for billed live calls.
+
+    Raises:
+        Skipped: Unless ``FASTERRAG_LIVE_PROVIDER_TESTS`` is set to a truthy value.
+    """
+    if os.environ.get(LIVE_TESTS_VAR, "").strip().lower() in LIVE_TESTS_ON:
+        return
+    reason = (
+        f"{LIVE_TESTS_VAR} is not set, so {check.name} was not contacted; these probes "
+        f"spend real money, so a credential alone does not authorise them. To opt in, run "
+        f"{LIVE_TESTS_VAR}=1 pytest -m eval -rs with the provider's credential set"
+    )
+    LEDGER.record_unverified(check.name, reason)
+    pytest.skip(reason)
+
+
 def _credential(check: LiveCheck) -> str:
     """Return the provider's credential, recording and skipping when it is absent.
 
@@ -336,6 +365,7 @@ def _endpoint(check: LiveCheck) -> str | None:
 
 def llm_settings(check: LiveCheck) -> Settings:
     """Build configuration pointing generation at the provider under check."""
+    _require_opt_in(check)
     _require_package(check)
     base_url = _endpoint(check)
     if not check.keyless:
@@ -361,6 +391,7 @@ def embedding_settings(check: LiveCheck) -> Settings:
     ``OllamaEmbedder`` reads its host from ``llm.base_url``, which is why the endpoint is
     set there rather than under ``embeddings``.
     """
+    _require_opt_in(check)
     _require_package(check)
     base_url = _endpoint(check)
     if not check.keyless:

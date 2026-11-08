@@ -71,7 +71,7 @@ class FasterRag:
     @classmethod
     def from_config(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> Self:
         """Load and validate ``config.yaml``, then build a facade over it."""
-        return cls(load_settings(path))
+        return cls(load_settings(path, export_env=True))
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Self:

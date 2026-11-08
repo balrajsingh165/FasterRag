@@ -78,7 +78,7 @@ async def run_replay(args: argparse.Namespace, console: Console) -> ExitCode:
     candidate = settings
     if args.candidate:
         try:
-            candidate = load_settings(args.candidate)
+            candidate = load_settings(args.candidate, export_env=True)
         except ConfigError as exc:
             console.problem(exc.code.value, exc.detail)
             return ExitCode.USAGE

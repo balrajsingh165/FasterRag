@@ -127,7 +127,9 @@ def test_dotenv_file_supplies_missing_variables(tmp_path: Path, env: dict[str, s
     (tmp_path / ".env").write_text("OPENAI_API_KEY=from-dotenv\n", encoding="utf-8")
     path = write_config(tmp_path, "llm:\n  api_key_env: OPENAI_API_KEY\n")
 
-    assert load_settings(path, env_file=tmp_path / ".env").llm.api_key_env == "OPENAI_API_KEY"
+    settings = load_settings(path, env_file=tmp_path / ".env", export_env=True)
+
+    assert settings.llm.api_key_env == "OPENAI_API_KEY"
     assert env["OPENAI_API_KEY"] == "from-dotenv"
 
 
@@ -136,14 +138,75 @@ def test_process_environment_wins_over_dotenv(tmp_path: Path, env: dict[str, str
     (tmp_path / ".env").write_text("OPENAI_API_KEY=from-dotenv\n", encoding="utf-8")
     path = write_config(tmp_path, "llm:\n  api_key_env: OPENAI_API_KEY\n")
 
-    load_settings(path, env_file=tmp_path / ".env")
+    load_settings(path, env_file=tmp_path / ".env", export_env=True)
     assert env["OPENAI_API_KEY"] == "from-process"
+
+
+def test_loading_settings_leaves_the_process_environment_untouched(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    """TASK-0341: a plain load must not put a single new name into os.environ.
+
+    The dotenv name is invented here; asserting on a real credential name would make the
+    test depend on the machine it runs on, which is the defect, not the check.
+    """
+    probe = "FASTERRAG_DOTENV_EXPORT_PROBE"
+    (tmp_path / ".env").write_text(f"{probe}=value-invented-by-this-test\n", encoding="utf-8")
+    path = write_config(tmp_path, "")
+    before = dict(env)
+
+    load_settings(path, env_file=tmp_path / ".env")
+
+    assert probe not in env
+    assert env == before
+
+
+def test_a_variable_only_in_an_unexported_dotenv_is_still_a_failure(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    """Fail-fast stays fail-fast: unexported means absent, and the error says so."""
+    del env["OPENAI_API_KEY"]
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=from-dotenv\n", encoding="utf-8")
+    path = write_config(tmp_path, "llm:\n  api_key_env: OPENAI_API_KEY\n")
+
+    with pytest.raises(ConfigError, match="OPENAI_API_KEY") as caught:
+        load_settings(path, env_file=tmp_path / ".env")
+
+    assert "export_env=True" in caught.value.detail
+    assert "did not export" in caught.value.detail
+    assert "from-dotenv" not in caught.value.detail
+    assert "OPENAI_API_KEY" not in env
+
+
+def test_exporting_never_overwrites_a_variable_the_process_already_has(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    probe = "FASTERRAG_DOTENV_EXPORT_PROBE"
+    env[probe] = "from-process"
+    (tmp_path / ".env").write_text(f"{probe}=from-dotenv\n", encoding="utf-8")
+    path = write_config(tmp_path, "")
+
+    load_settings(path, env_file=tmp_path / ".env", export_env=True)
+
+    assert env[probe] == "from-process"
+
+
+def test_exporting_is_independent_of_the_required_variable_check(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    probe = "FASTERRAG_DOTENV_EXPORT_PROBE"
+    (tmp_path / ".env").write_text(f"{probe}=from-dotenv\n", encoding="utf-8")
+    path = write_config(tmp_path, "")
+
+    load_settings(path, env_file=tmp_path / ".env", require_env=False, export_env=True)
+
+    assert env[probe] == "from-dotenv"
 
 
 @pytest.mark.usefixtures("env")
 def test_missing_dotenv_file_is_not_an_error(tmp_path: Path) -> None:
     path = write_config(tmp_path, "")
-    assert load_settings(path, env_file=tmp_path / "absent.env").app.port == 8000
+    assert load_settings(path, env_file=tmp_path / "absent.env", export_env=True).app.port == 8000
 
 
 @pytest.mark.usefixtures("env")

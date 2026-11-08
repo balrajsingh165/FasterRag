@@ -6,7 +6,7 @@ Always-loaded instructions for Claude Code working in the fasterRag repository. 
 
 fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generation (RAG) solution engineered for very, very large datasets. This repository ships the first beta of an all-in-one RAG system whose goal is to be the fastest, most efficient, and most optimized RAG project available (a goal — see the provable-claims policy below). Speed comes from multi-worker parallel processing across ingestion, chunking, embedding, and indexing; maximum chunking quality via a configurable chunking pipeline; and aggressive caching, batching, streaming, and async I/O. Everything is pluggable — any vector database, any embedding model, any LLM provider — selected purely through configuration. The system is operated ONLY through a REST API and a terminal/CLI; a separate, optional, self-hosted observability dashboard exists purely for inspection (Langfuse-like), never for control.
 
-**Current repository state: build phase (Gate C authorized 2026-07-29).** Slices S1–S13 have landed on `main` (34.2k LOC under `src/`, 54.5k LOC of tests, measured 2026-11-08); S14 (dashboard), D11 export/import (TASK-0079, read side and archive writer landed), and the remaining vector-DB adapters beyond Qdrant and pgvector (TASK-0049) are open — [docs/todo.md](docs/todo.md) is the authoritative slice ledger. Code ships only with its tests and doc updates in the same commit series, and a new slice starts only on explicit maintainer authorization.
+**Current repository state: build phase (Gate C authorized 2026-07-29).** All fourteen slices S1–S14 have landed on `main` (34.2k LOC under `src/`, 54.5k LOC of tests, measured 2026-11-08); S14's own tasks (TASK-0045, TASK-0184) are ticked and the read-only dashboard ships in `observability/dashboard.py`. What is open is D11 export/import (TASK-0079, read side and archive writer landed) and the Pinecone vector-DB adapter (TASK-0049; Qdrant, pgvector, Chroma, Milvus and Weaviate are registered) — [docs/todo.md](docs/todo.md) is the authoritative slice ledger. Code ships only with its tests and doc updates in the same commit series, and a new slice starts only on explicit maintainer authorization.
 
 ## Tech stack (approved)
 
@@ -30,7 +30,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 - Hooks: `pre-commit install` (wires both pre-commit and commit-msg stages; runs fast tests only, not integration/eval)
 - Lint: `ruff check .` and `ruff format --check .`
 - Typecheck: `mypy src/` (strict; zero errors)
-- Test: `pytest` (unit) / `pytest -m integration` (integration) / `pytest -m eval` (retrieval eval harness)
+- Test: `pytest` (unit **and** integration — `addopts` excludes only the eval/load/soak/chaos tiers; measured 2026-11-09: a bare run collects the integration tier and zero live-provider probes) / `pytest -m "not integration and not eval"` (what CI gates every commit on) / `pytest -m integration` / `pytest -m eval` (retrieval eval harness; the billed live-provider probes additionally need `FASTERRAG_LIVE_PROVIDER_TESTS=1`)
 - Run dev API: `uvicorn fasterrag.api.main:app --reload`
 - Run workers: `python -m fasterrag.workers` (spawns CPU + embedding pools per `config.yaml`)
 
