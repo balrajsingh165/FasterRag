@@ -113,6 +113,49 @@ def test_a_ticked_id_in_a_neighbouring_table_cell_is_not_paired(tmp_path: Path) 
     assert check(root) == []
 
 
+def test_a_ticked_id_in_a_later_sentence_of_one_cell_is_not_paired(tmp_path: Path) -> None:
+    """The live false positive: one cell, an open denial, then a ticked sentence after it."""
+    root = build(
+        tmp_path,
+        todo=TICKED + "- [ ] TASK-0159: build the cache_only rung\n",
+        reliability=(
+            "| Ladder | **the `cache_only` rung is not built yet (TASK-0159).** The rungs "
+            "are registered in `services/degradation.py` (TASK-0242). | config |\n"
+        ),
+    )
+
+    assert check(root) == []
+
+
+def test_a_bolded_sentence_end_still_breaks_the_sentence(tmp_path: Path) -> None:
+    """``records.**`` ends a sentence; a lookbehind wanting bare whitespace joined the two."""
+    root = build(
+        tmp_path,
+        todo=TICKED + "- [ ] TASK-0159: build the cache_only rung\n",
+        internals=(
+            "**The `cache_only` rung is not built (TASK-0159).** TASK-0242 shipped the budgets.\n"
+        ),
+    )
+
+    assert check(root) == []
+
+
+def test_a_denial_whose_own_sentence_cites_nothing_still_inherits_the_unit(
+    tmp_path: Path,
+) -> None:
+    """The fallback is what keeps the narrowing from becoming a hole."""
+    root = build(
+        tmp_path,
+        todo=TICKED,
+        internals=(
+            "| **Cost governor (TASK-0242)** | the spend cap does not exist. Operators "
+            "ask for it often. | Engineering |\n"
+        ),
+    )
+
+    assert any("TASK-0242" in entry for entry in check(root))
+
+
 def test_a_denial_inside_a_fenced_block_is_ignored(tmp_path: Path) -> None:
     """A phrase inside a fence is sample output, not the document asserting anything."""
     root = build(

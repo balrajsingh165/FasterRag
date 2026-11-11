@@ -26,7 +26,8 @@ one change that could make this gate fire on an honest row and get it disabled.
 covered. Those rows are listed in :data:`UNPROVEN_ROWS` with the reason, and the two
 directions are both checked: a row carrying the marker must be listed, and a listed row must
 carry it. A row may do both — cite a test for one half of its claim and mark the other half
-missing — which is how rows 8, 10 and 30 are written.
+missing — which is how row 30 is written. Rows 8 and 10 were written that way until
+TASK-0243 built the soak and load suites on 2026-11-11 and both lost their marker.
 
 Every assertion here is made against the parsed rows rather than against the raw text, so
 deleting the table turns this file red instead of leaving a sentence in prose to satisfy it.
@@ -47,9 +48,8 @@ _COLUMNS: Final = 7
 
 UNPROVEN_ROWS: Final[dict[int, str]] = {
     2: "no scanned-document fixture exists and nothing asserts the low_text_yield flag",
-    8: "no soak suite exists (TASK-0243)",
-    10: "the load-test half has no suite (TASK-0243)",
-    19: "no load suite exists, and the row's own timeout and metric label are unbuilt (TASK-0165)",
+    19: "a load suite exists since TASK-0243, and cannot prove this row because the row's "
+    "own per-call rerank timeout and stage=rerank label are unbuilt (TASK-0165)",
     30: "no case injects an unhealthy container into a compose bring-up",
     36: "nothing asserts the query path answering while the dashboard is down",
 }

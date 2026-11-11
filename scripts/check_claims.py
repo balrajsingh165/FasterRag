@@ -127,6 +127,14 @@ _FENCE: Final = re.compile(r"```.*?```", re.DOTALL)
 # exist: ... (TASK-0243)"), and breaking there would drop the id and the claim with it.
 _SENTENCE_BREAK: Final = re.compile(r"(?<=[.!?])\s+|\n|\|")
 
+# CRITICAL: this break is used to attribute an id INSIDE one unit and never to form
+# the units themselves. It consumes closing markup, because a bolded sentence ends
+# `records.**` and the unit break above, wanting whitespace straight after the full
+# stop, does not see that as an end at all. Widening the unit break instead split a
+# bolded prose denial away from the citation in the sentence after it, which is a
+# false negative with a live instance in failure-modes.md.
+_CLAUSE_BREAK: Final = re.compile(r"(?<=[.!?])[*_`)\]]*\s+")
+
 # CRITICAL: a table denial is paired with its OWN cell's id, and only with the rest of
 # the row when its cell cites none. Both halves are load-bearing and pull opposite ways.
 # Splitting on the pipe alone is a false negative with a live instance:
@@ -195,6 +203,22 @@ def scanned_documents(root: Path) -> list[Path]:
     return [path for path in found if path.relative_to(root).as_posix() not in EXEMPT_DOCUMENTS]
 
 
+def _cited_by(denial: re.Match[str], unit: str) -> set[str]:
+    """Return the ids the denial's own clause cites, or the unit's when it cites none.
+
+    A table cell is one unit and was never split further, so a cell carrying a truthful
+    open denial and, after it, a sentence about shipped work was failed for that
+    neighbour's ticked id.
+    """
+    starts = [0] + [match.end() for match in _CLAUSE_BREAK.finditer(unit)]
+    bounds = [(start, end) for start, end in zip(starts, [*starts[1:], len(unit)], strict=True)]
+    own = next(
+        (unit[start:end] for start, end in bounds if start <= denial.start() < end),
+        unit,
+    )
+    return set(_TASK.findall(own)) or set(_TASK.findall(unit))
+
+
 def _attributed(relative: str, sentence: str) -> bool:
     """Say whether this sentence is a recorded discovery attribution rather than a denial."""
     return any(
@@ -226,7 +250,7 @@ def check(root: Path = REPOSITORY_ROOT) -> list[str]:
             violations += [
                 f"{relative}:{line}: says {denial.group(0)!r} but cites {identifier}, "
                 f"which docs/{TODO_NAME} ticks as done"
-                for identifier in sorted(set(_TASK.findall(sentence)) & ticked)
+                for identifier in sorted(_cited_by(denial, sentence) & ticked)
             ]
 
     unread = [name for name in ROOT_DOCUMENTS if not (root / name).is_file()]

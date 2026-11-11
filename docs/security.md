@@ -103,7 +103,7 @@ With this, these tenant-visible surfaces are scoped: the semantic cache, collect
 
 `POST /v1/replay` is scoped for the same reason the read endpoints are, and it is the easier one to overlook: replay re-executes the stored question and returns a diff, so an unscoped lookup discloses another tenant's query and retrieved chunks through a write-shaped endpoint rather than a read-shaped one. It looked its trace up unscoped until 2026-08-06 (TASK-0194).
 - Semantic-cache entries are tenant-scoped — a cache hit can never leak another tenant's answer.
-- Per-tenant token budgets (D9, `cost.per_tenant_token_budget`) are **enforced** (TASK-0242 ✅) over a rolling 24-hour window, per tenant, checked before the provider is called. **The counter is in-process**, exactly like the per-key rate limiter's default `memory` backend: N replicas grant N times the configured budget, and for a spend cap that error permits more than was asked for rather than less. Size the value accordingly, or run one replica, until a shared counter lands — the limiter has one (`security.rate_limit_backend: redis`); the budget does not.
+- Per-tenant token budgets (D9, `cost.per_tenant_token_budget`) are **enforced** (TASK-0242 ✅) over a rolling 24-hour window, per tenant, checked before the provider is called. **The counter is in-process**, exactly like the per-key rate limiter's default `memory` backend: N replicas grant N times the configured budget, and for a spend cap that error permits more than was asked for rather than less. Size the value accordingly, or run one replica, until a shared counter lands (TASK-0426) — the limiter has one (`security.rate_limit_backend: redis`); the budget does not.
 
 ### What retrieval actually enforces (corrected 2026-11-09, TASK-0339)
 

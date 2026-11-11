@@ -60,7 +60,7 @@ superlatives and fails on any that do not.
 This is a **beta in its build phase**, and the documentation is deliberately candid about what
 that means:
 
-- The [benchmark ledger](benchmarks.md) holds four entries and **marks all four non-citable**,
+- The [benchmark ledger](benchmarks.md) holds six entries and **marks all six non-citable**,
   because they were measured on non-isolated hardware. The project targets high ingestion and
   retrieval throughput; it does not yet claim it, and the ledger explains exactly why.
 - [Release readiness](release-readiness.md) is re-derived at each release decision and published

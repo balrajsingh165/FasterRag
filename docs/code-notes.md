@@ -3212,11 +3212,13 @@ Args:
     # a change on every member of every export, and nobody can tell a real one from noise.
     #
     # This makes the *data* members byte-identical across two exports of an unchanged
-    # collection — `chunks.jsonl`, `documents.jsonl`, `vectors.jsonl`, `index.lock`, and
-    # `checksums.sha256` all match exactly. `manifest.json` does not: it carries
-    # `created_at`, which is deliberately a wall clock, so a diff of two exports shows that
-    # one line and nothing else. Verified against a live Qdrant (TASK-0214) — the earlier
-    # wording here claimed whole archives were byte-identical, which they are not.
+    # collection — `chunks.jsonl`, `documents.jsonl`, `vectors.jsonl` and `index.lock` all
+    # match exactly. `manifest.json` does not: it carries `created_at`, which is
+    # deliberately a wall clock. Since TASK-0329 digested the manifest, `checksums.sha256`
+    # inherits that one varying line and no longer matches either, so a diff of two exports
+    # shows the manifest's timestamp and its digest, and nothing else. Verified against a
+    # live Qdrant (TASK-0214) — the earlier wording here claimed whole archives were
+    # byte-identical, which they are not.
 
 ## `src/fasterrag/services/archive_import.py`
 
@@ -5456,6 +5458,35 @@ The precise property, established against a live Qdrant: every *data* member is
 The numbers here are a mechanism check, not a quality measurement: the embedder is a
     deterministic stand-in, so these scores say nothing about how well fasterRag retrieves
     and must never reach the benchmark ledger.
+
+## `tests/load/test_saturation.py`
+
+### `PeakRecordingQueue`
+
+> A bounded queue that remembers the deepest it ever got.
+
+Overriding ``_publish`` rather than sampling the gauge is deliberate: the gauge can
+    only be polled, and a poll that misses the peak under-reports it, which would turn a
+    breached ceiling into a green run.
+
+### `test_every_item_a_full_queue_refuses_is_typed_and_none_is_dropped`
+
+> Conservation under refusal, and the one path that produces ``QUEUE_FULL``.
+
+No production caller reaches ``offer``: the pipeline uses ``await put`` and waits. The
+    429 half of FMEA row 10 therefore describes an unbuilt mechanism, which is a stronger
+    statement than "untested" and is recorded in docs/failure-modes.md.
+
+## `tests/soak/test_trend.py`
+
+### `test_the_false_positive_rate_over_flat_series_stays_near_the_significance_level`
+
+> The calibration that justifies alpha, and the reason the budget is over the run.
+
+With the budget at zero every positive slope is material, so this isolates the
+    permutation test. The first version of this module projected over 24 h instead of over
+    the observed window, which made every series material and sent the whole nominal 5%
+    straight through to red; that bug is what this case holds shut.
 
 ## `tests/unit/adapters/test_pgvector.py`
 

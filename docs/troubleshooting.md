@@ -91,7 +91,7 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 | p95 latency high, retrieval fine | Generation dominates (provider-bound) | Check the `timings_ms` split; retrieval and generation are measured separately for exactly this reason |
 | Rerank stage dominates latency | `rerank_top_n` too high for your reranker/hardware | Lower it, or use a smaller cross-encoder. fasterRag publishes no expected figure for the stage — read your own `fasterrag_stage_duration_seconds` |
 | Slow first query after startup | Cold caches and model load | Expected. Benchmarks report cold and warm separately ([performance.md](performance.md)); pre-warm if TTFT matters |
-| Memory grows over a long run | Should not happen — the soak test asserts no memory/fd growth | File a bug with duration, RSS trend, and `fasterrag status`; unbounded growth is a defect, not tuning |
+| Memory grows over a long run | Should not happen — `pytest -m soak` asserts no RSS or handle trend over a sampled run, though the 24 h run has never been performed ([testing-strategy.md](testing-strategy.md) §1.8) | File a bug with duration, RSS trend, and `fasterrag status`; unbounded growth is a defect, not tuning |
 | Your numbers disagree with a doc | Docs contain **goals**, not measurements, until a ledger entry exists | Check [benchmarks.md](benchmarks.md). An unmeasured claim presented as fact is itself a bug — file it |
 
 ## Still stuck
