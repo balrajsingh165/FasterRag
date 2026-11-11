@@ -55,15 +55,17 @@ class SentenceEmbedder(Protocol):
 
 
 def _sentences(text: str) -> list[Segment]:
-    """Return sentence-aligned tiles covering ``text`` exactly."""
-    boundaries = [match.end() for match in _SENTENCE_END.finditer(text)]
+    """Return sentence-aligned tiles covering ``text`` exactly.
+
+    The boundary needs no ``> cursor`` guard: both alternatives of ``_SENTENCE_END``
+    consume at least one character, so the non-overlapping match ends strictly increase.
+    """
     tiles: list[Segment] = []
     cursor = 0
 
-    for boundary in boundaries:
-        if boundary > cursor:
-            tiles.append((cursor, boundary))
-            cursor = boundary
+    for match in _SENTENCE_END.finditer(text):
+        tiles.append((cursor, match.end()))
+        cursor = match.end()
 
     if cursor < len(text):
         tiles.append((cursor, len(text)))

@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from fasterrag.core.chunking.models import Segment
-from fasterrag.errors import EmbedError
+from fasterrag.errors import ChunkError, EmbedError
 
 __all__ = ["WINDOW_OVERLAP_FRACTION", "pool_spans", "supports_pooling"]
 
@@ -48,14 +48,23 @@ def supports_pooling(model: Any) -> bool:
 
 
 def _windows(total: int, size: int) -> list[tuple[int, int]]:
-    """Return overlapping ``[start, end)`` token windows covering ``total`` tokens."""
+    """Return overlapping ``[start, end)`` token windows covering ``total`` tokens.
+
+    A window narrower than one token is refused here rather than relied on upstream: it
+    is the only input for which the walk below would tile the document into empty spans.
+    """
+    if size < 1:
+        raise ChunkError(
+            f"late chunking needs a window of at least one token, not {size}; a narrower "
+            "window tiles the document into empty spans and every vector pools nothing"
+        )
     if total <= size:
         return [(0, total)]
 
     step = max(size - size // WINDOW_OVERLAP_FRACTION, 1)
     bounds = []
     start = 0
-    while start < total:
+    while True:
         end = min(start + size, total)
         bounds.append((start, end))
         if end == total:

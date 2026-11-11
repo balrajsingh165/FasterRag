@@ -34,11 +34,12 @@ from fasterrag.core.chunking.models import (
     hard_split,
     within_budget,
 )
+from fasterrag.core.chunking.pooling import _windows
 from fasterrag.core.chunking.recursive import pack, split_span
 from fasterrag.core.chunking.semantic import _distance, _sentences, _threshold
 from fasterrag.core.parsing import parse_markdown, parse_plaintext
-from fasterrag.core.parsing.models import ParsedDocument
-from fasterrag.errors import EmbedError, ErrorCode, IngestionError
+from fasterrag.core.parsing.models import Block, ParsedDocument
+from fasterrag.errors import ChunkError, EmbedError, ErrorCode, IngestionError
 
 WORDS = "alpha beta gamma delta"
 DENSE_BODY = "検索拡張生成" * 200
@@ -569,6 +570,55 @@ def test_a_document_without_blocks_is_chunked_from_its_first_character() -> None
 
     assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 22)]
     assert chunks[0].text == "alpha beta gamma delta"
+
+
+def test_layout_chunks_the_text_in_front_of_the_first_block_rather_than_dropping_it() -> None:
+    """Tiling from ``blocks[0].start`` loses every character before it and breaks invariant 1.
+
+    The shipped parsers cannot reach this — ``DocumentBuilder.add`` strips, so the first
+    block starts at zero — but a directly built document from the plugin surface can.
+    """
+    text = "xxxxxxxxalpha beta gamma delta"
+    document = ParsedDocument(
+        text=text,
+        blocks=(Block(kind="paragraph", text=text[8:], start=8, end=len(text)),),
+        mime_type="text/plain",
+        parser="plugin",
+    )
+
+    chunks = LayoutChunker().split(document)
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 30)]
+    assert "".join(chunk.text for chunk in chunks) == text
+
+
+def test_a_window_narrower_than_one_token_is_refused_rather_than_tiled_empty() -> None:
+    """``_windows`` only terminates on ``end == total`` while the step fits in the window.
+
+    It lives here rather than beside its siblings in ``test_pooling.py`` because it needs
+    no ``torch``, and that module skips entirely without the optional extra.
+    """
+    with pytest.raises(ChunkError) as caught:
+        _windows(5, 0)
+
+    assert caught.value.code is ErrorCode.CHUNK_FAILED
+    assert _windows(5, 1) == [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)]
+
+
+def test_sentence_tiles_never_repeat_a_boundary_whatever_the_separators_do() -> None:
+    """``_sentences`` keeps no ``boundary > cursor`` guard, so the ends must strictly rise.
+
+    Both alternatives of the separator pattern consume a character, which is what makes a
+    zero-width match — and so a zero-width tile at a repeated boundary — impossible.
+    """
+    adversarial = ["", ".", ". ", ".  .  ", "\n\n\n\n", "a.\n\n\n!?\t \nb", "...!!!???", " \t\n "]
+
+    for text in adversarial:
+        tiles = _sentences(text)
+
+        assert all(end > start for start, end in tiles)
+        assert all(left[1] == right[0] for left, right in pairwise(tiles))
+        assert "".join(text[start:end] for start, end in tiles) == text
 
 
 def test_layout_merges_a_block_that_lands_exactly_on_the_chunk_size() -> None:

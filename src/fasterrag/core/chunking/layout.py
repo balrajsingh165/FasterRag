@@ -86,14 +86,19 @@ class LayoutChunker:
         )
 
     def _pack_blocks(self, document: ParsedDocument) -> list[Segment]:
-        """Group block-aligned tiles into chunks, starting a chunk at every heading."""
+        """Group block-aligned tiles into chunks, starting a chunk at every heading.
+
+        The first tile opens at offset zero rather than at the first block, so anything
+        the parser left in front of it is chunked rather than dropped (invariant 1).
+        """
         text = document.text
         blocks = document.blocks
         tiles: list[tuple[int, int, bool]] = []
 
         for index, block in enumerate(blocks):
+            tile_start = block.start if index else 0
             tile_end = blocks[index + 1].start if index + 1 < len(blocks) else len(text)
-            tiles.append((block.start, tile_end, block.kind == "heading"))
+            tiles.append((tile_start, tile_end, block.kind == "heading"))
 
         segments: list[Segment] = []
         for start, end, starts_section in tiles:
