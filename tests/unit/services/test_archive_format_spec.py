@@ -24,6 +24,7 @@ from fasterrag.services.archive import (
     FORMAT_VERSION,
     export_archive,
 )
+from tests.support.archive import archive_members
 
 SPEC_RELATIVE = Path("docs") / "archive-format.md"
 
@@ -133,10 +134,7 @@ async def exported(tmp_path: Path) -> dict[str, bytes]:
         include_vectors=True,
     )
     with tarfile.open(tmp_path / f"backup{ARCHIVE_SUFFIX}", "r:gz") as tar:
-        return {
-            member.name: tar.extractfile(member).read()  # type: ignore[union-attr]
-            for member in tar.getmembers()
-        }
+        return archive_members(tar)
 
 
 def rows(body: bytes) -> list[dict[str, Any]]:
@@ -234,10 +232,7 @@ async def hybrid_exported(tmp_path: Path) -> dict[str, bytes]:
         include_vectors=True,
     )
     with tarfile.open(tmp_path / f"backup{ARCHIVE_SUFFIX}", "r:gz") as tar:
-        return {
-            member.name: tar.extractfile(member).read()  # type: ignore[union-attr]
-            for member in tar.getmembers()
-        }
+        return archive_members(tar)
 
 
 def test_the_spec_keeps_the_keyword_leg_optional_on_a_vector_row() -> None:

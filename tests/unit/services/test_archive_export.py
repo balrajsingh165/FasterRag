@@ -23,6 +23,7 @@ from fasterrag.services.archive import (
     export_archive,
 )
 from fasterrag.services.lockfile import build_lock
+from tests.support.archive import archive_members
 
 
 def point(
@@ -77,10 +78,7 @@ async def write(tmp_path: Path, points: list[Point], **kwargs: object) -> Path:
 
 def members(archive: Path) -> dict[str, bytes]:
     with tarfile.open(archive, "r:gz") as tar:
-        return {
-            member.name: tar.extractfile(member).read()  # type: ignore[union-attr]
-            for member in tar.getmembers()
-        }
+        return archive_members(tar)
 
 
 async def test_the_archive_carries_every_required_member(tmp_path: Path) -> None:

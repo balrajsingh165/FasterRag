@@ -4,10 +4,10 @@ import pytest
 
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, IngestionError
-from fasterrag.services.journal import create_journal
+from fasterrag.services.journal import Journal, create_journal
 
 
-def journal(tmp_path: Path):  # type: ignore[no-untyped-def]
+def journal(tmp_path: Path) -> Journal:
     return create_journal(Settings.model_validate({}), root=tmp_path)
 
 

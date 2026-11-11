@@ -257,6 +257,7 @@ asyncio_mode = "auto"
 markers = [
     "integration: requires containerized backends (testcontainers)",
     "eval: retrieval eval harness over committed datasets",
+    "must_run: must execute in at least one CI lane; skipped in all of them fails the build",
     "load: load-test scenarios run on reference hardware",
     "soak: long-running stability runs",
     "chaos: scripted fault-injection scenarios",
@@ -265,6 +266,14 @@ markers = [
 [tool.coverage.run]
 source = ["src/fasterrag"]
 branch = true
+# CRITICAL: coverage's default "sysmon" core does not record dynamic contexts. Under it,
+# `--cov-context=test` labels only the FIRST context to enter a line, so a query for which
+# tests entered a line returns zero whenever module import got there first - a clean, green
+# run that measured almost nothing. Two passes of the TASK-0335 vacuity sweep were lost to
+# it. COVERAGE_CORE in the environment still overrides this; see docs/testing-strategy.md
+# and tests/test_coverage_records_contexts.py, which proves the pinned core labels every
+# visit and that the default one still does not.
+core = "ctrace"
 
 [tool.coverage.report]
 show_missing = true

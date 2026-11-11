@@ -30,6 +30,7 @@ from fasterrag.services.archive_import import (
     open_archive,
 )
 from fasterrag.services.lockfile import LockStore
+from tests.support.archive import archive_members, member_bytes
 
 pytestmark = pytest.mark.integration
 
@@ -181,12 +182,7 @@ async def test_two_exports_differ_only_by_the_manifest_timestamp(
             qdrant, adapter, collection=collection, destination=archive, include_vectors=True
         )
         with tarfile.open(archive) as tar:
-            exports.append(
-                {
-                    member.name: tar.extractfile(member).read()  # type: ignore[union-attr]
-                    for member in tar.getmembers()
-                }
-            )
+            exports.append(archive_members(tar))
 
     first, second = exports
     assert set(first) == set(second)
@@ -438,7 +434,7 @@ async def test_a_live_hybrid_export_declares_the_newer_major(
         qdrant, adapter, collection=collection, destination=archive, include_vectors=True
     )
     with tarfile.open(archive) as tar:
-        manifest = json.loads(tar.extractfile("manifest.json").read())  # type: ignore[union-attr]
+        manifest = json.loads(member_bytes(tar, "manifest.json"))
 
     assert manifest["format_version"] == FORMAT_VERSION
     assert manifest["includes_sparse"] is True

@@ -1,6 +1,7 @@
 import base64
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -159,7 +160,7 @@ def test_an_exporter_is_built_when_the_toggle_and_keys_are_present(
     assert create_langfuse_exporter(settings) is not None
 
 
-def test_storing_without_a_running_loop_does_not_raise(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_storing_without_a_running_loop_does_not_raise(tmp_path: Path) -> None:
     """A CLI one-shot has no loop; the local write must still happen."""
     store = TraceStore(tmp_path, exporters=[LangfuseExporter("http://x", "pk", "sk")])
 
@@ -168,7 +169,7 @@ def test_storing_without_a_running_loop_does_not_raise(tmp_path) -> None:  # typ
     assert store.load("a" * 32) is not None
 
 
-async def test_an_export_task_is_retained_until_it_finishes(tmp_path) -> None:  # type: ignore[no-untyped-def]
+async def test_an_export_task_is_retained_until_it_finishes(tmp_path: Path) -> None:
     """Asyncio holds only a weak reference: an unretained task can vanish mid-flight."""
     store = TraceStore(tmp_path, exporters=[LangfuseExporter("http://127.0.0.1:1", "pk", "sk")])
 
