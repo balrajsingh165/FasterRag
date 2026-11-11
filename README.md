@@ -1,126 +1,336 @@
-# fasterRag
+<div align="center">
 
-**A FastAPI-based, backend-only, all-in-one Retrieval-Augmented Generation (RAG) framework engineered for very large datasets.** Install it as a Python package, drive it from a CLI or REST API, plug in any vector database, any embedding model, and any LLM provider — all through one config file. Its goal is to be the fastest, most efficient, and most reliable RAG framework available, and this repository holds itself to a standing rule: **a claim without a measurement is a bug** ([docs/benchmarks.md](docs/benchmarks.md)).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/balrajsingh165/FasterRag/main/docs/assets/logo-banner-dark.svg">
+  <img src="https://raw.githubusercontent.com/balrajsingh165/FasterRag/main/docs/assets/logo-banner-light.svg" alt="fasterRag" width="420">
+</picture>
 
-> **Status: build phase, pre-beta (not yet on PyPI — install from source).** The engineering specification in [`docs/`](docs/) is being implemented in tracked vertical slices; all fourteen slices **S1–S14 have landed** and the full ledger lives in [docs/todo.md](docs/todo.md). Release confidence for the first tagged beta is assessed and re-derived in [docs/release-readiness.md](docs/release-readiness.md) — **64/100 for the beta and 12/100 as positioned, re-derived 2026-11-08** (68/15 on 2026-09-13; 62/100 at the first derivation, 2026-08-10 — the score fell while the tree grew, which that document records as its finding) — held down by unmade release decisions, zero citable benchmark entries, and unverified claims rather than construction, with the gating checklist recorded there.
->
-> | Shipped | Partial | Not yet |
-> |---|---|---|
-> | Config loader (fail-fast) · Qdrant adapter (docker/external/remote), **pgvector**, and **Chroma** (embedded), all three passing the shared contract suite against a running store, plus **Milvus** and **Weaviate**, whose contract suites ran against real servers for the first time on 2026-11-11 (46/46 and 54/54) and found four adapter defects · `doctor` · parsing (PDF/OCR, HTML, MD, DOCX, tabular) · five chunkers with property-tested invariants · contextual enrichment · checkpointed ingestion with dedup + DLQ from `path`/`url`/`inline` sources · hybrid retrieval + RRF(k=60) · cross-encoder rerank · SSE generation with span citations · grounded-or-refuse · embedding + semantic caches (memory/disk/redis) · eval harness (recall/MRR/nDCG + faithfulness) · `FasterRag` facade (async + sync) + entry-point plugins · CLI · REST routers · trace store + replay · index lockfile + drift · blue/green reindex + rollback · chaos suite · benchmark suite + ledger · autopilot (suggest-only) · Langfuse/Grafana provisioning · **API-key auth with scopes, rate limiting, and multi-tenancy** · **circuit breaker** · **OTLP trace + metric export** · **read-only observability dashboard** · Docker image + compose profiles | Degradation ladder (`hybrid_only` and `extractive` served; the `cache_only` rung is specified but not built — TASK-0159) · the Milvus and Weaviate contract suites, which pass against real servers on a developer machine but run in no CI job, so nothing re-proves them on a change (TASK-0412) · cost estimator **plus the runtime governor** (TASK-0242 ✅: both `cost.*_token_budget` keys refuse with `BUDGET_EXCEEDED`/402 before the provider is called) — partial only because the per-tenant counter is in-process, so N replicas grant N times the budget (TASK-0426) · D11 export/import (a live Qdrant round trip ran once and found three defects — a tautological vector-copy guard, provenance dropped on import, no `index.lock` written; all three are fixed and **re-verified against a fake adapter only**, because the integration suite skips without a Docker daemon. The cross-backend re-embed leg is still unrun — TASK-0079) | Pinecone adapter · a 24 h soak measurement and any load *result* at all — both suites were built 2026-11-11 and each is proven only against itself, while the Locust benchmark beside them has never been pointed at fasterRag (TASK-0243) · PyPI publication · **citable benchmarks — the [ledger](docs/benchmarks.md) holds only non-citable entries until the isolated-hardware baseline run** |
+### A backend-only, all-in-one RAG framework for FastAPI
+
+Ingest documents, retrieve with hybrid search, and answer with citations —<br>
+through a REST API, a CLI, or a Python package, all driven by one config file.
+
+[![CI](https://github.com/balrajsingh165/FasterRag/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/balrajsingh165/FasterRag/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12%2B-3776ab.svg?logo=python&logoColor=white)](pyproject.toml)
+[![Status](https://img.shields.io/badge/status-pre--beta-orange.svg)](docs/release-readiness.md)
+[![Types: mypy strict](https://img.shields.io/badge/types-mypy%20strict-2a6db2.svg)](pyproject.toml)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
+[**Documentation**](https://docs-fasterrag.fortiqo.xyz/) ·
+[**Quickstart**](docs/quickstart.md) ·
+[**Configuration**](docs/config-reference.md) ·
+[**REST API**](docs/api-reference.md) ·
+[**CLI**](docs/cli-reference.md) ·
+[**Changelog**](docs/CHANGELOG.md)
+
+</div>
 
 ---
 
-## What it is
+> [!IMPORTANT]
+> **Status: pre-beta, not yet on PyPI — install from source.** The code is real and tested, but
+> nothing has been released, and no performance figure in this repository is citable yet. This
+> project's standing rule is that **a claim without a measurement is a bug**, so the
+> [Project status](#project-status) section below says plainly what works, what is partial, and
+> what is not built.
 
-fasterRag is a **framework**, not a demo: you adopt it three ways, all backed by one engine and one config contract, with identical behavior and identical typed errors everywhere.
+## Contents
+
+- [What is fasterRag?](#what-is-fasterrag)
+- [Features](#features)
+- [Quickstart](#quickstart)
+- [How it works](#how-it-works)
+- [Integrations](#integrations)
+- [Configuration](#configuration)
+- [Documentation](#documentation)
+- [Project status](#project-status)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
+
+## What is fasterRag?
+
+Most RAG stacks ask you to assemble parsing, chunking, embedding, retrieval, reranking,
+caching, evaluation and observability by hand. fasterRag packages that pipeline as one backend
+service with typed errors and an evaluation harness built in, and puts every vendor behind an
+adapter so the vector database, embedding model and LLM provider are configuration, not code.
+
+You can use it three ways, all backed by the same service layer and the same `config.yaml`:
 
 | Surface | How | For |
 |---|---|---|
-| **Python package** *(shipped — `FasterRag` facade async + sync, standalone components, entry-point plugins)* | `pip install -e .` → `from fasterrag import FasterRag`, or piecemeal: `from fasterrag.chunking import RecursiveChunker` | Embedding RAG in your own application; using components standalone (chunkers, hybrid fusion, evals) |
-| **CLI** *(shipped)* | `fasterrag ingest / query / doctor / estimate / benchmark / replay ...` | Operations, scripting, CI |
-| **REST API** *(shipped)* | `fasterrag serve` → `/v1/ingest`, `/v1/query` (SSE streaming) | Services and non-Python clients |
+| **CLI** | `fasterrag ingest / query / doctor / estimate / benchmark / replay …` | Operations, scripting, CI |
+| **REST API** | `fasterrag serve` → `/v1/ingest`, `/v1/query` (SSE streaming) | Services and non-Python clients |
+| **Python package** | `from fasterrag import FasterRag` (async) or `from fasterrag.sync import FasterRag` | Embedding RAG in your own application |
 
-There is deliberately **no control GUI**. A separate, optional, self-hosted dashboard exists for *observability only* — metrics, costs, latencies, and full LLM input/output history — and cannot control the system ([docs/adr/ADR-0005](docs/adr/ADR-0005-api-cli-only-control-plane.md)).
+There is deliberately **no control GUI**. An optional, self-hosted dashboard exists for
+observability only and has no write endpoint
+([ADR-0005](docs/adr/ADR-0005-api-cli-only-control-plane.md)).
 
-## Why another RAG framework
+<div align="center">
+  <img src="https://raw.githubusercontent.com/balrajsingh165/FasterRag/main/docs/assets/help.svg" alt="Output of fasterrag --help, listing every top-level command" width="720">
+</div>
 
-Most RAG stacks make you assemble chunking, retrieval, reranking, caching, evaluation, and observability by hand — then leave you guessing whether any of it works. fasterRag's answer is an **engineered pipeline with proof built in**:
+## Features
 
-- **Speed by architecture** *(shipped; unmeasured — no citable benchmark yet)*: decoupled CPU parse/chunk pool streaming into stateful embedding workers (model loaded once per worker), bounded queues with backpressure, batched embedding and upserts, async-everything API, SSE streaming for time-to-first-token. See [docs/architecture.md](docs/architecture.md).
-- **Retrieval quality by default** *(shipped)*: hybrid dense + BM25 retrieval fused with Reciprocal Rank Fusion (k=60, per Cormack/Clarke/Büttcher SIGIR 2009) and cross-encoder reranking; contextual-retrieval-style chunk enrichment (Anthropic's Sept 2024 results: −49% failed retrievals, −67% with reranking — their measurement, not ours). See [docs/adr/ADR-0004](docs/adr/ADR-0004-hybrid-search-plus-reranking.md).
-- **Total pluggability** *(partial)*: Qdrant (reference adapter, contract-suite-tested in all three modes), pgvector, and Chroma (embedded, shipped 2026-11-03) all pass the shared contract suite against a running store, which is what makes the vendor-neutral contract evidence rather than intent; Milvus (2026-11-07) and Weaviate (2026-11-08) are shipped and registered but their contract subclasses have never reached a server, so they are code and not yet evidence; the Pinecone adapter is pending (TASK-0049) and refused at config load rather than silently accepted. OpenAI/Cohere/HuggingFace/Ollama embeddings and OpenAI/Anthropic/Cohere/Ollama/OpenAI-compatible LLMs: shipped. Entry-point plugin registration: shipped. See [docs/integrations.md](docs/integrations.md).
-- **Reliability as a feature** *(partial)*: typed error taxonomy, RFC 9457 problem responses, bulkheads, timeouts + backoff retries, checkpointed exactly-once ingestion with a dead-letter queue, zero-downtime blue/green reindexing, a circuit breaker on the embedding and vector-DB paths, and a public chaos suite: shipped. The `cache_only` degradation rung: specified, not yet built (TASK-0159). The LLM-path breaker shipped 2026-08-10 (TASK-0245 ✅) and is consulted inside the ladder's try block, so an open circuit degrades rather than 503s. See [docs/reliability.md](docs/reliability.md), [docs/differentiators.md](docs/differentiators.md).
+**Ingestion**
 
-## Sixty-second tour *(works today, from a source checkout)*
+- Parsers for PDF (with an optional OCR fallback for scanned pages), DOCX, HTML, Markdown,
+  plain text, CSV/TSV and JSON
+- Fixed, recursive, layout-aware and late chunking in the pipeline, plus a semantic chunker
+  available as a standalone component
+- Optional contextual enrichment of chunks before embedding
+- Idempotent ingestion jobs with content-hash deduplication and a dead-letter queue
+- `path`, `url` and `inline` sources, with SSRF-guarded URL fetching and allowlisted source roots
+
+**Retrieval and generation**
+
+- Hybrid retrieval: dense vectors and BM25 sparse vectors searched together and fused with
+  Reciprocal Rank Fusion (k=60)
+- Optional cross-encoder reranking
+- Metadata filters pushed down to both retrieval legs
+- Answers streamed over Server-Sent Events with source citations
+- An optional grounded-or-refuse mode that grades faithfulness and refuses rather than answering
+  without evidence
+
+**Operations**
+
+- API-key authentication with scopes, per-key rate limiting, and RFC 9457
+  `application/problem+json` errors with stable machine-readable codes
+- `fasterrag doctor` preflight checks, each failure printed with its fix
+- `fasterrag estimate` for token counts and projected embedding cost before ingesting, and
+  token budgets enforced at runtime
+- Blue/green re-embedding behind a collection alias, with rollback
+- A stored-trace `replay` command that re-runs a past query under a candidate configuration
+- OpenTelemetry trace and metric export, Prometheus metrics, and optional Langfuse and Grafana
+  provisioning
+- An optional semantic cache with memory, disk or Redis storage
+
+**Quality tooling**
+
+- A retrieval evaluation harness (recall@k, MRR, nDCG, plus an LLM-graded faithfulness score)
+  and a regression gate that compares a build against a committed baseline
+- A benchmark ledger that every performance statement must link to
+  ([docs/benchmarks.md](docs/benchmarks.md))
+
+## Quickstart
+
+**Requirements:** Python 3.12+, and Docker if you want fasterRag to start Qdrant for you.
+
+### 1. Install from source
 
 ```bash
-pip install -e ".[all]"          # PyPI publication lands with the first tagged beta
-fasterrag doctor                 # preflight: Docker, ports, disk, keys — every failure prints a fix
-fasterrag provision qdrant       # config-driven; system-managed container, named volume
-fasterrag estimate ./my-docs/    # token counts + projected embedding cost BEFORE ingesting
-fasterrag ingest ./my-docs/      # runs inline to completion; `--watch` follows the job's per-document progress (TASK-0196 ✅)
+git clone https://github.com/balrajsingh165/FasterRag.git
+cd FasterRag
+pip install -e ".[all]"        # or pick extras: ".[huggingface,rerank,openai]"
+cp .env.example .env           # then fill in the keys your config.yaml references
+```
+
+### 2. Use the CLI
+
+```bash
+fasterrag doctor                 # preflight: Docker, ports, disk, keys
+fasterrag provision qdrant       # start a managed Qdrant container
+fasterrag estimate ./my-docs/    # token counts and projected embedding cost
+fasterrag ingest ./my-docs/      # parse, chunk, embed and index a folder
 fasterrag query "What does the vendor agreement say about termination?"
 ```
 
-Or in Python — the `FasterRag` facade (async here; a blocking twin lives at `fasterrag.sync`) and the standalone components (`fasterrag.parsing`, `.chunking`, `.retrieval`, `.rerank`, `.evals`) are both shipped ([docs/python-api.md](docs/python-api.md)):
+### 3. Or use Python
 
 ```python
+import asyncio
+
 from fasterrag import FasterRag
 
-async with FasterRag.from_config("config.yaml") as rag:
-    await (await rag.ingest(["./my-docs/"])).wait()
-    result = await rag.query("What does the vendor agreement say about termination?")
-    print(result.answer, result.citations)
+
+async def main() -> None:
+    async with FasterRag.from_config("config.yaml") as rag:
+        job = await rag.ingest(["./my-docs/vendor-agreement.pdf"])
+        print(job.status)
+
+        result = await rag.query("What does the vendor agreement say about termination?")
+        print(result.answer)
+        for citation in result.citations:
+            print(citation)
+
+
+asyncio.run(main())
 ```
 
-Everything above is driven by two files: `config.yaml` (all behavior, committable, no secrets) and `.env` (secrets only, referenced by env-var name). Flipping `observability.langfuse: true` auto-provisions a full self-hosted Langfuse v3 stack and returns `http://<host>:3000` — zero code changes ([docs/observability.md](docs/observability.md)).
+`ingest` returns once the job has settled. The Python facade takes individual files, URLs or
+inline payloads; folder expansion is a CLI convenience. A blocking twin with the same methods
+lives at `fasterrag.sync`, and `rag.retrieve(...)` returns ranked chunks without calling an LLM.
 
-## The twelve differentiators
+### 4. Or run the REST service
 
-Specified with acceptance tests and proof metrics in [docs/differentiators.md](docs/differentiators.md):
+```bash
+fasterrag serve                  # API on :8000
 
-1. **Index lockfile & reproducible builds** — every hashed config leaf is covered by a schema-derived mutation suite, so no single-field drift goes unreported
-2. **Zero-downtime reindexing** — blue/green + eval gate + rollback by alias flip, no rebuild
-3. **Checkpointed, idempotent ingestion** — crash-resume, dedup, DLQ with reason codes
-4. **Degradation ladder** — explicit degraded modes, never a silent quality drop
-5. **Grounded-or-refuse answering** — span citations mandatory; refuses instead of hallucinating
-6. **Autopilot** — eval-driven tuning suggestions from *your* corpus; never auto-applies
-7. **Continuous retrieval regression gate** — you cannot accidentally ship a worse RAG
-8. **Time-travel replay** — re-execute past queries under a candidate config, diff the results
-9. **Cost governor & preflight estimator** — know the bill before ingesting; enforce budgets at runtime
-10. **`fasterrag doctor`** — preflight diagnostics with concrete fix-it instructions
-11. **Portability & anti-lock-in** — export/import everything; leaving is a supported feature
-12. **Chaos-certified** — the fault-injection suite is public and repeatable
+curl -s http://localhost:8000/v1/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"sources": [{"type": "path", "value": "/data/docs/vendor-agreement.pdf"}]}'
 
-## Documentation map
+curl -s http://localhost:8000/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What does the vendor agreement say about termination?", "stream": false}'
+```
 
-All documentation lives in [`docs/`](docs/) (only `CLAUDE.md` and this README sit at root).
+> [!WARNING]
+> Authentication is **off by default** so a local first run needs no keys. Turn on
+> `security.auth` and set `ingestion.allowed_source_roots` before the API is reachable from
+> anything other than your own machine — see [docs/security.md](docs/security.md).
 
-| Read this | For |
+The full walkthrough is in [docs/quickstart.md](docs/quickstart.md).
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph Ingestion
+        S[Sources<br/>path · url · inline] --> P[Parse]
+        P --> C[Chunk]
+        C --> E[Embed]
+        E --> I[(Vector DB<br/>dense + sparse)]
+    end
+
+    subgraph Query
+        Q[Question] --> D[Dense search]
+        Q --> B[BM25 search]
+        D --> F[RRF fusion]
+        B --> F
+        F --> R[Rerank]
+        R --> X[Context assembly]
+        X --> L[LLM]
+        L --> A[Answer + citations]
+    end
+
+    I -.-> D
+    I -.-> B
+```
+
+- **Routers hold no business logic.** REST, CLI and the Python facade all call the same
+  service layer, so behaviour and errors are identical on every surface.
+- **Adapters isolate vendors.** Vector databases, embedding providers and LLM providers each
+  sit behind an interface and a factory; vendor types do not leak past the adapter.
+- **CPU work stays off the event loop.** Parsing and chunking run in a process pool and stream
+  through a bounded queue into batched embedding workers.
+- **Configuration is validated up front.** `config.yaml` is checked in full at load, and every
+  violation is reported at once.
+
+More detail: [docs/architecture.md](docs/architecture.md) · [docs/flow.md](docs/flow.md) ·
+[docs/internals.md](docs/internals.md).
+
+## Integrations
+
+| Layer | Supported |
 |---|---|
-| **[quickstart.md](docs/quickstart.md)** | **Start here** — zero to an answered query via CLI, Python, or REST |
-| [how-to-use.md](docs/how-to-use.md) | The post-release user manual: install, drive, tune, operate, upgrade |
-| [internals.md](docs/internals.md) | How the code implements the contract: module map, lifecycles, extension recipes |
-| [rebuild-playbook.md](docs/rebuild-playbook.md) | Reproduce the system from the docs: build order + the trap registry |
-| [verification.md](docs/verification.md) | Prove a checkout matches the docs: tiered acceptance procedure |
-| [release.md](docs/release.md) · [release-readiness.md](docs/release-readiness.md) | How a release ships, and the confidence threshold (≥85) that authorizes it |
-| [cookbook.md](docs/cookbook.md) | Ready-made config recipes (local/air-gapped, max accuracy, cost-optimized, multi-tenant, …) |
-| [migration-guide.md](docs/migration-guide.md) | Coming from LangChain / LlamaIndex / Haystack / a hand-rolled stack |
-| [troubleshooting.md](docs/troubleshooting.md) | Symptom → cause → fix |
-| [scope.md](docs/scope.md) | Vision, goals, non-goals, the 22-point RAG pain-point catalogue and mitigations |
-| [architecture.md](docs/architecture.md) | Workers, batching, chunking strategies, hybrid retrieval, caching, fault tolerance |
-| [flow.md](docs/flow.md) | End-to-end Mermaid flows (ingestion, worker hand-off, query, cache, provisioning) |
-| [structure.md](docs/structure.md) | Intended repository layout and layer responsibilities |
-| [config-reference.md](docs/config-reference.md) | Every `config.yaml` key: type, default, validation, description |
-| [python-api.md](docs/python-api.md) | The importable package surface, standalone components, plugin contract |
-| [api-reference.md](docs/api-reference.md) | REST endpoints, SSE streaming semantics, RFC 9457 error model |
-| [cli-reference.md](docs/cli-reference.md) | Every command and flag |
-| [data-model.md](docs/data-model.md) | Canonical entity schemas (Document, Chunk, Job, Trace, IndexLock) and their invariants |
-| [prompts.md](docs/prompts.md) | The four LLM call-site contracts: generation, enrichment, faithfulness, golden-set |
-| [integrations.md](docs/integrations.md) | Vector DBs, embedding/LLM providers, observability tools |
-| [observability.md](docs/observability.md) | Metrics catalogue, tracing, dashboard, Langfuse/Grafana auto-provisioning |
-| [deployment.md](docs/deployment.md) | Self-hosting modes, sizing, revert playbook |
-| [security.md](docs/security.md) | Secrets policy, auth/scopes, multi-tenancy, supply chain |
-| [reliability.md](docs/reliability.md) · [failure-modes.md](docs/failure-modes.md) · [slo.md](docs/slo.md) · [disaster-recovery.md](docs/disaster-recovery.md) | Error taxonomy, FMEA, SLIs/SLOs, backup + restore drill |
-| [testing-strategy.md](docs/testing-strategy.md) · [performance.md](docs/performance.md) · [benchmarks.md](docs/benchmarks.md) | Testing pyramid incl. chaos suite, measurement methodology, the benchmark ledger |
-| [differentiators.md](docs/differentiators.md) | The twelve capabilities, each with acceptance test + proof metric |
-| [glossary.md](docs/glossary.md) · [references.md](docs/references.md) · [archive-format.md](docs/archive-format.md) | Canonical terminology, external evidence sources, portability archive spec |
-| [adr/](docs/adr/) | Architecture Decision Records (MADR) |
-| [todo.md](docs/todo.md) | The ONE task file: done, in progress, pending, todo, future |
-| [CONTRIBUTING.md](docs/CONTRIBUTING.md) · [CHANGELOG.md](docs/CHANGELOG.md) | Rules and history |
+| **Vector databases** | Qdrant (reference adapter), pgvector, Chroma (embedded), Milvus, Weaviate |
+| **Embedding providers** | OpenAI, Cohere, Hugging Face (local, via sentence-transformers), Ollama |
+| **LLM providers** | OpenAI, Anthropic, Cohere, Ollama, and any OpenAI-compatible endpoint |
+| **Reranking** | Local cross-encoder models |
+| **Caches** | In-memory, disk, Redis |
+| **Observability** | OpenTelemetry (OTLP), Prometheus metrics, Langfuse, Grafana |
 
-## Project principles (short version)
+All five vector-database adapters share one contract test suite. The Pinecone adapter is
+pending (TASK-0049) and is refused at config load rather than silently accepted. Details and
+per-provider configuration: [docs/integrations.md](docs/integrations.md).
 
-1. **Config drives everything; secrets live only in `.env`.** Every integration toggle defaults to `false`.
-2. **Control plane is programmatic only** (API/CLI/library); the dashboard is read-only observability.
-3. **A claim without a measurement is a bug** — unmeasured statements are goals, and "fastest" is only ever claimed against a baseline we measured ourselves.
-4. **Reliability is tested, not asserted** — FMEA rows name their proving tests; the chaos suite is public.
-5. **Incremental, revertible shipping** — a PR per reviewable change with small fixes direct to `main` (maintainer instruction 2026-10-28, superseding the trunk-only rule of 2026-07-30), single-line commits, slice tags, a written revert playbook.
+## Configuration
+
+Everything is driven by two files: `config.yaml` holds all behaviour and is safe to commit, and
+`.env` holds secrets only, referenced from the YAML by environment-variable name.
+
+```yaml
+vector_db:
+  provider: qdrant          # qdrant | pgvector | chroma | milvus | weaviate
+
+embeddings:
+  provider: huggingface     # openai | cohere | huggingface | ollama
+  model: BAAI/bge-small-en-v1.5
+
+chunking:
+  strategy: recursive
+  chunk_size: 768
+  overlap: 64
+
+retrieval:
+  hybrid: true
+  rerank: true
+  top_k: 5
+
+llm:
+  provider: openai          # openai | anthropic | cohere | ollama | openai_compatible
+```
+
+Any key can be overridden for one command with `--set`, for example
+`fasterrag --set retrieval.top_k=10 query "…"`. Every key, its type, default and validation
+rule is listed in [docs/config-reference.md](docs/config-reference.md), and ready-made setups
+(local and air-gapped, cost-optimised, multi-tenant, …) are in
+[docs/cookbook.md](docs/cookbook.md).
+
+## Documentation
+
+The documentation site is at **<https://docs-fasterrag.fortiqo.xyz/>**, built from
+[`docs/`](docs/).
+
+| Start here | Reference | Operating it | Evidence |
+|---|---|---|---|
+| [Quickstart](docs/quickstart.md) | [REST API](docs/api-reference.md) | [Deployment](docs/deployment.md) | [Benchmark ledger](docs/benchmarks.md) |
+| [Using fasterRag](docs/how-to-use.md) | [CLI](docs/cli-reference.md) | [Security](docs/security.md) | [Testing strategy](docs/testing-strategy.md) |
+| [Cookbook](docs/cookbook.md) | [Configuration](docs/config-reference.md) | [Reliability](docs/reliability.md) | [Release readiness](docs/release-readiness.md) |
+| [Migration guide](docs/migration-guide.md) | [Python package](docs/python-api.md) | [Observability](docs/observability.md) | [Verification](docs/verification.md) |
+| [Troubleshooting](docs/troubleshooting.md) | [Data model](docs/data-model.md) | [Failure modes](docs/failure-modes.md) | [Architecture](docs/architecture.md) |
+
+Design decisions are recorded as ADRs in [docs/adr/](docs/adr/), and the twelve capabilities
+the project is built around are specified, each with an acceptance test, in
+[docs/differentiators.md](docs/differentiators.md).
+
+## Project status
+
+fasterRag is in its build phase. Release confidence is re-derived at each release decision and
+published whatever it says, in [docs/release-readiness.md](docs/release-readiness.md); the
+single task ledger is [docs/todo.md](docs/todo.md).
+
+| Working | Partial | Not yet |
+|---|---|---|
+| Config loader · CLI · REST API · Python facade (async and sync) · parsing and chunking · ingestion with dedup and a dead-letter queue · hybrid retrieval with RRF · cross-encoder rerank · SSE generation with citations · Qdrant, pgvector, Chroma, Milvus and Weaviate adapters · API-key auth with scopes · rate limiting · circuit breaker · evaluation harness and regression gate · `doctor` · cost estimator · trace store and replay · blue/green re-embedding · OTLP export · read-only dashboard · Docker image and compose profiles | Degradation ladder (`hybrid_only` and `extractive` served; the `cache_only` rung is specified but not built — TASK-0159) · the Milvus and Weaviate contract suites, which pass against real servers on a developer machine but run in no CI job, so nothing re-proves them on a change (TASK-0412) · portability export/import, in progress (TASK-0079) · multi-tenancy, with the caveats recorded in [docs/security.md](docs/security.md) · evaluation datasets, which are small | Pinecone adapter (TASK-0049) · PyPI publication (TASK-0087) · citable benchmarks — the [ledger](docs/benchmarks.md) holds only non-citable entries until the isolated-hardware baseline run |
+
+Its goal is to be the fastest, most efficient, and most reliable RAG framework available. That
+is a goal, not a result: no measurement in this repository yet supports a speed claim, and none
+is made.
+
+## Development
+
+```bash
+uv sync --locked --extra dev --python 3.12   # install exactly uv.lock
+pre-commit install                           # pre-commit and commit-msg hooks
+
+ruff check . && ruff format --check .        # lint and format
+mypy src/                                    # strict type check
+pytest -m "not integration and not eval and not load and not soak"   # what CI gates on
+pytest -m integration                        # adapter contract suites against real backends
+pytest -m eval                               # retrieval evaluation harness
+```
+
+The unit tier holds over 4,000 tests (measured 2026-11-11), and CI additionally runs
+packaging, secret-scanning, dependency-audit and documentation-truth gates. See
+[docs/testing-strategy.md](docs/testing-strategy.md).
 
 ## Contributing
 
-Read [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) first — commit format (single-line, no trailers), comment policy (docstrings only), the one-todo-file rule, and the quality gates are strictly enforced.
+Contributions are welcome. Please read [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) first — a
+few rules are enforced by CI and will surprise you otherwise:
+
+- **Conventional Commits, single line**, no body and no trailers
+- **Docstrings only** — no inline or explanatory comments beyond `# CRITICAL:`, `# TODO:` and
+  `# BLOCKED:` markers
+- **One task file** — [docs/todo.md](docs/todo.md) is the only ledger
+- **No unmeasured claims** — a performance or superiority statement must link to the benchmark
+  ledger or be written as a goal
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The decision and its reasoning are recorded in [ADR-0008](docs/adr/ADR-0008-apache-2-license.md).
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The decision and its reasoning are
+recorded in [ADR-0008](docs/adr/ADR-0008-apache-2-license.md).
