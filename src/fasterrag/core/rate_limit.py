@@ -39,10 +39,17 @@ and the failure is logged with the request's trace id — never swallowed. The r
 choosing that over failing closed is recorded in ``docs/security.md`` §2, where an operator
 deciding how to deploy this will actually read it.
 
-**Never run against a live Redis server.** Every test covering :class:`RedisRateLimiter`
-drives an in-memory double, because no Redis server was available where this was written.
-The command sequence is the conventional one and the transaction grouping is asserted, but
-"this behaves correctly against a real Redis" is an untested claim (TASK-0290).
+**Now run against a live Redis server, and it agrees with the double.** This module was
+written where no Redis was available, so every test covering :class:`RedisRateLimiter`
+drove an in-memory double and "this behaves correctly against a real Redis" was an
+untested claim. ``tests/integration/test_redis_rate_limit_server.py`` closes it against
+``redis:7.4.2-alpine`` over a real socket (2026-11-11): the ceiling, the window roll, the
+server-side ``EXPIRE``, the shared ceiling, the per-identity split and the fingerprinted
+key all hold, and one case drives the same decisions through both the server and
+``FakeAsyncRedis`` and finds **no divergence**. What is still untested, and keeps TASK-0290
+open: timeouts, resets, partitions, failover and pool exhaustion, so the fail-open path
+below is still reachable only by injecting an error; and replicas sharing one ceiling
+across *processes*, which is the topology this backend exists for.
 
 The connection handling deliberately mirrors ``fasterrag.core.cache.redis``: same optional
 import, same ``ConfigError`` when the extra is missing, same ``from_url``. Folding the two
