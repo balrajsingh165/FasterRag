@@ -13,8 +13,10 @@ import pytest
 from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.api.main import CONFIG_PATH_VAR
 from fasterrag.cli.commands import processes
+from fasterrag.cli.commands.processes import exposed_without_auth
 from fasterrag.cli.main import main
 from fasterrag.cli.output import ExitCode
+from fasterrag.config.schema import Settings
 from fasterrag.errors import FasterRagError
 from tests.unit.cli.conftest import write_config
 
@@ -259,3 +261,31 @@ def test_the_worker_count_overrides_reach_the_report(
 
     payload = json.loads(capsys.readouterr().out)
     assert (payload["cpu"], payload["embed"]) == (3, 7)
+
+
+@pytest.mark.parametrize(
+    ("host", "auth", "exposed"),
+    [
+        ("127.0.0.1", False, False),
+        ("::1", False, False),
+        ("localhost", False, False),
+        ("0.0.0.0", False, True),
+        ("10.0.0.5", False, True),
+        ("api.internal", False, True),
+        ("0.0.0.0", True, False),
+    ],
+)
+def test_an_unauthenticated_non_loopback_bind_is_recognised(
+    host: str, auth: bool, exposed: bool
+) -> None:
+    configured = Settings.model_validate({"security": {"auth": auth}})
+
+    assert exposed_without_auth(host, configured) is exposed
+
+
+def test_the_default_bind_is_loopback() -> None:
+    """Auth defaults to off, so the default bind must not be reachable from other machines."""
+    configured = Settings.model_validate({})
+
+    assert configured.app.host == "127.0.0.1"
+    assert not exposed_without_auth(configured.app.host, configured)

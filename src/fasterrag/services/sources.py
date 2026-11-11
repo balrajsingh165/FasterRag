@@ -49,6 +49,7 @@ __all__ = [
     "INLINE_SCHEME",
     "ResolvedSources",
     "guard_archive_path",
+    "guard_source_paths",
     "resolve_sources",
     "typed_source",
 ]
@@ -125,12 +126,7 @@ def _within(value: str, roots: Sequence[str]) -> Path | None:
 
 
 def _guard_path(value: str, settings: Settings) -> None:
-    """Refuse a path source that falls outside ``ingestion.allowed_source_roots``.
-
-    Raises:
-        IngestionError: If path sources are unconfined on a served deployment, or the
-            path resolves outside every configured root.
-    """
+    """Refuse a path source that falls outside ``ingestion.allowed_source_roots``."""
     # CRITICAL: `value` names a file on the SERVER and arrives from whoever called
     # `POST /v1/ingest`. Unconfined, it reads `.env`, `config.yaml` or an SSH key into a
     # collection the same caller can query back. The resolve-before-compare lives in
@@ -159,13 +155,18 @@ def _guard_path(value: str, settings: Settings) -> None:
     )
 
 
-def guard_archive_path(value: str, settings: Settings) -> Path:
-    """Return a caller-supplied archive path confined to ``security.allowed_archive_roots``.
+def guard_source_paths(values: Sequence[str], settings: Settings) -> None:
+    """Refuse any caller-supplied path outside ``ingestion.allowed_source_roots``.
 
-    Raises:
-        FasterRagError: If archive paths are unconfined on a served deployment, or the
-            path resolves outside every configured root.
+    The public form of the ingest path guard, for every other endpoint that reads a file
+    the caller names — an estimate parses the same bytes an ingest would.
     """
+    for value in values:
+        _guard_path(value, settings)
+
+
+def guard_archive_path(value: str, settings: Settings) -> Path:
+    """Return a caller-supplied archive path confined to ``security.allowed_archive_roots``."""
     # CRITICAL: `value` names a file on the SERVER and arrives in the body of
     # `POST /v1/admin/export` (which WRITES it) or `POST /v1/admin/import` (which reads it).
     # Unconfined, export overwrites anything the process can write — `config.yaml`, a web

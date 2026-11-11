@@ -12,6 +12,7 @@ and the endpoint's own availability is not what it is reporting on.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter
@@ -30,7 +31,7 @@ from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.lockfile import create_lock_store
 from fasterrag.services.provision_registry import provision_tool, stop_tool, tool_status
 from fasterrag.services.provisioning import ProvisionResult
-from fasterrag.services.sources import guard_archive_path
+from fasterrag.services.sources import guard_archive_path, guard_source_paths
 from fasterrag.services.tenancy import scoped_name, unscoped_name
 
 __all__ = ["router"]
@@ -86,7 +87,14 @@ async def provision_down(tool: str, settings: CurrentSettings) -> dict[str, Any]
 async def estimate(body: EstimateRequest, settings: CurrentSettings) -> dict[str, Any]:
     """Report what ingesting sources would cost, before embedding any of them (D9)."""
     require_estimator(settings)
-    return estimate_sources(body.sources, settings, all_providers=body.all_providers).as_dict()
+    # CRITICAL: the same confinement an ingest gets. An estimate parses the files it is
+    # given, so without the guard it reported the existence, size and token count of any
+    # path on the server, whatever `ingestion.allowed_source_roots` said.
+    guard_source_paths(body.sources, settings)
+    estimated = await asyncio.to_thread(
+        estimate_sources, body.sources, settings, all_providers=body.all_providers
+    )
+    return estimated.as_dict()
 
 
 @router.post("/admin/export")
@@ -125,12 +133,7 @@ async def import_collection(
     adapter: CurrentVectorDB,
     tenant: CurrentTenant,
 ) -> dict[str, Any]:
-    """Import a previously exported archive (D11).
-
-    Verification runs before anything is written, so a refused archive leaves the target
-    untouched rather than half-populated. The source path is confined first, by the same
-    rule the export side applies.
-    """
+    """Import a previously exported archive (D11)."""
     with open_archive(guard_archive_path(body.archive, settings)) as reader:
         target = scoped_name(body.target_collection or reader.collection, tenant)
 

@@ -13,18 +13,30 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import os
 from typing import Any
 
 from fasterrag.api.main import CONFIG_PATH_VAR, create_app
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import settings_from
+from fasterrag.config.schema import Settings
 from fasterrag.errors import ConfigError, FasterRagError
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import create_journal
 from fasterrag.workers.cpu_pool import resolve_pool_size
 
-__all__ = ["run_serve", "run_worker"]
+__all__ = ["exposed_without_auth", "run_serve", "run_worker"]
+
+
+def exposed_without_auth(host: str, settings: Settings) -> bool:
+    """Return whether this bind accepts unauthenticated requests from other machines."""
+    if settings.security.auth:
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower() != "localhost"
 
 
 async def run_serve(args: argparse.Namespace, console: Console) -> ExitCode:
@@ -40,6 +52,12 @@ async def run_serve(args: argparse.Namespace, console: Console) -> ExitCode:
     host = args.host or settings.app.host
     port = args.port or settings.app.port
     console.emit(f"serving on http://{host}:{port} (config: {args.config})")
+    if exposed_without_auth(host, settings):
+        console.error(
+            f"WARNING: binding {host} with security.auth off. Anyone who can reach this "
+            "port can ingest files readable by this process and query them back. Set "
+            "security.auth: true and ingestion.allowed_source_roots, or bind 127.0.0.1"
+        )
 
     if args.reload:
         # CRITICAL: reload runs the application in a child process, which cannot receive an

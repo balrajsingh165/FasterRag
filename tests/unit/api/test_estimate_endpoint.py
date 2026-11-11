@@ -63,3 +63,28 @@ def test_a_disabled_estimator_parses_nothing(tmp_path: Path) -> None:
 
     assert response.status_code == 422
     assert "cost.estimator" in response.json()["detail"]
+
+
+def test_an_estimate_is_confined_to_the_allowed_source_roots(tmp_path: Path) -> None:
+    """It parses the files it is given, so unguarded it probed any path on the server."""
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    response = client(ingestion={"allowed_source_roots": [str(allowed)]}).post(
+        "/v1/estimate", json={"sources": corpus(outside)}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == ErrorCode.VALIDATION_FAILED.value
+    assert "allowed_source_roots" in response.json()["detail"]
+
+
+def test_an_estimate_inside_an_allowed_root_still_answers(tmp_path: Path) -> None:
+    response = client(ingestion={"allowed_source_roots": [str(tmp_path)]}).post(
+        "/v1/estimate", json={"sources": corpus(tmp_path)}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["documents"] == 1

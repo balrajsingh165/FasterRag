@@ -124,7 +124,7 @@ class Section(BaseModel):
 class AppSettings(Section):
     """API server process settings."""
 
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: Annotated[int, Field(ge=1, le=65535)] = 8000
     workers: Annotated[int, Field(ge=1)] = 4
     log_level: Literal["debug", "info", "warning", "error"] = "info"

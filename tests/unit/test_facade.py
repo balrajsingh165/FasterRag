@@ -1,5 +1,6 @@
 import inspect
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -241,3 +242,59 @@ async def test_the_new_entry_points_check_they_were_started(name: str) -> None:
 
     with pytest.raises(FasterRagError, match="not been started"):
         await (method() if name == "collections" else method("anything"))
+
+
+def started(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, list[list[str]]]:
+    """Return a facade that believes it is started, and the sources its service received."""
+    received: list[list[str]] = []
+
+    class Recording:
+        async def ingest(self, sources: list[str], **kwargs: Any) -> str:
+            received.append(list(sources))
+            return "settled"
+
+    monkeypatch.setattr(
+        "fasterrag.api.dependencies.build_ingestion", lambda *args, **kwargs: Recording()
+    )
+    rag: Any = FasterRag.from_settings(Settings.model_validate({}))
+    rag._started = True
+    rag._vector_db = rag._journal = rag._cache = rag._embeddings = object()
+    return rag, received
+
+
+async def test_ingest_replaces_a_directory_with_the_files_inside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The README's first example passes a folder; taken verbatim it was one unreadable document."""
+    (tmp_path / "a.md").write_text("a", encoding="utf-8")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "b.md").write_text("b", encoding="utf-8")
+    rag, received = started(monkeypatch)
+
+    await rag.ingest([str(tmp_path)])
+
+    assert received == [[str(tmp_path / "a.md")]]
+
+
+async def test_recursive_ingest_descends_into_subdirectories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.md").write_text("a", encoding="utf-8")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "b.md").write_text("b", encoding="utf-8")
+    rag, received = started(monkeypatch)
+
+    await rag.ingest([str(tmp_path)], recursive=True)
+
+    assert received == [[str(tmp_path / "a.md"), str(tmp_path / "nested" / "b.md")]]
+
+
+async def test_an_empty_directory_is_refused_rather_than_ingested_as_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rag, received = started(monkeypatch)
+
+    with pytest.raises(FasterRagError, match="nothing to ingest"):
+        await rag.ingest([str(tmp_path)])
+
+    assert received == []

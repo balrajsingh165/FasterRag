@@ -166,8 +166,8 @@ from fasterrag import FasterRag
 
 async def main() -> None:
     async with FasterRag.from_config("config.yaml") as rag:
-        job = await rag.ingest(["./my-docs/"])
-        await job.wait()
+        job = await rag.ingest(["./my-docs/"], recursive=True)   # returns once the job has settled
+        print(job.status, job.counts)
 
         result = await rag.query("What are the payment terms?")
         print(result.answer)

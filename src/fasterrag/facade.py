@@ -204,16 +204,29 @@ class FasterRag:
         metadata: dict[str, Any] | None = None,
         tenant: str | None = None,
         idempotency_key: str | None = None,
+        recursive: bool = False,
     ) -> JobRecord:
-        """Ingest sources, returning the settled job record."""
+        """Ingest sources, returning the settled job record.
+
+        A directory is replaced by the files inside it, as ``fasterrag ingest`` does;
+        ``recursive`` descends into subdirectories.
+        """
         from fasterrag.api.dependencies import build_ingestion
+        from fasterrag.cli.sources import expand_sources
 
         self._require_started()
+        expanded = expand_sources(sources, recursive=recursive)
+        if not expanded:
+            raise FasterRagError(
+                "there is nothing to ingest: every source was a directory holding no "
+                "visible files. Pass recursive=True to descend into subdirectories",
+                code=ErrorCode.VALIDATION_FAILED,
+            )
         service = build_ingestion(
             self.settings, self.vector_db, self.journal, self.cache, router=self.embeddings
         )
         return await service.ingest(
-            sources,
+            expanded,
             collection=collection,
             metadata=metadata,
             tenant=tenant,

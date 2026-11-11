@@ -12,7 +12,7 @@ Conventions used below:
 
 ```yaml
 app:
-  host: 0.0.0.0
+  host: 127.0.0.1
   port: 8000
   workers: 4
   log_level: info
@@ -206,7 +206,7 @@ security:
 
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
-| `app.host` | str | `0.0.0.0` | valid IPv4/IPv6 address or hostname | Bind address for the API server. |
+| `app.host` | str | `127.0.0.1` | valid IPv4/IPv6 address or hostname | Bind address for the API server and the dashboard. Loopback by default, because `security.auth` defaults to `false`: an unauthenticated API must not be reachable from other machines unless an operator says so. The container image passes `--host 0.0.0.0` explicitly and publishes on `127.0.0.1`; set this to a routable address only together with `security.auth: true`. `fasterrag serve` logs a warning when it binds a non-loopback address with auth off. |
 | `app.port` | int | `8000` | 1–65535 | API server port. |
 | `app.workers` | int | `4` | ≥ 1 | Uvicorn/Gunicorn worker process count for the API tier (not pipeline workers). |
 | `app.log_level` | str | `info` | one of `debug`, `info`, `warning`, `error` | Structured-log verbosity. |

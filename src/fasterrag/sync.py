@@ -118,6 +118,7 @@ class FasterRag:
         metadata: dict[str, Any] | None = None,
         tenant: str | None = None,
         idempotency_key: str | None = None,
+        recursive: bool = False,
     ) -> JobRecord:
         """Ingest sources, blocking until the job settles."""
         return self._run(
@@ -127,6 +128,7 @@ class FasterRag:
                 metadata=metadata,
                 tenant=tenant,
                 idempotency_key=idempotency_key,
+                recursive=recursive,
             )
         )
 

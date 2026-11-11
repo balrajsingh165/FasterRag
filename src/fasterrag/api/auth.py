@@ -188,9 +188,14 @@ class KeyRegistry:
 
     def resolve(self, presented: str) -> ApiKey | None:
         """Return the matching key, or ``None``."""
+        # CRITICAL: compared as bytes. `secrets.compare_digest` raises `TypeError` on a
+        # `str` holding a non-ASCII character, and the Authorization header is latin-1
+        # decoded, so one such byte in a bearer token turned a 401 into an unhandled 500
+        # for an unauthenticated caller.
+        candidate = presented.encode("utf-8", "surrogatepass")
         found: ApiKey | None = None
         for key in self._keys:
-            if secrets.compare_digest(key.secret, presented):
+            if secrets.compare_digest(key.secret.encode("utf-8", "surrogatepass"), candidate):
                 found = key
         return found
 

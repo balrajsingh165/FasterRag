@@ -573,9 +573,9 @@ class _CountingSecrets:
 
     def __init__(self) -> None:
         """Start with nothing compared."""
-        self.compared: list[tuple[str, str]] = []
+        self.compared: list[tuple[bytes, bytes]] = []
 
-    def compare_digest(self, stored: str, presented: str) -> bool:
+    def compare_digest(self, stored: bytes, presented: bytes) -> bool:
         """Record the pair, then answer exactly as the real function would."""
         self.compared.append((stored, presented))
         return secrets.compare_digest(stored, presented)
@@ -592,7 +592,7 @@ def test_the_registry_compares_keys_in_constant_time(monkeypatch: pytest.MonkeyP
     registry = KeyRegistry([ApiKey(secret="aaa", scopes=ALL_SCOPES)])
 
     assert registry.resolve("aaa") is not None
-    assert counting.compared == [("aaa", "aaa")]
+    assert counting.compared == [(b"aaa", b"aaa")]
 
 
 def test_every_key_is_compared_even_after_one_matches(
@@ -610,4 +610,19 @@ def test_every_key_is_compared_even_after_one_matches(
     )
 
     assert registry.resolve("aaa") is not None
-    assert [stored for stored, _ in counting.compared] == ["aaa", "bbb"]
+    assert [stored for stored, _ in counting.compared] == [b"aaa", b"bbb"]
+
+
+def test_a_bearer_token_with_a_non_ascii_byte_is_refused_not_crashed_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`compare_digest` raises on such a `str`, which turned a 401 into an unhandled 500."""
+    with secured(monkeypatch) as client:
+        response = client.post(
+            "/v1/query",
+            json={"query": "hello"},
+            headers={"Authorization": b"Bearer caf\xe9-key"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == ErrorCode.AUTH_INVALID.value
