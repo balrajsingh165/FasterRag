@@ -60,10 +60,14 @@ def test_the_real_count_replaces_the_estimate(monkeypatch: pytest.MonkeyPatch) -
     assert EstimatingTokenCounter().count(DENSE) != len(DENSE.split())
 
 
-def test_an_unloadable_tokenizer_falls_back_rather_than_raising(
+def test_a_counter_with_no_tokenizer_counts_with_the_estimate_rather_than_raising(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing optional dependency must not fail a chunking run."""
+    """A missing optional dependency must not fail a chunking run.
+
+    The loader is stubbed out, so this pins the ``tokenizer is None`` fallback and not
+    the load itself; a failing load is covered by ``test_a_failed_load_is_not_retried``.
+    """
     monkeypatch.setattr(tokenizer_module, "load_tokenizer", lambda model: None)
 
     counter = ModelTokenCounter("some/model")

@@ -168,18 +168,25 @@ def _reach_back(
 
 
 def _merge_blank(text: str, segments: Sequence[Segment]) -> list[Segment]:
-    """Merge whitespace-only segments into their predecessor, preserving the tiling."""
+    """Merge whitespace-only segments into a neighbour, preserving the tiling.
+
+    A blank segment with no predecessor is held and given to the segment that follows:
+    dropping it would open a hole at the start of the tiling and break invariant 1.
+    """
     merged: list[Segment] = []
+    held: int | None = None
+
     for start, end in segments:
-        if end <= start:
-            continue
-        if not text[start:end].strip() and merged:
-            previous_start, _ = merged[-1]
-            merged[-1] = (previous_start, end)
-            continue
         if not text[start:end].strip():
+            if merged:
+                previous_start, _ = merged[-1]
+                merged[-1] = (previous_start, end)
+            elif held is None:
+                held = start
             continue
-        merged.append((start, end))
+        merged.append((start if held is None else held, end))
+        held = None
+
     return merged
 
 

@@ -11,10 +11,12 @@ the CPU worker pool rather than on the event loop, so the interface is deliberat
 synchronous.
 
 The embedder contract is one vector per text, all of the same width. A provider that
-returns a narrower vector for one sentence is rejected with a typed ``EmbedError`` rather
-than measured over the common prefix: the prefix distance is a plausible number, so the
-document would be chunked at the wrong places and re-ided with no error anywhere. The
-worker pool dead-letters the document with ``EMBED_PROVIDER_ERROR``.
+breaks either half of it — a narrower vector for one sentence, or a reply that does not
+answer every sentence — is rejected with a typed ``EmbedError`` rather than measured over
+the part that lines up: a prefix distance is a plausible number and a short reply merges
+every unanswered sentence into the last chunk, so the document would be chunked at the
+wrong places and re-ided with no error anywhere. The worker pool dead-letters the document
+with ``EMBED_PROVIDER_ERROR``.
 """
 
 from __future__ import annotations
@@ -156,8 +158,19 @@ class SemanticChunker:
         )
 
     def _group(self, text: str, tiles: Sequence[Segment]) -> list[Segment]:
-        """Merge sentence tiles into chunks, breaking where similarity drops."""
+        """Merge sentence tiles into chunks, breaking where similarity drops.
+
+        A reply of the wrong length is refused: one vector per sentence is the contract,
+        and a short one would merge every unanswered sentence into the last chunk.
+        """
         vectors = self._embedder.embed([text[start:end].strip() for start, end in tiles])
+        if len(vectors) != len(tiles):
+            raise EmbedError(
+                f"the embedding provider returned {len(vectors)} vectors for "
+                f"{len(tiles)} sentences of the same document; semantic boundaries cannot "
+                "be placed from a reply that does not answer every sentence",
+                retryable=False,
+            )
         distances = [
             _distance(vectors[index], vectors[index + 1]) for index in range(len(vectors) - 1)
         ]
@@ -166,7 +179,7 @@ class SemanticChunker:
         segments: list[Segment] = [tiles[0]]
         for index in range(1, len(tiles)):
             start, end = tiles[index]
-            shifted = distances[index - 1] >= cutoff if index - 1 < len(distances) else False
+            shifted = distances[index - 1] >= cutoff
             if shifted or end - segments[-1][0] > self._limit:
                 segments.append((start, end))
             else:

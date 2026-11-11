@@ -288,6 +288,54 @@ def test_a_ragged_embedder_fails_the_document_instead_of_chunking_it_anyway() ->
         ).split(document)
 
 
+class ShortReplyEmbedder:
+    """Answers every sentence but the last two, as a truncated provider reply does."""
+
+    def embed(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
+        return [[1.0, 0.0] for _ in range(len(texts) - 2)]
+
+
+class ExtraReplyEmbedder:
+    """Answers with one vector more than it was asked for."""
+
+    def embed(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
+        return [[1.0, 0.0] for _ in range(len(texts) + 1)]
+
+
+def test_a_short_embedder_reply_fails_the_document_instead_of_chunking_its_tail_blind() -> None:
+    """An unanswered sentence used to merge into the last chunk with no error at all.
+
+    Measured 2026-11-11: the two unanswered sentences were merged into the last chunk,
+    ``[(0, 11), (11, 45)]``, because an out-of-range distance read as "no shift here".
+    """
+    document = parse_plaintext(b"First one. Second one. Third one. Fourth one.")
+
+    with pytest.raises(EmbedError) as caught:
+        SemanticChunker(
+            ShortReplyEmbedder(), chunk_size=200, overlap=0, counter=EstimatingTokenCounter()
+        ).split(document)
+
+    assert "2 vectors" in caught.value.detail
+    assert "4 sentences" in caught.value.detail
+    assert caught.value.code is ErrorCode.EMBED_PROVIDER_ERROR
+    assert caught.value.retryable is False
+    assert isinstance(caught.value, IngestionError)
+
+
+def test_an_embedder_reply_with_a_vector_too_many_is_refused_as_well() -> None:
+    """The count is compared, not bounded: an extra vector means the reply is misaligned.
+
+    Without the mirrored case a ``!=`` weakened to ``<`` keeps passing, and a provider
+    that answers for a sentence nobody sent goes on placing boundaries.
+    """
+    document = parse_plaintext(b"First one. Second one. Third one. Fourth one.")
+
+    with pytest.raises(EmbedError, match="5 vectors for 4 sentences"):
+        SemanticChunker(
+            ExtraReplyEmbedder(), chunk_size=200, overlap=0, counter=EstimatingTokenCounter()
+        ).split(document)
+
+
 def test_the_semantic_boundary_lands_on_the_sentence_the_distance_spikes_at() -> None:
     """Which sentence opens the next chunk is the feature; a chunk count is not."""
     document = parse_plaintext(b"First one. Second one. Third one. Fourth one.")
@@ -403,6 +451,41 @@ def test_a_blank_segment_is_absorbed_by_its_neighbour_not_by_the_first_chunk() -
 
     assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 5), (5, 12)]
     assert [chunk.text for chunk in chunks] == ["alpha", "beta   "]
+
+
+def test_a_leading_blank_segment_is_given_to_the_chunk_that_follows_it() -> None:
+    """A blank segment with no predecessor has nowhere to merge back to, only forward.
+
+    Dropping it opens a hole at offset zero, which breaks invariant 1: the chunks no
+    longer reconstruct the source text.
+    """
+    text = "    alpha   beta "
+
+    chunks = assemble(
+        text,
+        [(0, 4), (4, 9), (9, 17)],
+        overlap_chars=0,
+        strategy="fixed",
+        counter=EstimatingTokenCounter(),
+    )
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 9), (9, 17)]
+    assert "".join(chunk.text for chunk in chunks) == text
+
+
+def test_a_document_that_opens_on_blank_segments_still_starts_at_its_first_character() -> None:
+    """Reachable from a shipped strategy, so the leading hole is not a theoretical concern.
+
+    Two blank segments precede the text here: holding only the first one's start is what
+    keeps the chunk anchored at offset zero rather than at the second blank.
+    """
+    text = " " * 33 + "alpha beta gamma delta epsilon zeta eta"
+    document = ParsedDocument(text=text, blocks=(), mime_type="text/plain", parser="test")
+
+    chunks = FixedChunker(chunk_size=4, overlap=0, counter=EstimatingTokenCounter()).split(document)
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 44), (44, 56), (56, 72)]
+    assert "".join(chunk.text for chunk in chunks) == text
 
 
 def test_a_strategy_that_emits_a_blank_segment_keeps_its_tiling() -> None:
