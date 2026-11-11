@@ -1,6 +1,6 @@
 """Cache storage backends.
 
-One narrow interface — get, set, delete, sweep — over the backends
+One narrow interface — get, set, delete, clear, items, close — over the backends
 ``embeddings.cache.backend`` and ``cache.backend`` name. Values are opaque bytes so a
 backend never has to know whether it is holding a vector or an answer.
 

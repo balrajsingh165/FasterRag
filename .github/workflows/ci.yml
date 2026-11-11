@@ -98,7 +98,8 @@ jobs:
       # swallowed. In a RAG pipeline a swallowed exception does not surface as an error, it
       # surfaces as a confident answer built from a silently shortened context. A code
       # gate, not a doc gate, so the maintainer's pre-commit exclusion for doc gates does
-      # not apply. Measured at 1.67-1.83 s locally on Windows, interpreter start included.
+      # not apply. Measured ~1 s on ubuntu-latest (run 42972651661, 06:29:54-55Z), which is
+      # the environment this step runs in; 0.96-1.02 s locally on Windows for comparison.
       - name: Typed error taxonomy holds
         if: ${{ !cancelled() }}
         run: python scripts/check_error_taxonomy.py
