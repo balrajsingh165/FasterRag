@@ -26,7 +26,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 
 ## Commands
 
-- Build: `pip install -e ".[dev]"`
+- Build: `uv sync --locked --extra dev --python 3.12` — installs exactly `uv.lock` on CI's interpreter, creating or **replacing** `.venv`. `pip install -e ".[dev]"` still works and is what most CI jobs still do, but it resolves afresh every time: measured 2026-11-11, that resolve differs from the lock on 42 of the same 145 packages, and this repo's own dev venv differs on 85 of 170 while running 3.14.7 against CI's 3.12. **No gate can check your machine from CI, so this line is the gate** (TASK-0398).
 - Hooks: `pre-commit install` (wires both pre-commit and commit-msg stages; runs fast tests only, not integration/eval)
 - Lint: `ruff check .` and `ruff format --check .`
 - Typecheck: `mypy src/` (strict; zero errors)

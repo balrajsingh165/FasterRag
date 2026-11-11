@@ -25,6 +25,14 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # CRITICAL: this is an unpinned resolve at job time, and so is every other `pip install`
+      # in this file. It is deliberately still here. `must-run` installs from uv.lock instead
+      # (TASK-0398) and is the canary that decides whether the rest follow: convert them when
+      # it has been green across a few runs, revert that one job if it is not. Do not convert
+      # them before it has, and do not convert them one at a time for the same reason — the
+      # canary's evidence covers `.[dev]` on ubuntu/3.12, which is this job, `packaging`,
+      # `integration` and `must-run`; `windows`, the two torch jobs and bare `.` each add an
+      # axis the canary did not test.
       - name: Install
         run: |
           python -m pip install --upgrade pip
@@ -81,6 +89,9 @@ jobs:
       # a prose lead-in label (TASK-0371) — README's "Not yet" column carried no denial verb in
       # any cell, which is how shipped adapters and a shipped test tier sat in it. Measured
       # over four trees: 574 tables, 1,177 tier mentions, 3 findings, every one real.
+      # Since TASK-0394 it reads the degradation ladder's rung registry too, which is what
+      # makes "the cache_only rung is specified but not built" decidable instead of asserted:
+      # 146 rung mentions over the same four trees, 0 findings, and 4 the day TASK-0159 lands.
       - name: Denials match the tree, not just the ledger
         if: ${{ !cancelled() }}
         run: python scripts/check_unbuilt_claims.py
@@ -506,12 +517,41 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
 
-      - name: Install
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # TASK-0398's canary, and the only job in this file that installs what uv.lock says.
+      # Every other job runs `pip install -e ".[dev]"`, which resolves at job time: measured
+      # 2026-11-11, that resolve and the lockfile name the SAME 145 packages for `.[dev]` and
+      # disagree on the version of 42 of them (mypy 2.4.1 against 2.4.0, ruff 0.17.4 against
+      # 0.17.3), while the maintainer's venv disagrees with the lock on 85 of its 170 and runs
+      # 3.14.7 against this 3.12. Three resolutions, no two equal, which is how `main` went red
+      # on 2026-11-08 with every local signal green: CI had httpx2 and the venv did not.
+      #
+      # This job goes first, and alone, because its red is the cheapest and the most legible
+      # in the file. It `needs` quality and windows, so lint, types and both test lanes have
+      # already posted their verdicts when it starts and a failure here cannot be mistaken for
+      # one of theirs; it has four steps that can fail — install, download, collect, check —
+      # so a red names its own cause; and it holds nothing else up. It is still a real
+      # exercise rather than a token one — `--extra dev` installs
+      # the same package NAMES pip installs here today, nothing added, no torch and no CUDA
+      # (that is `--all-extras`: 3.2 GB against 194 MB, measured from the lock's wheel sizes)
+      # — and the collection below imports the whole test tree, eval and integration tiers
+      # included. So green here is the evidence that converting `quality` is safe, and red
+      # here costs one job on a run whose real gates have already spoken. The price of that
+      # `needs` is stated rather than discovered: this job is SKIPPED when quality or windows
+      # fails, so the canary reports only on runs that were already green, and a conversion
+      # decision has to count green runs rather than elapsed days.
+      #
+      # `--locked` fails instead of relocking, making this a second `uv lock --check` beside
+      # supply-chain's. uv syncs into `.venv` rather than into setup-python's environment,
+      # which is what the GITHUB_PATH line is for — every later step must find that one.
+      - name: Install from the lockfile
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          uv sync --locked --extra dev --python 3.12
+          echo "${PWD}/.venv/bin" >> "${GITHUB_PATH}"
 
       # A pattern that matches nothing fails the download, and the gate below fails again on
       # the empty directory. Both are deliberate: an artifact that silently did not arrive is
