@@ -99,57 +99,55 @@ extra_css:
 
 not_in_nav: |
   references.md
+  glossary.md
+  data-model.md
+  prompts.md
+  archive-format.md
+  structure.md
+  flow.md
+  internals.md
+  reliability.md
+  failure-modes.md
+  slo.md
+  disaster-recovery.md
+  benchmarks.md
+  performance.md
+  testing-strategy.md
+  verification.md
+  release-readiness.md
+  rebuild-playbook.md
+  scope.md
+  differentiators.md
+  release.md
+  adr/*.md
 
+# CRITICAL: the navigation is deliberately short. It lists what someone using fasterRag needs:
+# how to start, the four references, how it works, how to run it. The design, reliability,
+# evidence and process documents are still built and still linked - from engineering-notes.md
+# and from each other - but they are not in the sidebar, because a reader who has to scan forty
+# entries to find the quickstart does not find it.
 nav:
   - Home: index.md
-  - Start here:
+  - Get started:
       - Quickstart: quickstart.md
-      - Using fasterRag: how-to-use.md
+      - User guide: how-to-use.md
       - Configuration recipes: cookbook.md
-      - Coming from another framework: migration-guide.md
       - Troubleshooting: troubleshooting.md
-      - Glossary: glossary.md
+      - Coming from another framework: migration-guide.md
   - Reference:
       - REST API: api-reference.md
       - CLI: cli-reference.md
       - Configuration: config-reference.md
       - Python package: python-api.md
-      - Data model: data-model.md
-      - Prompt contracts: prompts.md
-      - Portability archive: archive-format.md
   - How it works:
+      - Visual tour: tour.md
       - Architecture: architecture.md
-      - Repository structure: structure.md
-      - End-to-end flows: flow.md
-      - Internals: internals.md
       - Integrations: integrations.md
-      - Observability: observability.md
-  - Running it:
+  - Run it:
       - Deployment: deployment.md
       - Security: security.md
-      - Reliability: reliability.md
-      - Failure modes: failure-modes.md
-      - Service levels: slo.md
-      - Disaster recovery: disaster-recovery.md
-  - Evidence:
-      - Benchmark ledger: benchmarks.md
-      - Performance methodology: performance.md
-      - Testing strategy: testing-strategy.md
-      - Verification procedure: verification.md
-      - Release readiness: release-readiness.md
-      - Rebuild playbook: rebuild-playbook.md
+      - Observability: observability.md
   - Project:
-      - Scope and goals: scope.md
-      - Differentiators: differentiators.md
-      - Release process: release.md
       - Changelog: CHANGELOG.md
       - Contributing: CONTRIBUTING.md
-      - Decision records:
-          - Qdrant as reference vector DB: adr/ADR-0001-qdrant-as-reference-vector-db.md
-          - Adapter factory pluggability: adr/ADR-0002-adapter-factory-pluggability.md
-          - config.yaml and .env split: adr/ADR-0003-config-yaml-env-split.md
-          - Hybrid search and reranking: adr/ADR-0004-hybrid-search-plus-reranking.md
-          - API and CLI only control plane: adr/ADR-0005-api-cli-only-control-plane.md
-          - Python package surface: adr/ADR-0006-python-package-surface.md
-          - BM25 as backend sparse vectors: adr/ADR-0007-bm25-as-backend-sparse-vectors.md
-          - Apache 2.0 licence: adr/ADR-0008-apache-2-license.md
+      - Engineering notes: engineering-notes.md

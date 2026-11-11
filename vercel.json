@@ -7,12 +7,12 @@
   "redirects": [
     {
       "source": "/intro/",
-      "destination": "/",
+      "destination": "/tour/",
       "permanent": true
     },
     {
       "source": "/intro",
-      "destination": "/",
+      "destination": "/tour/",
       "permanent": true
     }
   ],
