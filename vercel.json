@@ -4,6 +4,18 @@
   "installCommand": "python3 -m pip install --break-system-packages --disable-pip-version-check -r requirements-docs.txt",
   "buildCommand": "python3 -m mkdocs build --strict --site-dir public",
   "outputDirectory": "public",
+  "redirects": [
+    {
+      "source": "/intro/",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/intro",
+      "destination": "/",
+      "permanent": true
+    }
+  ],
   "headers": [
     {
       "source": "/(.*)",

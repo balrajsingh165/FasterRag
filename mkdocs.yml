@@ -102,7 +102,6 @@ not_in_nav: |
 
 nav:
   - Home: index.md
-  - Introduction: intro.md
   - Start here:
       - Quickstart: quickstart.md
       - Using fasterRag: how-to-use.md
