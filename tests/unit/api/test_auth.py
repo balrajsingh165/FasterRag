@@ -621,7 +621,7 @@ def test_a_bearer_token_with_a_non_ascii_byte_is_refused_not_crashed_on(
         response = client.post(
             "/v1/query",
             json={"query": "hello"},
-            headers={"Authorization": b"Bearer caf\xe9-key"},
+            headers={b"Authorization": b"Bearer caf\xe9-key"},
         )
 
     assert response.status_code == 401
