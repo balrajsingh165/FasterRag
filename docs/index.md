@@ -6,6 +6,8 @@ description: >-
   configuration alone. REST API and CLI only; the dashboard observes and never controls.
 ---
 
+![The fasterRag logo: three chunk bars streaming into a lightning bolt](assets/logo.svg){ width="96" }
+
 # fasterRag
 
 **A backend-only Retrieval-Augmented Generation framework, operated entirely through a REST API

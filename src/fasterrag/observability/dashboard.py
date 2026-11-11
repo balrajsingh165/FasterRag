@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from html import escape
 from typing import Any, Final
+from urllib.parse import quote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -33,15 +34,36 @@ from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.traces import TraceStore, create_trace_store
 
-__all__ = ["DASHBOARD_TITLE", "create_dashboard", "render_page"]
+__all__ = ["DASHBOARD_TITLE", "LOGO_SVG", "create_dashboard", "render_page"]
 
 DASHBOARD_TITLE: Final = "fasterRag — observability"
+
+LOGO_SVG: Final = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" '
+    'role="img" aria-label="fasterRag"><title>fasterRag</title><defs>'
+    '<linearGradient id="fr-tile" x1="0" y1="0" x2="1" y2="1">'
+    '<stop offset="0" stop-color="#4f46e5"/><stop offset="1" stop-color="#38bdf8"/>'
+    '</linearGradient></defs><rect width="128" height="128" rx="28" fill="url(#fr-tile)"/>'
+    '<g fill="#ffffff"><rect x="18" y="40" width="34" height="9" rx="4.5" opacity=".95"/>'
+    '<rect x="12" y="59.5" width="30" height="9" rx="4.5" opacity=".75"/>'
+    '<rect x="20" y="79" width="22" height="9" rx="4.5" opacity=".55"/>'
+    '<path d="M84 14 52 68h20l-8 46 38-58H80z"/></g></svg>'
+)
+"""The project mark, inlined so the page needs no static file and the wheel ships no asset.
+
+Byte-identical to ``docs/assets/logo.svg``; a test holds the two together, so the dashboard,
+the documentation site and the README cannot drift onto different logos.
+"""
+
+_FAVICON: Final = "data:image/svg+xml," + quote(LOGO_SVG)
 
 _RECENT_TRACES: Final = 50
 
 _STYLE: Final = """
   body { font: 14px/1.5 system-ui, sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
-  header { padding: 16px 24px; border-bottom: 1px solid #23262d; }
+  header { padding: 16px 24px; border-bottom: 1px solid #23262d; display: flex;
+           align-items: center; gap: 10px; }
+  .mark svg { width: 24px; height: 24px; display: block; }
   h1 { font-size: 16px; margin: 0; font-weight: 600; }
   main { padding: 24px; display: grid; gap: 24px; }
   section { border: 1px solid #23262d; border-radius: 8px; padding: 16px; }
@@ -98,8 +120,11 @@ def render_page(traces: list[dict[str, Any]]) -> str:
 
     return (
         f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
-        f"<title>{escape(DASHBOARD_TITLE)}</title><style>{_STYLE}</style></head><body>"
-        f"<header><h1>{escape(DASHBOARD_TITLE)}</h1></header><main>"
+        f"<title>{escape(DASHBOARD_TITLE)}</title>"
+        f'<link rel="icon" type="image/svg+xml" href="{_FAVICON}">'
+        f"<style>{_STYLE}</style></head><body>"
+        f'<header><span class="mark">{LOGO_SVG}</span>'
+        f"<h1>{escape(DASHBOARD_TITLE)}</h1></header><main>"
         f"{sections}"
         f"<section><h2>Recent queries</h2><table>"
         f"<tr><th>trace</th><th>query</th><th>collection</th><th>tenant</th></tr>"

@@ -6,9 +6,15 @@ from fastapi.testclient import TestClient
 from fasterrag.config.schema import Settings
 from fasterrag.core.tracing import Trace
 from fasterrag.observability import metrics
-from fasterrag.observability.dashboard import DASHBOARD_TITLE, create_dashboard, render_page
+from fasterrag.observability.dashboard import (
+    DASHBOARD_TITLE,
+    LOGO_SVG,
+    create_dashboard,
+    render_page,
+)
 from fasterrag.services.traces import TraceStore
 
+PUBLISHED_LOGO = Path(__file__).resolve().parents[3] / "docs" / "assets" / "logo.svg"
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -190,3 +196,15 @@ def test_the_json_view_is_scoped_too(tmp_path: Path, monkeypatch: pytest.MonkeyP
         ).json()
 
     assert [item["query"] for item in payload["traces"]] == ["mine"]
+
+
+def test_the_page_carries_the_project_mark() -> None:
+    page = render_page([])
+
+    assert LOGO_SVG in page
+    assert '<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,' in page
+
+
+def test_the_inlined_mark_is_the_published_logo() -> None:
+    """One logo, three surfaces: the dashboard inlines what the docs site and README link."""
+    assert PUBLISHED_LOGO.read_text(encoding="utf-8").strip() == LOGO_SVG
