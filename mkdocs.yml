@@ -93,12 +93,14 @@ extra:
 
 extra_css:
   - assets/extra.css
+  - assets/intro.css
 
 not_in_nav: |
   references.md
 
 nav:
   - Home: index.md
+  - Introduction: intro.md
   - Start here:
       - Quickstart: quickstart.md
       - Using fasterRag: how-to-use.md

@@ -15,6 +15,7 @@ and a terminal.** Built on FastAPI and Pydantic v2, with every vendor behind an 
 vector database, embedding model and LLM provider are configuration rather than code.
 
 [Read the quickstart](quickstart.md){ .md-button .md-button--primary }
+[See the whole system on one page](intro.md){ .md-button }
 [View on GitHub](https://github.com/balrajsingh165/fasterrag){ .md-button }
 
 ---
