@@ -100,7 +100,7 @@ class IngestionService:
         typed = [
             typed_source(source) if isinstance(source, str) else dict(source) for source in sources
         ]
-        return self.journal.create_job(
+        return await self.journal.create_job(
             target,
             typed,
             idempotency_key=idempotency_key,
@@ -128,7 +128,7 @@ class IngestionService:
         queue: BoundedQueue[ChunkPayload] = BoundedQueue(self.settings.workers.queue_depth)
 
         running = replace(record, status="running")
-        self.journal.save_job(running)
+        await self.journal.save_job(running)
         progress = _Checkpointer(self.journal, running)
         started = time.monotonic()
 
@@ -172,7 +172,7 @@ class IngestionService:
                 await enricher.close()
 
         for document, code in embed_report.failures:
-            self.journal.dead_letter(
+            await self.journal.dead_letter(
                 record.job_id,
                 document=document,
                 source=next(
@@ -198,11 +198,11 @@ class IngestionService:
             counts=counts,
             finished_at=_finished_at(),
         )
-        self.journal.save_job(settled)
-        self._publish_metrics(settled, counts, elapsed=time.monotonic() - started)
+        await self.journal.save_job(settled)
+        await self._publish_metrics(settled, counts, elapsed=time.monotonic() - started)
 
         if indexer.written:
-            self._write_lockfile(record.collection)
+            await self._write_lockfile(record.collection)
 
         if self.cache is not None and indexer.written:
             await self.cache.invalidate(f"ingest job {record.job_id} indexed {indexer.written}")
@@ -222,7 +222,7 @@ class IngestionService:
         )
         return settled
 
-    def _publish_metrics(
+    async def _publish_metrics(
         self, record: JobRecord, counts: dict[str, int], *, elapsed: float
     ) -> None:
         """Publish the ingestion half of the metrics catalogue for a settled job."""
@@ -239,11 +239,11 @@ class IngestionService:
             metrics.INGEST_THROUGHPUT.set(indexed / elapsed, unit="chunks_per_second")
 
         metrics.DLQ_DEPTH.set(
-            float(len(self.journal.dead_lettered(record.job_id))),
+            float(len(await self.journal.dead_lettered(record.job_id))),
             collection=record.collection,
         )
 
-    def _write_lockfile(self, collection: str) -> None:
+    async def _write_lockfile(self, collection: str) -> None:
         """Record what produced this index, so drift against it is detectable (D1).
 
         Written after the job settles rather than before it runs: a lockfile describing an
@@ -253,16 +253,18 @@ class IngestionService:
             return
 
         embedder = self.router.default
-        self.locks.write(
-            build_lock(
-                collection,
-                self.settings,
-                embedding_model=embedder.model,
-                embedding_model_version=embedder.model_version,
-                dimensions=embedder.dimensions,
-                document_hashes=self.journal.document_hashes(collection),
-            )
+        lock = build_lock(
+            collection,
+            self.settings,
+            embedding_model=embedder.model,
+            embedding_model_version=embedder.model_version,
+            dimensions=embedder.dimensions,
+            document_hashes=await self.journal.document_hashes(collection),
         )
+        # TODO: offload belongs inside LockStore, as it now does inside Journal. LockStore
+        # still has synchronous callers (`facade.index_lock`, the CLI, `archive_import`),
+        # so it needs the same two-faced treatment as a change of its own — NEW-1.
+        await asyncio.to_thread(self.locks.write, lock)
 
     async def ingest(
         self,
@@ -296,9 +298,9 @@ class _Checkpointer:
         self.journal = journal
         self.record = record
 
-    def __call__(self, index: int) -> None:
-        """Checkpoint after the document at ``index``."""
-        self.record = self.journal.checkpoint(self.record, index)
+    async def __call__(self, index: int) -> None:
+        """Checkpoint after the document at ``index``, off the event loop."""
+        self.record = await self.journal.checkpoint(self.record, index)
 
 
 def _status_for(counts: dict[str, int]) -> str:

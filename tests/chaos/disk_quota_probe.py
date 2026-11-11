@@ -71,7 +71,7 @@ def fill(path: Path) -> int:
 def observe(journal: Journal, job: str) -> dict[str, Any]:
     """Return whether a job record is still readable, and the checkpoint it carries."""
     try:
-        record = journal.load_job(job)
+        record = journal.load_job_blocking(job)
     except Exception as exc:
         return {"loaded": False, **describe(exc)}
     return {
@@ -85,8 +85,8 @@ def main() -> None:
     report: dict[str, Any] = {}
     journal = Journal(MOUNT / "journal", checkpoint_every=1)
 
-    job = journal.create_job(COLLECTION, SOURCES)
-    job = journal.checkpoint(job, BASELINE_INDEX)
+    job = journal.create_job_blocking(COLLECTION, SOURCES)
+    job = journal.checkpoint_blocking(job, BASELINE_INDEX)
     report["baseline"] = observe(journal, job.job_id)
 
     filler = MOUNT / "filler.bin"
@@ -94,14 +94,14 @@ def main() -> None:
     report["free_bytes"] = shutil.disk_usage(MOUNT).free
 
     try:
-        journal.create_job(COLLECTION, SOURCES)
+        journal.create_job_blocking(COLLECTION, SOURCES)
     except Exception as exc:
         report["create_while_full"] = describe(exc)
     else:
         report["create_while_full"] = None
 
     try:
-        journal.checkpoint(job, LATER_INDEX)
+        journal.checkpoint_blocking(job, LATER_INDEX)
     except Exception as exc:
         report["checkpoint_while_full"] = describe(exc)
     else:
@@ -112,7 +112,7 @@ def main() -> None:
     filler.unlink()
 
     try:
-        recovered = journal.create_job(COLLECTION, SOURCES)
+        recovered = journal.create_job_blocking(COLLECTION, SOURCES)
     except Exception as exc:
         report["create_after_free"] = {"ok": False, **describe(exc)}
     else:

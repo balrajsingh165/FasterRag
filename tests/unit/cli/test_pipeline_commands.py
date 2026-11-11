@@ -553,8 +553,12 @@ class FakeJournal(Journal):
         self.polls = 0
         self.drained = threading.Event()
 
-    def counts(self, job: str) -> dict[str, int]:
-        """Return the next tally, as ``Journal.counts`` does."""
+    def counts_blocking(self, job: str) -> dict[str, int]:
+        """Return the next tally, as ``Journal.counts_blocking`` does.
+
+        The blocking twin rather than ``counts``: the follower awaits the async method,
+        which runs this one in a worker thread (TASK-0399).
+        """
         tally = self.tallies[min(self.polls, len(self.tallies) - 1)]
         self.polls += 1
         if self.polls > len(self.tallies):

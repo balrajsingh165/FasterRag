@@ -58,7 +58,7 @@ fasterRag/
 │       ├── services/             # Business logic / use cases (orchestration)
 │       │   ├── provisioning.py   # Config-driven auto-provisioning (Qdrant/Langfuse/Grafana)
 │       │   ├── doctor.py         # D10 preflight checks; gates provisioning
-│       │   ├── journal.py        # D3 checkpoints, content-hash dedup, dead-letter queue
+│       │   ├── journal.py        # D3 checkpoints, dedup, DLQ; async over *_blocking twins
 │       │   ├── estimation.py     # D9 preflight token counts and projected cost
 │       │   ├── ingestion.py      # Job lifecycle: run both pools, checkpoint, settle
 │       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate
@@ -98,7 +98,10 @@ fasterRag/
     ├── unit/                     # Fast, isolated (mirrors src layout)
     ├── contract/                 # Shared adapter contract suite every provider must pass
     ├── integration/              # Real adapters against containerized backends
-    └── eval/                     # Retrieval eval harness + datasets (recall@k, MRR, nDCG, faithfulness)
+    ├── eval/                     # Retrieval eval harness + datasets (recall@k, MRR, nDCG, faithfulness)
+    ├── chaos/                    # Scripted fault injection (D12); `chaos` marker, not in CI
+    ├── load/                     # Locust benchmark + the `load` saturation suite; not in CI
+    └── soak/                     # Long-run resource-trend harness; `soak` marker, not in CI
 ```
 
 ## Directory responsibilities

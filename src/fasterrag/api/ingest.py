@@ -64,9 +64,9 @@ def _mark_deprecated(response: Response) -> None:
     )
 
 
-def _job_body(record: JobRecord, journal: Journal) -> dict[str, Any]:
+async def _job_body(record: JobRecord, journal: Journal) -> dict[str, Any]:
     """Return the documented job-status body."""
-    counts = dict(record.counts) or journal.counts(record.job_id)
+    counts = dict(record.counts) or await journal.counts(record.job_id)
     return {
         "job_id": record.job_id,
         "status": record.status,
@@ -99,7 +99,7 @@ async def _run_job(request: Request, record: JobRecord, metadata: dict[str, Any]
                 extra={"job_id": record.job_id, "code": exc.code.value, "detail": exc.detail},
             )
             record.status = "failed"
-            journal.save_job(record)
+            await journal.save_job(record)
         finally:
             await embedding_router.close()
 
@@ -150,7 +150,7 @@ async def start_ingest(
 @router.get("/{job_id}")
 async def job_status(job_id: str, journal: JournalDep, tenant: CurrentTenant) -> dict[str, Any]:
     """Return one job's status and counts."""
-    return _job_body(journal.load_job(job_id, tenant=tenant), journal)
+    return await _job_body(await journal.load_job(job_id, tenant=tenant), journal)
 
 
 @router.get("/{job_id}/documents")
@@ -165,7 +165,7 @@ async def job_documents(
     Loading the job first means an unknown id 404s here too, rather than returning an empty
     list that reads as "this job ingested nothing".
     """
-    journal.load_job(job_id, tenant=tenant)
+    await journal.load_job(job_id, tenant=tenant)
     documents = [
         {
             "document_id": record.document_id,
@@ -175,7 +175,7 @@ async def job_documents(
             "attempts": record.attempts,
             "content_hash": record.content_hash,
         }
-        for record in journal.documents(job_id, status=document_status)
+        for record in await journal.documents(job_id, status=document_status)
     ]
     return {"job_id": job_id, "documents": documents, "count": len(documents)}
 
@@ -195,8 +195,8 @@ async def retry_dead_letters(
     A new job rather than a mutation of the old one: the original is an audit record of what
     happened, and rewriting it would destroy the evidence of the failure being retried.
     """
-    original = journal.load_job(job_id, tenant=tenant)
-    failed = journal.dead_lettered(job_id)
+    original = await journal.load_job(job_id, tenant=tenant)
+    failed = await journal.dead_lettered(job_id)
     if not failed:
         return {"job_id": job_id, "retried": 0, "status": original.status}
 

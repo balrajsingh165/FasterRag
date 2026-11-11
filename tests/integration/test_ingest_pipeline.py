@@ -223,7 +223,7 @@ async def test_a_broken_document_is_dead_lettered_and_the_rest_still_index(
     assert record.counts["dead_lettered"] == 1
     assert record.counts["indexed"] > 0
 
-    entries = service.journal.dead_lettered(record.job_id)
+    entries = service.journal.dead_lettered_blocking(record.job_id)
     assert [entry.reason_code for entry in entries] == ["PARSE_FAILED"]
 
 
@@ -240,7 +240,7 @@ async def test_progress_is_checkpointed_as_documents_complete(
     service: IngestionService, corpus: Path
 ) -> None:
     record = await service.ingest(sources(corpus))
-    reloaded = service.journal.load_job(record.job_id)
+    reloaded = service.journal.load_job_blocking(record.job_id)
 
     assert reloaded.checkpoint is not None
     assert reloaded.checkpoint.last_document_index == 1

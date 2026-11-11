@@ -24,7 +24,7 @@ class RecordingIngestion:
         RecordingIngestion.instances.append(self)
 
     async def accept(self, sources: Any, **kwargs: Any) -> JobRecord:
-        return self.journal.create_job(
+        return self.journal.create_job_blocking(
             kwargs.get("collection") or "default",
             [{"type": "path", "value": source} for source in sources],
             idempotency_key=kwargs.get("idempotency_key"),
@@ -36,7 +36,7 @@ class RecordingIngestion:
         if self.error is not None:
             raise self.error
         settled = replace(record, status=self.outcome, counts={"total": 1, "indexed": 1})
-        self.journal.save_job(settled)
+        self.journal.save_job_blocking(settled)
         return settled
 
     async def close(self) -> None:
@@ -198,7 +198,7 @@ def test_a_misspelled_field_is_rejected(client: TestClient) -> None:
 def test_documents_are_listed_for_a_job(client: TestClient, app: FastAPI) -> None:
     job_id = start(client).json()["job_id"]
     journal: Journal = app.state.journal
-    journal.dead_letter(
+    journal.dead_letter_blocking(
         job_id,
         document="d_1",
         source="corpus/bad.pdf",
@@ -216,7 +216,7 @@ def test_documents_are_listed_for_a_job(client: TestClient, app: FastAPI) -> Non
 def test_documents_can_be_filtered_by_status(client: TestClient, app: FastAPI) -> None:
     job_id = start(client).json()["job_id"]
     journal: Journal = app.state.journal
-    journal.dead_letter(
+    journal.dead_letter_blocking(
         job_id,
         document="d_1",
         source="corpus/bad.pdf",
@@ -241,7 +241,7 @@ def test_documents_of_an_unknown_job_are_404_not_an_empty_list(client: TestClien
 def test_retrying_dead_letters_starts_a_new_job(client: TestClient, app: FastAPI) -> None:
     job_id = start(client).json()["job_id"]
     journal: Journal = app.state.journal
-    journal.dead_letter(
+    journal.dead_letter_blocking(
         job_id,
         document="d_1",
         source="corpus/bad.pdf",
@@ -275,7 +275,7 @@ def test_retrying_an_unknown_job_is_404(client: TestClient) -> None:
 def test_the_original_job_is_not_mutated_by_a_retry(client: TestClient, app: FastAPI) -> None:
     job_id = start(client).json()["job_id"]
     journal: Journal = app.state.journal
-    journal.dead_letter(
+    journal.dead_letter_blocking(
         job_id,
         document="d_1",
         source="corpus/bad.pdf",
@@ -283,8 +283,8 @@ def test_the_original_job_is_not_mutated_by_a_retry(client: TestClient, app: Fas
         detail="unreadable",
         attempts=3,
     )
-    before = journal.load_job(job_id).status
+    before = journal.load_job_blocking(job_id).status
 
     client.post(f"/v1/ingest/{job_id}/retry-dlq")
 
-    assert journal.load_job(job_id).status == before
+    assert journal.load_job_blocking(job_id).status == before

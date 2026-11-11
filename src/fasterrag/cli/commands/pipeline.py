@@ -105,7 +105,7 @@ async def _follow_job(
     reported: dict[str, int] = {}
     while True:
         await asyncio.sleep(interval)
-        counts = await asyncio.to_thread(journal.counts, job_id)
+        counts = await journal.counts(job_id)
         if counts != reported:
             reported = counts
             console.emit(f"progress        {_tally(counts)}")
@@ -379,7 +379,7 @@ async def _index_list(settings: Settings, adapter: VectorDBAdapter, console: Con
             lock,
             settings,
             collection=info.name,
-            document_hashes=journal.document_hashes(info.name) or None,
+            document_hashes=await journal.document_hashes(info.name) or None,
         )
         status = "no lockfile" if drift.missing_lock else ("DRIFT" if drift.detected else "ok")
         console.emit(
@@ -403,7 +403,7 @@ async def _index_lock_verify(
         lock,
         settings,
         collection=collection,
-        document_hashes=create_journal(settings).document_hashes(collection) or None,
+        document_hashes=await create_journal(settings).document_hashes(collection) or None,
     )
 
     console.document(drift.as_dict())

@@ -27,7 +27,7 @@ class RecordingIngestion:
     async def accept(self, sources: Any, **kwargs: Any) -> JobRecord:
         collection = kwargs.get("collection") or "default"
         self.accepted.append(collection)
-        return self.journal.create_job(
+        return self.journal.create_job_blocking(
             collection,
             [{"type": "path", "value": "corpus/"}],
             idempotency_key=kwargs.get("idempotency_key"),
@@ -170,7 +170,7 @@ def test_retrying_dead_letters_is_held_to_the_same_preflight(
 ) -> None:
     job_id = start(client, collection="docs").json()["job_id"]
     journal: Journal = app.state.journal
-    journal.dead_letter(
+    journal.dead_letter_blocking(
         job_id,
         document="d_1",
         source="corpus/bad.pdf",

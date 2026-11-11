@@ -136,7 +136,7 @@ async def test_an_unreadable_document_is_dead_lettered_and_the_pass_continues(
     assert report.dead_lettered == 1
     assert report.parsed == 1
 
-    entries = journal.dead_lettered("job_1")
+    entries = journal.dead_lettered_blocking("job_1")
     assert len(entries) == 1
     assert entries[0].reason_code == "PARSE_FAILED"
     assert entries[0].source.endswith("broken.zip")
@@ -156,7 +156,7 @@ async def test_an_oversized_document_is_refused_before_it_is_read(
 
     assert report.dead_lettered == 1
     assert report.parsed == 0
-    assert journal.dead_lettered("job_1")[0].reason_code == "PAYLOAD_TOO_LARGE"
+    assert journal.dead_lettered_blocking("job_1")[0].reason_code == "PAYLOAD_TOO_LARGE"
 
 
 async def test_a_missing_file_is_dead_lettered(corpus: Path, journal: Journal) -> None:
@@ -168,7 +168,7 @@ async def test_a_missing_file_is_dead_lettered(corpus: Path, journal: Journal) -
         )
 
     assert report.dead_lettered == 1
-    assert journal.dead_lettered("job_1")[0].reason_code == "PARSE_FAILED"
+    assert journal.dead_lettered_blocking("job_1")[0].reason_code == "PARSE_FAILED"
 
 
 async def test_resuming_skips_documents_a_checkpoint_already_covered(corpus: Path) -> None:
@@ -230,7 +230,7 @@ async def test_document_outcomes_are_journalled(corpus: Path, journal: Journal) 
             pool.tasks_for(sources(corpus, "a.md", "b.md")), BoundedQueue(400), job="job_1"
         )
 
-    assert journal.counts("job_1") == {"indexed": 2, "total": 2}
+    assert journal.counts_blocking("job_1") == {"indexed": 2, "total": 2}
 
 
 async def test_parse_flags_are_counted(corpus: Path) -> None:

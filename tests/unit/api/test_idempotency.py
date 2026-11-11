@@ -77,7 +77,7 @@ class RecordingIngestion:
         RecordingIngestion.instances.append(self)
 
     async def accept(self, sources: Any, **kwargs: Any) -> JobRecord:
-        return self.journal.create_job(
+        return self.journal.create_job_blocking(
             kwargs.get("collection") or "default",
             [dict(source) for source in sources],
             idempotency_key=kwargs.get("idempotency_key"),
@@ -87,7 +87,7 @@ class RecordingIngestion:
     async def run(self, record: JobRecord, **kwargs: Any) -> JobRecord:
         self.ran.append(record.job_id)
         settled = replace(record, status="completed", counts={"total": 1, "indexed": 1})
-        self.journal.save_job(settled)
+        self.journal.save_job_blocking(settled)
         return settled
 
     async def close(self) -> None:

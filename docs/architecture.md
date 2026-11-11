@@ -46,6 +46,7 @@ Design rules:
 - All I/O-bound endpoints are `async`. The API process performs no CPU-heavy work.
 - **Queue-based decoupling of ingestion**: `POST /v1/ingest` validates, persists a job record, enqueues, and returns `202 Accepted` with a `job_id` — the API accepts ingestion asynchronously without blocking on parsing/embedding/indexing.
 - Generation responses stream (SSE) so time-to-first-token is decoupled from total generation time.
+- **A filesystem-backed store offloads its own blocking calls, rather than asking each caller to remember** (TASK-0357, TASK-0399). `Journal`, `FileIdempotencyStore` and the semantic-cache store each expose an `async` method over a synchronous body they run in a worker thread; a coroutine therefore cannot stall the loop on them by forgetting a rule, and `tests/unit/test_no_blocking_journal_in_async.py` fails the build if one tries. Stores that still have synchronous callers outside the API — `LockStore`, `TraceStore`, the archive reader and writer — have not been converted and are listed as open work in [todo.md](todo.md).
 
 ## 5. Configurable chunking pipeline
 

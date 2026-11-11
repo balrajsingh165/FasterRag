@@ -231,7 +231,7 @@ async def test_the_job_is_settled_in_the_journal(tmp_path: Path, corpus: Path) -
     record = await service.accept(sources(corpus))
     settled = await service.run(record)
 
-    assert service.journal.load_job(record.job_id).status == settled.status
+    assert service.journal.load_job_blocking(record.job_id).status == settled.status
 
 
 async def test_counts_add_up(tmp_path: Path, corpus: Path) -> None:
@@ -264,7 +264,7 @@ async def test_an_unreadable_source_is_dead_lettered(tmp_path: Path, corpus: Pat
 
     assert settled.counts["dead_lettered"] == 1
     assert settled.counts["parsed"] == 2
-    assert service.journal.dead_lettered(record.job_id)
+    assert service.journal.dead_lettered_blocking(record.job_id)
 
 
 async def test_a_failed_embedding_dead_letters_rather_than_losing_the_job(
@@ -318,7 +318,7 @@ async def test_resuming_skips_what_a_checkpoint_already_covered(
     record = await service.accept(sources(corpus))
     await service.run(record)
 
-    resumed = await service.run(service.journal.load_job(record.job_id))
+    resumed = await service.run(service.journal.load_job_blocking(record.job_id))
 
     assert resumed.counts["parsed"] == 0
 
@@ -391,7 +391,7 @@ async def test_the_refusal_replaces_the_embed_provider_error_the_operator_used_t
 ) -> None:
     """The old failure names the embedding provider and a point id for an index mistake."""
     service, _ = build(tmp_path, adapter=DenseOnlyAdapter(settings()))
-    bypassed = service.journal.create_job(
+    bypassed = service.journal.create_job_blocking(
         "default", [{"type": "path", "value": source} for source in sources(corpus)]
     )
 

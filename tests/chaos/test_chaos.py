@@ -261,9 +261,9 @@ async def test_a_corrupt_document_is_dead_lettered_with_a_reason_code(
     chaos_journal: Journal,
 ) -> None:
     """Scenario 3: a malformed document lands in the DLQ and the pipeline continues."""
-    job = chaos_journal.create_job("docs", [{"type": "path", "value": "corpus/"}])
+    job = chaos_journal.create_job_blocking("docs", [{"type": "path", "value": "corpus/"}])
 
-    record = chaos_journal.dead_letter(
+    record = chaos_journal.dead_letter_blocking(
         job.job_id,
         document="d_bad",
         source="corpus/corrupt.pdf",
@@ -274,15 +274,17 @@ async def test_a_corrupt_document_is_dead_lettered_with_a_reason_code(
 
     assert record.dead_lettered is True
     assert record.reason_code == ErrorCode.PARSE_FAILED.value
-    assert [entry.document_id for entry in chaos_journal.dead_lettered(job.job_id)] == ["d_bad"]
+    assert [entry.document_id for entry in chaos_journal.dead_lettered_blocking(job.job_id)] == [
+        "d_bad"
+    ]
 
 
 async def test_the_pipeline_continues_past_a_dead_lettered_document(
     chaos_journal: Journal,
 ) -> None:
     """Scenario 3b: one bad document never stops the job."""
-    job = chaos_journal.create_job("docs", [{"type": "path", "value": "corpus/"}])
-    chaos_journal.dead_letter(
+    job = chaos_journal.create_job_blocking("docs", [{"type": "path", "value": "corpus/"}])
+    chaos_journal.dead_letter_blocking(
         job.job_id,
         document="d_bad",
         source="corpus/corrupt.pdf",
@@ -290,14 +292,14 @@ async def test_the_pipeline_continues_past_a_dead_lettered_document(
         detail="unreadable",
         attempts=2,
     )
-    chaos_journal.record_document(
+    chaos_journal.record_document_blocking(
         job.job_id,
-        chaos_journal.dead_lettered(job.job_id)[0].__class__(
+        chaos_journal.dead_lettered_blocking(job.job_id)[0].__class__(
             document_id="d_good", source="corpus/fine.pdf", status="indexed"
         ),
     )
 
-    counts = chaos_journal.counts(job.job_id)
+    counts = chaos_journal.counts_blocking(job.job_id)
 
     assert counts["dead_lettered"] == 1
     assert counts["indexed"] == 1
@@ -343,7 +345,7 @@ async def test_a_full_disk_halts_cleanly_with_a_typed_error(tmp_path: Path) -> N
     journal = Journal(blocker)
 
     with pytest.raises((IngestionError, OSError)) as failure:
-        journal.create_job("docs", [{"type": "path", "value": "corpus/"}])
+        journal.create_job_blocking("docs", [{"type": "path", "value": "corpus/"}])
 
     assert failure.value is not None
 
@@ -364,10 +366,10 @@ async def test_a_full_disk_never_takes_down_trace_storage(tmp_path: Path) -> Non
 
 async def test_the_journal_resumes_from_its_checkpoint(chaos_journal: Journal) -> None:
     """Scenario 5c: after space is freed, the job resumes rather than restarting."""
-    job = chaos_journal.create_job("docs", [{"type": "path", "value": "corpus/"}])
-    chaos_journal.checkpoint(job, document_index=499)
+    job = chaos_journal.create_job_blocking("docs", [{"type": "path", "value": "corpus/"}])
+    chaos_journal.checkpoint_blocking(job, document_index=499)
 
-    resumed = chaos_journal.load_job(job.job_id)
+    resumed = chaos_journal.load_job_blocking(job.job_id)
 
     assert resumed.checkpoint is not None
     assert resumed.checkpoint.last_document_index == 499

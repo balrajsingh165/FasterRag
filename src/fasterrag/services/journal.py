@@ -20,9 +20,10 @@ kept so a damaged one degrades to resuming slightly earlier rather than to losin
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -185,7 +186,11 @@ def open_envelope(text: str) -> dict[str, Any] | None:
 
 
 class Journal:
-    """Durable ingestion state: jobs, per-document outcomes, and dedup hashes."""
+    """Durable ingestion state: jobs, per-document outcomes, and dedup hashes.
+
+    Every operation that touches a file has two faces: an ``async`` one, which is what
+    callers use, and the ``*_blocking`` twin it runs in a worker thread (TASK-0399).
+    """
 
     def __init__(
         self,
@@ -211,7 +216,7 @@ class Journal:
         """Return the path of a collection's content-hash index."""
         return self.root / _COLLECTIONS_DIR / collection / _DEDUP_FILE
 
-    def create_job(
+    async def create_job(
         self,
         collection: str,
         sources: Sequence[dict[str, str]],
@@ -219,13 +224,34 @@ class Journal:
         idempotency_key: str | None = None,
         tenant: str | None = None,
     ) -> JobRecord:
-        """Create and persist a job.
+        """Create and persist a job, off the event loop.
+
+        One thread hop covers the key lookup and the write together, so the deprecated
+        body-field path costs a request its scan but costs the worker nothing.
+        """
+        return await asyncio.to_thread(
+            self.create_job_blocking,
+            collection,
+            sources,
+            idempotency_key=idempotency_key,
+            tenant=tenant,
+        )
+
+    def create_job_blocking(
+        self,
+        collection: str,
+        sources: Sequence[dict[str, str]],
+        *,
+        idempotency_key: str | None = None,
+        tenant: str | None = None,
+    ) -> JobRecord:
+        """Create and persist a job; :meth:`create_job` is this off the event loop.
 
         Replaying an idempotency key returns the original job and creates nothing, so a
         retried submission never starts a second ingest of the same corpus.
         """
         if idempotency_key is not None:
-            existing = self.find_by_idempotency_key(idempotency_key, tenant=tenant)
+            existing = self.find_by_idempotency_key_blocking(idempotency_key, tenant=tenant)
             if existing is not None:
                 _logger.info(
                     "returning the existing job for a replayed idempotency key",
@@ -242,15 +268,33 @@ class Journal:
             idempotency_key=idempotency_key,
             tenant=tenant,
         )
-        self.save_job(record)
+        self.save_job_blocking(record)
         return record
 
-    def save_job(self, record: JobRecord) -> None:
-        """Persist a job record atomically."""
+    async def save_job(self, record: JobRecord) -> None:
+        """Persist a job record atomically, off the event loop."""
+        await asyncio.to_thread(self.save_job_blocking, record)
+
+    def save_job_blocking(self, record: JobRecord) -> None:
+        """Persist a job record atomically; :meth:`save_job` is this off the event loop."""
         _write_atomically(self._job_path(record.job_id), envelope(record.as_dict()))
 
-    def load_job(self, job: str, *, tenant: str | None = None) -> JobRecord:
-        """Load a job record, falling back to the previous good copy."""
+    async def load_job(self, job: str, *, tenant: str | None = None) -> JobRecord:
+        """Load a job record off the event loop.
+
+        Raises:
+            IngestionError: ``NOT_FOUND`` for an unknown job, ``CHUNK_FAILED`` for one
+                whose record and previous copy both fail their checksum.
+        """
+        return await asyncio.to_thread(self.load_job_blocking, job, tenant=tenant)
+
+    def load_job_blocking(self, job: str, *, tenant: str | None = None) -> JobRecord:
+        """Load a job record, falling back to the previous good copy.
+
+        Raises:
+            IngestionError: ``NOT_FOUND`` for an unknown job, ``CHUNK_FAILED`` for one
+                whose record and previous copy both fail their checksum.
+        """
         path = self._job_path(job)
         if not path.exists():
             raise IngestionError(f"unknown ingest job {job!r}", code=ErrorCode.NOT_FOUND)
@@ -278,7 +322,15 @@ class Journal:
             raise IngestionError(f"unknown ingest job {job!r}", code=ErrorCode.NOT_FOUND)
         return record
 
-    def find_by_idempotency_key(self, key: str, *, tenant: str | None = None) -> JobRecord | None:
+    async def find_by_idempotency_key(
+        self, key: str, *, tenant: str | None = None
+    ) -> JobRecord | None:
+        """Return the job ``tenant`` created with ``key``, off the event loop."""
+        return await asyncio.to_thread(self.find_by_idempotency_key_blocking, key, tenant=tenant)
+
+    def find_by_idempotency_key_blocking(
+        self, key: str, *, tenant: str | None = None
+    ) -> JobRecord | None:
         """Return the job ``tenant`` created with ``key``, if one exists.
 
         Scoped to the tenant, because an unscoped match hands one tenant another's job id
@@ -296,21 +348,33 @@ class Journal:
                 return JobRecord.from_dict(payload)
         return None
 
-    def checkpoint(self, record: JobRecord, document_index: int) -> JobRecord:
-        """Record progress, writing only at the configured interval."""
-        if not self.enabled:
-            return record
+    async def checkpoint(self, record: JobRecord, document_index: int) -> JobRecord:
+        """Record progress off the event loop, writing only at the configured interval.
 
-        reached_interval = (document_index + 1) % self.checkpoint_every == 0
-        if not reached_interval:
+        An interval that is not due is answered from the record alone, so the documents
+        between checkpoints pay no thread hop at all.
+        """
+        if not self._checkpoint_due(document_index):
+            return record
+        return await asyncio.to_thread(self.checkpoint_blocking, record, document_index)
+
+    def checkpoint_blocking(self, record: JobRecord, document_index: int) -> JobRecord:
+        """Record progress; :meth:`checkpoint` is this off the event loop."""
+        if not self._checkpoint_due(document_index):
             return record
 
         updated = replace(
             record,
             checkpoint=Checkpoint(last_document_index=document_index, written_at=_now()),
         )
-        self.save_job(updated)
+        self.save_job_blocking(updated)
         return updated
+
+    def _checkpoint_due(self, document_index: int) -> bool:
+        """Return whether this document index is one a checkpoint is written at."""
+        if not self.enabled:
+            return False
+        return (document_index + 1) % self.checkpoint_every == 0
 
     def resume_index(self, record: JobRecord) -> int:
         """Return the document index to resume from after a crash."""
@@ -318,15 +382,37 @@ class Journal:
             return 0
         return record.checkpoint.last_document_index + 1
 
-    def record_document(self, job: str, record: DocumentRecord) -> None:
-        """Append a document outcome to the job's log."""
+    async def record_document(self, job: str, record: DocumentRecord) -> None:
+        """Append a document outcome to the job's log, off the event loop."""
+        await asyncio.to_thread(self.record_document_blocking, job, record)
+
+    def record_document_blocking(self, job: str, record: DocumentRecord) -> None:
+        """Append a document outcome; :meth:`record_document` is this off the loop."""
         path = self._documents_path(job)
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(asdict(record), sort_keys=True, separators=(",", ":"))
         with path.open("a", encoding="utf-8") as handle:
             handle.write(f"{line}\n")
 
-    def dead_letter(
+    async def record_indexed(
+        self, job: str, collection: str, record: DocumentRecord, *, dedup: bool
+    ) -> None:
+        """Log a parsed document and remember its hash in one hop off the event loop.
+
+        One hop rather than two: the per-document path runs millions of times, and the
+        thread handoff costs more than either append (``docs/benchmarks.md`` BENCH-0006).
+        """
+        await asyncio.to_thread(self.record_indexed_blocking, job, collection, record, dedup=dedup)
+
+    def record_indexed_blocking(
+        self, job: str, collection: str, record: DocumentRecord, *, dedup: bool
+    ) -> None:
+        """Log a document and its hash; :meth:`record_indexed` is this off the loop."""
+        self.record_document_blocking(job, record)
+        if dedup and record.content_hash is not None:
+            self.remember_content_blocking(collection, record.content_hash, record.document_id)
+
+    async def dead_letter(
         self,
         job: str,
         *,
@@ -338,7 +424,32 @@ class Journal:
         trace_id: str | None = None,
         content: str | None = None,
     ) -> DocumentRecord:
-        """Record a document that failed its retries, and return the entry."""
+        """Record a document that failed its retries, off the event loop."""
+        return await asyncio.to_thread(
+            self.dead_letter_blocking,
+            job,
+            document=document,
+            source=source,
+            reason_code=reason_code,
+            detail=detail,
+            attempts=attempts,
+            trace_id=trace_id,
+            content=content,
+        )
+
+    def dead_letter_blocking(
+        self,
+        job: str,
+        *,
+        document: str,
+        source: str,
+        reason_code: ErrorCode,
+        detail: str,
+        attempts: int,
+        trace_id: str | None = None,
+        content: str | None = None,
+    ) -> DocumentRecord:
+        """Record a failed document; :meth:`dead_letter` is this off the event loop."""
         timestamp = _now()
         record = DocumentRecord(
             document_id=document,
@@ -352,7 +463,7 @@ class Journal:
             first_failed_at=timestamp,
             last_failed_at=timestamp,
         )
-        self.record_document(job, record)
+        self.record_document_blocking(job, record)
         _logger.warning(
             "document dead-lettered",
             extra={
@@ -364,34 +475,55 @@ class Journal:
         )
         return record
 
-    def documents(self, job: str, *, status: str | None = None) -> Iterator[DocumentRecord]:
-        """Yield a job's document outcomes, optionally filtered by status."""
+    async def documents(self, job: str, *, status: str | None = None) -> list[DocumentRecord]:
+        """Return a job's document outcomes off the event loop, optionally filtered."""
+        return await asyncio.to_thread(self.documents_blocking, job, status=status)
+
+    def documents_blocking(self, job: str, *, status: str | None = None) -> list[DocumentRecord]:
+        """Return a job's document outcomes; :meth:`documents` is this off the loop.
+
+        A list rather than a generator: a lazy read would do its file I/O in whichever
+        thread consumed it, which is the event loop again.
+        """
         path = self._documents_path(job)
         if not path.exists():
-            return
+            return []
 
+        found: list[DocumentRecord] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            payload = json.loads(line)
-            record = DocumentRecord(**payload)
+            record = DocumentRecord(**json.loads(line))
             if status is None or record.status == status:
-                yield record
+                found.append(record)
+        return found
 
-    def dead_lettered(self, job: str) -> list[DocumentRecord]:
-        """Return the job's dead-letter entries."""
-        return list(self.documents(job, status="dead_lettered"))
+    async def dead_lettered(self, job: str) -> list[DocumentRecord]:
+        """Return the job's dead-letter entries, off the event loop."""
+        return await asyncio.to_thread(self.dead_lettered_blocking, job)
 
-    def remember_content(self, collection: str, content: str, document: str) -> None:
-        """Record that a content hash is indexed in a collection."""
+    def dead_lettered_blocking(self, job: str) -> list[DocumentRecord]:
+        """Return the job's dead-letter entries; :meth:`dead_lettered` is this off the loop."""
+        return self.documents_blocking(job, status="dead_lettered")
+
+    async def remember_content(self, collection: str, content: str, document: str) -> None:
+        """Record that a content hash is indexed in a collection, off the event loop."""
+        await asyncio.to_thread(self.remember_content_blocking, collection, content, document)
+
+    def remember_content_blocking(self, collection: str, content: str, document: str) -> None:
+        """Record an indexed content hash; :meth:`remember_content` is this off the loop."""
         path = self._dedup_path(collection)
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps({"content_hash": content, "document_id": document})
         with path.open("a", encoding="utf-8") as handle:
             handle.write(f"{line}\n")
 
-    def known_content(self, collection: str) -> dict[str, str]:
-        """Return the collection's content-hash to document-id map."""
+    async def known_content(self, collection: str) -> dict[str, str]:
+        """Return the collection's content-hash to document-id map, off the event loop."""
+        return await asyncio.to_thread(self.known_content_blocking, collection)
+
+    def known_content_blocking(self, collection: str) -> dict[str, str]:
+        """Return the hash to document-id map; :meth:`known_content` is this off the loop."""
         path = self._dedup_path(collection)
         if not path.exists():
             return {}
@@ -403,18 +535,32 @@ class Journal:
                 known[payload["content_hash"]] = payload["document_id"]
         return known
 
-    def document_hashes(self, collection: str) -> dict[str, str]:
-        """Return the collection's ``document_id → content_hash`` map."""
-        return {document: digest for digest, document in self.known_content(collection).items()}
+    async def document_hashes(self, collection: str) -> dict[str, str]:
+        """Return the collection's ``document_id → content_hash`` map, off the event loop."""
+        return await asyncio.to_thread(self.document_hashes_blocking, collection)
 
-    def is_duplicate(self, collection: str, content: str) -> bool:
-        """Return whether a collection already holds this exact content."""
-        return content in self.known_content(collection)
+    def document_hashes_blocking(self, collection: str) -> dict[str, str]:
+        """Return the document-id to hash map; :meth:`document_hashes` is this off the loop."""
+        return {
+            document: digest for digest, document in self.known_content_blocking(collection).items()
+        }
 
-    def counts(self, job: str) -> dict[str, int]:
-        """Return per-status document counts for a job."""
+    async def is_duplicate(self, collection: str, content: str) -> bool:
+        """Return whether a collection already holds this content, off the event loop."""
+        return await asyncio.to_thread(self.is_duplicate_blocking, collection, content)
+
+    def is_duplicate_blocking(self, collection: str, content: str) -> bool:
+        """Return whether the content is already held; :meth:`is_duplicate` is this off the loop."""
+        return content in self.known_content_blocking(collection)
+
+    async def counts(self, job: str) -> dict[str, int]:
+        """Return per-status document counts for a job, off the event loop."""
+        return await asyncio.to_thread(self.counts_blocking, job)
+
+    def counts_blocking(self, job: str) -> dict[str, int]:
+        """Return per-status document counts; :meth:`counts` is this off the event loop."""
         tally: dict[str, int] = {}
-        for record in self.documents(job):
+        for record in self.documents_blocking(job):
             tally[record.status] = tally.get(record.status, 0) + 1
         tally["total"] = sum(count for status, count in tally.items() if status != "total")
         return tally

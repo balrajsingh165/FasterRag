@@ -16,6 +16,15 @@ record, on the deprecated ingest body-field path — is worth indexing before th
 removed at 1.0. The answer is a latency at a realistic journal size, so this script measures
 the miss (the full scan, which is what submitting a *new* key does) and the hit.
 
+**TASK-0399** asks what that scan — and every other journal write — costs the *other*
+requests on the worker, because ``IngestionService.accept`` used to make it from inside an
+``async def``. The question is not how long a journal call takes but how long the event
+loop stops serving anyone, so this script runs a heartbeat coroutine and reports the lag it
+sees while one ingest is journalled: once with the blocking call made on the loop, as the
+code did before, and once awaited through the journal's async face. It also measures the
+per-document pair, because a thread handoff on something that runs millions of times can
+cost more than the write it moves (the trap TASK-0365 recorded).
+
 **It changes nothing.** It writes only into a temporary directory of its own, which it
 removes, and it recommends nothing: it prints numbers for ``docs/benchmarks.md``.
 
@@ -32,6 +41,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import shutil
@@ -39,7 +49,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -51,14 +61,26 @@ from fasterrag.services.idempotency import (
     Reclamation,
     request_fingerprint,
 )
-from fasterrag.services.journal import JobRecord, Journal
+from fasterrag.services.journal import DocumentRecord, JobRecord, Journal
 
-__all__ = ["Latency", "Report", "main", "measure", "parse_args"]
+__all__ = [
+    "Latency",
+    "Report",
+    "idle_lag",
+    "loop_lag",
+    "main",
+    "measure",
+    "parse_args",
+    "per_document",
+]
 
 DEFAULT_RECORDS: Final = 10_000
 DEFAULT_EXPIRED: Final = 2_000
 DEFAULT_JOBS: Final = 10_000
 DEFAULT_SAMPLES: Final = 200
+DEFAULT_LAG_ROUNDS: Final = 20
+
+_HEARTBEAT_SECONDS: Final = 0.005
 
 _TENANT: Final = "acme"
 _STORED_BODY: Final = b'{"id":"col_00000000","name":"handbook","status":"created"}'
@@ -92,6 +114,7 @@ class Report:
     reclaim_steady: dict[str, Any] = field(default_factory=dict)
     latencies: list[Latency] = field(default_factory=list)
     journal: list[Latency] = field(default_factory=list)
+    loop: list[Latency] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """Return the JSON form."""
@@ -105,6 +128,7 @@ class Report:
             "reclaim_steady": self.reclaim_steady,
             "latencies": [item.as_dict() for item in self.latencies],
             "journal": [item.as_dict() for item in self.journal],
+            "loop": [item.as_dict() for item in self.loop],
             "hardware": fingerprint().as_dict(),
             "commit": commit_hash(),
         }
@@ -193,12 +217,12 @@ def claims_under_reclamation(store: FileIdempotencyStore, *, samples: int) -> li
 def populate_journal(journal: Journal, *, jobs: int) -> float:
     """Write ``jobs`` job records, each carrying its own body idempotency key.
 
-    ``save_job`` rather than ``create_job``, because the latter resolves the key first and
-    populating this way would be the quadratic cost the measurement is here to size.
+    ``save_job_blocking`` rather than ``create_job_blocking``, because the latter resolves
+    the key first and populating that way would be the quadratic cost this script sizes.
     """
     started = time.perf_counter()
     for index in range(jobs):
-        journal.save_job(
+        journal.save_job_blocking(
             JobRecord(
                 job_id=f"job_{index:016x}",
                 collection="handbook",
@@ -218,11 +242,90 @@ def journal_samples(journal: Journal, *, jobs: int, samples: int, hit: bool) -> 
     """
     timings: list[float] = []
     stride = max(1, jobs // max(1, samples))
-    journal.find_by_idempotency_key("warm-up", tenant=_TENANT)
+    journal.find_by_idempotency_key_blocking("warm-up", tenant=_TENANT)
     for index in range(samples):
         key = f"body-key-{(index * stride) % jobs}" if hit else f"absent-key-{index}"
         started = time.perf_counter()
-        journal.find_by_idempotency_key(key, tenant=_TENANT)
+        journal.find_by_idempotency_key_blocking(key, tenant=_TENANT)
+        timings.append((time.perf_counter() - started) * 1000)
+    return timings
+
+
+async def _heartbeat(lags: list[float], stop: asyncio.Event, interval: float) -> None:
+    """Record how far past ``interval`` each wake-up lands, which is the loop's lag."""
+    while not stop.is_set():
+        started = time.perf_counter()
+        await asyncio.sleep(interval)
+        lags.append((time.perf_counter() - started - interval) * 1000)
+
+
+async def _under_load(
+    work: Callable[[int], Awaitable[None]], *, rounds: int, interval: float
+) -> list[float]:
+    """Return the lag a heartbeat coroutine sees while ``work`` runs ``rounds`` times."""
+    lags: list[float] = []
+    stop = asyncio.Event()
+    beat = asyncio.create_task(_heartbeat(lags, stop, interval))
+    await asyncio.sleep(interval * 10)
+    lags.clear()
+    for index in range(rounds):
+        await work(index)
+        await asyncio.sleep(interval * 4)
+    stop.set()
+    await beat
+    return lags
+
+
+async def idle_lag(*, rounds: int) -> list[float]:
+    """Return the lag a heartbeat sees with nothing else on the loop.
+
+    The floor, not a result: a 5 ms sleep on Windows wakes on a ~15.6 ms timer, so every
+    other row here has to be read against this one.
+    """
+
+    async def work(_: int) -> None:
+        return None
+
+    return await _under_load(work, rounds=rounds, interval=_HEARTBEAT_SECONDS)
+
+
+async def loop_lag(journal: Journal, *, on_loop: bool, rounds: int) -> list[float]:
+    """Time the loop's lag while a keyed job is accepted, with and without the offload.
+
+    ``on_loop`` calls the blocking twin directly, which is what ``IngestionService.accept``
+    did before TASK-0399; the other arm awaits the shipped async method.
+    """
+    sources = [{"type": "path", "value": "corpus/probe"}]
+
+    async def work(index: int) -> None:
+        key = f"lag-{int(on_loop)}-{index}"
+        if on_loop:
+            journal.create_job_blocking("handbook", sources, idempotency_key=key, tenant=_TENANT)
+        else:
+            await journal.create_job("handbook", sources, idempotency_key=key, tenant=_TENANT)
+
+    return await _under_load(work, rounds=rounds, interval=_HEARTBEAT_SECONDS)
+
+
+async def per_document(journal: Journal, *, offload: bool, samples: int) -> list[float]:
+    """Time the per-document journal pair, with and without the thread handoff.
+
+    This is the tight loop TASK-0365 warned about: if the handoff costs more than the two
+    appends it moves, the offload is a regression dressed as a fix.
+    """
+    timings: list[float] = []
+    for index in range(samples):
+        record = DocumentRecord(
+            document_id=f"doc-{index:08x}",
+            source=f"corpus/{index}",
+            status="indexed",
+            content_hash=f"{index:064x}",
+        )
+        started = time.perf_counter()
+        if offload:
+            await journal.record_indexed("job_probe", "handbook", record, dedup=True)
+        else:
+            journal.record_indexed_blocking("job_probe", "handbook", record, dedup=True)
         timings.append((time.perf_counter() - started) * 1000)
     return timings
 
@@ -266,6 +369,39 @@ def measure(root: Path, args: argparse.Namespace) -> Report:
             _latency(
                 "find_by_idempotency_key (hit)",
                 journal_samples(journal, jobs=args.jobs, samples=args.journal_samples, hit=True),
+            )
+        )
+
+        _progress("timing an idle event loop, for the heartbeat floor")
+        report.loop.append(
+            _latency("loop lag, idle (floor)", asyncio.run(idle_lag(rounds=args.lag_rounds)))
+        )
+        _progress("timing the event loop while a job is accepted on it")
+        report.loop.append(
+            _latency(
+                "loop lag, accept on the loop",
+                asyncio.run(loop_lag(journal, on_loop=True, rounds=args.lag_rounds)),
+            )
+        )
+        _progress("timing the event loop while a job is accepted off it")
+        report.loop.append(
+            _latency(
+                "loop lag, accept off the loop",
+                asyncio.run(loop_lag(journal, on_loop=False, rounds=args.lag_rounds)),
+            )
+        )
+
+        _progress("timing the per-document journal pair")
+        report.loop.append(
+            _latency(
+                "record_indexed, blocking",
+                asyncio.run(per_document(journal, offload=False, samples=args.samples)),
+            )
+        )
+        report.loop.append(
+            _latency(
+                "record_indexed, off the loop",
+                asyncio.run(per_document(journal, offload=True, samples=args.samples)),
             )
         )
 
@@ -316,6 +452,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--jobs", type=int, default=DEFAULT_JOBS)
     parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
     parser.add_argument("--journal-samples", type=int, default=20)
+    parser.add_argument("--lag-rounds", type=int, default=DEFAULT_LAG_ROUNDS)
     parser.add_argument("--json", dest="json_path", default=None)
     parser.add_argument(
         "--keep",

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field, replace
@@ -194,9 +194,13 @@ class CpuWorkerPool:
         job: str | None = None,
         collection: str = "default",
         resume_from: int = 0,
-        on_progress: Callable[[int], None] | None = None,
+        on_progress: Callable[[int], Awaitable[None]] | None = None,
     ) -> PoolReport:
-        """Parse and chunk every task, streaming chunks into ``sink``."""
+        """Parse and chunk every task, streaming chunks into ``sink``.
+
+        ``on_progress`` is awaited because checkpointing writes a file, and a synchronous
+        callback would put that write back on the event loop (TASK-0399).
+        """
         if self._executor is None:
             raise IngestionError(
                 "the cpu worker pool is not running; use it as an async context manager",
@@ -206,7 +210,7 @@ class CpuWorkerPool:
 
         known: dict[str, str] = {}
         if self.journal is not None and self.settings.ingestion.dedup:
-            known = self.journal.known_content(collection)
+            known = await self.journal.known_content(collection)
         loop = asyncio.get_running_loop()
         parsed = chunked = deduplicated = dead_lettered = skipped = 0
         flags: dict[str, int] = {}
@@ -224,16 +228,16 @@ class CpuWorkerPool:
                 raise _unguarded_entry_point_error() from exc
             except FasterRagError as exc:
                 dead_lettered += 1
-                self._dead_letter(job, task, exc)
+                await self._dead_letter(job, task, exc)
                 if on_progress is not None:
-                    on_progress(task.index)
+                    await on_progress(task.index)
                 continue
 
             if outcome.content_hash in known:
                 deduplicated += 1
-                self._record(job, task, "deduplicated", outcome.content_hash)
+                await self._record(job, task, "deduplicated", outcome.content_hash)
                 if on_progress is not None:
-                    on_progress(task.index)
+                    await on_progress(task.index)
                 continue
 
             outcome = await self._enriched(outcome)
@@ -247,9 +251,9 @@ class CpuWorkerPool:
             parsed += 1
             chunked += len(outcome.chunks)
             known[outcome.content_hash] = task.document_id
-            self._index_document(job, collection, task, outcome)
+            await self._index_document(job, collection, task, outcome)
             if on_progress is not None:
-                on_progress(task.index)
+                await on_progress(task.index)
 
         return PoolReport(
             parsed=parsed,
@@ -267,8 +271,8 @@ class CpuWorkerPool:
 
         return [replace(payload, document_text=outcome.document_text) for payload in outcome.chunks]
 
-    def _dead_letter(self, job: str | None, task: DocumentTask, exc: FasterRagError) -> None:
-        """Route a failed document to the dead-letter queue."""
+    async def _dead_letter(self, job: str | None, task: DocumentTask, exc: FasterRagError) -> None:
+        """Route a failed document to the dead-letter queue, off the event loop."""
         _logger.warning(
             "document failed to parse",
             extra={
@@ -280,7 +284,7 @@ class CpuWorkerPool:
         if self.journal is None or job is None:
             return
 
-        self.journal.dead_letter(
+        await self.journal.dead_letter(
             job,
             document=task.document_id,
             source=task.source,
@@ -290,31 +294,44 @@ class CpuWorkerPool:
             trace_id=exc.trace_id,
         )
 
-    def _record(
+    async def _record(
         self, job: str | None, task: DocumentTask, status: str, digest: str | None = None
     ) -> None:
-        """Record a document outcome when journalling is active."""
+        """Record a document outcome when journalling is active, off the event loop."""
         if self.journal is None or job is None:
             return
 
-        self.journal.record_document(
-            job,
-            DocumentRecord(
-                document_id=task.document_id,
-                source=task.source,
-                status=status,
-                content_hash=digest,
-                trace_id=current_trace_id(),
-            ),
-        )
+        await self.journal.record_document(job, self._outcome(task, status, digest))
 
-    def _index_document(
+    async def _index_document(
         self, job: str | None, collection: str, task: DocumentTask, outcome: ParseOutcome
     ) -> None:
-        """Record a parsed document and remember its content hash."""
-        self._record(job, task, "indexed", outcome.content_hash)
-        if self.journal is not None and self.settings.ingestion.dedup:
-            self.journal.remember_content(collection, outcome.content_hash, task.document_id)
+        """Record a parsed document and remember its content hash, in one thread hop.
+
+        One hop rather than two: this runs once per document, and the handoff costs more
+        than either append does (``docs/benchmarks.md`` BENCH-0006).
+        """
+        if self.journal is None or job is None:
+            return
+
+        await self.journal.record_indexed(
+            job,
+            collection,
+            self._outcome(task, "indexed", outcome.content_hash),
+            dedup=self.settings.ingestion.dedup,
+        )
+
+    def _outcome(
+        self, task: DocumentTask, status: str, digest: str | None = None
+    ) -> DocumentRecord:
+        """Return the journal entry for one document's outcome."""
+        return DocumentRecord(
+            document_id=task.document_id,
+            source=task.source,
+            status=status,
+            content_hash=digest,
+            trace_id=current_trace_id(),
+        )
 
     async def _enriched(self, outcome: ParseOutcome) -> ParseOutcome:
         """Prepend a situating context to each chunk, when the toggle and a model allow it."""
