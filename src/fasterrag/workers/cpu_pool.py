@@ -6,15 +6,26 @@ each document finishes instead of after the whole corpus is parsed, which is wha
 expensive embedding workers from idling behind the parser.
 
 Failure is per-document by design. A corrupt file becomes a dead-letter entry with a reason
-code and the pipeline continues; a crashed worker costs only its in-flight document
-(``docs/failure-modes.md`` row 1).
+code and the pipeline continues — including a parser that raises something untyped, which is
+converted to a ``ParseError`` inside the worker rather than aborting the job. A worker
+*process* dying is different: the standard library marks the whole pool broken, so the job
+fails rather than continuing on a pool that can no longer accept work.
+
+Documents are parsed concurrently, up to the pool size at a time, and consumed in
+submission order. Awaiting each document before submitting the next — which this module did
+until 2026-11-11 — keeps exactly one worker busy however many the pool holds.
+
+A document is journalled as indexed only when the :class:`IndexLedger` says every chunk of
+it was written downstream (``workers/ledger.py``). With no ledger passed there is no
+downstream to wait for, and the chunks are acknowledged as they are enqueued.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections import deque
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Executor, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field, replace
@@ -29,6 +40,7 @@ from fasterrag.core.parsing import create_parsing_options, parse_bytes
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
 from fasterrag.observability.logging import current_trace_id, get_logger
 from fasterrag.services.journal import DocumentRecord, Journal
+from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload, DocumentTask, ParseOutcome
 
 __all__ = ["CpuWorkerPool", "PoolReport", "parse_and_chunk", "resolve_pool_size"]
@@ -61,6 +73,19 @@ class PoolReport:
 
 def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
     """Load, parse, and chunk one document."""
+    try:
+        return _parse_and_chunk(task, settings)
+    except FasterRagError:
+        raise
+    except Exception as exc:
+        # CRITICAL: a parser library raising its own exception type (a corrupt DOCX, a
+        # RecursionError on deeply nested JSON) must cost one document, not the job. Only
+        # typed errors are dead-lettered by the pool, so the conversion happens here.
+        raise ParseError(f"{task.source} could not be parsed: {type(exc).__name__}: {exc}") from exc
+
+
+def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
+    """Do the work of :func:`parse_and_chunk`, raising whatever the parsers raise."""
     limit = settings.ingestion.max_document_mb * _MEGABYTE
     data = _read(task.readable, limit)
     document = parse_bytes(
@@ -195,12 +220,9 @@ class CpuWorkerPool:
         collection: str = "default",
         resume_from: int = 0,
         on_progress: Callable[[int], Awaitable[None]] | None = None,
+        ledger: IndexLedger | None = None,
     ) -> PoolReport:
-        """Parse and chunk every task, streaming chunks into ``sink``.
-
-        ``on_progress`` is awaited because checkpointing writes a file, and a synchronous
-        callback would put that write back on the event loop (TASK-0399).
-        """
+        """Parse and chunk every task, streaming chunks into ``sink``."""
         if self._executor is None:
             raise IngestionError(
                 "the cpu worker pool is not running; use it as an async context manager",
@@ -211,49 +233,54 @@ class CpuWorkerPool:
         known: dict[str, str] = {}
         if self.journal is not None and self.settings.ingestion.dedup:
             known = await self.journal.known_content(collection)
-        loop = asyncio.get_running_loop()
-        parsed = chunked = deduplicated = dead_lettered = skipped = 0
+        standalone = ledger is None
+        tracker = ledger or IndexLedger(on_progress, start=resume_from)
+        parsed = chunked = deduplicated = dead_lettered = 0
         flags: dict[str, int] = {}
 
-        for task in tasks:
-            if task.index < resume_from:
-                skipped += 1
-                continue
+        ordered = list(tasks)
+        pending = [task for task in ordered if task.index >= resume_from]
+        skipped = len(ordered) - len(pending)
 
-            try:
-                outcome = await loop.run_in_executor(
-                    self._executor, parse_and_chunk, task, self.settings
+        stream = self._parsed(pending)
+        try:
+            async for task, result in self._parsed(pending):
+                if isinstance(result, FasterRagError):
+                    dead_lettered += 1
+                    await self._dead_letter(job, task, result)
+                    await tracker.settle(task.index)
+                    continue
+
+                outcome = result
+                if outcome.content_hash in known:
+                    deduplicated += 1
+                    await self._record(job, task, "deduplicated", outcome.content_hash)
+                    await tracker.settle(task.index)
+                    continue
+
+                outcome = await self._enriched(outcome)
+
+                for flag in outcome.parse_flags:
+                    flags[flag] = flags.get(flag, 0) + 1
+
+                payloads = self._addressed(outcome)
+                await tracker.expect(
+                    task.document_id,
+                    index=task.index,
+                    source=task.source,
+                    chunks=len(payloads),
+                    commit=self._commit(job, collection, task, outcome),
                 )
-            except BrokenProcessPool as exc:
-                raise _unguarded_entry_point_error() from exc
-            except FasterRagError as exc:
-                dead_lettered += 1
-                await self._dead_letter(job, task, exc)
-                if on_progress is not None:
-                    await on_progress(task.index)
-                continue
+                for payload in payloads:
+                    await sink.put(payload)
 
-            if outcome.content_hash in known:
-                deduplicated += 1
-                await self._record(job, task, "deduplicated", outcome.content_hash)
-                if on_progress is not None:
-                    await on_progress(task.index)
-                continue
-
-            outcome = await self._enriched(outcome)
-
-            for flag in outcome.parse_flags:
-                flags[flag] = flags.get(flag, 0) + 1
-
-            for payload in self._addressed(outcome):
-                await sink.put(payload)
-
-            parsed += 1
-            chunked += len(outcome.chunks)
-            known[outcome.content_hash] = task.document_id
-            await self._index_document(job, collection, task, outcome)
-            if on_progress is not None:
-                await on_progress(task.index)
+                parsed += 1
+                chunked += len(outcome.chunks)
+                known[outcome.content_hash] = task.document_id
+                if standalone:
+                    await tracker.written(payloads)
+        finally:
+            await stream.aclose()
 
         return PoolReport(
             parsed=parsed,
@@ -263,6 +290,54 @@ class CpuWorkerPool:
             skipped=skipped,
             flags=flags,
         )
+
+    async def _parsed(
+        self, tasks: Sequence[DocumentTask]
+    ) -> AsyncGenerator[tuple[DocumentTask, ParseOutcome | FasterRagError]]:
+        """Yield each task with its outcome or its typed failure, in submission order.
+
+        Up to ``self.size`` documents are in the pool at once. Order is kept so the dedup
+        decision between two identical documents in one job stays deterministic.
+        """
+        executor = self._executor
+        loop = asyncio.get_running_loop()
+        window: deque[tuple[DocumentTask, asyncio.Future[ParseOutcome]]] = deque()
+        queued = iter(tasks)
+
+        def fill() -> None:
+            while len(window) < self.size:
+                task = next(queued, None)
+                if task is None:
+                    return
+                future = loop.run_in_executor(executor, parse_and_chunk, task, self.settings)
+                window.append((task, future))
+
+        try:
+            fill()
+            while window:
+                task, future = window.popleft()
+                try:
+                    outcome = await future
+                except BrokenProcessPool as exc:
+                    raise _unguarded_entry_point_error() from exc
+                except FasterRagError as exc:
+                    yield task, exc
+                else:
+                    yield task, outcome
+                fill()
+        finally:
+            for _, future in window:
+                future.cancel()
+
+    def _commit(
+        self, job: str | None, collection: str, task: DocumentTask, outcome: ParseOutcome
+    ) -> Callable[[], Awaitable[None]]:
+        """Return the callback that journals this document once it is fully indexed."""
+
+        async def commit() -> None:
+            await self._index_document(job, collection, task, outcome)
+
+        return commit
 
     def _addressed(self, outcome: ParseOutcome) -> list[ChunkPayload]:
         """Return the outcome's chunks, carrying the document text late chunking needs."""
@@ -306,7 +381,7 @@ class CpuWorkerPool:
     async def _index_document(
         self, job: str | None, collection: str, task: DocumentTask, outcome: ParseOutcome
     ) -> None:
-        """Record a parsed document and remember its content hash, in one thread hop.
+        """Record an indexed document and remember its content hash, in one thread hop.
 
         One hop rather than two: this runs once per document, and the handoff costs more
         than either append does (``docs/benchmarks.md`` BENCH-0006).

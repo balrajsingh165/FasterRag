@@ -389,17 +389,22 @@ async def test_nothing_is_recorded_for_a_refused_job(tmp_path: Path, corpus: Pat
 async def test_the_refusal_replaces_the_embed_provider_error_the_operator_used_to_get(
     tmp_path: Path, corpus: Path
 ) -> None:
-    """The old failure names the embedding provider and a point id for an index mistake."""
+    """The old failure names the embedding provider and a point id for an index mistake.
+
+    A job that bypasses ``accept`` no longer raises out of ``run``: a refused write is a
+    per-document failure now, so every document is dead-lettered and the job settles failed.
+    """
     service, _ = build(tmp_path, adapter=DenseOnlyAdapter(settings()))
     bypassed = service.journal.create_job_blocking(
         "default", [{"type": "path", "value": source} for source in sources(corpus)]
     )
 
-    with pytest.raises(FasterRagError) as old:
-        await service.run(bypassed)
+    settled = await service.run(bypassed)
+    dead = await service.journal.dead_lettered(bypassed.job_id)
 
-    assert old.value.code is ErrorCode.EMBED_PROVIDER_ERROR
-    assert "fasterrag index reembed" not in old.value.detail
+    assert settled.status == "failed"
+    assert {entry.reason_code for entry in dead} == {ErrorCode.EMBED_PROVIDER_ERROR.value}
+    assert all("fasterrag index reembed" not in (entry.detail or "") for entry in dead)
 
     with pytest.raises(FasterRagError) as new:
         await service.accept(sources(corpus))
@@ -454,3 +459,87 @@ async def test_the_preflight_costs_one_round_trip_per_job_not_per_document(
 
     assert accepted == 1
     assert adapter.listings == 2
+
+
+async def test_a_document_that_failed_to_embed_is_not_remembered_as_indexed(
+    tmp_path: Path, corpus: Path
+) -> None:
+    """The retry-is-a-no-op defect: a failed document used to be recorded as indexed.
+
+    Its content hash went into the dedup file when its chunks were enqueued, so the retry
+    found it there, reported it deduplicated, and the document was never indexed at all.
+    """
+    embedder = StubEmbedder(settings())
+    embedder.error = EmbedError("the provider is down", retryable=False)
+    service, adapter = build(tmp_path, embedder=embedder)
+
+    first = await service.run(await service.accept(sources(corpus)))
+    embedder.error = None
+    second = await service.run(await service.accept(sources(corpus)))
+
+    assert first.status == "failed"
+    assert first.counts["dead_lettered"] == 2
+    assert second.status == "completed"
+    assert second.counts["deduplicated"] == 0
+    assert adapter.points
+
+
+async def test_a_failed_document_is_dead_lettered_once_not_once_per_chunk(
+    tmp_path: Path, corpus: Path
+) -> None:
+    embedder = StubEmbedder(settings())
+    embedder.error = EmbedError("the provider is down", retryable=False)
+    service, _ = build(tmp_path, embedder=embedder)
+
+    record = await service.accept(sources(corpus))
+    settled = await service.run(record)
+    dead = await service.journal.dead_lettered(record.job_id)
+
+    assert settled.counts["chunked"] >= 2
+    assert sorted(entry.source for entry in dead) == sorted(sources(corpus))
+
+
+async def test_semantic_chunking_is_refused_before_a_job_is_recorded(
+    tmp_path: Path, corpus: Path
+) -> None:
+    """It used to be accepted and then dead-letter every document with a config error."""
+    configured = settings(chunking={"strategy": "semantic", "chunk_size": 128, "overlap": 16})
+    service, _ = build(tmp_path, configured)
+
+    with pytest.raises(FasterRagError) as refused:
+        await service.accept(sources(corpus))
+
+    assert refused.value.code is ErrorCode.CONFIG_INVALID
+    assert "recursive" in refused.value.detail
+    assert not list(service.journal.root.rglob("*.json"))
+
+
+async def test_an_unexpected_failure_settles_the_job_as_failed(
+    tmp_path: Path, corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job left 'running' by an untyped exception is indistinguishable from a slow one."""
+    service, adapter = build(tmp_path)
+
+    async def explode(points: list[Point]) -> UpsertResult:
+        raise RuntimeError("a bug in the adapter")
+
+    monkeypatch.setattr(adapter, "upsert", explode)
+    record = await service.accept(sources(corpus))
+
+    with pytest.raises(FasterRagError) as stopped:
+        await service.run(record)
+
+    assert stopped.value.code is ErrorCode.INTERNAL
+    assert service.journal.load_job_blocking(record.job_id).status == "failed"
+
+
+async def test_a_source_that_cannot_be_resolved_settles_the_job_as_failed(tmp_path: Path) -> None:
+    service, _ = build(tmp_path)
+    record = service.journal.create_job_blocking(
+        "default", [{"type": "url", "value": "ftp://example.invalid/file.md"}]
+    )
+
+    with pytest.raises(FasterRagError):
+        await service.run(record)
+
+    assert service.journal.load_job_blocking(record.job_id).status == "failed"

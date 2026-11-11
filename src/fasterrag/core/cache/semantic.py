@@ -73,20 +73,24 @@ MISS: dict[str, Any] = {"semantic_hit": False, "similarity": None}
 
 
 def _encode(
-    question: str, vector: Sequence[float], response: dict[str, Any], tenant: str | None = None
+    question: str,
+    vector: Sequence[float],
+    response: dict[str, Any],
+    tenant: str | None = None,
+    scope: str = "",
 ) -> bytes:
     """Pack an entry as a length-prefixed vector followed by JSON."""
     packed = encode_vector(vector)
     header = json.dumps(
-        {"question": question, "vector_bytes": len(packed), "tenant": tenant}
+        {"question": question, "vector_bytes": len(packed), "tenant": tenant, "scope": scope}
     ).encode("utf-8")
     return b"".join(
         (len(header).to_bytes(4, "little"), header, packed, json.dumps(response).encode("utf-8"))
     )
 
 
-def _decode(raw: bytes) -> tuple[str, list[float], dict[str, Any], str | None] | None:
-    """Return the question, vector, response, and tenant in ``raw``, or ``None`` if malformed."""
+def _decode(raw: bytes) -> tuple[str, list[float], dict[str, Any], str | None, str] | None:
+    """Return the question, vector, response, tenant and scope, or ``None`` if malformed."""
     try:
         if len(raw) < 4:
             return None
@@ -109,6 +113,7 @@ def _decode(raw: bytes) -> tuple[str, list[float], dict[str, Any], str | None] |
         vector,
         response,
         str(tenant) if tenant is not None else None,
+        str(header.get("scope", "")),
     )
 
 
@@ -131,9 +136,12 @@ class SemanticCache:
         return self.config.similarity_threshold
 
     async def lookup(
-        self, vector: Sequence[float], *, tenant: str | None = None
+        self, vector: Sequence[float], *, tenant: str | None = None, scope: str = ""
     ) -> CacheHit | None:
-        """Return the closest stored response above the threshold, or ``None``."""
+        """Return the closest stored response above the threshold, or ``None``.
+
+        Only entries stored under the same ``tenant`` and the same ``scope`` are candidates.
+        """
         if not self.enabled:
             return None
 
@@ -152,8 +160,8 @@ class SemanticCache:
             decoded = _decode(raw)
             if decoded is None:
                 continue
-            question, stored, response, owner = decoded
-            if owner != tenant:
+            question, stored, response, owner, stored_scope = decoded
+            if owner != tenant or stored_scope != scope:
                 continue
             similarity = cosine_similarity(vector, stored)
             if similarity >= self.threshold and (best is None or similarity > best.similarity):
@@ -177,6 +185,7 @@ class SemanticCache:
         response: dict[str, Any],
         *,
         tenant: str | None = None,
+        scope: str = "",
     ) -> None:
         """Remember ``response`` as the answer to anything close to ``vector``.
 
@@ -188,8 +197,8 @@ class SemanticCache:
 
         try:
             await self.store.set(
-                f"sem:{tenant or '-'}:{question}",
-                _encode(question, vector, response, tenant),
+                f"sem:{tenant or '-'}:{scope or '-'}:{question}",
+                _encode(question, vector, response, tenant, scope),
                 ttl=self.config.ttl,
             )
         except CacheError as exc:

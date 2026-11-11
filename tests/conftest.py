@@ -20,6 +20,8 @@ import pytest
 from hypothesis import HealthCheck, settings
 
 import fasterrag
+from fasterrag.core.breaker import reset_shared_breakers
+from fasterrag.core.rerank.cross_encoder import reset_shared_cross_encoders
 from fasterrag.services.budget import reset_shared_governors
 
 REPO_ROOT: Final = Path(__file__).resolve().parent.parent
@@ -126,6 +128,20 @@ def _unspent_governors() -> Iterator[None]:
     reset_shared_governors()
     yield
     reset_shared_governors()
+
+
+# CRITICAL: the shared circuit breakers and the shared cross-encoder cache are the same kind
+# of process-wide state for the same reason, and leak across tests the same way: a test that
+# opens a circuit would hand `CIRCUIT_OPEN` to whatever runs next, and a test that installs a
+# fake model would hand it to every later reranker of that name.
+@pytest.fixture(autouse=True)
+def _closed_circuits_and_no_loaded_models() -> Iterator[None]:
+    """Give every test closed shared breakers and an empty reranker cache."""
+    reset_shared_breakers()
+    reset_shared_cross_encoders()
+    yield
+    reset_shared_breakers()
+    reset_shared_cross_encoders()
 
 
 MUST_RUN_MARKER: Final = "must_run"

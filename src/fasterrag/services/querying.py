@@ -44,7 +44,7 @@ from fasterrag.adapters.vectordb.base import (
 )
 from fasterrag.adapters.vectordb.qdrant import POINT_ID_PAYLOAD_KEY
 from fasterrag.config.schema import Settings
-from fasterrag.core.breaker import CircuitBreaker
+from fasterrag.core.breaker import CircuitBreaker, shared_breaker
 from fasterrag.core.rerank import Reranker
 from fasterrag.core.retrieval.bm25 import encode_query
 from fasterrag.core.retrieval.fusion import Ranking, rrf_fuse
@@ -108,14 +108,10 @@ class RetrievalService:
         self.router = router
         self.reranker = reranker
         self.tenant = tenant
-        # CRITICAL: one breaker for the life of the service, as in GenerationService and
-        # EmbeddingPool. A breaker rebuilt per query counts to one forever and never opens.
-        self.breaker = breaker or CircuitBreaker(
-            provider="vector_db",
-            failure_threshold=settings.reliability.circuit_breaker.failure_threshold,
-            reset_timeout_ms=settings.reliability.circuit_breaker.reset_timeout_ms,
-            enabled=settings.reliability.circuit_breaker.enabled,
-        )
+        # CRITICAL: the process-wide breaker, not a fresh one. This object is built per
+        # request on the REST path and per job on the ingest path, and a breaker rebuilt
+        # per unit of work counts to one forever and can never open.
+        self.breaker = breaker or shared_breaker("vector_db", settings)
 
     async def retrieve(
         self,

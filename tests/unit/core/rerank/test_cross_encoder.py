@@ -131,3 +131,62 @@ def test_a_missing_extra_names_the_install_command(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises((ConfigError, AttributeError, ImportError, TypeError)):
         cross_encoder.load_cross_encoder("any-model")
+
+
+async def test_two_rerankers_share_one_loaded_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The REST API builds a reranker per request; per instance, that is a load per query."""
+    loads: list[str] = []
+    fake = FakeCrossEncoder()
+
+    def load(name: str) -> FakeCrossEncoder:
+        loads.append(name)
+        return fake
+
+    monkeypatch.setattr(cross_encoder, "load_cross_encoder", load)
+    shortlist = [chunk("c_a", "the notice period", 1)]
+
+    await CrossEncoderReranker(settings()).rerank("notice", shortlist)
+    await CrossEncoderReranker(settings()).rerank("notice", shortlist)
+
+    assert len(loads) == 1
+
+
+async def test_a_different_model_name_is_loaded_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loads: list[str] = []
+
+    def load(name: str) -> FakeCrossEncoder:
+        loads.append(name)
+        return FakeCrossEncoder()
+
+    monkeypatch.setattr(cross_encoder, "load_cross_encoder", load)
+    shortlist = [chunk("c_a", "the notice period", 1)]
+
+    await CrossEncoderReranker(settings()).rerank("notice", shortlist)
+    await CrossEncoderReranker(
+        settings(retrieval={"reranker_model": "cross-encoder/another"})
+    ).rerank("notice", shortlist)
+
+    assert loads == ["BAAI/bge-reranker-v2-m3", "cross-encoder/another"]
+
+
+async def test_a_failed_load_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Caching the failure would turn one bad download into a permanently broken stage."""
+    attempts: list[str] = []
+    fake = FakeCrossEncoder()
+
+    def load(name: str) -> FakeCrossEncoder:
+        attempts.append(name)
+        if len(attempts) == 1:
+            raise OSError("connection reset")
+        return fake
+
+    monkeypatch.setattr(cross_encoder, "load_cross_encoder", load)
+    shortlist = [chunk("c_a", "the notice period", 1)]
+
+    with pytest.raises(RetrievalError):
+        await CrossEncoderReranker(settings()).rerank("notice", shortlist)
+    await CrossEncoderReranker(settings()).rerank("notice", shortlist)
+
+    assert len(attempts) == 2

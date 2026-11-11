@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -41,16 +41,17 @@ from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache.semantic import SemanticCache
-from fasterrag.errors import ErrorCode
+from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger, use_trace_id
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.lockfile import LockStore, build_lock
 from fasterrag.services.reindex import require_keyword_leg
 from fasterrag.services.sources import resolve_sources, typed_source
-from fasterrag.workers.cpu_pool import CpuWorkerPool
-from fasterrag.workers.embed_pool import EmbeddingWorkerPool
+from fasterrag.workers.cpu_pool import CpuWorkerPool, PoolReport
+from fasterrag.workers.embed_pool import EmbeddingWorkerPool, EmbedReport
 from fasterrag.workers.indexer import Indexer
+from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload
 
 __all__ = ["IngestionService"]
@@ -95,6 +96,7 @@ class IngestionService:
         keyword leg — one metadata round trip per job, covering every caller (TASK-0320).
         """
         target = collection or self.settings.vector_db.collection.default_name
+        _require_pipeline_chunker(self.settings)
         await require_keyword_leg(target, self.settings, self.adapter)
 
         typed = [
@@ -113,26 +115,63 @@ class IngestionService:
         *,
         metadata: dict[str, Any] | None = None,
     ) -> JobRecord:
-        """Run an accepted job to completion and return its settled record."""
-        resolved = await resolve_sources(record.sources, self.settings)
-        tasks = CpuWorkerPool.tasks_for(
-            resolved.sources,
-            tenant=record.tenant,
-            metadata=metadata,
-            locations=resolved.locations,
-        )
-        resume_from = self.journal.resume_index(record)
+        """Run an accepted job to completion and return its settled record.
 
-        indexer = Indexer(self.settings, self.adapter, collection=record.collection)
-        pool = EmbeddingWorkerPool(self.settings, self.router, indexer, tenant=record.tenant)
-        queue: BoundedQueue[ChunkPayload] = BoundedQueue(self.settings.workers.queue_depth)
-
-        running = replace(record, status="running")
-        await self.journal.save_job(running)
-        progress = _Checkpointer(self.journal, running)
-        started = time.monotonic()
-
+        Any failure settles the job as ``failed`` before it propagates, so a job can never
+        be left ``running`` by an exception — typed or not — on any of the three surfaces.
+        """
         with use_trace_id():
+            try:
+                return await self._run(record, metadata)
+            except FasterRagError as exc:
+                await self._settle_failed(record, exc.code.value, exc.detail)
+                raise
+            except Exception as exc:
+                await self._settle_failed(record, ErrorCode.INTERNAL.value, repr(exc))
+                raise IngestionError(
+                    f"ingest job {record.job_id} stopped on an unexpected error: "
+                    f"{type(exc).__name__}: {exc}",
+                    code=ErrorCode.INTERNAL,
+                    retryable=False,
+                ) from exc
+
+    async def _settle_failed(self, record: JobRecord, code: str, detail: str) -> None:
+        """Persist a terminal ``failed`` status, keeping whatever checkpoint was reached."""
+        try:
+            current = await self.journal.load_job(record.job_id)
+        except FasterRagError:
+            current = record
+        await self.journal.save_job(replace(current, status="failed", finished_at=_finished_at()))
+        _logger.error(
+            "ingest job failed",
+            extra={"job_id": record.job_id, "code": code, "detail": detail},
+        )
+
+    async def _run(self, record: JobRecord, metadata: dict[str, Any] | None) -> JobRecord:
+        """Resolve, parse, embed and index a job, then settle its record."""
+        resolved = await resolve_sources(record.sources, self.settings)
+        enricher = None
+        try:
+            tasks = CpuWorkerPool.tasks_for(
+                resolved.sources,
+                tenant=record.tenant,
+                metadata=metadata,
+                locations=resolved.locations,
+            )
+            resume_from = self.journal.resume_index(record)
+
+            running = replace(record, status="running")
+            await self.journal.save_job(running)
+            progress = _Checkpointer(self.journal, running)
+            ledger = IndexLedger(progress, start=resume_from)
+
+            indexer = Indexer(self.settings, self.adapter, collection=record.collection)
+            pool = EmbeddingWorkerPool(
+                self.settings, self.router, indexer, tenant=record.tenant, ledger=ledger
+            )
+            queue: BoundedQueue[ChunkPayload] = BoundedQueue(self.settings.workers.queue_depth)
+            started = time.monotonic()
+
             _logger.info(
                 "ingest started",
                 extra={
@@ -143,43 +182,40 @@ class IngestionService:
                 },
             )
 
-            enricher = (
-                create_llm_adapter(self.settings)
-                if self.settings.chunking.contextual_enrichment
-                else None
-            )
+            if self.settings.chunking.contextual_enrichment:
+                enricher = create_llm_adapter(self.settings)
+
             async with CpuWorkerPool(
                 self.settings,
                 journal=self.journal,
                 executor_factory=self._executor_factory,
                 llm=enricher,
             ) as cpu:
-                consumer = asyncio.create_task(pool.run(queue))
-                try:
-                    parse_report = await cpu.process(
+                parse_report, embed_report = await _pipe(
+                    cpu.process(
                         tasks,
                         queue,
                         job=record.job_id,
                         collection=record.collection,
                         resume_from=resume_from,
-                        on_progress=progress,
-                    )
-                finally:
-                    await queue.close(consumers=pool.size)
-                embed_report = await consumer
-
+                        ledger=ledger,
+                    ),
+                    pool,
+                    queue,
+                )
+        finally:
             if enricher is not None:
                 await enricher.close()
+            resolved.cleanup()
 
-        for document, code in embed_report.failures:
+        failed = ledger.failed_documents
+        for document in failed:
             await self.journal.dead_letter(
                 record.job_id,
-                document=document,
-                source=next(
-                    (task.source for task in tasks if task.document_id == document), document
-                ),
-                reason_code=ErrorCode(code),
-                detail="the embedding provider could not be reached after its retries",
+                document=document.document_id,
+                source=document.source,
+                reason_code=ErrorCode(document.code),
+                detail="the document could not be embedded and indexed after its retries",
                 attempts=self.settings.reliability.retries.max_attempts,
             )
 
@@ -190,7 +226,7 @@ class IngestionService:
             "embedded": embed_report.embedded,
             "indexed": indexer.written,
             "deduplicated": parse_report.deduplicated,
-            "dead_lettered": parse_report.dead_lettered + len(embed_report.failures),
+            "dead_lettered": parse_report.dead_lettered + len(failed),
         }
         settled = replace(
             progress.record,
@@ -206,8 +242,6 @@ class IngestionService:
 
         if self.cache is not None and indexer.written:
             await self.cache.invalidate(f"ingest job {record.job_id} indexed {indexer.written}")
-
-        resolved.cleanup()
 
         _logger.info("ingest finished", extra={"job_id": record.job_id, **counts})
         _logger.info(
@@ -301,6 +335,50 @@ class _Checkpointer:
     async def __call__(self, index: int) -> None:
         """Checkpoint after the document at ``index``, off the event loop."""
         self.record = await self.journal.checkpoint(self.record, index)
+
+
+async def _pipe(
+    producing: Coroutine[Any, Any, PoolReport],
+    pool: EmbeddingWorkerPool,
+    queue: BoundedQueue[ChunkPayload],
+) -> tuple[PoolReport, EmbedReport]:
+    """Run the parse side and the embedding side together, failing both if either fails."""
+    producer = asyncio.ensure_future(producing)
+    consumer = asyncio.ensure_future(pool.run(queue))
+
+    await asyncio.wait({producer, consumer}, return_when=asyncio.FIRST_COMPLETED)
+
+    if consumer.done() and not producer.done():
+        producer.cancel()
+        await asyncio.gather(producer, return_exceptions=True)
+        embed_report = consumer.result()
+        raise IngestionError(
+            "the embedding pool stopped before the parser finished, having processed "
+            f"{embed_report.embedded} chunks",
+            code=ErrorCode.INTERNAL,
+            retryable=False,
+        )
+
+    try:
+        parse_report = producer.result()
+    except BaseException:
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+        raise
+
+    await queue.close(consumers=pool.size)
+    return parse_report, await consumer
+
+
+def _require_pipeline_chunker(settings: Settings) -> None:
+    """Refuse a job whose chunking strategy the ingestion pipeline cannot run."""
+    if settings.chunking.strategy == "semantic":
+        raise ConfigError(
+            "chunking.strategy is 'semantic', which the ingestion pipeline cannot run yet: "
+            "the parse workers have no embedding model to find sentence boundaries with. "
+            "Choose 'recursive', 'layout', 'fixed' or 'late'; SemanticChunker remains usable "
+            "as a standalone component (fasterrag.chunking)"
+        )
 
 
 def _status_for(counts: dict[str, int]) -> str:

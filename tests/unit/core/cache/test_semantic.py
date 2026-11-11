@@ -235,3 +235,43 @@ async def test_rewriting_a_question_replaces_its_entry() -> None:
 
     assert hit is not None
     assert hit.response["answer"] == "new"
+
+
+async def test_an_answer_is_not_served_across_scopes() -> None:
+    """The same words against another collection or filter are a different question."""
+    cache = build()
+    await cache.store_response("notice period?", [1.0, 0.0], response(), scope="contracts")
+
+    assert await cache.lookup([1.0, 0.0], scope="handbook") is None
+
+
+async def test_an_answer_is_served_within_its_scope() -> None:
+    cache = build()
+    await cache.store_response("notice period?", [1.0, 0.0], response(), scope="contracts")
+
+    hit = await cache.lookup([1.0, 0.0], scope="contracts")
+
+    assert hit is not None
+    assert hit.response["answer"] == "thirty days"
+
+
+async def test_the_same_question_is_kept_once_per_scope() -> None:
+    """One key per scope, or the second store would overwrite the first."""
+    cache = build()
+    await cache.store_response("notice period?", [1.0, 0.0], response("thirty"), scope="a")
+    await cache.store_response("notice period?", [1.0, 0.0], response("ninety"), scope="b")
+
+    first = await cache.lookup([1.0, 0.0], scope="a")
+    second = await cache.lookup([1.0, 0.0], scope="b")
+
+    assert first is not None
+    assert second is not None
+    assert (first.response["answer"], second.response["answer"]) == ("thirty", "ninety")
+
+
+async def test_an_unscoped_entry_is_not_served_to_a_scoped_lookup() -> None:
+    """An entry written before scopes existed must miss, not answer for every collection."""
+    cache = build()
+    await cache.store_response("notice period?", [1.0, 0.0], response())
+
+    assert await cache.lookup([1.0, 0.0], scope="contracts") is None

@@ -33,12 +33,13 @@ from typing import Protocol, cast, runtime_checkable
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.config.schema import Settings
-from fasterrag.core.breaker import CircuitBreaker, CircuitOpenError
+from fasterrag.core.breaker import CircuitBreaker, CircuitOpenError, shared_breaker
 from fasterrag.core.chunking.models import Segment
-from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.errors import ErrorCode, FasterRagError, IngestionError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.budget import CostGovernor, shared_governor
+from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload, EmbeddedBatch
 
 __all__ = [
@@ -126,22 +127,22 @@ class EmbeddingWorkerPool:
         *,
         tenant: str | None = None,
         governor: CostGovernor | None = None,
+        ledger: IndexLedger | None = None,
     ) -> None:
         """Build the pool."""
         self.settings = settings
         self.router = router
         self.sink = sink
         self.tenant = tenant
+        self.ledger = ledger
         # CRITICAL: the shared governor, not a fresh one. A per-job instance would charge a
         # rolling tenant window that is discarded with the job, which looks like accounting
         # and enforces nothing.
         self.governor = governor or shared_governor(settings)
-        self.breaker = breaker or CircuitBreaker(
-            provider="embeddings",
-            failure_threshold=settings.reliability.circuit_breaker.failure_threshold,
-            reset_timeout_ms=settings.reliability.circuit_breaker.reset_timeout_ms,
-            enabled=settings.reliability.circuit_breaker.enabled,
-        )
+        # CRITICAL: the process-wide breaker, not a fresh one. This object is built per
+        # request on the REST path and per job on the ingest path, and a breaker rebuilt
+        # per unit of work counts to one forever and can never open.
+        self.breaker = breaker or shared_breaker("embeddings", settings)
         self.size = settings.workers.embedding_pool_size
         self.batch_size = settings.embeddings.batch_size
         self.report = EmbedReport()
@@ -154,8 +155,29 @@ class EmbeddingWorkerPool:
         """
         self.report = EmbedReport()
         workers = [asyncio.create_task(self._worker(source, index)) for index in range(self.size)]
-        await asyncio.gather(*workers)
+        try:
+            await asyncio.gather(*workers)
+        except FasterRagError:
+            await self._stop(workers)
+            raise
+        except Exception as exc:
+            # CRITICAL: one worker raising something untyped must end the pool loudly. Left
+            # alone, the surviving workers keep draining while the dead one's share of the
+            # queue backs up, and a producer blocked on a full queue then waits forever.
+            await self._stop(workers)
+            raise IngestionError(
+                f"an embedding worker stopped unexpectedly: {type(exc).__name__}: {exc}",
+                code=ErrorCode.INTERNAL,
+                retryable=False,
+            ) from exc
         return self.report
+
+    @staticmethod
+    async def _stop(workers: Sequence[asyncio.Task[None]]) -> None:
+        """Cancel every worker still running and wait for them to finish unwinding."""
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
     async def _worker(self, source: BoundedQueue[ChunkPayload], index: int) -> None:
         """Drain the queue into batches, embedding each one."""
@@ -273,21 +295,58 @@ class EmbeddingWorkerPool:
                 await asyncio.sleep(delay)
                 continue
 
-            await self.sink.write(
+            self.breaker.record_success()
+            self._charge(adapter, ordered, result)
+            self.report.embedded += len(group)
+            self.report.batches += 1
+
+            failure = await self._write(
                 EmbeddedBatch(
                     chunks=ordered,
                     vectors=result.vectors,
                     model=result.model,
                     model_version=result.model_version,
-                )
+                ),
+                worker,
             )
-            self.breaker.record_success()
-            self._charge(adapter, ordered, result)
-            self.report.embedded += len(group)
-            self.report.batches += 1
+            if failure is not None:
+                await self._give_up(group, failure)
+            elif self.ledger is not None:
+                await self.ledger.written(ordered)
             return
 
-        self._give_up(group, last)
+        await self._give_up(group, last)
+
+    async def _write(self, batch: EmbeddedBatch, worker: int) -> FasterRagError | None:
+        """Hand a batch to the sink, retrying what is retryable, and return the last failure."""
+        attempts = self.settings.reliability.retries.max_attempts
+        last: FasterRagError | None = None
+
+        for attempt in range(attempts + 1):
+            try:
+                await self.sink.write(batch)
+            except FasterRagError as exc:
+                last = exc
+                if not exc.retryable or attempt == attempts:
+                    break
+
+                self.report.retries += 1
+                delay = backoff_delay(attempt + 1, self.settings)
+                _logger.warning(
+                    "retrying an index write",
+                    extra={
+                        "worker": worker,
+                        "attempt": attempt + 1,
+                        "delay_seconds": round(delay, 3),
+                        "code": exc.code.value,
+                        "trace_id": exc.trace_id,
+                    },
+                )
+                await asyncio.sleep(delay)
+                continue
+            return None
+
+        return last
 
     def _charge(
         self, adapter: EmbeddingAdapter, group: Sequence[ChunkPayload], result: EmbeddingResult
@@ -326,8 +385,8 @@ class EmbeddingWorkerPool:
 
         self.governor.record(billed, tenant=self.tenant)
 
-    def _give_up(self, group: Sequence[ChunkPayload], error: FasterRagError | None) -> None:
-        """Record a batch that could not be embedded, without stopping the pool."""
+    async def _give_up(self, group: Sequence[ChunkPayload], error: FasterRagError | None) -> None:
+        """Record a batch that could not be embedded or written, without stopping the pool."""
         code = error.code.value if error else ErrorCode.EMBED_PROVIDER_ERROR.value
         detail = error.detail if error else "the embedding provider could not be reached"
 
@@ -344,3 +403,5 @@ class EmbeddingWorkerPool:
                 "trace_id": error.trace_id if error else None,
             },
         )
+        if self.ledger is not None:
+            await self.ledger.failed(group, code)

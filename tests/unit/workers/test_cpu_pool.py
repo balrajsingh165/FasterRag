@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from concurrent.futures import Executor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -7,7 +9,9 @@ import pytest
 
 from fasterrag.config.schema import Settings
 from fasterrag.services.journal import Journal
-from fasterrag.workers.cpu_pool import CpuWorkerPool, resolve_pool_size
+from fasterrag.workers import cpu_pool
+from fasterrag.workers.cpu_pool import CpuWorkerPool, parse_and_chunk, resolve_pool_size
+from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload
 
 BODY = "# Title\n\n" + ("sentence body text. " * 30)
@@ -288,3 +292,102 @@ def test_a_broken_pool_is_reported_as_a_missing_main_guard() -> None:
 
     assert "__main__" in error.detail
     assert not error.retryable
+
+
+async def test_documents_are_parsed_concurrently_up_to_the_pool_size(
+    corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Awaiting each document before submitting the next keeps exactly one worker busy."""
+    real = parse_and_chunk
+    lock = threading.Lock()
+    running = 0
+    peak = 0
+
+    def slow(task: Any, configured: Settings) -> Any:
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.05)
+        try:
+            return real(task, configured)
+        finally:
+            with lock:
+                running -= 1
+
+    monkeypatch.setattr(cpu_pool, "parse_and_chunk", slow)
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(500)
+
+    async with CpuWorkerPool(
+        settings(workers={"cpu_pool_size": 3}), executor_factory=threads
+    ) as pool:
+        report = await pool.process(pool.tasks_for(sources(corpus, "a.md", "b.md", "c.md")), queue)
+
+    assert report.parsed == 3
+    assert peak > 1
+
+
+async def test_parallel_parsing_keeps_submission_order(corpus: Path) -> None:
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(500)
+
+    async with CpuWorkerPool(
+        settings(workers={"cpu_pool_size": 3}), executor_factory=threads
+    ) as pool:
+        tasks = pool.tasks_for(sources(corpus, "a.md", "b.md", "c.md"))
+        await pool.process(tasks, queue)
+
+    seen: list[str] = []
+    for payload in await queue.drain():
+        if payload.document_id not in seen:
+            seen.append(payload.document_id)
+
+    assert seen == [task.document_id for task in tasks]
+
+
+async def test_an_untyped_parser_failure_costs_one_document_not_the_job(
+    corpus: Path, journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parser library raising its own exception type used to abort the whole pass."""
+    real = cpu_pool._parse_and_chunk
+
+    def flaky(task: Any, configured: Settings) -> Any:
+        if task.source.endswith("b.md"):
+            raise RecursionError("maximum recursion depth exceeded")
+        return real(task, configured)
+
+    monkeypatch.setattr(cpu_pool, "_parse_and_chunk", flaky)
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(500)
+
+    async with CpuWorkerPool(settings(), journal=journal, executor_factory=threads) as pool:
+        job = journal.create_job_blocking("default", [])
+        report = await pool.process(
+            pool.tasks_for(sources(corpus, "a.md", "b.md", "c.md")), queue, job=job.job_id
+        )
+
+    dead = journal.dead_lettered_blocking(job.job_id)
+    assert report.parsed == 2
+    assert report.dead_lettered == 1
+    assert [entry.reason_code for entry in dead] == ["PARSE_FAILED"]
+    assert "RecursionError" in (dead[0].detail or "")
+
+
+async def test_with_a_ledger_nothing_is_journalled_until_the_index_side_reports(
+    corpus: Path, journal: Journal
+) -> None:
+    """The ordering defect: 'indexed' was written when the chunks were merely enqueued."""
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(500)
+    ledger = IndexLedger()
+
+    async with CpuWorkerPool(settings(), journal=journal, executor_factory=threads) as pool:
+        job = journal.create_job_blocking("default", [])
+        await pool.process(
+            pool.tasks_for(sources(corpus, "a.md")), queue, job=job.job_id, ledger=ledger
+        )
+
+    assert journal.documents_blocking(job.job_id, status="indexed") == []
+    assert journal.known_content_blocking("default") == {}
+
+    await ledger.written(list(await queue.drain()))
+
+    assert len(journal.documents_blocking(job.job_id, status="indexed")) == 1
+    assert len(journal.known_content_blocking("default")) == 1

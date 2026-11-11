@@ -9,11 +9,14 @@ from typing import Any
 
 import pytest
 
+from fasterrag.config.schema import Settings
 from fasterrag.core import breaker as breaker_module
 from fasterrag.core.breaker import (
     CircuitBreaker,
     CircuitOpenError,
     CircuitState,
+    reset_shared_breakers,
+    shared_breaker,
 )
 from fasterrag.errors import EmbedError, ErrorCode
 from fasterrag.observability import metrics
@@ -373,3 +376,31 @@ def test_a_half_open_breaker_is_not_shedding(clock: Clock) -> None:
     clock.advance(1000)
 
     assert subject.is_open is False
+
+
+def test_a_shared_breaker_is_one_instance_per_provider() -> None:
+    configured = Settings.model_validate({})
+
+    assert shared_breaker("llm", configured) is shared_breaker("llm", configured)
+    assert shared_breaker("llm", configured) is not shared_breaker("vector_db", configured)
+
+
+def test_failures_accumulate_across_callers_of_a_shared_breaker() -> None:
+    """A breaker rebuilt per request counts to one forever; shared, it reaches the threshold."""
+    configured = Settings.model_validate(
+        {"reliability": {"circuit_breaker": {"failure_threshold": 3}}}
+    )
+
+    for _ in range(3):
+        shared_breaker("llm", configured).record_failure(transient())
+
+    assert shared_breaker("llm", configured).is_open
+
+
+def test_resetting_drops_every_shared_breaker() -> None:
+    configured = Settings.model_validate({})
+    before = shared_breaker("llm", configured)
+
+    reset_shared_breakers()
+
+    assert shared_breaker("llm", configured) is not before

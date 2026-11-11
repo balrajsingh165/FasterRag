@@ -26,11 +26,18 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Final
 
+from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["CircuitBreaker", "CircuitOpenError", "CircuitState"]
+__all__ = [
+    "CircuitBreaker",
+    "CircuitOpenError",
+    "CircuitState",
+    "reset_shared_breakers",
+    "shared_breaker",
+]
 
 _MILLISECONDS: Final = 1000.0
 
@@ -164,3 +171,27 @@ class CircuitBreaker:
         self._failures = 0
         self._opened_at = 0.0
         self._transition(CircuitState.CLOSED)
+
+
+_SHARED: Final[dict[tuple[object, ...], CircuitBreaker]] = {}
+
+
+def shared_breaker(provider: str, settings: Settings) -> CircuitBreaker:
+    """Return the process-wide breaker for a provider, creating it on first use."""
+    configured = settings.reliability.circuit_breaker
+    key = (provider, configured.failure_threshold, configured.reset_timeout_ms, configured.enabled)
+    breaker = _SHARED.get(key)
+    if breaker is None:
+        breaker = CircuitBreaker(
+            provider=provider,
+            failure_threshold=configured.failure_threshold,
+            reset_timeout_ms=configured.reset_timeout_ms,
+            enabled=configured.enabled,
+        )
+        _SHARED[key] = breaker
+    return breaker
+
+
+def reset_shared_breakers() -> None:
+    """Drop every shared breaker, so a test or a reload starts from closed circuits."""
+    _SHARED.clear()

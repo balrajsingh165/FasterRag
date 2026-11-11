@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 import pytest
@@ -8,8 +8,9 @@ from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
 from fasterrag.core.chunking.models import TextChunk
-from fasterrag.errors import EmbedError, ErrorCode
+from fasterrag.errors import EmbedError, ErrorCode, FasterRagError, IngestionError
 from fasterrag.workers.embed_pool import EmbeddingWorkerPool, backoff_delay
+from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload, EmbeddedBatch
 
 DIMENSIONS = 3
@@ -328,3 +329,117 @@ def test_jitter_keeps_delays_inside_half_the_window() -> None:
 
     assert all(0.2 <= delay <= 0.4 for delay in delays)
     assert len(set(delays)) > 1
+
+
+class RefusingSink:
+    """A sink whose backend refuses a fixed number of writes, then accepts."""
+
+    def __init__(self, refusals: int, *, retryable: bool) -> None:
+        self.refusals = refusals
+        self.retryable = retryable
+        self.attempts = 0
+        self.batches: list[EmbeddedBatch] = []
+
+    async def write(self, batch: EmbeddedBatch) -> None:
+        self.attempts += 1
+        if self.refusals > 0:
+            self.refusals -= 1
+            raise EmbedError("the vector database refused the write", retryable=self.retryable)
+        self.batches.append(batch)
+
+
+class ExplodingSink:
+    """A sink that raises something outside the taxonomy."""
+
+    async def write(self, batch: EmbeddedBatch) -> None:
+        raise RuntimeError("a bug in the sink")
+
+
+async def run_pool(pool: EmbeddingWorkerPool, count: int) -> Any:
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(50)
+    await feed(queue, count)
+    await queue.close(consumers=pool.size)
+    return await pool.run(queue)
+
+
+async def test_a_refused_index_write_does_not_stop_the_pool() -> None:
+    """Raised out of the worker, it lost the batch and stranded the producer on a full queue."""
+    configured = settings()
+    sink = RefusingSink(refusals=10, retryable=False)
+    pool = EmbeddingWorkerPool(configured, TieringRouter(RecordingEmbedder(configured)), sink)
+
+    report = await run_pool(pool, 4)
+
+    assert report.failed == 4
+    assert sink.attempts == 2
+
+
+async def test_a_retryable_index_write_is_retried_without_embedding_again() -> None:
+    configured = settings()
+    embedder = RecordingEmbedder(configured)
+    sink = RefusingSink(refusals=1, retryable=True)
+    pool = EmbeddingWorkerPool(configured, TieringRouter(embedder), sink)
+
+    report = await run_pool(pool, 2)
+
+    assert report.failed == 0
+    assert len(sink.batches) == 1
+    assert len(embedder.calls) == 1
+
+
+async def test_the_ledger_hears_about_written_chunks_only_after_the_write() -> None:
+    configured = settings()
+    committed: list[str] = []
+    ledger = IndexLedger()
+
+    def commit(name: str) -> Callable[[], Awaitable[None]]:
+        async def run() -> None:
+            committed.append(name)
+
+        return run
+
+    for index in range(2):
+        await ledger.expect(
+            f"d_{index}", index=index, source="a.md", chunks=1, commit=commit(f"d_{index}")
+        )
+    sink = RefusingSink(refusals=10, retryable=False)
+    pool = EmbeddingWorkerPool(
+        configured, TieringRouter(RecordingEmbedder(configured)), sink, ledger=ledger
+    )
+
+    await run_pool(pool, 2)
+
+    assert committed == []
+    assert sorted(entry.document_id for entry in ledger.failed_documents) == ["d_0", "d_1"]
+
+
+async def test_a_written_batch_commits_its_documents_through_the_ledger() -> None:
+    configured = settings()
+    committed: list[str] = []
+    ledger = IndexLedger()
+
+    async def commit() -> None:
+        committed.append("d_0")
+
+    await ledger.expect("d_0", index=0, source="a.md", chunks=1, commit=commit)
+    pool = EmbeddingWorkerPool(
+        configured, TieringRouter(RecordingEmbedder(configured)), CollectingSink(), ledger=ledger
+    )
+
+    await run_pool(pool, 1)
+
+    assert committed == ["d_0"]
+
+
+async def test_an_untyped_worker_failure_ends_the_pool_with_a_typed_error() -> None:
+    configured = settings()
+    pool = EmbeddingWorkerPool(
+        configured, TieringRouter(RecordingEmbedder(configured)), ExplodingSink()
+    )
+
+    with pytest.raises(FasterRagError) as stopped:
+        await run_pool(pool, 2)
+
+    assert isinstance(stopped.value, IngestionError)
+    assert stopped.value.code is ErrorCode.INTERNAL
+    assert "RuntimeError" in stopped.value.detail

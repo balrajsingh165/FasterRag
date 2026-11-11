@@ -22,6 +22,7 @@ accepted and then dead-lettering every document against an error about one point
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, Query, Request, Response, status
@@ -35,8 +36,8 @@ from fasterrag.api.dependencies import (
     build_ingestion,
 )
 from fasterrag.api.schemas import IngestRequest
-from fasterrag.errors import FasterRagError
-from fasterrag.observability.logging import get_logger, use_trace_id
+from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.observability.logging import current_trace_id, get_logger, use_trace_id
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.reindex import require_keyword_leg
 
@@ -76,6 +77,21 @@ async def _job_body(record: JobRecord, journal: Journal) -> dict[str, Any]:
     }
 
 
+async def _ensure_settled(journal: Journal, record: JobRecord) -> None:
+    """Mark a job ``failed`` unless the service already gave it a terminal status.
+
+    The current record is loaded rather than the one this request accepted, so a
+    checkpoint the run reached is kept instead of overwritten with a stale copy.
+    """
+    try:
+        current = await journal.load_job(record.job_id)
+    except FasterRagError:
+        current = record
+
+    if current.status in {"queued", "running"}:
+        await journal.save_job(replace(current, status="failed"))
+
+
 async def _run_job(request: Request, record: JobRecord, metadata: dict[str, Any] | None) -> None:
     """Execute an accepted job, recording its outcome whatever happens."""
     settings = request.app.state.settings
@@ -95,11 +111,29 @@ async def _run_job(request: Request, record: JobRecord, metadata: dict[str, Any]
             await service.run(record, metadata=metadata)
         except FasterRagError as exc:
             _logger.error(
-                "ingest job failed",
-                extra={"job_id": record.job_id, "code": exc.code.value, "detail": exc.detail},
+                "ingest job failed in the background",
+                extra={
+                    "job_id": record.job_id,
+                    "code": exc.code.value,
+                    "detail": exc.detail,
+                    "trace_id": exc.trace_id,
+                },
             )
-            record.status = "failed"
-            await journal.save_job(record)
+            await _ensure_settled(journal, record)
+        except Exception as exc:
+            # CRITICAL: a background task has no caller to raise to. Without this branch an
+            # untyped failure is logged by the server and the job stays `running` forever,
+            # which a client polling the job cannot tell apart from slow progress.
+            _logger.error(
+                "ingest job stopped on an unexpected error",
+                extra={
+                    "job_id": record.job_id,
+                    "code": ErrorCode.INTERNAL.value,
+                    "detail": f"{type(exc).__name__}: {exc}",
+                    "trace_id": current_trace_id(),
+                },
+            )
+            await _ensure_settled(journal, record)
         finally:
             await embedding_router.close()
 

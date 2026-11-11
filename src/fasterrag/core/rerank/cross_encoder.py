@@ -19,17 +19,23 @@ far better than no answer (D4).
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 from fasterrag.config.schema import Settings
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ConfigError, ErrorCode, RetrievalError
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["CrossEncoderReranker", "Reranker", "load_cross_encoder"]
+__all__ = [
+    "CrossEncoderReranker",
+    "Reranker",
+    "load_cross_encoder",
+    "reset_shared_cross_encoders",
+]
 
 _logger = get_logger(__name__)
 
@@ -55,6 +61,16 @@ def load_cross_encoder(model: str) -> Any:
     return CrossEncoder(model)
 
 
+_MODELS: Final[dict[str, Any]] = {}
+_LOADING: Final = threading.Lock()
+
+
+def reset_shared_cross_encoders() -> None:
+    """Drop every loaded model, so a test or a reload starts from an empty cache."""
+    with _LOADING:
+        _MODELS.clear()
+
+
 class CrossEncoderReranker:
     """Reranks with a locally-loaded cross-encoder."""
 
@@ -64,7 +80,17 @@ class CrossEncoderReranker:
         self._model: Any | None = None
 
     def _loaded(self) -> Any:
-        """Return the model, loading it once on first use."""
+        """Return the model, loading it once per process on first use."""
+        if self._model is None:
+            with _LOADING:
+                self._model = _MODELS.get(self.model_name)
+                if self._model is None:
+                    self._model = self._load()
+                    _MODELS[self.model_name] = self._model
+        return self._model
+
+    def _load(self) -> Any:
+        """Load the model from disk or the hub, reporting how long it took."""
         if self._model is None:
             # CRITICAL: warning, not info. Nothing configures logging in a plain script or a
             # notebook, so an info line is invisible and the default reranker —

@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,6 +20,7 @@ from fasterrag.errors import (
 )
 from fasterrag.services.generation import EXTRACTIVE_MODE, GenerationService, QueryEvent
 from fasterrag.services.querying import FULL_MODE, HYBRID_ONLY_MODE, Retrieval
+from fasterrag.services.traces import TraceStore
 
 
 class ScriptedLLM(LLMAdapter):
@@ -1009,3 +1011,40 @@ async def test_the_streamed_usage_event_carries_the_same_field() -> None:
     usage = next(event for event in events if event.type == "usage")
 
     assert "estimated_cost_usd" in usage.data["usage"]
+
+
+def traced(tmp_path: Path) -> tuple[GenerationService, TraceStore]:
+    service, _ = build()
+    store = TraceStore(tmp_path)
+    service.traces = store
+    return service, store
+
+
+async def test_a_streamed_query_stores_a_trace(tmp_path: Path) -> None:
+    """Streaming is the default path; without this, replay had nothing for most traffic."""
+    service, store = traced(tmp_path)
+
+    events = await collect(service, "what is the notice period?")
+    meta = next(event for event in events if event.type == "meta")
+    stored = store.load(meta.data["trace_id"])
+
+    assert stored is not None
+    assert stored.query == "what is the notice period?"
+    assert stored.response.strip() == "The notice period is thirty days [^c_a]."
+
+
+async def test_a_streamed_trace_matches_the_non_streamed_one(tmp_path: Path) -> None:
+    """Two code paths producing the same answer must leave the same evidence behind."""
+    service, store = traced(tmp_path)
+
+    answered = await service.answer("what is the notice period?")
+    events = await collect(service, "what is the notice period?")
+    meta = next(event for event in events if event.type == "meta")
+    plain = store.load(answered.trace_id)
+    streamed = store.load(meta.data["trace_id"])
+
+    assert plain is not None
+    assert streamed is not None
+    assert streamed.prompt == plain.prompt
+    assert streamed.retrieved == plain.retrieved
+    assert streamed.result["answer"] == plain.result["answer"]

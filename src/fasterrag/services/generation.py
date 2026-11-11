@@ -38,6 +38,8 @@ operator who asked for it.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -46,7 +48,7 @@ from typing import Any, Final
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
 from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.config.schema import GenerationSettings, Settings
-from fasterrag.core.breaker import CircuitBreaker
+from fasterrag.core.breaker import CircuitBreaker, shared_breaker
 from fasterrag.core.cache.semantic import MISS, CacheHit, SemanticCache
 from fasterrag.core.chunking.models import EstimatingTokenCounter, TokenCounter
 from fasterrag.core.context import AssembledContext, Citation, Span, assemble_context
@@ -333,16 +335,10 @@ class GenerationService:
         # instance the embedding pool records ingest spend into, which is the only way a
         # query's check can see what ingestion already spent.
         self.governor = governor or shared_governor(settings)
-        # CRITICAL: built here rather than fetched from `create_breakers`, matching how the
-        # embedding pool builds its own. One service instance owns one breaker for the whole
-        # of its life, which is what makes consecutive failures countable — a breaker rebuilt
-        # per query counts to one forever and can never open.
-        self.breaker = breaker or CircuitBreaker(
-            provider="llm",
-            failure_threshold=settings.reliability.circuit_breaker.failure_threshold,
-            reset_timeout_ms=settings.reliability.circuit_breaker.reset_timeout_ms,
-            enabled=settings.reliability.circuit_breaker.enabled,
-        )
+        # CRITICAL: the process-wide breaker, not a fresh one. This object is built per
+        # request on the REST path and per job on the ingest path, and a breaker rebuilt
+        # per unit of work counts to one forever and can never open.
+        self.breaker = breaker or shared_breaker("llm", settings)
         self._last_candidates: list[ScoredChunk] = []
 
     @property
@@ -354,6 +350,23 @@ class GenerationService:
     def caching(self) -> bool:
         """Return whether a semantic cache lookup is possible at all."""
         return self.cache is not None and self.cache.enabled and self.embedder is not None
+
+    def _cache_scope(
+        self, collection: str | None, top_k: int | None, filters: Mapping[str, Any] | None
+    ) -> str:
+        """Return the digest of everything besides the question that decides an answer.
+
+        Two queries with the same words are the same question only against the same
+        collection, under the same filters, for the same number of chunks.
+        """
+        target = collection or self.settings.vector_db.collection.default_name
+        scoped = {
+            "collection": target,
+            "top_k": top_k or self.settings.retrieval.top_k,
+            "filters": dict(filters or {}),
+        }
+        canonical = json.dumps(scoped, sort_keys=True, default=str, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
 
     async def _cache_vector(self, question: str) -> list[float] | None:
         """Return the question's vector for cache use, or ``None`` if caching is off."""
@@ -582,7 +595,11 @@ class GenerationService:
         cache_ms = int((time.perf_counter() - started) * 1000)
 
         if vector is not None and self.cache is not None:
-            hit = await self.cache.lookup(vector, tenant=self.tenant)
+            hit = await self.cache.lookup(
+                vector,
+                tenant=self.tenant,
+                scope=self._cache_scope(collection, top_k, filters),
+            )
             if hit is not None:
                 return _cached_answer(hit, trace_id, cache_ms)
 
@@ -706,7 +723,13 @@ class GenerationService:
         )
 
         if vector is not None and self.cache is not None and prepared.mode == FULL_MODE:
-            await self.cache.store_response(question, vector, answer.as_dict(), tenant=self.tenant)
+            await self.cache.store_response(
+                question,
+                vector,
+                answer.as_dict(),
+                tenant=self.tenant,
+                scope=self._cache_scope(collection, top_k, filters),
+            )
 
         self._store_trace(question, collection, filters, prepared, completion.text, answer)
         return answer
@@ -726,7 +749,11 @@ class GenerationService:
         cache_ms = int((time.perf_counter() - started) * 1000)
 
         if vector is not None and self.cache is not None:
-            hit = await self.cache.lookup(vector, tenant=self.tenant)
+            hit = await self.cache.lookup(
+                vector,
+                tenant=self.tenant,
+                scope=self._cache_scope(collection, top_k, filters),
+            )
             if hit is not None:
                 for event in _cached_events(_cached_answer(hit, trace_id, cache_ms)):
                     yield event
@@ -842,22 +869,29 @@ class GenerationService:
         )
         yield QueryEvent(type="done", data={})
 
+        streamed = Answer(
+            answer=answer,
+            citations=citations,
+            mode=prepared.mode,
+            trace_id=trace_id,
+            prompt_tokens=usage["prompt_tokens"],
+            completion_tokens=usage["completion_tokens"],
+            timings_ms=timings,
+            faithfulness=verdict.score,
+        )
+
         if vector is not None and self.cache is not None and prepared.mode == FULL_MODE:
             await self.cache.store_response(
                 question,
                 vector,
-                Answer(
-                    answer=answer,
-                    citations=citations,
-                    mode=prepared.mode,
-                    trace_id=trace_id,
-                    prompt_tokens=usage["prompt_tokens"],
-                    completion_tokens=usage["completion_tokens"],
-                    timings_ms=timings,
-                    faithfulness=verdict.score,
-                ).as_dict(),
+                streamed.as_dict(),
                 tenant=self.tenant,
+                scope=self._cache_scope(collection, top_k, filters),
             )
+
+        # CRITICAL: streaming is the default path, so a trace stored only by `answer()`
+        # left replay (D8) with nothing to replay for the traffic a deployment mostly serves.
+        self._store_trace(question, collection, filters, prepared, answer, streamed)
 
     async def close(self) -> None:
         """Release the generation provider."""
