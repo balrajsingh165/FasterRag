@@ -11,6 +11,7 @@ configuration, ``4`` for a failed preflight, ``3`` for a dependency that cannot 
 from __future__ import annotations
 
 import argparse
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,13 @@ from fasterrag.cli.settings import overrides_from, settings_from
 from fasterrag.config.schema import Settings
 from fasterrag.config.template import canonical_config_text, env_template_text
 from fasterrag.errors import ConfigError, FasterRagError
+from fasterrag.services.ci_status import (
+    DEFAULT_WORKFLOW_DIR,
+    branch_verdict,
+    format_branch_verdict,
+    origin_remote,
+    workflow_files,
+)
 from fasterrag.services.doctor import (
     diagnose,
     diagnose_and_fix,
@@ -32,6 +40,7 @@ from fasterrag.services.doctor import (
 from fasterrag.services.provisioning import container_state, docker_available
 
 __all__ = [
+    "run_ci_status",
     "run_config_init",
     "run_config_show",
     "run_config_validate",
@@ -180,6 +189,58 @@ async def run_doctor_command(args: argparse.Namespace, console: Console) -> Exit
 
     console.error(f"{len(report.failures)} check(s) failed")
     return ExitCode.PREFLIGHT
+
+
+def _selected_workflows(args: argparse.Namespace) -> list[str]:
+    """Return the workflow files to ask about, discovered unless named."""
+    chosen = list(args.workflow) if args.workflow else list(workflow_files(Path()))
+    excluded = set(args.exclude)
+    return [workflow for workflow in chosen if workflow not in excluded]
+
+
+async def run_ci_status(args: argparse.Namespace, console: Console) -> ExitCode:
+    """Fail when any workflow's last conclusion on a branch is not green.
+
+    Exits ``1`` on a red or never-run workflow and ``3`` when the API could not be read;
+    never ``0`` for either, because a verdict that could not be obtained is not a pass.
+    """
+    remote = await origin_remote()
+    if remote is None:
+        console.error("no github.com 'origin' remote; run this inside a GitHub checkout")
+        console.document({"green": False, "reason": "no github remote"})
+        return ExitCode.USAGE
+
+    token: str | None = None
+    if args.token_env:
+        token = os.environ.get(args.token_env) or None
+        if token is None:
+            console.error(f"--token-env named {args.token_env}, which is unset or empty")
+            console.document({"green": False, "reason": "token env var unset"})
+            return ExitCode.USAGE
+
+    workflows = _selected_workflows(args)
+    if not workflows:
+        console.error(
+            "no workflows to check; pass --workflow, or run from a checkout with "
+            f"{DEFAULT_WORKFLOW_DIR.as_posix()}"
+        )
+        console.document({"green": False, "reason": "no workflows selected"})
+        return ExitCode.FAILURE
+
+    verdict = await branch_verdict(remote, workflows, branch=args.branch, token=token)
+    console.lines(format_branch_verdict(verdict))
+    console.document(verdict.as_dict())
+
+    if verdict.green:
+        console.emit(f"{len(verdict.workflows)} workflow(s) green on {args.branch}")
+        return ExitCode.SUCCESS
+
+    console.error(f"{len(verdict.red)} workflow(s) not green on {args.branch}")
+    for workflow in verdict.red:
+        console.error(workflow.reason)
+    if all(workflow.unreachable is not None for workflow in verdict.red):
+        return ExitCode.UNREACHABLE
+    return ExitCode.FAILURE
 
 
 async def _vector_db_status(settings: Settings) -> dict[str, Any]:

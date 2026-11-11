@@ -92,6 +92,8 @@ Run a query (same path as `POST /v1/query`).
 | `reembed NAME <sources...>` | D2 zero-downtime re-embed: blue/green build → eval gate → alias swap (`--no-eval-gate` for dev, `--dataset PATH` to gate on a specific eval dataset). `--recursive` expands directory sources; `--watch` follows the green build the same way `ingest --watch` does, printing the build's job id and a `progress` line per tally change before the gate and the swap are reported. |
 | `rollback NAME` | Alias flip back to the retained previous collection (within `index.reindex.rollback_retention_hours`); `--to NAME` restores a specific retained build rather than the most recent. |
 | `lock verify [NAME]` | D1: verify `index.lock` against current config/corpus; report any drift (model version, config hash, content hashes). Exit 1 on drift. |
+| `tenants [NAME]` | Count a collection's points by `tenant` payload tag, or every collection's when no name is given. Read-only. This is what to run **before** `index backfill-tenant`: with `security.tenant_scoped_retrieval` on, a point carrying no tag is invisible to every query, so the untagged count is the size of the blackout the flag would cause ([security.md](security.md) §3). |
+| `backfill-tenant NAME` | Write the `tenant` payload tag onto a collection's points through the adapters' metadata-only update path. `--tenant ID` (required) is the id to write. **Dry run by default** — it reports what it would write and writes nothing; `--apply` performs the write. A point already tagged for another tenant is refused with `CONFLICT` unless `--overwrite` relabels every point in the collection, because untagged points in a collection holding two tenants cannot be attributed to either. `--batch-size N` sets how many points travel per update call (default 512). Re-running is safe: only untagged points are selected, so a run that died halfway resumes by being run again. |
 
 ## `fasterrag provision <tool>`
 
@@ -135,6 +137,66 @@ Every attempted repair is verified by re-running the whole report afterwards, an
 | `needs human` | No safe automatic repair; the reason is printed. |
 
 **Exit codes are unchanged**: `0` when every check passes after the repairs, `4` when any still fails. `--fix` cannot launder a failed preflight into a green one, so it stays safe to wire into a setup script that branches on `4`.
+
+## `fasterrag ci-status`
+
+Reads the GitHub Actions API and **fails when any workflow's last conclusion on a branch is not green**. It exists because `main` was red for 81 days once (TASK-0261) and for three days again in November 2026 (TASK-0313) with nobody noticing: the pre-commit hook passes locally, so every commit looks green to the person making it, and until this command nothing in the repository read the Actions API.
+
+It is a gate, not a report. Every way it can fail to learn something exits non-zero:
+
+| Situation | Exit |
+|---|---|
+| Every workflow's last completed run concluded `success` | `0` |
+| Any workflow's last completed run is `failure`, `cancelled`, or `timed_out` | `1` |
+| Any workflow's last run concluded `success` with **every job skipped** | `1` |
+| Any workflow has **no** completed run on the branch | `1` |
+| No workflows were selected at all (empty `.github/workflows`, or everything excluded) | `1` |
+| The API could not be read — no network, rate limit, 404 — and nothing else was red | `3` |
+| No `github.com` `origin` remote, or `--token-env` names a variable that is unset | `2` |
+
+A `cancelled` run is not a pass: `concurrency: cancel-in-progress` left 21 commits on `main` with no completed verdict, and no verdict is not a green one. Nor is a run whose every job was skipped — GitHub concludes such a run `success`, but a workflow that ran nothing found nothing.
+
+### `skipped` is not `fine`
+
+The report names every step a failing job **skipped**, because that is where the damage hides. On run `42522906097` (`6be46f9`, 2026-11-08) the `quality` job failed at `Typecheck` — and the thirteen steps after it, nine of them named gates, were all reported `skipped`:
+
+```console
+$ fasterrag ci-status --workflow ci.yml
+balrajsingh165/FasterRag @ main
+  RED ci.yml: failure (#163 6be46f9e) -- quality/Typecheck -- 13 later step(s) never ran
+      https://github.com/balrajsingh165/FasterRag/actions/runs/42522906097
+      never ran: quality/Docs match the repository
+      never ran: quality/Denials match the tree, not just the ledger
+      ...
+```
+
+A reader told only "red on `Typecheck`" will fix the typecheck and expect green. In fact nine documentation gates, the unit suite, both coverage gates and the doctor smoke test never ran, so none of them had the chance to object to anything else in that commit. Runner bookkeeping (`Set up job`, `Complete job`, `Post Run …`) is excluded from the count; a step skipped by its own `if:` inside a job that *passed* is a decision, not a gap, and is not reported.
+
+**The listing is never filtered by trigger**, and that is the point. On 2026-11-07 `main` was simultaneously green on the `ci` *push* run and red on the `security` and `nightly` *scheduled* runs of the same commit — so a check that read only the trigger a human looks at would reproduce the bug instead of catching it.
+
+| Flag | Description |
+|---|---|
+| `--branch NAME` | Branch whose runs are read. Default `main`. |
+| `--workflow FILE` | A workflow file to check. Repeatable. Defaults to every `*.yml`/`*.yaml` file in `.github/workflows`, discovered from the working directory, so a fourth workflow is gated the day it is added. |
+| `--exclude FILE` | A workflow file to leave out. Repeatable. |
+| `--token-env NAME` | Read a bearer token from this environment variable. Anonymous when omitted. Nothing is ever read from `GITHUB_TOKEN` or a `.netrc` unless that variable is the one named. |
+
+```console
+$ fasterrag ci-status
+balrajsingh165/FasterRag @ main
+  ok  ci.yml: success (#164 882a07ea)
+  ok  nightly.yml: success (#100 6be46f9e)
+  ok  security.yml: success (#23 6be46f9e)
+3 workflow(s) green on main
+```
+
+### Why `ci.yml` excludes itself in CI
+
+`ci.yml` runs this command against the other workflows (`--exclude ci.yml`) rather than all three, because a workflow that gates on its own previous conclusion has no working state. If it treats its own last red run as a failure, the push that fixes the cause still reads that red run and fails, and the branch can never return to green. If it excuses it, it excuses every red, because the latest completed run of `ci.yml` on `main` is always an ancestor of the commit being tested. There is no middle setting: self-checking is either deadlocked or vacuous.
+
+Excluding it loses nothing. A workflow's own push run is attached to the commit, shown in the PR merge box, and emailed on failure — it is visible by construction. The invisible ones are exactly the workflows whose latest run came from a `schedule` nobody opens, and those are the ones the step checks.
+
+The anonymous GitHub API budget is 60 requests an hour **per address**, shared with every other job on a runner, so the CI step passes `--token-env GITHUB_TOKEN` with the workflow's own `actions: read` token. Locally, anonymous is fine: two requests per workflow.
 
 ## `fasterrag estimate <path|url> [...]`
 

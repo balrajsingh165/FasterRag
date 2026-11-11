@@ -870,3 +870,150 @@ async def test_the_two_indexed_numbers_of_a_watched_run_cannot_be_confused(
     assert "progress        documents_indexed=2 documents_total=2" in printed
     assert "indexed         2 chunks" in printed
     assert "progress        indexed=" not in printed
+
+
+def backfill_args(config: str, name: str, **values: Any) -> argparse.Namespace:
+    defaults: dict[str, Any] = {
+        "action": "backfill-tenant",
+        "name": name,
+        "tenant": "acme",
+        "apply": False,
+        "overwrite": False,
+        "batch_size": 512,
+    }
+    return namespace(config=config, **{**defaults, **values})
+
+
+def tagged(points: dict[str, str | None]) -> list[Point]:
+    return [
+        Point(
+            point_id=point_id,
+            collection="docs",
+            vector=[],
+            payload={"text": point_id} if tag is None else {"text": point_id, "tenant": tag},
+        )
+        for point_id, tag in points.items()
+    ]
+
+
+def serving(adapter: FakeAdapter, points: list[Point], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the double's iteration yield points, which it otherwise never does."""
+
+    async def iterate(
+        collection: str, *, with_vectors: bool = False, batch_size: int = 256
+    ) -> AsyncIterator[Point]:
+        for point in points:
+            yield point
+
+    monkeypatch.setattr(adapter, "iterate_points", iterate)
+
+
+def test_the_tenancy_subcommands_are_wired_into_the_parser() -> None:
+    parsed = build_parser().parse_args(["index", "backfill-tenant", "docs", "--tenant", "acme"])
+
+    assert (parsed.command, parsed.action, parsed.name) == ("index", "backfill-tenant", "docs")
+    assert parsed.tenant == "acme"
+    assert (parsed.apply, parsed.overwrite) == (False, False)
+    assert build_parser().parse_args(["index", "tenants"]).name is None
+
+
+async def test_index_tenants_reports_the_blackout_an_unbackfilled_corpus_would_cause(
+    config: str,
+    adapter: FakeAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    adapter.collections = [CollectionInfo(name="docs", vectors=3)]
+    serving(adapter, tagged({"a": None, "b": None, "c": "acme"}), monkeypatch)
+
+    code = await pipeline.run_index(
+        namespace(config=config, action="tenants", name=None), Console()
+    )
+    out = capsys.readouterr().out
+
+    assert code == ExitCode.SUCCESS
+    assert "untagged=2" in out
+    assert "acme=1" in out
+    assert "invisible to every query" in out
+
+
+async def test_index_backfill_tenant_dry_runs_by_default(
+    config: str,
+    adapter: FakeAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    serving(adapter, tagged({"a": None, "b": "acme"}), monkeypatch)
+    sent: list[list[PointUpdate]] = []
+    monkeypatch.setattr(adapter, "update", lambda updates: sent.append(updates))
+
+    code = await pipeline.run_index(backfill_args(config, "docs"), Console())
+    out = capsys.readouterr().out
+
+    assert code == ExitCode.SUCCESS
+    assert sent == []
+    assert "would tag       1" in out
+    assert "dry run: nothing was written" in out
+
+
+async def test_index_backfill_tenant_applies_and_reports_json(
+    config: str,
+    adapter: FakeAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    serving(adapter, tagged({"a": None, "b": None}), monkeypatch)
+
+    code = await pipeline.run_index(
+        backfill_args(config, "docs", apply=True, as_json=True), Console(as_json=True)
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == ExitCode.SUCCESS
+    assert report["updated"] == 2
+    assert report["pending"] == 0
+    assert report["applied"] is True
+
+
+async def test_index_backfill_tenant_reports_a_mixed_collection_as_a_problem(
+    config: str,
+    adapter: FakeAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    serving(adapter, tagged({"a": None, "b": "globex"}), monkeypatch)
+
+    code = await pipeline.run_index(backfill_args(config, "docs", apply=True), Console())
+    err = capsys.readouterr().err
+
+    assert code == ExitCode.FAILURE
+    assert "[CONFLICT]" in err
+    assert "globex" in err
+
+
+async def test_a_backfill_that_dies_halfway_says_how_far_it_got(
+    config: str,
+    adapter: FakeAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    serving(adapter, tagged({"a": None, "b": None, "c": None, "d": None}), monkeypatch)
+    calls = 0
+
+    async def flaky(updates: list[PointUpdate]) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RetrievalError("the backend dropped the connection")
+
+    monkeypatch.setattr(adapter, "update", flaky)
+
+    code = await pipeline.run_index(
+        backfill_args(config, "docs", apply=True, batch_size=2), Console()
+    )
+    captured = capsys.readouterr()
+
+    assert code == ExitCode.UNREACHABLE
+    assert "wrote           2 points in 1 batches" in captured.out
+    assert "stopped after writing 2 points in 1 batches" in captured.err
+    assert "re-running it resumes from there" in captured.err

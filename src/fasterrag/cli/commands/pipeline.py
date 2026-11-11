@@ -34,6 +34,12 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.rerank import CrossEncoderReranker
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
+from fasterrag.services.backfill import (
+    BackfillProgress,
+    audit_collection,
+    audit_collections,
+    backfill_tenant,
+)
 from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.evaluation import run_eval
 from fasterrag.services.generation import GenerationService
@@ -505,6 +511,92 @@ async def _index_delete(
     return ExitCode.SUCCESS
 
 
+async def _index_tenants(
+    args: argparse.Namespace, adapter: VectorDBAdapter, console: Console
+) -> ExitCode:
+    """Report which collections hold points no tenant filter can see (TASK-0377).
+
+    The discovery step `docs/security.md` §3 asks for before step 1 is run: a backfill is
+    only safe if an operator already knows what it will touch.
+    """
+    name = args.name or args.collection
+    audits = [await audit_collection(adapter, name)] if name else await audit_collections(adapter)
+    if not audits:
+        console.emit("no collections")
+
+    for audit in audits:
+        tags = ", ".join(f"{tag}={audit.tagged[tag]}" for tag in audit.tenants) or "none"
+        console.emit(
+            f"{audit.collection:<24} {audit.scanned:>10} points  "
+            f"untagged={audit.untagged}  tagged: {tags}"
+        )
+
+    untagged = sum(audit.untagged for audit in audits)
+    if untagged:
+        console.emit(
+            f"{untagged} points carry no tenant tag; with security.tenant_scoped_retrieval "
+            "on they are invisible to every query. Run `index backfill-tenant` first."
+        )
+
+    console.document({"collections": [audit.as_dict() for audit in audits], "untagged": untagged})
+    return ExitCode.SUCCESS
+
+
+async def _index_backfill_tenant(
+    args: argparse.Namespace, adapter: VectorDBAdapter, console: Console
+) -> ExitCode:
+    """Write the tenant payload tag onto a collection's points, dry-running by default."""
+    seen: BackfillProgress | None = None
+
+    def observed(progress: BackfillProgress) -> None:
+        """Record and show how far a run got, so a killed one still reported it."""
+        nonlocal seen
+        seen = progress
+        console.emit(f"wrote           {progress.updated} points in {progress.batches} batches")
+
+    try:
+        report = await backfill_tenant(
+            adapter,
+            args.name,
+            args.tenant,
+            apply=args.apply,
+            overwrite=args.overwrite,
+            batch_size=args.batch_size,
+            progress=observed,
+        )
+    except FasterRagError:
+        if seen is not None:
+            console.error(
+                f"the backfill stopped after writing {seen.updated} points in "
+                f"{seen.batches} batches; re-running it resumes from there"
+            )
+        raise
+
+    written = (
+        f"tagged          {report.updated}"
+        if report.applied
+        else (f"would tag       {report.pending}")
+    )
+    console.lines(
+        [
+            f"collection      {report.collection}",
+            f"tenant          {report.tenant}",
+            f"scanned         {report.scanned} points",
+            f"untagged        {report.untagged}",
+            f"already tagged  {report.already}",
+            f"other tenants   {report.foreign}",
+            written,
+        ]
+    )
+    if not report.applied:
+        console.emit("dry run: nothing was written. Pass --apply to write.")
+    elif report.pending:
+        console.error(f"{report.pending} points are still untagged; re-run to finish them")
+
+    console.document(report.as_dict())
+    return ExitCode.FAILURE if report.applied and report.pending else ExitCode.SUCCESS
+
+
 async def run_index(args: argparse.Namespace, console: Console) -> ExitCode:
     """Dispatch an ``index`` subcommand."""
     settings = _settings_or_none(args, console)
@@ -515,6 +607,10 @@ async def run_index(args: argparse.Namespace, console: Console) -> ExitCode:
     try:
         if args.action == "list":
             return await _index_list(settings, adapter, console)
+        if args.action == "tenants":
+            return await _index_tenants(args, adapter, console)
+        if args.action == "backfill-tenant":
+            return await _index_backfill_tenant(args, adapter, console)
         if args.action == "lock":
             return await _index_lock_verify(args, settings, console)
         if args.action == "reembed":

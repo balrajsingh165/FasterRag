@@ -20,7 +20,14 @@ from typing import Final
 
 from fasterrag.errors import ErrorCode, FasterRagError
 
-__all__ = ["SEPARATOR", "TENANT_PAYLOAD_KEY", "scoped_name", "unscoped_name", "visible_to"]
+__all__ = [
+    "SEPARATOR",
+    "TENANT_PAYLOAD_KEY",
+    "scoped_name",
+    "unscoped_name",
+    "validated_tenant",
+    "visible_to",
+]
 
 SEPARATOR: Final = "__"
 
@@ -55,6 +62,15 @@ def _validated(tenant: str) -> str:
             retryable=False,
         )
     return tenant
+
+
+def validated_tenant(tenant: str) -> str:
+    """Return the tenant id, refusing anything that could forge a collection prefix.
+
+    The public spelling of the rule the name helpers apply, for callers that take a tenant
+    id without building a name from it — the payload backfill, which writes it into points.
+    """
+    return _validated(tenant)
 
 
 def scoped_name(name: str, tenant: str | None) -> str:

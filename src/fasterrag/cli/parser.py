@@ -18,7 +18,9 @@ from collections.abc import Sequence
 from typing import Any, Final
 
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH
+from fasterrag.services.backfill import DEFAULT_BATCH_SIZE
 from fasterrag.services.backup import DEFAULT_RETAIN
+from fasterrag.services.ci_status import DEFAULT_BRANCH
 from fasterrag.services.provision_registry import PROVISIONABLE_TOOLS
 
 __all__ = ["PENDING_COMMANDS", "build_parser"]
@@ -162,6 +164,30 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     _add_global_flags(rollback)
     rollback.add_argument("name", help="the served alias")
     rollback.add_argument("--to", default=None, help="a specific retained build to restore")
+
+    tenants = actions.add_parser("tenants", help="count points by tenant payload tag")
+    _add_global_flags(tenants)
+    tenants.add_argument(
+        "name", nargs="?", default=None, help="one collection; every collection if omitted"
+    )
+
+    backfill = actions.add_parser(
+        "backfill-tenant", help="write the tenant payload tag onto existing points"
+    )
+    _add_global_flags(backfill)
+    backfill.add_argument("name", help="collection, spelled as `index list` prints it")
+    backfill.add_argument("--tenant", required=True, help="the tenant id to write")
+    backfill.add_argument(
+        "--apply", action="store_true", help="write; without it the command only reports"
+    )
+    backfill.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="relabel points already tagged for another tenant",
+    )
+    backfill.add_argument(
+        "--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="points per update call"
+    )
 
     lock = actions.add_parser("lock", help="index lockfile operations (D1)")
     _add_global_flags(lock)
@@ -335,6 +361,38 @@ def _add_config(subparsers: argparse._SubParsersAction[argparse.ArgumentParser])
     )
 
 
+def _add_ci_status(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Attach ``ci-status``, the gate that reads a branch's Actions verdict."""
+    ci_status = subparsers.add_parser(
+        "ci-status", help="fail when any workflow's last conclusion on a branch is red"
+    )
+    _add_global_flags(ci_status)
+    ci_status.add_argument(
+        "--branch",
+        default=DEFAULT_BRANCH,
+        help=f"the branch whose runs are read (default: {DEFAULT_BRANCH})",
+    )
+    ci_status.add_argument(
+        "--workflow",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="a workflow file to check; repeatable, defaults to every file in .github/workflows",
+    )
+    ci_status.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="a workflow file to leave out; repeatable",
+    )
+    ci_status.add_argument(
+        "--token-env",
+        metavar="NAME",
+        help="read a bearer token from this environment variable; anonymous when omitted",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Return the parser for the whole CLI surface."""
     parser = argparse.ArgumentParser(
@@ -361,6 +419,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="apply the repairs that are safe to apply, then run every check again",
     )
+
+    _add_ci_status(subparsers)
 
     _add_estimate(subparsers)
     _add_autopilot(subparsers)

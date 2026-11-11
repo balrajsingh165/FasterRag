@@ -23,6 +23,7 @@ from fasterrag.cli.commands.autopilot import run_autopilot, run_generate_golden_
 from fasterrag.cli.commands.backup import run_backup, run_restore
 from fasterrag.cli.commands.benchmark import run_benchmark
 from fasterrag.cli.commands.diagnostics import (
+    run_ci_status,
     run_config_init,
     run_config_show,
     run_config_validate,
@@ -46,6 +47,7 @@ __all__ = ["main"]
 
 _HANDLERS: Final[dict[str, Handler]] = {
     "backup": run_backup,
+    "ci-status": run_ci_status,
     "benchmark": run_benchmark,
     "restore": run_restore,
     "doctor": run_doctor_command,
