@@ -13,6 +13,7 @@ from check_unbuilt_claims import (
     LABEL_DENIAL,
     LAYER_DENIAL,
     RATCHET,
+    RUNG_DENIAL,
     STRUCTURE_ABSENT,
     STRUCTURE_PENDING,
     VACUOUS,
@@ -25,6 +26,7 @@ from check_unbuilt_claims import (
     prose_findings,
     registered_layers,
     registered_providers,
+    registered_rungs,
     structure_findings,
 )
 
@@ -38,6 +40,15 @@ _BUILTIN_ADAPTERS: Final[dict[str, str]] = {
 _PLANNED_ADAPTERS: Final[frozenset[str]] = frozenset({"pinecone"})
 """
 
+LADDER = """
+from typing import Final
+
+_BUILTIN_RUNGS: Final[dict[str, str]] = {
+    "hybrid_only": "fasterrag.services.querying:fused_shortlist",
+}
+_PLANNED_RUNGS: Final[frozenset[str]] = frozenset({"cache_only"})
+"""
+
 PROJECT = """
 [tool.pytest.ini_options]
 addopts = "-m 'not soak'"
@@ -47,16 +58,17 @@ markers = [
 ]
 """
 
-# CRITICAL: every fake tree carries one table, one tier name in prose, and one tier with no
-# tests, because four vacuity guards fire without them. A fixture that trips a guard tests
-# the guard and not the rule it was written for.
+# CRITICAL: every fake tree carries one table, one tier name in prose, one rung name in
+# prose, one built rung and one declared-unbuilt rung, because a vacuity guard fires without
+# each of them. A fixture that trips a guard tests the guard and not the rule it was written
+# for.
 FIXTURE = """# fixture.md
 
 | Surface | How |
 |---|---|
 | CLI | shipped |
 
-The integration suite runs on every push.
+The integration suite runs on every push, and a reranker outage serves hybrid_only.
 """
 
 MAP_HEADER = """# structure.md
@@ -76,12 +88,16 @@ def build(
     *,
     factory: str = FACTORY,
     project: str = PROJECT,
+    ladder: str = LADDER,
     docs: dict[str, str] | None = None,
 ) -> Path:
-    """Write a fake tree: an adapter factory, a marker registry, and the given docs."""
+    """Write a fake tree: the three registries the gate reads, and the given docs."""
     path = root / "src" / "fasterrag" / "adapters" / "vectordb"
     path.mkdir(parents=True, exist_ok=True)
     (path / "factory.py").write_text(factory, encoding="utf-8")
+    services = root / "src" / "fasterrag" / "services"
+    services.mkdir(parents=True, exist_ok=True)
+    (services / "degradation.py").write_text(ladder, encoding="utf-8")
     (root / "pyproject.toml").write_text(project, encoding="utf-8")
     (root / "tests" / "integration").mkdir(parents=True, exist_ok=True)
     (root / "tests" / "integration" / "test_live.py").write_text("", encoding="utf-8")
@@ -295,6 +311,73 @@ def test_a_sentence_denying_a_result_rather_than_a_tier_is_left_alone(tmp_path: 
     assert found == []
 
 
+def test_a_denial_of_a_rung_the_ladder_serves_is_a_finding(tmp_path: Path) -> None:
+    """The class TASK-0369 left ungated for want of a registry, decided by _BUILTIN_RUNGS."""
+    root = build(tmp_path, docs={"a.md": "The hybrid_only rung is not yet built.\n"})
+
+    found, _ = prose_findings(root)
+
+    assert [finding.rule for finding in found] == [RUNG_DENIAL]
+    assert "hybrid_only" in found[0].detail
+
+
+def test_a_denial_of_a_declared_unbuilt_rung_is_not_a_finding(tmp_path: Path) -> None:
+    """`cache_only` is genuinely unbuilt (TASK-0159), and saying so must stay green."""
+    root = build(tmp_path, docs={"a.md": "The cache_only rung is specified but not built.\n"})
+
+    found, _ = prose_findings(root)
+
+    assert found == []
+
+
+def test_the_live_wording_of_every_cache_only_denial_is_left_alone(tmp_path: Path) -> None:
+    """Four live sentences, one per document, that the rule must never fire on today."""
+    body = (
+        "The `cache_only` rung is specified but not built (TASK-0159).\n\n"
+        "As built, only `hybrid_only` and `extractive` are served; `cache_only` is "
+        "specified but not implemented (TASK-0159), and a vector-DB outage currently "
+        "returns a retryable `RETRIEVAL_FAILED` problem instead.\n\n"
+        "Known gaps: the `cache_only` degradation rung is not built (TASK-0159).\n\n"
+        "`hybrid_only` (reranker loss) and `extractive` (LLM loss) are implemented and "
+        "chaos-verified; the `cache_only` rung (vector-DB loss) is not built yet.\n"
+    )
+    root = build(tmp_path, docs={"a.md": body})
+
+    found, _ = prose_findings(root)
+
+    assert found == []
+
+
+def test_a_denial_of_what_a_rung_produces_is_left_alone(tmp_path: Path) -> None:
+    """The item must BE the rung: a denial of its output denies no rung."""
+    root = build(tmp_path, docs={"a.md": "An extractive answer for a 404 is not built.\n"})
+
+    found, _ = prose_findings(root)
+
+    assert found == []
+
+
+def test_a_rung_under_a_denying_column_header_is_a_finding(tmp_path: Path) -> None:
+    """README's third column is where a shipped rung would be listed as unbuilt."""
+    body = "| Shipped | Not yet |\n|---|---|\n| CLI | hybrid_only rung |\n"
+    root = build(tmp_path, docs={"a.md": body})
+
+    found, _ = column_findings(root)
+
+    assert [finding.rule for finding in found] == [COLUMN_DENIAL]
+    assert "hybrid_only" in found[0].detail
+
+
+def test_the_ladder_registry_decides_which_rungs_exist(tmp_path: Path) -> None:
+    """_BUILTIN_RUNGS and _PLANNED_RUNGS are read as code, exactly as the factories are."""
+    root = build(tmp_path)
+
+    served, declared = registered_rungs(root)
+
+    assert served == {"hybrid_only"}
+    assert declared == {"cache_only"}
+
+
 def test_the_marker_registry_decides_which_tiers_exist(tmp_path: Path) -> None:
     """--strict-markers makes the list executable truth: an unregistered marker errors."""
     root = build(tmp_path)
@@ -419,16 +502,22 @@ def test_a_registry_with_no_markers_is_vacuous(tmp_path: Path) -> None:
     assert "no pytest marker" in found[0].detail
 
 
-def test_a_suite_with_every_tier_built_is_vacuous(tmp_path: Path) -> None:
-    """The nothing-planned guard's sibling: with every tier built, every denial is false."""
-    root = build(tmp_path)
+def test_a_suite_with_every_tier_built_still_catches_a_false_denial(tmp_path: Path) -> None:
+    """Finishing every tier is the goal, so it must not read as the rule going blind.
+
+    This case asserted the opposite until 2026-11-11, when TASK-0243 built the soak layer
+    and the guard short-circuited the whole gate — failing `main` for succeeding. The rule
+    catches a *false* denial, so a vocabulary whose denials are all false is the case it
+    catches every one of; `named[TIER] == 0` is what still proves the matcher ran.
+    """
+    root = build(tmp_path, docs={"scope.md": "The soak suite is not built (TASK-0243).\n"})
     (root / "tests" / "soak").mkdir(parents=True)
     (root / "tests" / "soak" / "test_long.py").write_text("", encoding="utf-8")
 
     found = check(root)
 
-    assert rules(found) == [VACUOUS]
-    assert "stopped discriminating" in found[0].detail
+    assert VACUOUS not in rules(found)
+    assert any("soak" in finding.detail for finding in found)
 
 
 def test_a_corpus_with_no_table_at_all_is_vacuous(tmp_path: Path) -> None:
@@ -446,7 +535,7 @@ def test_documents_that_name_no_tier_are_vacuous(tmp_path: Path) -> None:
     """If prose stops spelling the marker names, the join silently stops existing."""
     root = build(tmp_path)
     (root / "docs" / "fixture.md").write_text(
-        FIXTURE.replace("The integration suite runs on every push.", "Nothing here."),
+        FIXTURE.replace("The integration suite runs on every push, and a", "A"),
         encoding="utf-8",
     )
 
@@ -454,6 +543,39 @@ def test_documents_that_name_no_tier_are_vacuous(tmp_path: Path) -> None:
 
     assert rules(found) == [VACUOUS]
     assert "tiers that have tests" in found[0].detail
+
+
+def test_a_ladder_with_no_registered_rung_is_vacuous(tmp_path: Path) -> None:
+    """_BUILTIN_RUNGS is the rung rule's whole vocabulary, as the factory is the adapters'."""
+    root = build(tmp_path, ladder="EMPTY = 1\n")
+
+    found = check(root)
+
+    assert rules(found) == [VACUOUS]
+    assert "no rung registers an implementation" in found[0].detail
+
+
+def test_a_ladder_with_every_rung_implemented_is_vacuous(tmp_path: Path) -> None:
+    """The nothing-planned guard's sibling: with every rung built, every denial is false."""
+    root = build(tmp_path, ladder=LADDER.replace('frozenset({"cache_only"})', "frozenset()"))
+
+    found = check(root)
+
+    assert rules(found) == [VACUOUS]
+    assert "every rung the ladder declares is implemented" in found[0].detail
+
+
+def test_documents_that_name_no_rung_are_vacuous(tmp_path: Path) -> None:
+    """Counted per vocabulary: one total passes while the rung half matches nothing."""
+    root = build(tmp_path)
+    (root / "docs" / "fixture.md").write_text(
+        FIXTURE.replace(", and a reranker outage serves hybrid_only", ""), encoding="utf-8"
+    )
+
+    found = check(root)
+
+    assert rules(found) == [VACUOUS]
+    assert "rungs the ladder serves" in found[0].detail
 
 
 def test_the_ratchet_counts_by_path(tmp_path: Path) -> None:
@@ -494,12 +616,25 @@ def test_the_real_registry_names_the_adapters_that_shipped(name: str) -> None:
     assert planned == {"pinecone"}
 
 
-def test_the_real_suite_has_a_load_tier_and_no_soak_tier() -> None:
-    """The two facts TASK-0369 turned on: tests/load has held modules since 2026-11-07."""
+def test_the_real_ladder_serves_two_rungs_and_declares_a_third() -> None:
+    """The pair the class turns on: `cache_only` is TASK-0159 and must stay undecided."""
+    served, declared = registered_rungs()
+
+    assert served == {"hybrid_only", "extractive"}
+    assert declared == {"cache_only"}
+
+
+def test_every_registered_tier_in_the_real_suite_now_has_test_code() -> None:
+    """TASK-0369 turned on `tests/load` holding modules and `soak` holding none.
+
+    TASK-0243 closed the second half on 2026-11-11, so the set this asserted is now
+    empty — which is a milestone and not a regression, and the reason `check` no longer
+    treats an empty unbuilt set as the rule going blind.
+    """
     built, unbuilt = registered_layers()
 
-    assert {"integration", "eval", "load", "chaos"} <= built
-    assert unbuilt == {"soak"}
+    assert {"integration", "eval", "load", "chaos", "soak"} <= built
+    assert unbuilt == set()
 
 
 def test_the_only_denying_column_header_in_the_corpus_is_readmes() -> None:

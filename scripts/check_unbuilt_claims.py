@@ -26,6 +26,14 @@ and ask the tree, for the narrow set of claims where the tree gives a yes or no:
   ``tests/<tier>/`` holds a test module or any test carries its marker, which is why
   ``reliability.md`` calling the load harness "specified but not built (TASK-0243)" was
   false while ``tests/load/`` held five modules;
+* **degradation rungs** (TASK-0394). ``services/degradation.py`` registers each rung
+  against the implementation that serves it in ``_BUILTIN_RUNGS`` and names the specified
+  ones it has not built in ``_PLANNED_RUNGS``. The ladder dispatches through that mapping,
+  so a rung cannot label a response without registering, exactly as an adapter cannot load
+  without its factory entry. Before it the class was undecidable and deliberately left
+  alone: ``hybrid_only`` was a bare constant, ``extractive`` not even that, ``cache_only``
+  appeared nowhere, and a grep decided a rung by whether a docstring happened to spell it
+  — ``cross_encoder.py``'s does;
 * **an inherited denial** (TASK-0371), in a table column header or in a prose lead-in
   label. README's capability table puts the denial in the header — "Not yet" — and no cell
   under it carries a denial verb, so both gates read those cells as ordinary prose; that is
@@ -38,13 +46,14 @@ and ask the tree, for the narrow set of claims where the tree gives a yes or no:
 What this gate CANNOT do, stated plainly because a check that oversells its coverage is
 the defect it exists to catch:
 
-* **the umbrella hole stays open for every capability with no registry.** Providers and
-  test tiers have one; degradation rungs and D-features do not. ``hybrid_only`` is a module
-  constant and ``cache_only`` appears nowhere, so a grep decides a rung by whether a
-  docstring happens to spell it — which is not a registry, and a wrong *yes* there fails an
-  honest sentence. A per-item sub-ledger was considered and rejected: it is a second
-  document asserting things about the tree, with nothing checking it, and anything able to
-  check it could read the tree directly and not need it. Those classes need review;
+* **the umbrella hole stays open for every capability with no registry.** Providers, test
+  tiers and degradation rungs have one; the twelve D-features do not (TASK-0369), and no
+  mapping exists that a D-number can be looked up in to decide whether it is built. The
+  rung class was the last one a registry could reach, because the ladder's rungs are a
+  closed set the code must name; a D-feature is a paragraph of behaviour and is not.
+  A per-item sub-ledger was considered and rejected: it is a
+  second document asserting things about the tree, with nothing checking it, and anything
+  able to check it could read the tree directly and not need it. Those classes need review;
 * it reads a clause, not a meaning. A denial whose subject sits in a different clause from
   its name is missed, and a denied column item is decided only when the whole item is the
   thing — "a Milvus or Weaviate contract run against a real server" is correctly left alone,
@@ -63,6 +72,16 @@ Measured over four trees (237f6f5, 671156a, 650943b, HEAD): 574 tables, 19 items
 denying header, 1,177 tier clause-mentions, **3 findings and no false positive**. All three
 are on 650943b — the tree the previous sweep produced, which every gate scored green: two
 README items under "Not yet" (a registered adapter, a tier with tests) and reliability.md:56.
+
+The rung rule was measured the same way over the same four trees (2026-11-11): 146 rung
+clause-mentions, 40 denial clauses that name a rung, **0 findings and 0 false positives**.
+Zero findings is not zero discrimination, and it was not assumed: moving ``cache_only`` into
+``_BUILTIN_RUNGS`` — simulating the day TASK-0159 lands — makes the rule report 4 stale
+denials on HEAD, one each in README.md, api-reference.md, quickstart.md and reliability.md,
+which is precisely the transition no gate could previously see. Six further denial clauses
+name ``cache_only`` and are left to review, because the subject of the denial is not the
+rung alone; one of those, failure-modes.md:52, misses only because its ``> - `` blockquote
+bullet survives ``_normalised`` (NEW-1).
 
 Exit codes: ``0`` when every decidable denial matches the tree, ``1`` on any finding or if
 a vacuity guard fires.
@@ -90,12 +109,15 @@ ADAPTERS: Final = Path("src/fasterrag/adapters")
 STRUCTURE_MAP: Final = Path("docs/structure.md")
 PROJECT_FILE: Final = Path("pyproject.toml")
 TESTS: Final = Path("tests")
+LADDER: Final = Path("src/fasterrag/services/degradation.py")
 
 PROVIDER: Final = "provider"
 TIER: Final = "tier"
+RUNG: Final = "rung"
 
 ADAPTER_DENIAL: Final = "adapter-denial"
 LAYER_DENIAL: Final = "layer-denial"
+RUNG_DENIAL: Final = "rung-denial"
 COLUMN_DENIAL: Final = "column-denial"
 LABEL_DENIAL: Final = "label-denial"
 STRUCTURE_PENDING: Final = "structure-pending"
@@ -192,6 +214,11 @@ ADAPTER_NOUNS: Final = (
 )
 LAYER_NOUNS: Final = r"(?:(?:test[\s-]+)?(?:layer|tier|suite|harness|run)e?s?|tests)"
 
+# CRITICAL: deliberately three nouns and no more. "answer" and "response" were rejected: the
+# documentation says "extractive, retrieval-only answers" of the *output*, not of the rung,
+# and deciding that sentence against the registry would fail prose that denies no rung at all.
+RUNG_NOUNS: Final = r"(?:degrad(?:ed|ation)[\s-]+)?(?:rung|mode|fallback)s?"
+
 # CRITICAL: ratcheted by path, never by line. Line numbers in these documents move every
 # time a paragraph above them is edited, and a ratchet pinned to a line turns an unrelated
 # edit into a failure, which is how a ratchet gets deleted. Empty is the correct state:
@@ -209,28 +236,57 @@ class Finding:
     detail: str
 
 
+def _registry_in(tree: ast.AST, builtin: str, planned: str) -> tuple[set[str], set[str]]:
+    """Return the names a registry declares built, and the ones it declares merely planned.
+
+    Keys of the built mapping and every string inside the planned collection, read as code:
+    the adapter factories and the degradation ladder state their truth in that same pair.
+    """
+    shipped: set[str] = set()
+    pending: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AnnAssign) or not isinstance(node.target, ast.Name):
+            continue
+        if node.target.id == builtin and isinstance(node.value, ast.Dict):
+            shipped |= {
+                key.value
+                for key in node.value.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+        if node.target.id == planned and node.value is not None:
+            pending |= {
+                item.value
+                for item in ast.walk(node.value)
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            }
+    return shipped, pending
+
+
 def registered_providers(root: Path = REPOSITORY_ROOT) -> tuple[set[str], set[str]]:
     """Return the provider names the adapter factories register, and the ones they plan."""
     shipped: set[str] = set()
     planned: set[str] = set()
     for factory in sorted((root / ADAPTERS).rglob("factory.py")):
         tree = ast.parse(factory.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.AnnAssign) or not isinstance(node.target, ast.Name):
-                continue
-            if node.target.id == "_BUILTIN_ADAPTERS" and isinstance(node.value, ast.Dict):
-                shipped |= {
-                    key.value
-                    for key in node.value.keys
-                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
-                }
-            if node.target.id == "_PLANNED_ADAPTERS" and node.value is not None:
-                planned |= {
-                    item.value
-                    for item in ast.walk(node.value)
-                    if isinstance(item, ast.Constant) and isinstance(item.value, str)
-                }
+        built, pending = _registry_in(tree, "_BUILTIN_ADAPTERS", "_PLANNED_ADAPTERS")
+        shipped |= built
+        planned |= pending
     return shipped, planned - shipped
+
+
+# CRITICAL: `full` is not in this vocabulary and must never be. It is the top of the ladder
+# rather than a rung — the registry excludes it for that reason — and it is also an ordinary
+# English word, so admitting it would decide denials off sentences that never mentioned a
+# degraded mode. The three rung names are unambiguous strings; "full" is not.
+def registered_rungs(root: Path = REPOSITORY_ROOT) -> tuple[set[str], set[str]]:
+    """Return the degradation rungs the ladder serves, and the ones it only declares."""
+    module = root / LADDER
+    if not module.is_file():
+        return set(), set()
+    served, declared = _registry_in(
+        ast.parse(module.read_text(encoding="utf-8")), "_BUILTIN_RUNGS", "_PLANNED_RUNGS"
+    )
+    return served, declared - served
 
 
 # CRITICAL: parsed as code, never grepped. This gate's own tests write "@pytest.mark.soak"
@@ -326,12 +382,14 @@ class Oracle:
     built: frozenset[str]
     noun: str
     source: str
+    rule: str
 
 
 def oracles(root: Path = REPOSITORY_ROOT) -> tuple[Oracle, ...]:
-    """Return the vocabularies a denial can be decided against: providers and test tiers."""
+    """Return the vocabularies a denial decides against: providers, tiers, ladder rungs."""
     shipped, planned = registered_providers(root)
     built, unbuilt = registered_layers(root)
+    served, declared = registered_rungs(root)
     return (
         Oracle(
             PROVIDER,
@@ -339,6 +397,7 @@ def oracles(root: Path = REPOSITORY_ROOT) -> tuple[Oracle, ...]:
             frozenset(shipped),
             ADAPTER_NOUNS,
             "adapters/*/factory.py registers it",
+            ADAPTER_DENIAL,
         ),
         Oracle(
             TIER,
@@ -346,6 +405,15 @@ def oracles(root: Path = REPOSITORY_ROOT) -> tuple[Oracle, ...]:
             frozenset(built),
             LAYER_NOUNS,
             "pyproject registers that tier and tests/ holds it",
+            LAYER_DENIAL,
+        ),
+        Oracle(
+            RUNG,
+            frozenset(served | declared),
+            frozenset(served),
+            RUNG_NOUNS,
+            "services/degradation.py registers the implementation that serves it",
+            RUNG_DENIAL,
         ),
     )
 
@@ -455,18 +523,25 @@ def _labelled_items(sentence: str, denial: re.Pattern[str]) -> list[str]:
 
 def prose_findings(
     root: Path = REPOSITORY_ROOT, known: tuple[Oracle, ...] | None = None
-) -> tuple[list[Finding], int]:
-    """Return a finding per prose denial the tree decides, by subject or by lead-in label."""
+) -> tuple[list[Finding], dict[str, int]]:
+    """Return a finding per prose denial the tree decides, by subject or by lead-in label.
+
+    The mentions are counted per vocabulary rather than in one total, because a vacuity
+    guard over the sum passes while one whole vocabulary has stopped matching any prose.
+    """
     known = oracles(root) if known is None else known
     # CRITICAL: the provider oracle is excluded from the subject rule and only from it.
     # adapter_findings already reads every clause for a provider denial, with an affirmation
     # guard this rule does not have, so including it here reports the same sentence twice and
     # loses that guard on the duplicate.
     subjects = tuple(oracle for oracle in known if oracle.name != PROVIDER)
-    tiers = {name: _name_pattern(name) for oracle in subjects for name in sorted(oracle.built)}
+    named = {
+        oracle.name: {name: _name_pattern(name) for name in sorted(oracle.built)}
+        for oracle in subjects
+    }
     denial = re.compile("|".join(DENIAL_PATTERNS), re.IGNORECASE)
     findings: list[Finding] = []
-    mentions = 0
+    mentions = dict.fromkeys(named, 0)
 
     for path in scanned_documents(root):
         relative = path.relative_to(root).as_posix()
@@ -482,14 +557,15 @@ def prose_findings(
                     for oracle, names in _decided(item, known)
                 ]
             for clause in CLAUSE_BREAK.split(sentence):
-                if any(pattern.search(clause) for pattern in tiers.values()):
-                    mentions += 1
+                for subject, patterns in named.items():
+                    if any(pattern.search(clause) for pattern in patterns.values()):
+                        mentions[subject] += 1
                 match = denial.search(clause)
                 if match is None:
                     continue
                 findings += [
                     Finding(
-                        LAYER_DENIAL,
+                        oracle.rule,
                         relative,
                         f"line {line} denies {', '.join(names)}, but {oracle.source}: "
                         f"{clause.strip()[:120]}",
@@ -602,10 +678,11 @@ def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
     structure, entries = structure_findings(root)
     known = oracles(root)
     columns, tables = column_findings(root, known)
-    prose, layer_mentions = prose_findings(root, known)
+    prose, named = prose_findings(root, known)
     built = {name for oracle in known if oracle.name == TIER for name in oracle.built}
-    unbuilt = {
-        name for oracle in known if oracle.name == TIER for name in oracle.known - oracle.built
+    served = {name for oracle in known if oracle.name == RUNG for name in oracle.built}
+    declared = {
+        name for oracle in known if oracle.name == RUNG for name in oracle.known - oracle.built
     }
 
     if not built:
@@ -617,13 +694,22 @@ def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
                 "nothing; [tool.pytest.ini_options].markers is its whole vocabulary",
             )
         ]
-    if not unbuilt:
+    # CRITICAL: there is deliberately no "every tier is built" guard here, unlike the
+    # provider and rung rules below. Finishing every tier is the goal, not a defect, and
+    # TASK-0243 reached it on 2026-11-11 when `soak` gained tests -- at which point the
+    # guard short-circuited the whole gate and would have redded `main` for succeeding.
+    # Its stated reason does not survive inspection either: this rule exists to catch a
+    # *false* denial of a tier, so a vocabulary whose denials are all false is the case it
+    # catches every one of, not the case where it stops discriminating. What has to stay
+    # proven is that the matcher still runs, and the `named[TIER] == 0` guard below is
+    # exactly that proof -- it fails when no document names a built tier in any clause.
+    if not served:
         return [
             Finding(
                 VACUOUS,
-                PROJECT_FILE.as_posix(),
-                "every registered tier has test code, so every tier denial this gate reads "
-                "is automatically false and the rule stopped discriminating",
+                LADDER.as_posix(),
+                "no rung registers an implementation, so the rung rule decided nothing; "
+                "_BUILTIN_RUNGS is its whole vocabulary",
             )
         ]
     if tables == 0:
@@ -635,7 +721,7 @@ def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
                 "inside a blockquote is the one TASK-0371 is about and is easy to lose",
             )
         ]
-    if layer_mentions == 0:
+    if named.get(TIER, 0) == 0:
         return [
             Finding(
                 VACUOUS,
@@ -643,6 +729,16 @@ def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
                 f"scanned every document and found no clause naming any of the {len(built)} "
                 "tiers that have tests; either the documentation stopped naming them or the "
                 "marker names stopped matching how prose spells them",
+            )
+        ]
+    if named.get(RUNG, 0) == 0:
+        return [
+            Finding(
+                VACUOUS,
+                "docs",
+                f"scanned every document and found no clause naming any of the {len(served)} "
+                "rungs the ladder serves; either the documentation stopped naming them or the "
+                "registry keys stopped matching how prose spells them",
             )
         ]
     if mentions == 0:
@@ -671,6 +767,15 @@ def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
                 ADAPTERS.as_posix(),
                 "no factory names a planned provider, so every denial this gate reads "
                 "is automatically false and the rule stopped discriminating",
+            )
+        ]
+    if not declared:
+        return [
+            Finding(
+                VACUOUS,
+                LADDER.as_posix(),
+                "every rung the ladder declares is implemented, so every rung denial this "
+                "gate reads is automatically false and the rule stopped discriminating",
             )
         ]
     return adapters + structure + columns + prose

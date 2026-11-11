@@ -51,12 +51,19 @@ from fasterrag.core.retrieval.fusion import Ranking, rrf_fuse
 from fasterrag.core.retrieval.models import DENSE_LEG, SPARSE_LEG, ScoredChunk
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
+from fasterrag.services.degradation import DegradationMode, serving
 from fasterrag.services.tenancy import TENANT_PAYLOAD_KEY
 
-FULL_MODE = "full"
-HYBRID_ONLY_MODE = "hybrid_only"
+FULL_MODE = DegradationMode.FULL.value
+HYBRID_ONLY_MODE = DegradationMode.HYBRID_ONLY.value
 
-__all__ = ["FULL_MODE", "HYBRID_ONLY_MODE", "Retrieval", "RetrievalService"]
+__all__ = [
+    "FULL_MODE",
+    "HYBRID_ONLY_MODE",
+    "Retrieval",
+    "RetrievalService",
+    "fused_shortlist",
+]
 
 _logger = get_logger(__name__)
 
@@ -72,6 +79,15 @@ class Retrieval:
     def degraded(self) -> bool:
         """Return whether a stage was skipped, which callers must surface to the user."""
         return self.mode != FULL_MODE
+
+
+def fused_shortlist(shortlist: list[ScoredChunk], limit: int) -> list[ScoredChunk]:
+    """Serve the fused ranking unreranked: what the ``hybrid_only`` rung answers with.
+
+    Registered as that rung's implementation in ``services.degradation``, which is how the
+    tree can say the rung is built (D4, TASK-0394).
+    """
+    return shortlist[:limit]
 
 
 class RetrievalService:
@@ -195,11 +211,15 @@ class RetrievalService:
         try:
             reordered = await reranker.rerank(text, shortlist)
         except FasterRagError as exc:
+            # CRITICAL: the mode comes from the ladder's registry, never from a literal. That
+            # is what makes "which rungs are built" a question the tree answers rather than a
+            # grep, and it is why a rung cannot be served without registering itself.
+            mode = serving(DegradationMode.HYBRID_ONLY)
             _logger.warning(
                 "reranking failed, serving fused results instead",
-                extra={"code": exc.code.value, "trace_id": exc.trace_id, "mode": HYBRID_ONLY_MODE},
+                extra={"code": exc.code.value, "trace_id": exc.trace_id, "mode": mode},
             )
-            return shortlist[:limit], HYBRID_ONLY_MODE
+            return fused_shortlist(shortlist, limit), mode
 
         return reordered[:limit], FULL_MODE
 

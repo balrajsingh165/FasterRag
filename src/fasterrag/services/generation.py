@@ -63,6 +63,7 @@ from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import current_trace_id, get_logger
 from fasterrag.services.budget import CostGovernor, shared_governor
+from fasterrag.services.degradation import DegradationMode, serving
 from fasterrag.services.estimation import price_generation
 from fasterrag.services.querying import FULL_MODE, RetrievalService
 from fasterrag.services.traces import TraceStore, now
@@ -74,9 +75,10 @@ __all__ = [
     "Answer",
     "GenerationService",
     "QueryEvent",
+    "extractive_answer",
 ]
 
-EXTRACTIVE_MODE: Final = "extractive"
+EXTRACTIVE_MODE: Final = DegradationMode.EXTRACTIVE.value
 
 MAXIMUM_BEST_CANDIDATES: Final = 5
 
@@ -185,8 +187,12 @@ class Answer:
         }
 
 
-def _extractive_answer(context: AssembledContext) -> str:
-    """Return the retrieved passages as the answer of last resort."""
+def extractive_answer(context: AssembledContext) -> str:
+    """Return the retrieved passages as the answer of last resort.
+
+    Registered as the ``extractive`` rung's implementation in ``services.degradation``,
+    which is how the tree can say the rung is built (D4, TASK-0394).
+    """
     return context.text
 
 
@@ -613,6 +619,10 @@ class GenerationService:
             if not exc.retryable:
                 raise
             timings["generate"] = int((time.perf_counter() - started) * 1000)
+            # CRITICAL: the mode comes from the ladder's registry, never from a literal, so
+            # a rung cannot be served without registering itself and the documentation's
+            # claim about which rungs exist is decidable against the tree.
+            mode = serving(DegradationMode.EXTRACTIVE)
             _logger.warning(
                 "generation failed, serving the retrieved passages instead",
                 extra={
@@ -623,14 +633,14 @@ class GenerationService:
                     "detail": exc.detail,
                     "retryable": exc.retryable,
                     "trace_id": trace_id,
-                    "mode": EXTRACTIVE_MODE,
+                    "mode": mode,
                 },
             )
-            metrics.DEGRADED_RESPONSES.increment(mode=EXTRACTIVE_MODE)
+            metrics.DEGRADED_RESPONSES.increment(mode=mode)
             return Answer(
-                answer=_extractive_answer(prepared.context),
+                answer=extractive_answer(prepared.context),
                 citations=list(prepared.context.citations),
-                mode=EXTRACTIVE_MODE,
+                mode=mode,
                 trace_id=trace_id,
                 timings_ms=timings,
             )
