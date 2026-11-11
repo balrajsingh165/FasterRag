@@ -19,6 +19,7 @@ from fasterrag.services.backfill import (
     audit_collection,
     audit_collections,
     backfill_tenant,
+    inventory_untagged,
 )
 
 
@@ -263,3 +264,115 @@ async def test_the_batch_size_is_what_reaches_the_adapter() -> None:
 
     assert memory.attempted == [["a", "b"], ["c", "d"], ["e"]]
     assert report.batches == 3
+
+
+async def test_assume_untagged_tags_the_residue_and_leaves_the_other_tenant_alone() -> None:
+    memory = corpus(a=None, b=None, c="globex", d="acme")
+
+    report = await backfill_tenant(
+        adapter_of(memory), "docs", "acme", apply=True, assume_untagged=True
+    )
+
+    assert report.assumed is True
+    assert (report.untagged, report.already, report.foreign) == (2, 1, 1)
+    assert report.updated == 2
+    assert report.pending == 0
+    assert memory.written == ["a", "b"]
+    assert memory.payloads["docs"]["c"]["tenant"] == "globex"
+
+
+async def test_a_run_that_assumed_ownership_says_so_in_the_report_it_leaves_behind() -> None:
+    memory = corpus(a=None, b="globex")
+
+    report = await backfill_tenant(adapter_of(memory), "docs", "acme", assume_untagged=True)
+
+    # CRITICAL: an assertion the operator made must never read back as one the system
+    # derived. The flag is the only thing that let this collection through at all.
+    assert report.as_dict()["assumed"] is True
+    assert report.as_dict()["overwrite"] is False
+    assert memory.attempted == []
+
+
+async def test_assume_untagged_dry_runs_like_every_other_backfill() -> None:
+    memory = corpus(a=None, b=None, c="globex")
+
+    report = await backfill_tenant(adapter_of(memory), "docs", "acme", assume_untagged=True)
+
+    assert memory.attempted == []
+    assert report.applied is False
+    assert report.pending == 2
+    assert "tenant" not in memory.payloads["docs"]["a"]
+
+
+async def test_an_assumed_run_is_a_fixpoint_and_never_claims_the_other_tenant() -> None:
+    memory = corpus(a=None, b="globex")
+    await backfill_tenant(adapter_of(memory), "docs", "acme", apply=True, assume_untagged=True)
+
+    again = await backfill_tenant(
+        adapter_of(memory), "docs", "acme", apply=True, assume_untagged=True
+    )
+
+    assert again.updated == 0
+    assert again.foreign == 1
+    assert memory.payloads["docs"]["b"]["tenant"] == "globex"
+
+
+async def test_the_two_ownership_assertions_cannot_be_made_together() -> None:
+    memory = corpus(a=None, b="globex")
+
+    with pytest.raises(FasterRagError) as caught:
+        await backfill_tenant(
+            adapter_of(memory), "docs", "acme", apply=True, overwrite=True, assume_untagged=True
+        )
+
+    assert caught.value.code is ErrorCode.VALIDATION_FAILED
+    assert memory.attempted == []
+
+
+async def test_the_conflict_names_both_ways_out_rather_than_only_the_destructive_one() -> None:
+    memory = corpus(a=None, b="globex")
+
+    with pytest.raises(FasterRagError) as caught:
+        await backfill_tenant(adapter_of(memory), "docs", "acme")
+
+    assert "assume_untagged" in caught.value.detail
+    assert "overwrite" in caught.value.detail
+    assert "index tenants --untagged" in caught.value.detail
+
+
+def mixed_corpus() -> MemoryAdapter:
+    """A collection whose untagged points come from two documents and one stray chunk."""
+    return MemoryAdapter(
+        {
+            "docs": {
+                "a": {"document_id": "d_1", "source_uri": "s3://bucket/one.pdf"},
+                "b": {"document_id": "d_1", "source_uri": "s3://bucket/one.pdf"},
+                "c": {"document_id": "d_2", "source_uri": "s3://bucket/two.pdf"},
+                "d": {"document_id": "d_3", "source_uri": "x", "tenant": "globex"},
+                "e": {"text": "no document at all"},
+            }
+        }
+    )
+
+
+async def test_the_untagged_inventory_groups_by_document_and_skips_tagged_points() -> None:
+    rows = await inventory_untagged(adapter_of(mixed_corpus()), "docs")
+
+    assert [(row.document_id, row.chunks) for row in rows] == [("d_1", 2), ("", 1), ("d_2", 1)]
+    assert rows[0].source_uri == "s3://bucket/one.pdf"
+    assert all(row.collection == "docs" for row in rows)
+    assert "d_3" not in {row.document_id for row in rows}
+
+
+async def test_chunks_with_no_document_id_are_one_unattributable_row_rather_than_many() -> None:
+    memory = MemoryAdapter({"docs": {"a": {}, "b": {}, "c": {}}})
+
+    rows = await inventory_untagged(adapter_of(memory), "docs")
+
+    assert [row.as_dict() for row in rows] == [
+        {"collection": "docs", "document_id": "", "source_uri": "", "chunks": 3}
+    ]
+
+
+async def test_a_fully_tagged_collection_has_nothing_to_inspect() -> None:
+    assert await inventory_untagged(adapter_of(corpus(a="acme", b="globex")), "docs") == []

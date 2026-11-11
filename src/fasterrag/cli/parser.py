@@ -170,6 +170,11 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     tenants.add_argument(
         "name", nargs="?", default=None, help="one collection; every collection if omitted"
     )
+    tenants.add_argument(
+        "--untagged",
+        default=None,
+        help="write the untagged points, grouped by document, as JSONL to this path",
+    )
 
     backfill = actions.add_parser(
         "backfill-tenant", help="write the tenant payload tag onto existing points"
@@ -184,6 +189,11 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
         "--overwrite",
         action="store_true",
         help="relabel points already tagged for another tenant",
+    )
+    backfill.add_argument(
+        "--assume-untagged",
+        action="store_true",
+        help="in a collection holding another tenant, tag only the untagged points",
     )
     backfill.add_argument(
         "--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="points per update call"

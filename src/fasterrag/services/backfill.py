@@ -26,6 +26,23 @@ tenants' chunks, and assigning all of its untagged points to one tenant would ha
 tenant another's data, which is the defect TASK-0339 fixed once in ``chunk_payload``. Such a
 collection is refused with ``CONFLICT`` unless the operator passes ``overwrite``, which says
 in one word that the whole collection is that tenant's.
+
+**Two escapes, and each one names what it asserts.** ``overwrite`` says the whole collection
+is one tenant's and relabels every point in it. ``assume_untagged`` says only the untagged
+residue is, and leaves every existing tag alone — the mixed collection's case, which
+``overwrite`` would otherwise answer by handing one tenant another's chunks. Passing both is
+refused, because they assert different things about the same collection, and the report
+records which was used, so ownership that was *asserted* can never be read back as ownership
+the system derived. ``inventory_untagged`` is what lets that assertion rest on evidence: it
+lists the untagged residue grouped by document, a document being the granularity an operator
+can actually recognise. Neither escape is a default and neither is inferred.
+
+**Relocation is deliberately not here.** Splitting a mixed collection into
+``<tenant>__<name>`` collections is the remedy TASK-0385 sketched, and it is the wrong one
+today: the ingest and query paths address the raw collection name (TASK-0381), so points
+moved under a scoped name stop being addressable by the queries the move was meant to fix,
+while the filter ``tenant_scoped_retrieval`` installs needs a correct *tag* and does not care
+which collection holds it. The reasoning is recorded in ``docs/security.md`` §3.
 """
 
 from __future__ import annotations
@@ -44,9 +61,11 @@ __all__ = [
     "BackfillProgress",
     "BackfillReport",
     "TenantAudit",
+    "UntaggedDocument",
     "audit_collection",
     "audit_collections",
     "backfill_tenant",
+    "inventory_untagged",
 ]
 
 DEFAULT_BATCH_SIZE: Final = 512
@@ -98,6 +117,25 @@ class TenantAudit:
 
 
 @dataclass(frozen=True, slots=True)
+class UntaggedDocument:
+    """One document whose chunks carry no tenant tag, as an operator has to judge it."""
+
+    collection: str
+    document_id: str
+    source_uri: str
+    chunks: int
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the row ``fasterrag index tenants --untagged`` writes."""
+        return {
+            "collection": self.collection,
+            "document_id": self.document_id,
+            "source_uri": self.source_uri,
+            "chunks": self.chunks,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class BackfillProgress:
     """Cumulative counts after one flushed batch, so a killed run still reported progress."""
 
@@ -123,11 +161,17 @@ class BackfillReport:
     foreign: int
     updated: int
     batches: int
+    assumed: bool = False
 
     @property
     def pending(self) -> int:
-        """Return how many points would still be invisible to the filter after this run."""
-        return self.untagged + self.foreign - self.updated
+        """Return how many points this run would still leave for the next one.
+
+        Another tenant's points count only under ``overwrite``, which claims them; under
+        ``assumed`` they are left where they are on purpose and are not outstanding work.
+        """
+        claimed = self.foreign if self.overwrite else 0
+        return self.untagged + claimed - self.updated
 
     def as_dict(self) -> dict[str, Any]:
         """Return the form ``fasterrag index backfill-tenant --json`` prints."""
@@ -136,6 +180,7 @@ class BackfillReport:
             "tenant": self.tenant,
             "applied": self.applied,
             "overwrite": self.overwrite,
+            "assumed": self.assumed,
             "scanned": self.scanned,
             "untagged": self.untagged,
             "already": self.already,
@@ -177,6 +222,38 @@ async def audit_collections(
     ]
 
 
+async def inventory_untagged(
+    adapter: VectorDBAdapter, collection: str, *, batch_size: int = DEFAULT_BATCH_SIZE
+) -> list[UntaggedDocument]:
+    """List a collection's untagged points grouped by the document they were chunked from.
+
+    The evidence behind ``assume_untagged``: the tool cannot derive who owns an untagged
+    point, so it hands the operator the documents and asks. Heaviest in untagged
+    *documents*, the same cost the exporter already pays to deduplicate its own walk.
+    """
+    counts: dict[str, int] = {}
+    sources: dict[str, str] = {}
+
+    async for point in adapter.iterate_points(
+        collection, with_vectors=False, batch_size=batch_size
+    ):
+        if _tag_of(point.payload) is not None:
+            continue
+        document_id = str(point.payload.get("document_id", ""))
+        counts[document_id] = counts.get(document_id, 0) + 1
+        sources.setdefault(document_id, str(point.payload.get("source_uri", "")))
+
+    return [
+        UntaggedDocument(
+            collection=collection,
+            document_id=document_id,
+            source_uri=sources[document_id],
+            chunks=chunks,
+        )
+        for document_id, chunks in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
 def _refuse_foreign(audit: TenantAudit, tenant: str) -> None:
     """Refuse a collection holding another tenant's points, naming them."""
     foreign = sorted(name for name in audit.tagged if name != tenant)
@@ -185,10 +262,24 @@ def _refuse_foreign(audit: TenantAudit, tenant: str) -> None:
     raise FasterRagError(
         f"collection {audit.collection!r} already holds points tagged for "
         f"{foreign!r}, so its {audit.untagged} untagged points cannot be attributed to "
-        f"{tenant!r}; split the collection, or pass overwrite to relabel every point in it",
+        f"{tenant!r}; inspect them with `index tenants --untagged`, then pass "
+        f"assume_untagged to tag only those for {tenant!r}, or overwrite to claim the "
+        "whole collection",
         code=ErrorCode.CONFLICT,
         retryable=False,
     )
+
+
+def _refuse_contradictory_assertions(overwrite: bool, assume_untagged: bool) -> None:
+    """Refuse the two ownership assertions together, since they disagree."""
+    if overwrite and assume_untagged:
+        raise FasterRagError(
+            "overwrite and assume_untagged assert different things about the same "
+            "collection — that all of it belongs to this tenant, or that only its "
+            "untagged points do; pass exactly one",
+            code=ErrorCode.VALIDATION_FAILED,
+            retryable=False,
+        )
 
 
 async def backfill_tenant(
@@ -198,15 +289,17 @@ async def backfill_tenant(
     *,
     apply: bool = False,
     overwrite: bool = False,
+    assume_untagged: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
     progress: Callable[[BackfillProgress], None] | None = None,
 ) -> BackfillReport:
     """Write the tenant tag onto a collection's points, or report what that would write.
 
-    Audits first and refuses a collection holding another tenant unless ``overwrite``.
-    ``apply`` is what turns the dry run into a write; the counts are identical either way.
+    Refuses a collection holding another tenant unless ``overwrite`` or ``assume_untagged``
+    asserts who owns it; ``apply`` is what turns the dry run into a write.
     """
     validated_tenant(tenant)
+    _refuse_contradictory_assertions(overwrite, assume_untagged)
     audit = await audit_collection(adapter, collection, batch_size=batch_size)
 
     if not audit.scanned:
@@ -217,7 +310,7 @@ async def backfill_tenant(
             retryable=False,
         )
 
-    if not overwrite:
+    if not overwrite and not assume_untagged:
         _refuse_foreign(audit, tenant)
 
     already = audit.tagged.get(tenant, 0)
@@ -227,6 +320,7 @@ async def backfill_tenant(
         tenant=tenant,
         applied=apply,
         overwrite=overwrite,
+        assumed=assume_untagged,
         scanned=audit.scanned,
         untagged=audit.untagged,
         already=already,
@@ -254,6 +348,7 @@ async def backfill_tenant(
             "updated": updated,
             "batches": batches,
             "overwrite": overwrite,
+            "assumed": assume_untagged,
         },
     )
     return BackfillReport(
@@ -261,6 +356,7 @@ async def backfill_tenant(
         tenant=report.tenant,
         applied=True,
         overwrite=overwrite,
+        assumed=assume_untagged,
         scanned=report.scanned,
         untagged=report.untagged,
         already=report.already,

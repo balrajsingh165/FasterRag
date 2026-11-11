@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -36,9 +37,12 @@ from fasterrag.errors import ConfigError, ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.backfill import (
     BackfillProgress,
+    TenantAudit,
+    UntaggedDocument,
     audit_collection,
     audit_collections,
     backfill_tenant,
+    inventory_untagged,
 )
 from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.evaluation import run_eval
@@ -538,8 +542,41 @@ async def _index_tenants(
             "on they are invisible to every query. Run `index backfill-tenant` first."
         )
 
-    console.document({"collections": [audit.as_dict() for audit in audits], "untagged": untagged})
+    document: dict[str, Any] = {
+        "collections": [audit.as_dict() for audit in audits],
+        "untagged": untagged,
+    }
+    destination = getattr(args, "untagged", None)
+    if destination is not None:
+        rows = await _write_untagged_inventory(adapter, audits, Path(destination))
+        console.emit(
+            f"wrote {len(rows)} untagged documents to {destination}; no tool can say who "
+            "owns them, so read it before asserting an owner"
+        )
+        document["untagged_inventory"] = {"path": str(destination), "documents": len(rows)}
+
+    console.document(document)
     return ExitCode.SUCCESS
+
+
+async def _write_untagged_inventory(
+    adapter: VectorDBAdapter, audits: Sequence[TenantAudit], destination: Path
+) -> list[UntaggedDocument]:
+    """Write every audited collection's untagged documents to one JSONL file.
+
+    A second read-only traversal rather than one fused into the audit, so the counts can
+    be asked for without paying for the rows nobody requested.
+    """
+    rows: list[UntaggedDocument] = []
+    for audit in audits:
+        if audit.backfillable:
+            rows.extend(await inventory_untagged(adapter, audit.collection))
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            handle.write(f"{json.dumps(row.as_dict(), default=str)}\n")
+    return rows
 
 
 async def _index_backfill_tenant(
@@ -561,6 +598,7 @@ async def _index_backfill_tenant(
             args.tenant,
             apply=args.apply,
             overwrite=args.overwrite,
+            assume_untagged=getattr(args, "assume_untagged", False),
             batch_size=args.batch_size,
             progress=observed,
         )
@@ -588,6 +626,11 @@ async def _index_backfill_tenant(
             written,
         ]
     )
+    if report.assumed:
+        console.emit(
+            f"assumed         the {report.untagged} untagged points are {report.tenant}'s "
+            "because --assume-untagged says so; nothing derived that"
+        )
     if not report.applied:
         console.emit("dry run: nothing was written. Pass --apply to write.")
     elif report.pending:

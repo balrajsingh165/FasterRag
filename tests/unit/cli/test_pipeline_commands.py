@@ -1021,3 +1021,59 @@ async def test_a_backfill_that_dies_halfway_says_how_far_it_got(
     assert "wrote           2 points in 1 batches" in captured.out
     assert "stopped after writing 2 points in 1 batches" in captured.err
     assert "re-running it resumes from there" in captured.err
+
+
+def test_the_two_ownership_assertions_are_separate_flags_in_the_parser() -> None:
+    parsed = build_parser().parse_args(
+        ["index", "backfill-tenant", "docs", "--tenant", "acme", "--assume-untagged"]
+    )
+
+    assert (parsed.assume_untagged, parsed.overwrite) == (True, False)
+    assert build_parser().parse_args(["index", "tenants"]).untagged is None
+
+
+async def test_index_backfill_tenant_can_claim_only_the_residue_of_a_mixed_collection(
+    config: str,
+    adapter: FakeAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    serving(adapter, tagged({"a": None, "b": "globex"}), monkeypatch)
+    sent: list[list[PointUpdate]] = []
+
+    async def record(updates: list[PointUpdate]) -> None:
+        sent.append(updates)
+
+    monkeypatch.setattr(adapter, "update", record)
+
+    code = await pipeline.run_index(
+        backfill_args(config, "docs", apply=True, assume_untagged=True), Console()
+    )
+    out = capsys.readouterr().out
+
+    assert code == ExitCode.SUCCESS
+    assert [update.point_id for batch in sent for update in batch] == ["a"]
+    assert "assumed         the 1 untagged points are acme's" in out
+    assert "nothing derived that" in out
+
+
+async def test_index_tenants_writes_the_untagged_subset_for_the_operator_to_judge(
+    config: str,
+    adapter: FakeAdapter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    adapter.collections = [CollectionInfo(name="docs", vectors=3)]
+    serving(adapter, tagged({"a": None, "b": None, "c": "acme"}), monkeypatch)
+    destination = tmp_path / "untagged.jsonl"
+
+    code = await pipeline.run_index(
+        namespace(config=config, action="tenants", name=None, untagged=str(destination)),
+        Console(),
+    )
+    rows = [json.loads(line) for line in destination.read_text(encoding="utf-8").splitlines()]
+
+    assert code == ExitCode.SUCCESS
+    assert rows == [{"collection": "docs", "document_id": "", "source_uri": "", "chunks": 2}]
+    assert "no tool can say who owns them" in capsys.readouterr().out
