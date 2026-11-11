@@ -31,15 +31,16 @@ through a REST API, a CLI, or a Python package, all driven by one config file.
 > [!IMPORTANT]
 > **Status: pre-beta, not yet on PyPI — install from source.** The code is real and tested, but
 > nothing has been released, and no performance figure in this repository is citable yet. This
-> project's standing rule is that **a claim without a measurement is a bug**, so the
-> [Project status](#project-status) section below says plainly what works, what is partial, and
-> what is not built.
+> project's standing rule is that **a claim without a measurement is a bug**, so this page tells
+> you what works, what is partial, what is not built — and
+> [how to check each of those yourself](#dont-trust-us--check).
 
 ## Contents
 
 - [What is fasterRag?](#what-is-fasterrag)
 - [Features](#features)
 - [Quickstart](#quickstart)
+- [Don't trust us — check](#dont-trust-us--check)
 - [How it works](#how-it-works)
 - [Integrations](#integrations)
 - [Configuration](#configuration)
@@ -147,8 +148,8 @@ from fasterrag import FasterRag
 
 async def main() -> None:
     async with FasterRag.from_config("config.yaml") as rag:
-        job = await rag.ingest(["./my-docs/vendor-agreement.pdf"])
-        print(job.status)
+        job = await rag.ingest(["./my-docs/"], recursive=True)
+        print(job.status, job.counts)
 
         result = await rag.query("What does the vendor agreement say about termination?")
         print(result.answer)
@@ -159,9 +160,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`ingest` returns once the job has settled. The Python facade takes individual files, URLs or
-inline payloads; folder expansion is a CLI convenience. A blocking twin with the same methods
-lives at `fasterrag.sync`, and `rag.retrieve(...)` returns ranked chunks without calling an LLM.
+`ingest` returns once the job has settled, and a document counts as indexed only after every
+one of its chunks is in the vector database. A blocking twin with the same methods lives at
+`fasterrag.sync`, and `rag.retrieve(...)` returns ranked chunks without calling an LLM.
 
 ### 4. Or run the REST service
 
@@ -178,11 +179,38 @@ curl -s http://localhost:8000/v1/query \
 ```
 
 > [!WARNING]
-> Authentication is **off by default** so a local first run needs no keys. Turn on
-> `security.auth` and set `ingestion.allowed_source_roots` before the API is reachable from
-> anything other than your own machine — see [docs/security.md](docs/security.md).
+> Authentication is **off by default** so a local first run needs no keys — which is why the
+> server binds to `127.0.0.1` by default. Turn on `security.auth` and set
+> `ingestion.allowed_source_roots` before you bind it to any other address; `fasterrag serve`
+> warns you if you do not. See [docs/security.md](docs/security.md).
 
 The full walkthrough is in [docs/quickstart.md](docs/quickstart.md).
+
+## Don't trust us — check
+
+Most projects ask you to believe the README. This one is built so you do not have to: the
+statements below are each backed by something you can run from a checkout in a few minutes.
+
+| We say | Run this to check |
+|---|---|
+| The code is fully typed and lint-clean | `ruff check . && mypy` |
+| The unit tier passes | `pytest -m "not integration and not eval and not load and not soak"` |
+| A document is never recorded as indexed before it is in the index | `pytest tests/unit/workers/test_ledger.py` |
+| A failed ingest can be retried and is not silently skipped | `pytest tests/unit/services/test_ingestion.py -k remembered_as_indexed` |
+| One bad file costs one document, not the job | `pytest tests/unit/workers/test_cpu_pool.py -k untyped_parser` |
+| Every vector-database adapter obeys the same contract | `pytest -m integration` (needs Docker) |
+| A cached answer is never served for a different collection or filter | `pytest tests/unit/core/cache/test_semantic.py -k scope` |
+| The dashboard cannot change anything | `pytest tests/unit/observability/test_dashboard.py -k write_route` |
+| The REST API matches its reference page | `python scripts/check_openapi_drift.py` |
+| No document claims a capability the code lacks, or denies one it has | `python scripts/check_claims.py && python scripts/check_unbuilt_claims.py` |
+| No performance or superiority claim is made without a measurement | `pytest tests/unit/docs/test_superlative_scan.py` |
+| No exception is silently swallowed | `python scripts/check_error_taxonomy.py` |
+
+What we **cannot** show you yet is just as specific, and is written down with the same care:
+the [engineering scorecard](docs/engineering-scorecard.md) records an independent audit of the
+whole codebase — 47/100 when it was taken on 2026-11-11, 52 after the fixes made the same day —
+together with the rubric it used, what a 90 would require in each category, and the open task
+for every finding.
 
 ## How it works
 
@@ -214,8 +242,10 @@ flowchart LR
   service layer, so behaviour and errors are identical on every surface.
 - **Adapters isolate vendors.** Vector databases, embedding providers and LLM providers each
   sit behind an interface and a factory; vendor types do not leak past the adapter.
-- **CPU work stays off the event loop.** Parsing and chunking run in a process pool and stream
-  through a bounded queue into batched embedding workers.
+- **CPU work stays off the event loop.** Documents are parsed and chunked concurrently in a
+  process pool and stream through a bounded queue into batched embedding workers.
+- **"Indexed" is a statement about the index.** A ledger commits a document to the journal only
+  when every chunk of it has been written, so a failure leaves nothing falsely recorded.
 - **Configuration is validated up front.** `config.yaml` is checked in full at load, and every
   violation is reported at once.
 
@@ -281,7 +311,8 @@ The documentation site is at **<https://docs-fasterrag.fortiqo.xyz/>**, built fr
 | [Using fasterRag](docs/how-to-use.md) | [CLI](docs/cli-reference.md) | [Security](docs/security.md) | [Testing strategy](docs/testing-strategy.md) |
 | [Cookbook](docs/cookbook.md) | [Configuration](docs/config-reference.md) | [Reliability](docs/reliability.md) | [Release readiness](docs/release-readiness.md) |
 | [Migration guide](docs/migration-guide.md) | [Python package](docs/python-api.md) | [Observability](docs/observability.md) | [Verification](docs/verification.md) |
-| [Troubleshooting](docs/troubleshooting.md) | [Data model](docs/data-model.md) | [Failure modes](docs/failure-modes.md) | [Architecture](docs/architecture.md) |
+| [Troubleshooting](docs/troubleshooting.md) | [Data model](docs/data-model.md) | [Failure modes](docs/failure-modes.md) | [Engineering scorecard](docs/engineering-scorecard.md) |
+| [Glossary](docs/glossary.md) | [Prompt contracts](docs/prompts.md) | [Disaster recovery](docs/disaster-recovery.md) | [Architecture](docs/architecture.md) |
 
 Design decisions are recorded as ADRs in [docs/adr/](docs/adr/), and the twelve capabilities
 the project is built around are specified, each with an acceptance test, in
@@ -291,11 +322,13 @@ the project is built around are specified, each with an acceptance test, in
 
 fasterRag is in its build phase. Release confidence is re-derived at each release decision and
 published whatever it says, in [docs/release-readiness.md](docs/release-readiness.md); the
-single task ledger is [docs/todo.md](docs/todo.md).
+engineering audit and the path from here are in
+[docs/engineering-scorecard.md](docs/engineering-scorecard.md); the single task ledger is
+[docs/todo.md](docs/todo.md).
 
 | Working | Partial | Not yet |
 |---|---|---|
-| Config loader · CLI · REST API · Python facade (async and sync) · parsing and chunking · ingestion with dedup and a dead-letter queue · hybrid retrieval with RRF · cross-encoder rerank · SSE generation with citations · Qdrant, pgvector, Chroma, Milvus and Weaviate adapters · API-key auth with scopes · rate limiting · circuit breaker · evaluation harness and regression gate · `doctor` · cost estimator · trace store and replay · blue/green re-embedding · OTLP export · read-only dashboard · Docker image and compose profiles | Degradation ladder (`hybrid_only` and `extractive` served; the `cache_only` rung is specified but not built — TASK-0159) · the Milvus and Weaviate contract suites, which pass against real servers on a developer machine but run in no CI job, so nothing re-proves them on a change (TASK-0412) · portability export/import, in progress (TASK-0079) · multi-tenancy, with the caveats recorded in [docs/security.md](docs/security.md) · evaluation datasets, which are small | Pinecone adapter (TASK-0049) · PyPI publication (TASK-0087) · citable benchmarks — the [ledger](docs/benchmarks.md) holds only non-citable entries until the isolated-hardware baseline run |
+| Config loader · CLI · REST API · Python facade (async and sync) · parsing and chunking · ingestion with dedup and a dead-letter queue · hybrid retrieval with RRF · cross-encoder rerank · SSE generation with citations · Qdrant, pgvector, Chroma, Milvus and Weaviate adapters · API-key auth with scopes · rate limiting · circuit breaker · evaluation harness and regression gate · `doctor` · cost estimator · trace store and replay · blue/green re-embedding · OTLP export · read-only dashboard · Docker image and compose profiles | Degradation ladder (`hybrid_only` and `extractive` served; the `cache_only` rung is specified but not built — TASK-0159) · the Milvus and Weaviate contract suites, which pass against real servers on a developer machine but run in no CI job, so nothing re-proves them on a change (TASK-0412) · portability export/import, in progress (TASK-0079) · multi-tenancy, with the caveats recorded in [docs/security.md](docs/security.md) · evaluation datasets, which are small · semantic chunking, which is available as a standalone component and refused by the ingestion pipeline (TASK-0431) · the standalone `fasterrag worker` process, which starts and does no work because ingestion runs inside the API process (TASK-0440) | Pinecone adapter (TASK-0049) · PyPI publication (TASK-0087) · citable benchmarks — the [ledger](docs/benchmarks.md) holds only non-citable entries until the isolated-hardware baseline run |
 
 Its goal is to be the fastest, most efficient, and most reliable RAG framework available. That
 is a goal, not a result: no measurement in this repository yet supports a speed claim, and none
