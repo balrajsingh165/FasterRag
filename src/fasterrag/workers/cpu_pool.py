@@ -247,14 +247,16 @@ class CpuWorkerPool:
             async for task, result in self._parsed(pending):
                 if isinstance(result, FasterRagError):
                     dead_lettered += 1
-                    await self._dead_letter(job, task, result)
+                    async with tracker.journal_lock:
+                        await self._dead_letter(job, task, result)
                     await tracker.settle(task.index)
                     continue
 
                 outcome = result
                 if outcome.content_hash in known:
                     deduplicated += 1
-                    await self._record(job, task, "deduplicated", outcome.content_hash)
+                    async with tracker.journal_lock:
+                        await self._record(job, task, "deduplicated", outcome.content_hash)
                     await tracker.settle(task.index)
                     continue
 

@@ -25,9 +25,16 @@ seen", because documents now settle out of order. It advances only across docume
 are settled — committed, deduplicated, or dead-lettered — so resuming from it can never
 skip one that is still in flight.
 
-Commits are serialised behind one lock. The journal appends to plain files from a worker
-thread, and before this module existed those appends were sequential by construction; with
-several embedding workers finishing documents at once they no longer are.
+Every journal write of a job goes through one lock, :attr:`IndexLedger.journal_lock`:
+commits, checkpoints, and the parse side's own dead-letter and dedup records. The journal
+writes plain files from worker threads, and before this module existed those writes were
+sequential by construction — they all came from the parse loop. They no longer are. A
+checkpoint can now be triggered from the parse side (a dead-lettered document settles) and
+from the embedding side (a document finishes) at the same moment, and the journal rewrites
+a job record through one fixed temporary file name, so two such writes collide: the first
+CI run of this module against a real backend failed on exactly that, with
+``FileNotFoundError`` on the rename. Serialising here costs nothing measurable — each write
+is already a thread hop — and makes the ordering a property instead of a coincidence.
 """
 
 from __future__ import annotations
@@ -74,7 +81,7 @@ class IndexLedger:
         self._settled: set[int] = set()
         self._pending: dict[str, _Pending] = {}
         self._failed: dict[str, FailedDocument] = {}
-        self._committing = asyncio.Lock()
+        self.journal_lock = asyncio.Lock()
         self.committed = 0
 
     @property
@@ -143,7 +150,7 @@ class IndexLedger:
                 document_id=document_id, source=pending.source, code=pending.failure
             )
         else:
-            async with self._committing:
+            async with self.journal_lock:
                 await pending.commit()
             self.committed += 1
 
@@ -152,6 +159,11 @@ class IndexLedger:
     async def _advance(self, index: int) -> None:
         """Move the contiguous watermark past every settled index, reporting each one."""
         self._settled.add(index)
+        async with self.journal_lock:
+            await self._report_settled()
+
+    async def _report_settled(self) -> None:
+        """Advance the watermark and report it; the caller holds the journal lock."""
         while self._next in self._settled:
             self._settled.discard(self._next)
             reached = self._next

@@ -5,6 +5,7 @@ chunk, a failed chunk prevents the commit and is reported once per document, and
 checkpoint watermark never passes a document that is still in flight.
 """
 
+import asyncio
 from collections.abc import Awaitable, Callable
 
 from fasterrag.core.chunking.models import TextChunk
@@ -181,3 +182,79 @@ async def test_chunks_of_an_unregistered_document_are_ignored() -> None:
 
     assert ledger.committed == 0
     assert ledger.failed_documents == []
+
+
+async def test_progress_reports_never_overlap() -> None:
+    """Two sides settle documents at once, and a checkpoint rewrites one file.
+
+    The parse side settles a dead-lettered document while the embedding side finishes
+    another. Overlapping reports meant two writers on the journal's single temporary file,
+    which failed the first real-backend run of the ledger with a missing-file rename.
+    """
+    running = 0
+    peak = 0
+
+    async def slow_progress(index: int) -> None:
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+
+    ledger = IndexLedger(slow_progress)
+    recorder = Recorder()
+    await register(ledger, recorder, "b", 1)
+
+    await asyncio.gather(
+        ledger.settle(0),
+        ledger.written([chunk("b", 0), chunk("b", 1)]),
+        ledger.settle(2),
+        ledger.settle(3),
+    )
+
+    assert peak == 1
+
+
+async def test_commits_and_progress_reports_share_one_lock() -> None:
+    """A commit and a checkpoint both write the journal, so neither may run inside the other."""
+    active: list[str] = []
+    overlaps: list[tuple[str, ...]] = []
+
+    async def enter(name: str) -> None:
+        active.append(name)
+        if len(active) > 1:
+            overlaps.append(tuple(active))
+        await asyncio.sleep(0.01)
+        active.remove(name)
+
+    async def on_progress(index: int) -> None:
+        await enter("progress")
+
+    async def commit() -> None:
+        await enter("commit")
+
+    ledger = IndexLedger(on_progress)
+    await ledger.expect("a", index=1, source="a.md", chunks=1, commit=commit)
+
+    await asyncio.gather(ledger.settle(0), ledger.written([chunk("a", 0)]), ledger.settle(2))
+
+    assert overlaps == []
+
+
+async def test_a_caller_holding_the_journal_lock_excludes_the_ledger() -> None:
+    """The parse side takes the same lock for its own dead-letter and dedup records."""
+    order: list[str] = []
+
+    async def on_progress(index: int) -> None:
+        order.append("progress")
+
+    ledger = IndexLedger(on_progress)
+
+    async with ledger.journal_lock:
+        settling = asyncio.create_task(ledger.settle(0))
+        await asyncio.sleep(0.01)
+        order.append("caller finished")
+
+    await settling
+
+    assert order == ["caller finished", "progress"]
