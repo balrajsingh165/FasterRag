@@ -1,4 +1,8 @@
-# The Milvus and Weaviate servers the contract suites under tests/integration/ point at.
+# The Milvus, Weaviate and Redis servers the suites under tests/integration/ point at.
+#
+# FIRST RUN: 2026-11-11, against a Docker daemon, for the first time since this file was
+# written. It did not come up as written — see the MinIO note below — and what it found
+# once it did is recorded in docs/testing-strategy.md §3.1.
 #
 # WHY THIS FILE EXISTS. The Qdrant, pgvector and Chroma suites provision their own backend
 # from a fixture. The Milvus and Weaviate suites deliberately do not: the machine both
@@ -15,41 +19,66 @@
 # same day — and every line of it was measured against a fake. This file is what a real
 # server costs.
 #
+# What it bought, on the first run (2026-11-11): three adapter defects neither fake could
+# show. Milvus could not create a single collection; Weaviate's `iterate_points` never
+# terminated; Weaviate's `restore_snapshot` could never clear a collection. All three are
+# fixed and both suites are green against the servers below. docs/testing-strategy.md
+# §3.1.1 has the evidence.
+#
 # Usage, locally or in a CI job that has a Docker daemon:
 #
 #   docker compose -f deploy/compose.test-backends.yml up -d --wait
 #   pytest -m integration tests/integration/milvus tests/integration/weaviate -rs
 #   docker compose -f deploy/compose.test-backends.yml down -v
 #
-# `--wait` is load-bearing: every service below declares a healthcheck, Milvus takes up to
-# ninety seconds to answer one, and a suite that starts before the server does would skip
-# with a connection error — which is the failure this file exists to remove, reappearing as
-# a race.
+# `--wait` is load-bearing: every service below declares a healthcheck, Milvus is the last
+# to answer one, and a suite that starts before the server does would skip with a
+# connection error — which is the failure this file exists to remove, reappearing as a
+# race. Measured 2026-11-11 from a `down -v`, images already pulled: all four healthy in
+# 17.5 s, Milvus 5 s after its container started. Its `start_period: 120s` is headroom for
+# a slower machine, not a wait anyone pays.
 #
 # The defaults in both conftests (`localhost:19530`, `localhost:8080`, `localhost:50051`)
 # are what the published ports below serve, so neither FASTERRAG_TEST_MILVUS_URI nor
 # FASTERRAG_TEST_WEAVIATE_HTTP needs setting against this stack.
 #
-# NO CREDENTIALS, AND ONE CASE PER SUITE IS NOT EXERCISED BY THAT. Milvus runs with
-# authorization off and Weaviate with anonymous access on, so neither server rejects a bad
-# credential — and both contract suites override `misconfigured_adapter` precisely to prove
-# that the adapter surfaces an auth failure as a typed error (one case,
-# `test_invalid_credentials_are_not_retryable`). Against this stack that case asserts nothing it could
-# not assert against an open door, so **44 of 45 Milvus and 52 of 53 Weaviate cases are
-# what this file buys**, not all of them. The
-# alternative was an `AUTHENTICATION_APIKEY_ALLOWED_KEYS` value and a Milvus
-# `authorizationEnabled` override written into this file, which puts a credential in YAML
-# where CLAUDE.md does not allow one and pins the suites to a key nobody rotates. Turning
-# auth on, with the key read from the environment, is the follow-up and is tracked rather
-# than quietly skipped.
+# NO CREDENTIALS, AND THAT COSTS LESS THAN IT WAS PREDICTED TO. Milvus runs with
+# authorization off and Weaviate with anonymous access on. This file used to say that
+# `test_invalid_credentials_are_not_retryable` therefore "asserts nothing it could not
+# assert against an open door", and put what the stack buys at 44 of 45 Milvus and 52 of 53
+# Weaviate cases. The first real run (2026-11-11) disproved it: the client still sends the
+# key, Weaviate answers HTTP 401 "oidc auth is not configured", and the case FAILED,
+# because the adapter was classifying that as a retryable provider error. An open server
+# rejects a bad credential differently, not never. **46 of 46 Milvus and 54 of 54 Weaviate
+# cases are what this file buys.** Turning auth on, with the key read from the environment
+# rather than written here where CLAUDE.md does not allow one, is still the follow-up for
+# the stronger assertion, and is tracked rather than quietly skipped.
 #
 # CRITICAL: the Milvus half is the upstream standalone topology, taken from
 # milvus-io/milvus at tag v2.5.14 (deployments/docker/standalone/docker-compose.yml) and
-# changed only by removing the host volume mounts, since a CI runner wants no state that
-# outlives the job. Milvus standalone is three containers, not one: it needs etcd for
-# metadata and an S3-compatible store for segments, and the single-container "embedded etcd"
-# recipe needs mounted config files that differ between minor versions. Do not simplify this
-# to one service.
+# changed by removing the host volume mounts, since a CI runner wants no state that
+# outlives the job, and by dropping upstream's MinIO for `COMMON_STORAGETYPE: local`.
+# Milvus standalone still needs etcd for metadata and must not be collapsed to one service;
+# the single-container "embedded etcd" recipe needs mounted config files that differ
+# between minor versions.
+#
+# WHY MINIO IS GONE, MEASURED RATHER THAN ASSUMED (2026-11-11). The first time this file
+# was ever run, `docker compose up` failed on upstream's own image:
+# `minio/minio:RELEASE.2023-03-20T20-16-18Z` -> "pull access denied for minio/minio,
+# repository does not exist or may require 'docker login'". It is not that tag: `docker
+# manifest inspect minio/minio:latest` returns "unauthorized: authentication required", so
+# the whole Docker Hub repository is gated to anonymous pulls, while `redis:7.4.2-alpine`
+# and `quay.io/coreos/etcd:v3.5.18` pulled anonymously in the same session.
+# `quay.io/minio/minio` answers 401 and `bitnami/minio` no longer exists. A CI job cannot
+# log in to a third party's registry to run a test, so upstream's segment store is simply
+# unavailable to this file.
+#
+# Milvus does not need it. `COMMON_STORAGETYPE: local` puts segments on the container's own
+# disk, which is what a disposable test stack wants anyway. Verified on this machine the
+# same day against milvusdb/milvus:v2.5.14: the container reports healthy on
+# /healthz, `get_server_version()` returns 2.5.14, and a create-collection / insert /
+# search round trip returns the inserted vector at distance 1.0. Do NOT restore the MinIO
+# service without first checking that its image can still be pulled without credentials.
 
 name: fasterrag-test-backends
 
@@ -68,27 +97,14 @@ services:
       timeout: 20s
       retries: 6
 
-  minio:
-    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
-    environment:
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-    command: minio server /minio_data --console-address ":9001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 20s
-      retries: 6
-
   milvus:
     image: milvusdb/milvus:v2.5.14
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
     environment:
-      MINIO_REGION: us-east-1
       ETCD_ENDPOINTS: etcd:2379
-      MINIO_ADDRESS: minio:9000
+      COMMON_STORAGETYPE: local
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 10s
@@ -100,8 +116,6 @@ services:
       - "9091:9091"
     depends_on:
       etcd:
-        condition: service_healthy
-      minio:
         condition: service_healthy
 
   # CRITICAL: both ports are published because the v4 client refuses to work over HTTP
@@ -132,3 +146,19 @@ services:
     ports:
       - "8080:8080"
       - "50051:50051"
+
+  # The Redis `security.rate_limit_backend: redis` counts its fixed window in. Unlike
+  # Milvus this is one service with no command override and no dependencies: the limiter
+  # issues INCR and EXPIRE inside one MULTI/EXEC and needs nothing configured to do it.
+  # No password is set, so `tests/integration/test_redis_rate_limit_server.py` connects
+  # with the bare `redis://localhost:6379/0` its default URL already carries, and no
+  # credential goes in this file (TASK-0290).
+  redis:
+    image: redis:7.4.2-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "6379:6379"

@@ -121,7 +121,6 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from itertools import islice
 from typing import Any, Final, TypeVar
 
 from fasterrag.adapters.vectordb.base import (
@@ -190,6 +189,7 @@ EXTRA_PROPERTY: Final = "fr_extra"
 ALIAS_PROPERTY: Final = "fr_alias"
 TARGET_PROPERTY: Final = "fr_target"
 RESERVED_PREFIX: Final = "fr_"
+_NIL_UUID: Final = "00000000-0000-0000-0000-000000000000"
 
 _COLLECTION_PREFIX: Final = "Frag"
 _SNAPSHOT_PREFIX: Final = "Fragsnap"
@@ -225,6 +225,7 @@ _UNREACHABLE_ERRORS: Final[frozenset[str]] = frozenset(
 )
 _NOT_FOUND_PHRASES: Final[tuple[str, ...]] = ("not found", "could not find", "does not exist")
 _CONFLICT_PHRASES: Final[tuple[str, ...]] = ("already exists", "already exist")
+_AUTH_STATUS_CODES: Final[frozenset[int]] = frozenset({401, 403})
 _AUTH_PHRASES: Final[tuple[str, ...]] = (
     "anonymous access",
     "forbidden",
@@ -317,6 +318,19 @@ def _comparison(key: str, operator: str, value: Any) -> Any:
         "$lte": built.less_or_equal,
     }
     return operators[operator](value)
+
+
+def _everything() -> Any:
+    """Return a filter matching every object in a collection, whatever it holds.
+
+    Matching on the id keeps this independent of any property's tokenizer; the nil UUID
+    can never collide because every object id here is a UUIDv5.
+    """
+    # CRITICAL: this must not be `by_property(PK_PROPERTY).not_equal("")`. A real Weaviate
+    # tokenizes the empty string to nothing and refuses the whole batch delete with
+    # "invalid search term, only stopwords provided", which broke every restore_snapshot
+    # against a server (measured 2026-11-11) while the unit double matched it happily.
+    return WeaviateFilter.by_id().not_equal(_NIL_UUID)
 
 
 def to_weaviate_filter(filters: Filter | None) -> Any:
@@ -551,6 +565,13 @@ class WeaviateAdapter(VectorDBAdapter):
         message = str(getattr(exc, "message", "") or exc).lower()
         named = type(exc).__name__
 
+        # CRITICAL: the status code is checked before the prose because a real Weaviate
+        # refusing a credential says neither "unauthorized" nor "forbidden". Against an
+        # anonymous-access server it answers 401 with "oidc auth is not configured", which
+        # matched no phrase below and came back out as a RETRYABLE provider error — a
+        # caller retrying a rejected credential forever (measured 2026-11-11).
+        if getattr(exc, "status_code", None) in _AUTH_STATUS_CODES:
+            return self._auth_error(operation)
         if named in ("AuthenticationFailedError", "InsufficientPermissionsError") or any(
             phrase in message for phrase in _AUTH_PHRASES
         ):
@@ -915,9 +936,7 @@ class WeaviateAdapter(VectorDBAdapter):
         handle = await self._handle(target.physical)
         await self._call(
             "restore_snapshot",
-            lambda: handle.data.delete_many(
-                where=WeaviateFilter.by_property(PK_PROPERTY).not_equal("")
-            ),
+            lambda: handle.data.delete_many(where=_everything()),
         )
         await self._copy(held, target.physical)
 
@@ -1108,8 +1127,25 @@ class WeaviateAdapter(VectorDBAdapter):
                 lambda: handle.iterator(include_vector=with_vectors, cache_size=batch_size),
             )
         )
+
+        # CRITICAL: advance the cursor with `next`, never `islice` or any other helper that
+        # calls `iter()` on it. Weaviate's `_ObjectIterator.__iter__` RESETS the walk to the
+        # first page, so re-entering it per page restarted the collection every time: against
+        # a real server this never terminated and re-yielded the same objects forever
+        # (measured 2026-11-11, 400+ gRPC round trips for a one-object collection). The unit
+        # double's iterator does not reset, which is why 95% coverage missed it.
+        def page_of(taking: int) -> list[Any]:
+            """Take up to ``taking`` objects without re-entering the cursor's ``__iter__``."""
+            taken: list[Any] = []
+            while len(taken) < taking:
+                found = next(cursor, None)
+                if found is None:
+                    break
+                taken.append(found)
+            return taken
+
         while True:
-            page = await self._call("iterate_points", lambda: list(islice(cursor, batch_size)))
+            page = await self._call("iterate_points", lambda: page_of(batch_size))
             if not page:
                 return
             for found in page:

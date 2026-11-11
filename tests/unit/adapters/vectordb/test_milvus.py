@@ -98,7 +98,18 @@ class FakeSchema:
     def __init__(self, **options: Any) -> None:
         self.options = options
         self.fields: list[dict[str, Any]] = []
-        self.description = ""
+        self._description = str(options.get("description", ""))
+
+    @property
+    def description(self) -> str:
+        """Return the description, read-only exactly as pymilvus 3.x makes it.
+
+        This was a writable attribute until 2026-11-11, so the adapter's
+        `schema.description = ...` passed here and raised AttributeError against every
+        real server. A double that accepts what the real client refuses is why 94%
+        coverage proved nothing about collection creation.
+        """
+        return self._description
 
     def add_field(self, field_name: str, datatype: Any, **kwargs: Any) -> None:
         self.fields.append({"name": field_name, "type": datatype, **kwargs})

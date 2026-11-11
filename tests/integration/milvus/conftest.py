@@ -21,6 +21,10 @@ default port above, so this suite needs no environment variable against it::
     docker compose -f deploy/compose.test-backends.yml up -d --wait
     pytest -m integration tests/integration/milvus -rs
 
+That stack has now been run (2026-11-11): all 46 cases here pass against a real Milvus,
+and getting there needed one adapter fix, because no collection could be created at all.
+docs/testing-strategy.md §3.1.1 has it.
+
 CI still starts nothing, so every case here still skips there; docs/testing-strategy.md
 §3.1 carries the count and what wiring it costs (TASK-0352).
 """

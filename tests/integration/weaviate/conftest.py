@@ -22,6 +22,11 @@ module needs, so this suite needs no environment variable against it::
     docker compose -f deploy/compose.test-backends.yml up -d --wait
     pytest -m integration tests/integration/weaviate -rs
 
+That stack has now been run (2026-11-11): all 54 cases here pass against a real Weaviate,
+and getting there needed three adapter fixes — a walk that never terminated, a snapshot
+restore that could never clear a collection, and a 401 classified as retryable.
+docs/testing-strategy.md §3.1.1 has them.
+
 CI still starts nothing, so every case here still skips there; docs/testing-strategy.md
 §3.1 carries the count and what wiring it costs (TASK-0352).
 """

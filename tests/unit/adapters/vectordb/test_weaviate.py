@@ -340,6 +340,32 @@ class FakeConfigSurface:
         return self._store.config_value
 
 
+class FakeObjectIterator:
+    """A cursor whose ``__iter__`` RESTARTS the walk, as Weaviate's own does.
+
+    This used to be a plain ``iter(list)``, which re-entering is harmless — and that is
+    precisely why the adapter's ``islice`` loop looked correct here while never terminating
+    against a real server (2026-11-11). The reset is the behaviour being doubled.
+    """
+
+    def __init__(self, objects: list[Any]) -> None:
+        """Hold the objects one walk would return, starting un-begun."""
+        self._objects = objects
+        self._position = 0
+
+    def __iter__(self) -> FakeObjectIterator:
+        """Return self, having rewound to the first object exactly as Weaviate does."""
+        self._position = 0
+        return self
+
+    def __next__(self) -> Any:
+        """Return the next object, or stop."""
+        if self._position >= len(self._objects):
+            raise StopIteration
+        self._position += 1
+        return self._objects[self._position - 1]
+
+
 class FakeCollection:
     """One collection handle, with the four surfaces the adapter touches."""
 
@@ -357,7 +383,7 @@ class FakeCollection:
         self._client.record(
             "iterator", collection=self._store.config_value.name, cache_size=cache_size
         )
-        return iter(
+        return FakeObjectIterator(
             [_rendered(held, None, include_vector) for held in self._store.objects.values()]
         )
 

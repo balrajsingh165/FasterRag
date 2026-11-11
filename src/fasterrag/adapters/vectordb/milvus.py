@@ -560,7 +560,13 @@ class MilvusAdapter(VectorDBAdapter):
 
     def _schema(self, client: Any, spec: CollectionSpec, description: str) -> Any:
         """Declare the fields one fasterRag collection needs, sparse leg included."""
-        schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
+        # CRITICAL: the description goes in at construction because
+        # `CollectionSchema.description` is a read-only property in pymilvus 3.x. Assigning
+        # it raised AttributeError on every create against a real server (2026-11-11) while
+        # the unit double accepted the attribute, which is how this survived 94% coverage.
+        schema = client.create_schema(
+            auto_id=False, enable_dynamic_field=False, description=description
+        )
         schema.add_field(PK_FIELD, DataType.VARCHAR, is_primary=True, max_length=_PK_MAX_LENGTH)
         schema.add_field(DENSE_FIELD, DataType.FLOAT_VECTOR, dim=spec.dimensions)
         schema.add_field(PAYLOAD_FIELD, DataType.JSON)
@@ -572,7 +578,6 @@ class MilvusAdapter(VectorDBAdapter):
                 element_type=DataType.INT64,
                 max_capacity=MAXIMUM_TERMS,
             )
-        schema.description = description
         return schema
 
     @staticmethod
