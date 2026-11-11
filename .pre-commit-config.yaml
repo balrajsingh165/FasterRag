@@ -51,7 +51,7 @@ repos:
       # Docker stopped. CI runs them as separate jobs.
       - id: pytest-unit
         name: pytest (unit)
-        entry: python -m pytest -q -m "not integration and not eval"
+        entry: python -m pytest -q -m "not integration and not eval and not load and not soak"
         language: system
         pass_filenames: false
         types: [python]

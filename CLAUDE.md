@@ -30,7 +30,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 - Hooks: `pre-commit install` (wires both pre-commit and commit-msg stages; runs fast tests only, not integration/eval)
 - Lint: `ruff check .` and `ruff format --check .`
 - Typecheck: `mypy src/` (strict; zero errors)
-- Test: `pytest` (unit **and** integration — `addopts` excludes only the eval/load/soak/chaos tiers; measured 2026-11-09: a bare run collects the integration tier and zero live-provider probes) / `pytest -m "not integration and not eval"` (what CI gates every commit on) / `pytest -m integration` / `pytest -m eval` (retrieval eval harness; the billed live-provider probes additionally need `FASTERRAG_LIVE_PROVIDER_TESTS=1`)
+- Test: `pytest` (unit **and** integration — `addopts` excludes only the eval/load/soak/chaos tiers; measured 2026-11-09: a bare run collects the integration tier and zero live-provider probes) / `pytest -m "not integration and not eval and not load and not soak"` (what CI gates every commit on; the two tier exclusions are repeated here because `-m` **replaces** `addopts`' own `-m` rather than intersecting with it, so dropping them runs the 120 s soak on every push) / `pytest -m integration` / `pytest -m eval` (retrieval eval harness; the billed live-provider probes additionally need `FASTERRAG_LIVE_PROVIDER_TESTS=1`)
 - Run dev API: `uvicorn fasterrag.api.main:app --reload`
 - Run workers: `python -m fasterrag.workers` (spawns CPU + embedding pools per `config.yaml`)
 

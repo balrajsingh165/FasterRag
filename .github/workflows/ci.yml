@@ -139,7 +139,7 @@ jobs:
       - name: Unit tests
         env:
           FASTERRAG_MUST_RUN_REPORT: must-run-reports/must-run-ubuntu.json
-        run: pytest -m "not integration and not eval" -rs --cov --cov-report=term-missing
+        run: pytest -m "not integration and not eval and not load and not soak" -rs --cov --cov-report=term-missing
 
       # The other half of `-rs`, and the half a reader cannot skip (TASK-0349). The variable
       # above makes tests/conftest.py write what this lane did with every `must_run` test;
@@ -162,7 +162,7 @@ jobs:
       # without letting it drift.
       - name: Coverage gate (core, adapters, workers)
         run: >
-          pytest -m "not integration and not eval" -q
+          pytest -m "not integration and not eval and not load and not soak" -q
           --cov=src/fasterrag/core
           --cov=src/fasterrag/adapters
           --cov=src/fasterrag/workers
@@ -226,7 +226,7 @@ jobs:
       - name: Unit tests
         env:
           FASTERRAG_MUST_RUN_REPORT: must-run-reports/must-run-windows.json
-        run: pytest -m "not integration and not eval" -rs
+        run: pytest -m "not integration and not eval and not load and not soak" -rs
 
       # This platform is half of the comparison the `must-run` job makes, and the half that
       # makes the rule "ran SOMEWHERE" rather than "ran everywhere": the symlink confinement
