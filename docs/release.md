@@ -45,4 +45,4 @@ A published version is **yanked, never deleted** (`pip` will refuse it for new r
 
 ## 5. Cadence and support
 
-Pre-1.0: only the latest release line receives fixes ([.github/SECURITY.md](../.github/SECURITY.md)). Betas ship when the gate passes, not on a calendar. Every release re-runs this document top to bottom; if a step was wrong or missing, fixing this file is part of the release.
+Pre-1.0: only the latest release line receives fixes ([.github/SECURITY.md](https://github.com/balrajsingh165/fasterrag/blob/main/.github/SECURITY.md)). Betas ship when the gate passes, not on a calendar. Every release re-runs this document top to bottom; if a step was wrong or missing, fixing this file is part of the release.

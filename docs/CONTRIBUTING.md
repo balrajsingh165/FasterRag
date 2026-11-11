@@ -1,6 +1,6 @@
 # CONTRIBUTING.md — Contributor Rules
 
-These rules are non-negotiable and enforced by review, pre-commit hooks, and CI. They restate the permanent constraints from [CLAUDE.md](../CLAUDE.md); on any conflict, CLAUDE.md wins.
+These rules are non-negotiable and enforced by review, pre-commit hooks, and CI. They restate the permanent constraints from [CLAUDE.md](https://github.com/balrajsingh165/fasterrag/blob/main/CLAUDE.md); on any conflict, CLAUDE.md wins.
 
 ## 0. Local setup
 

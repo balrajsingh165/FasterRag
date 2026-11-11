@@ -13,7 +13,7 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Process exits at startup naming a config key | Fail-fast validation rejected the config — by design, a misconfigured process never serves | Fix the named key; `fasterrag config validate` before restarting. Rules in [config-reference.md](config-reference.md) |
-| Exits naming an environment variable | A `*_env` key references a variable missing from the environment/`.env` (the value is never logged, only the name) | Add it to `.env`; copy [`.env.example`](../.env.example) if you don't have one |
+| Exits naming an environment variable | A `*_env` key references a variable missing from the environment/`.env` (the value is never logged, only the name) | Add it to `.env`; copy [`.env.example`](https://github.com/balrajsingh165/fasterrag/blob/main/.env.example) if you don't have one |
 | `top_k must be ≤ rerank_top_n` and similar | A cross-field validation rule was violated | See the cross-field rules list at the end of [config-reference.md](config-reference.md) |
 | Config change appears to do nothing | Config is read at startup/provision time, not live (deliberate — it keeps the control plane auditable) | Restart the process, or re-run the relevant `fasterrag provision` command |
 
@@ -98,4 +98,4 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 
 1. `fasterrag doctor --json` and `fasterrag status` — capture both.
 2. Pull the trace: `GET /v1/traces/{trace_id}` (or `fasterrag replay --trace <id>`) — it holds the retrieved set, all leg scores, the exact prompt, and the exact response.
-3. Open an issue using the bug template. Include the `code`, `trace_id`, config sections involved, and versions. **Never paste `.env` contents.** Suspected security issue? Use private reporting instead ([.github/SECURITY.md](../.github/SECURITY.md)).
+3. Open an issue using the bug template. Include the `code`, `trace_id`, config sections involved, and versions. **Never paste `.env` contents.** Suspected security issue? Use private reporting instead ([.github/SECURITY.md](https://github.com/balrajsingh165/fasterrag/blob/main/.github/SECURITY.md)).

@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{#
+  Search-engine and social metadata. Material emits the canonical link and the description
+  already; this adds Open Graph, Twitter cards and a SoftwareSourceCode JSON-LD node so a
+  crawler can resolve the project to its repository and licence rather than guessing.
+#}
+{% block extrahead %}
+  {% set title = config.site_name %}
+  {% if page and page.title and not page.is_homepage %}
+    {% set title = page.title ~ " — " ~ config.site_name %}
+  {% endif %}
+  {% set description = config.site_description %}
+  {% if page and page.meta and page.meta.description %}
+    {% set description = page.meta.description %}
+  {% endif %}
+  {% set image = config.site_url ~ "assets/social-card.png" %}
+  {% set canonical = page.canonical_url if page else config.site_url %}
+
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+  <meta name="keywords" content="RAG, retrieval augmented generation, FastAPI, vector database, Qdrant, pgvector, Chroma, Milvus, Weaviate, hybrid search, BM25, reranking, embeddings, LLM, Python, backend, self-hosted, open source">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ title }}">
+  <meta property="og:description" content="{{ description | striptags | trim }}">
+  <meta property="og:url" content="{{ canonical }}">
+  <meta property="og:image" content="{{ image }}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="fasterRag — a backend-only RAG framework for FastAPI">
+  <meta property="og:locale" content="en_GB">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ title }}">
+  <meta name="twitter:description" content="{{ description | striptags | trim }}">
+  <meta name="twitter:image" content="{{ image }}">
+
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareSourceCode",
+      "name": "fasterRag",
+      "description": {{ (config.site_description | striptags | trim) | tojson }},
+      "codeRepository": "https://github.com/balrajsingh165/fasterrag",
+      "url": {{ config.site_url | tojson }},
+      "programmingLanguage": "Python",
+      "runtimePlatform": "Python 3.12+",
+      "license": "https://www.apache.org/licenses/LICENSE-2.0",
+      "applicationCategory": "DeveloperApplication",
+      "keywords": "retrieval augmented generation, RAG, FastAPI, vector database, hybrid search, embeddings",
+      "author": {"@type": "Person", "name": "Balraj"}
+    }
+  </script>
+{% endblock %}

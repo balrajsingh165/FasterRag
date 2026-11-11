@@ -21,7 +21,11 @@ repos:
       # any unknown tag. The standard-YAML alternative (`ports: []`) parses cleanly and does
       # nothing, which is the worse failure (TASK-0190).
       - id: check-yaml
-        exclude: ^deploy/compose\.large\.yml$
+        # mkdocs.yml carries mkdocs-material's `!!python/name:` tags, which safe_load
+        # cannot construct. `mkdocs build --strict` validates that file far more
+        # thoroughly than this hook would, so it is excluded here rather than passing
+        # --unsafe, which would downgrade the check for every workflow too.
+        exclude: ^(deploy/compose\.large\.yml|mkdocs\.yml)$
       - id: detect-private-key
       - id: end-of-file-fixer
       - id: trailing-whitespace

@@ -39,7 +39,7 @@ If you want library-style composition back, you still have it: `fasterrag.parsin
 
 **1. Inventory what you have.** Write down, from your current code: chunk size and overlap, embedding model **and version**, vector store and distance metric, top_k, whether you rerank, and your prompt text. That list *is* your first `config.yaml`, and the model+version pair is what determines whether you can reuse vectors.
 
-**2. Translate into `config.yaml`.** Start from the canonical default ([`config.yaml`](../config.yaml)) and change only what your inventory dictates. Then `fasterrag config validate` — cross-field rules catch mismatches (e.g. `top_k > rerank_top_n`) that were silent bugs in the old stack.
+**2. Translate into `config.yaml`.** Start from the canonical default ([`config.yaml`](https://github.com/balrajsingh165/fasterrag/blob/main/config.yaml)) and change only what your inventory dictates. Then `fasterrag config validate` — cross-field rules catch mismatches (e.g. `top_k > rerank_top_n`) that were silent bugs in the old stack.
 
 **3. Choose re-embed or reuse.**
 

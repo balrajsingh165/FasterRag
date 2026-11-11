@@ -101,7 +101,7 @@ SemVer: patch/minor are drop-in; the public Python surface, config keys, error c
 
 ## 7. When something is wrong
 
-Grab three things: the `trace_id`, the problem `code`, and `fasterrag status`. Then [troubleshooting.md](troubleshooting.md) (symptom→cause→fix). Degraded answers announce themselves (`degraded: true` + `mode`) — never silently. Bugs: GitHub issues with the template; security problems: private reporting per [SECURITY.md](../.github/SECURITY.md) — never a public issue.
+Grab three things: the `trace_id`, the problem `code`, and `fasterrag status`. Then [troubleshooting.md](troubleshooting.md) (symptom→cause→fix). Degraded answers announce themselves (`degraded: true` + `mode`) — never silently. Bugs: GitHub issues with the template; security problems: private reporting per [SECURITY.md](https://github.com/balrajsingh165/fasterrag/blob/main/.github/SECURITY.md) — never a public issue.
 
 ## 8. Known sharp edges (current release line)
 

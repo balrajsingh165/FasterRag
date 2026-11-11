@@ -111,7 +111,7 @@ fasterRag/
 | `core/` | The RAG pipeline itself — parsing, chunking, retrieval, rerank, context assembly, generation. Pure domain logic; depends on adapter *interfaces*, never concrete vendors. |
 | `adapters/` | All vendor code (vector DBs, embedding providers, LLM providers). Each adapter implements a base interface; a factory instantiates the concrete one from config. Vendor types never leak past this boundary. |
 | `workers/` | Parallel execution: CPU pool for parse/chunk, stateful embedding pool, bounded queues, batch indexer. Owns backpressure and retry policy. |
-| `config/` | Pydantic schema + pydantic-settings loader (YAML config, `.env` secrets). Validates on startup and fails fast with a clear error. Sensitive area — see [CLAUDE.md](../CLAUDE.md) folder boundaries. |
+| `config/` | Pydantic schema + pydantic-settings loader (YAML config, `.env` secrets). Validates on startup and fails fast with a clear error. Sensitive area — see [CLAUDE.md](https://github.com/balrajsingh165/fasterrag/blob/main/CLAUDE.md) folder boundaries. |
 | `core/cache/` | Embedding cache and semantic response cache (similarity-keyed), TTL + event-driven invalidation. |
 | `observability/` | OTel spans, metrics export, and the read-only dashboard. The dashboard renders data; it exposes zero control endpoints. |
 | `cli/` | Terminal control plane. Thin command layer calling the same services as the API. |

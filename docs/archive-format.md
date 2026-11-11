@@ -76,7 +76,7 @@ byte-identical whatever order a vendor's walk returns. A duplicate index is refu
 a backend keeps whichever value it sees last, so the same postings would score differently on
 each one.
 
-IDF is deliberately absent, as it is everywhere else in the system ([ADR-0007](adr/ADR-0007.md)):
+IDF is deliberately absent, as it is everywhere else in the system ([ADR-0007](adr/ADR-0007-bm25-as-backend-sparse-vectors.md)):
 it is a statistic of the live corpus that each backend derives per query. What the archive
 carries is the half that `k1` and `b` are already baked into, which is exactly the half a
 different deployment cannot re-derive identically.

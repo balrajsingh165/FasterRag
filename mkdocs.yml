@@ -1,0 +1,149 @@
+site_name: fasterRag
+site_url: https://docs-fasterrag.fortiqo.xyz/
+site_author: Balraj
+site_description: >-
+  fasterRag is a backend-only, API-and-CLI Retrieval-Augmented Generation framework built on
+  FastAPI. Pluggable vector databases, embedding models and LLM providers chosen entirely
+  through configuration, with a typed error taxonomy, hybrid retrieval, blue/green re-embedding
+  and an observability dashboard that never controls the system.
+repo_url: https://github.com/balrajsingh165/fasterrag
+repo_name: balrajsingh165/fasterrag
+edit_uri: edit/main/docs/
+copyright: Apache-2.0 licensed. Every performance claim on this site is a goal unless it links to the benchmark ledger.
+
+# CRITICAL: todo.md and blockers.md are excluded from the build, not merely left out of the
+# nav. A page absent from the nav is still rendered and indexed by mkdocs. Those two files
+# describe unfixed security findings in enough detail to act on, and must not be published
+# until the findings they name are closed.
+exclude_docs: |
+  todo.md
+  blockers.md
+  code-notes.md
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.action.edit
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search:
+      lang: en
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/balrajsingh165/fasterrag
+      name: fasterRag on GitHub
+  generator: false
+
+extra_css:
+  - assets/extra.css
+
+not_in_nav: |
+  references.md
+
+nav:
+  - Home: index.md
+  - Start here:
+      - Quickstart: quickstart.md
+      - Using fasterRag: how-to-use.md
+      - Configuration recipes: cookbook.md
+      - Coming from another framework: migration-guide.md
+      - Troubleshooting: troubleshooting.md
+      - Glossary: glossary.md
+  - Reference:
+      - REST API: api-reference.md
+      - CLI: cli-reference.md
+      - Configuration: config-reference.md
+      - Python package: python-api.md
+      - Data model: data-model.md
+      - Prompt contracts: prompts.md
+      - Portability archive: archive-format.md
+  - How it works:
+      - Architecture: architecture.md
+      - Repository structure: structure.md
+      - End-to-end flows: flow.md
+      - Internals: internals.md
+      - Integrations: integrations.md
+      - Observability: observability.md
+  - Running it:
+      - Deployment: deployment.md
+      - Security: security.md
+      - Reliability: reliability.md
+      - Failure modes: failure-modes.md
+      - Service levels: slo.md
+      - Disaster recovery: disaster-recovery.md
+  - Evidence:
+      - Benchmark ledger: benchmarks.md
+      - Performance methodology: performance.md
+      - Testing strategy: testing-strategy.md
+      - Verification procedure: verification.md
+      - Release readiness: release-readiness.md
+      - Rebuild playbook: rebuild-playbook.md
+  - Project:
+      - Scope and goals: scope.md
+      - Differentiators: differentiators.md
+      - Release process: release.md
+      - Changelog: CHANGELOG.md
+      - Contributing: CONTRIBUTING.md
+      - Decision records:
+          - Qdrant as reference vector DB: adr/ADR-0001-qdrant-as-reference-vector-db.md
+          - Adapter factory pluggability: adr/ADR-0002-adapter-factory-pluggability.md
+          - config.yaml and .env split: adr/ADR-0003-config-yaml-env-split.md
+          - Hybrid search and reranking: adr/ADR-0004-hybrid-search-plus-reranking.md
+          - API and CLI only control plane: adr/ADR-0005-api-cli-only-control-plane.md
+          - Python package surface: adr/ADR-0006-python-package-surface.md
+          - BM25 as backend sparse vectors: adr/ADR-0007-bm25-as-backend-sparse-vectors.md
+          - Apache 2.0 licence: adr/ADR-0008-apache-2-license.md
