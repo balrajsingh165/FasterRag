@@ -81,6 +81,15 @@ def members(archive: Path) -> dict[str, bytes]:
         return archive_members(tar)
 
 
+def data_digests(listed: bytes) -> bytes:
+    """Return the checksum lines for every member but the manifest, whose digest varies."""
+    return b"".join(
+        raw + b"\n"
+        for raw in listed.splitlines()
+        if not raw.endswith(MANIFEST_NAME.encode("utf-8"))
+    )
+
+
 async def test_the_archive_carries_every_required_member(tmp_path: Path) -> None:
     archive = await write(tmp_path, [point("c_1")])
 
@@ -148,14 +157,20 @@ async def test_the_manifest_records_whether_vectors_are_present(tmp_path: Path) 
     assert json.loads(members(without)[MANIFEST_NAME])["includes_vectors"] is False
 
 
-async def test_the_checksums_cover_every_data_member(tmp_path: Path) -> None:
+async def test_the_checksums_cover_every_other_member(tmp_path: Path) -> None:
+    """Every member but the checksums file itself, which cannot carry its own digest.
+
+    The manifest was the exception until TASK-0329, and it is the member the vector-copy
+    guard reads: unverified, a rewritten `model` permits a copy into another space.
+    """
     archive = await write(tmp_path, [point("c_1")], include_vectors=True)
     body = members(archive)
     listed = {
         line.split("  ", 1)[1] for line in body[CHECKSUMS_NAME].decode("utf-8").strip().splitlines()
     }
 
-    assert listed == {DOCUMENTS_NAME, CHUNKS_NAME, VECTORS_NAME, LOCK_NAME}
+    assert listed == set(body) - {CHECKSUMS_NAME}
+    assert MANIFEST_NAME in listed
 
 
 async def test_the_checksums_list_the_data_members_in_the_order_the_spec_lays_them_out(
@@ -164,7 +179,8 @@ async def test_the_checksums_list_the_data_members_in_the_order_the_spec_lays_th
     """The set test above holds for any order, so the vectors member can drift anywhere.
 
     The container listing puts `vectors.jsonl` between `chunks.jsonl` and `index.lock`,
-    and a fixed order is what keeps the member deterministic rather than incidental.
+    and a fixed order is what keeps the member deterministic rather than incidental. The
+    manifest is digested last because it is written last, carrying counts the rows decide.
     """
     archive = await write(tmp_path, [point("c_1")], include_vectors=True)
     listed = [
@@ -173,7 +189,7 @@ async def test_the_checksums_list_the_data_members_in_the_order_the_spec_lays_th
         if line.strip()
     ]
 
-    assert listed == [DOCUMENTS_NAME, CHUNKS_NAME, VECTORS_NAME, LOCK_NAME]
+    assert listed == [DOCUMENTS_NAME, CHUNKS_NAME, VECTORS_NAME, LOCK_NAME, MANIFEST_NAME]
 
 
 async def test_a_chunk_with_no_recorded_span_exports_a_zero_span(tmp_path: Path) -> None:
@@ -218,11 +234,18 @@ async def test_the_checksums_are_correct(tmp_path: Path) -> None:
 async def test_two_exports_of_an_unchanged_collection_are_byte_identical(
     tmp_path: Path,
 ) -> None:
-    """Otherwise every backup diff reports a timestamp and hides the real changes."""
+    """Otherwise every backup diff reports a timestamp and hides the real changes.
+
+    The manifest carries `created_at`, so it differs between two exports and so, since
+    TASK-0329 digested it, does its line in `checksums.sha256`. Everything else must not:
+    that is what an object-store dedup and a `diff` of two backups actually compare.
+    """
     first = members(await write(tmp_path / "a", [point("c_1")]))
     second = members(await write(tmp_path / "b", [point("c_1")]))
 
     del first[MANIFEST_NAME], second[MANIFEST_NAME]
+    first[CHECKSUMS_NAME] = data_digests(first[CHECKSUMS_NAME])
+    second[CHECKSUMS_NAME] = data_digests(second[CHECKSUMS_NAME])
     assert first == second
 
 
@@ -543,3 +566,53 @@ async def test_an_empty_keyword_leg_is_still_carried(tmp_path: Path) -> None:
 
     assert row["sparse"] == {"indices": [], "values": []}
     assert json.loads(members(archive)[MANIFEST_NAME])["includes_sparse"] is True
+
+
+async def test_the_manifest_records_the_name_the_tenant_gave_not_the_backends(
+    tmp_path: Path,
+) -> None:
+    """TASK-0340: a caller scopes before it reaches the backend, and `acme__docs` is ours.
+
+    The format defines `collection.name` as the source collection name. Recording the
+    scoped form made import scope it again, into `acme__acme__docs`.
+    """
+    destination = tmp_path / "tenant"
+    await export_archive(
+        Settings.model_validate({}),
+        FakeAdapter([point("c_1")]),  # type: ignore[arg-type]
+        collection="acme__docs",
+        destination=destination,
+        tenant="acme",
+    )
+    manifest = json.loads(members(destination.with_suffix(ARCHIVE_SUFFIX))[MANIFEST_NAME])
+
+    assert manifest["collection"]["name"] == "docs"
+    assert manifest["tenant"] == "acme"
+
+
+async def test_an_untenanted_export_records_the_name_unchanged(tmp_path: Path) -> None:
+    """Guards the test above: stripping a prefix nobody added would corrupt every name."""
+    destination = tmp_path / "plain"
+    await export_archive(
+        Settings.model_validate({}),
+        FakeAdapter([point("c_1")]),  # type: ignore[arg-type]
+        collection="acme__docs",
+        destination=destination,
+    )
+    manifest = json.loads(members(destination.with_suffix(ARCHIVE_SUFFIX))[MANIFEST_NAME])
+
+    assert manifest["collection"]["name"] == "acme__docs"
+    assert manifest["tenant"] is None
+
+
+async def test_the_listed_manifest_digest_is_the_manifests_own(tmp_path: Path) -> None:
+    """A listed digest that is not recomputed from the member verifies nothing."""
+    import hashlib
+
+    body = members(await write(tmp_path, [point("c_1")]))
+    digests = {
+        line.split("  ", 1)[1]: line.split("  ", 1)[0]
+        for line in body[CHECKSUMS_NAME].decode("utf-8").strip().splitlines()
+    }
+
+    assert digests[MANIFEST_NAME] == hashlib.sha256(body[MANIFEST_NAME]).hexdigest()

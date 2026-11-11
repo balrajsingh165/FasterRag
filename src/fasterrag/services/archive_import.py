@@ -17,6 +17,17 @@ Verify-first survives the change because staging is a pass of its own. The diges
 member is computed as it streams to disk, and it is the staged file — the one that was
 hashed — that every verification pass and the writer then read.
 
+**The manifest must be checksummed, and must agree with ``index.lock``** (TASK-0329). Until
+this build the manifest was the one member ``checksums.sha256`` never listed, so rewriting
+its ``model``/``model_version`` and repacking passed verification and then passed the
+vector-copy guard, which reads exactly those fields. Two rules close it: an archive that
+does not list ``manifest.json`` is refused outright — unconditionally, because a manifest
+cannot be trusted to declare whether it is verified — and a manifest that contradicts the
+lockfile it was built from is refused as well, which gives the embedding fields the row to
+disagree with that the counts and widths already have. Neither is authenticity: a repacker
+who recomputes the checksums and edits the lock to match still passes, and only a signature
+would stop that.
+
 Two write paths, and which one is legal is not the caller's choice alone:
 
 * **Vector copy** reuses the archived vectors. Permitted only when the archive carries them
@@ -461,12 +472,18 @@ def open_archive(path: Path) -> ArchiveReader:
 
     try:
         staged = _stage_members(path, reader.staging)
-        reader.manifest = _verified_manifest(path, staged)
+        # CRITICAL: the checksums are verified before the manifest is parsed, not after.
+        # Now that the manifest is a checksummed member (TASK-0329), reading it first would
+        # report a tampered manifest as a syntax error and never reach the digest that
+        # names it as tampering.
+        _require_members(path, staged)
         _verify_checksums(path, staged)
+        reader.manifest = _verified_manifest(path, staged)
         _verify_counts(path, reader)
         _verify_references(path, reader)
         _verify_vector_widths(path, reader)
         _verify_keyword_leg(path, reader)
+        _verify_manifest_matches_lock(path, reader)
     except Exception:
         reader.close()
         raise
@@ -484,14 +501,17 @@ def open_archive(path: Path) -> ArchiveReader:
     return reader
 
 
-def _verified_manifest(path: Path, staged: dict[str, _StagedMember]) -> dict[str, Any]:
-    """Confirm the archive has every required member and a manifest this build can read."""
+def _require_members(path: Path, staged: dict[str, _StagedMember]) -> None:
+    """Confirm the archive carries every member the format requires."""
     missing = _REQUIRED_MEMBERS - set(staged)
     if missing:
         raise VerificationError(
             f"{path} is missing required member(s): {', '.join(sorted(missing))}"
         )
 
+
+def _verified_manifest(path: Path, staged: dict[str, _StagedMember]) -> dict[str, Any]:
+    """Confirm the manifest parses and declares a format major this build can read."""
     try:
         manifest: dict[str, Any] = json.loads(staged[MANIFEST_NAME].path.read_bytes())
     except json.JSONDecodeError as exc:
@@ -513,6 +533,7 @@ def _verify_checksums(path: Path, staged: dict[str, _StagedMember]) -> None:
     bytes that landed on disk — the ones every later pass reads — not a second copy.
     """
     listed = staged[CHECKSUMS_NAME].path.read_text(encoding="utf-8")
+    named: set[str] = set()
 
     for line in listed.splitlines():
         if not line.strip():
@@ -528,6 +549,20 @@ def _verify_checksums(path: Path, staged: dict[str, _StagedMember]) -> None:
                 f"{path} member {name.strip()!r} failed its checksum; the archive is "
                 "corrupt or was modified after export"
             )
+        named.add(name.strip())
+
+    # CRITICAL: the requirement is unconditional, not gated on the version the manifest
+    # declares. The manifest is the member being authenticated, so a reader that trusted it
+    # to say whether it must be checksummed would accept a stripped line beside a lowered
+    # format_version and verify nothing (TASK-0329).
+    if MANIFEST_NAME not in named:
+        raise VerificationError(
+            f"{path} does not list {MANIFEST_NAME} in {CHECKSUMS_NAME}, so its manifest is "
+            "unverified; the manifest is what decides whether archived vectors may be "
+            "copied, and an unverified one permits a copy into a different embedding "
+            "space. Re-export the collection, or append the manifest's digest to "
+            f"{CHECKSUMS_NAME}"
+        )
 
 
 def _verify_counts(path: Path, reader: ArchiveReader) -> None:
@@ -654,6 +689,48 @@ def _verify_keyword_leg(path: Path, reader: ArchiveReader) -> None:
         raise VerificationError(
             f"{path} declares includes_sparse but no vector row carries a keyword leg; the "
             "archive is truncated or its manifest is wrong"
+        )
+
+
+_LOCKED_FIELDS: Final[tuple[tuple[str, str, str], ...]] = (
+    ("embedding", "model", "embedding_model"),
+    ("embedding", "model_version", "embedding_model_version"),
+    ("embedding", "dimensions", "dimensions"),
+    ("chunking", "strategy", "chunker_strategy"),
+    ("chunking", "chunk_size", "chunk_size"),
+    ("chunking", "overlap", "overlap"),
+)
+
+
+def _verify_manifest_matches_lock(path: Path, reader: ArchiveReader) -> None:
+    """Confirm the manifest agrees with the lockfile it was built from.
+
+    ``model`` and ``model_version`` are the fields the vector-copy guard reads and the only
+    ones with no row to contradict them; ``index.lock`` is that row (TASK-0329).
+    """
+    staged = reader.member(LOCK_NAME)
+    if staged is None:
+        return
+    try:
+        lock: dict[str, Any] = json.loads(staged.read_bytes() or b"{}")
+    except json.JSONDecodeError as exc:
+        raise VerificationError(f"{path} has an unreadable {LOCK_NAME}: {exc}") from exc
+    if not isinstance(lock, dict) or not lock:
+        return
+
+    disagreements = [
+        f"{block}.{field} {(reader.manifest.get(block) or {}).get(field)!r} != {lock[key]!r}"
+        for block, field, key in _LOCKED_FIELDS
+        if lock.get(key) not in (None, "", 0)
+        and str((reader.manifest.get(block) or {}).get(field, "")) != str(lock[key])
+    ]
+    if disagreements:
+        raise VerificationError(
+            f"{path} has a manifest that contradicts its own {LOCK_NAME}: "
+            + "; ".join(disagreements)
+            + ". The manifest describes the embedding space a vector copy is checked "
+            "against, so an archive whose two self-descriptions disagree is refused "
+            "rather than resolved in favour of either"
         )
 
 

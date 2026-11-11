@@ -187,10 +187,21 @@ async def test_two_exports_differ_only_by_the_manifest_timestamp(
     first, second = exports
     assert set(first) == set(second)
 
+    # CRITICAL: `checksums.sha256` is excluded for the same reason `manifest.json` is, not
+    # as a weakening. TASK-0329 made the checksums member cover the manifest, and the
+    # manifest carries `created_at`, so its digest line differs between two exports of an
+    # unchanged collection. Every member holding corpus data is still byte-identical, which
+    # is the property this test exists to hold.
     for name in sorted(first):
-        if name == "manifest.json":
+        if name in {"manifest.json", "checksums.sha256"}:
             continue
         assert first[name] == second[name], f"{name} is not reproducible"
+
+    first_lines = first["checksums.sha256"].splitlines()
+    second_lines = second["checksums.sha256"].splitlines()
+    assert [line for line in first_lines if b"manifest.json" not in line] == [
+        line for line in second_lines if b"manifest.json" not in line
+    ], "only the manifest's digest line may differ between two exports"
 
     stamped = re.compile(rb'"created_at": "[^"]+"')
     assert stamped.sub(b"X", first["manifest.json"]) == stamped.sub(b"X", second["manifest.json"])

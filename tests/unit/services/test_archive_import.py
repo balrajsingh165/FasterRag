@@ -36,6 +36,7 @@ from fasterrag.services.archive_import import (
     supported_major,
 )
 from fasterrag.services.lockfile import LockStore, build_lock
+from tests.support.archive import member_bytes
 
 
 def line(payload: dict[str, Any]) -> bytes:
@@ -51,7 +52,9 @@ def make(
     manifest: dict[str, Any] | None = None,
     corrupt: str | None = None,
     drop: str | None = None,
+    unlist: str | None = None,
     sparse: bool = False,
+    lock: dict[str, Any] | None = None,
 ) -> Path:
     documents = documents if documents is not None else [{"document_id": "d_1"}]
     chunks = chunks if chunks is not None else [{"chunk_id": "c_1", "document_id": "d_1"}]
@@ -59,7 +62,7 @@ def make(
     members: dict[str, bytes] = {
         DOCUMENTS_NAME: b"".join(line(row) for row in documents),
         CHUNKS_NAME: b"".join(line(row) for row in chunks),
-        LOCK_NAME: b"{}\n",
+        LOCK_NAME: line(lock) if lock is not None else b"{}\n",
     }
     if vectors is not None:
         members[VECTORS_NAME] = b"".join(line(row) for row in vectors)
@@ -77,12 +80,18 @@ def make(
         **({"includes_sparse": True} if sparse else {}),
     }
 
+    members[MANIFEST_NAME] = line(body)
     digests = {name: hashlib.sha256(data).hexdigest() for name, data in members.items()}
     members[CHECKSUMS_NAME] = "".join(
         f"{digest}  {name}\n" for name, digest in digests.items()
     ).encode("utf-8")
-    members[MANIFEST_NAME] = line(body)
 
+    if unlist:
+        members[CHECKSUMS_NAME] = b"".join(
+            raw + b"\n"
+            for raw in members[CHECKSUMS_NAME].splitlines()
+            if not raw.endswith(unlist.encode("utf-8"))
+        )
     if corrupt:
         members[corrupt] = members[corrupt] + b'{"tampered": true}\n'
     if drop:
@@ -111,6 +120,23 @@ def test_a_tampered_member_fails_its_checksum(tmp_path: Path) -> None:
     """The archive was modified after export, and nothing else would notice."""
     with pytest.raises(VerificationError, match="checksum"):
         open_archive(make(tmp_path, corrupt=CHUNKS_NAME))
+
+
+def test_a_tampered_manifest_fails_its_checksum(tmp_path: Path) -> None:
+    """The manifest is the member the vector-copy guard reads, so it is the one to cover."""
+    with pytest.raises(VerificationError, match="checksum"):
+        open_archive(make(tmp_path, corrupt=MANIFEST_NAME))
+
+
+def test_an_archive_that_does_not_checksum_its_manifest_is_refused(tmp_path: Path) -> None:
+    """Every archive written before TASK-0329 has this shape, and none of them is verified.
+
+    The requirement cannot be gated on the version the manifest declares, because the
+    manifest is the thing being verified: a stripped line beside a lowered `format_version`
+    would re-open the hole.
+    """
+    with pytest.raises(VerificationError, match="does not list"):
+        open_archive(make(tmp_path, unlist=MANIFEST_NAME))
 
 
 def test_a_missing_required_member_is_refused(tmp_path: Path) -> None:
@@ -1678,3 +1704,143 @@ async def test_a_keyword_leg_does_not_cost_the_streaming_import(tmp_path: Path) 
     assert settings.retrieval.hybrid is True
     assert counts.chunks == BULK_CHUNKS
     assert peak < ceiling, f"held {peak} bytes while reading a {payload} byte archive"
+
+
+def repacked(archive: Path, destination: Path, **edits: dict[str, Any]) -> Path:
+    """Rewrite named members of a real archive and tar it back up, as an attacker would.
+
+    Only the named members change; everything else is carried through byte for byte, which
+    is what makes this the archive TASK-0329 describes rather than a hand-built fixture.
+    """
+    with tarfile.open(archive, "r:gz") as tar:
+        members = {member.name: member_bytes(tar, member) for member in tar.getmembers()}
+    for name, body in edits.items():
+        members[name] = line(body)
+
+    with tarfile.open(destination, "w:gz") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            info.mtime = 0
+            tar.addfile(info, io.BytesIO(data))
+    return destination
+
+
+def relisted(archive: Path, destination: Path) -> Path:
+    """Recompute `checksums.sha256` over whatever the archive now holds."""
+    with tarfile.open(archive, "r:gz") as tar:
+        members = {member.name: member_bytes(tar, member) for member in tar.getmembers()}
+    members[CHECKSUMS_NAME] = "".join(
+        f"{hashlib.sha256(members[name]).hexdigest()}  {name}\n"
+        for name in members
+        if name != CHECKSUMS_NAME
+    ).encode("utf-8")
+
+    with tarfile.open(destination, "w:gz") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            info.mtime = 0
+            tar.addfile(info, io.BytesIO(data))
+    return destination
+
+
+async def exported_with_a_lock(tmp_path: Path) -> Path:
+    """Return a real archive whose manifest was built from a real lockfile."""
+    source = SourceAdapter(
+        [
+            Point(
+                point_id="c_1",
+                collection="docs",
+                vector=[0.1, 0.2],
+                payload={
+                    "document_id": "d_1",
+                    "source_uri": "/docs/policy.md",
+                    "content_hash": "sha-abc",
+                    "text": "body",
+                },
+            )
+        ]
+    )
+    destination = tmp_path / "honest.fragx"
+    await export_archive(
+        copy_settings(),
+        source,  # type: ignore[arg-type]
+        collection="docs",
+        destination=destination,
+        include_vectors=True,
+        lock=build_lock(
+            "docs",
+            copy_settings(),
+            embedding_model="honest-model",
+            embedding_model_version="7",
+            dimensions=2,
+            document_hashes={"d_1": "sha-abc"},
+        ),
+    )
+    return destination
+
+
+def forged(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Return the manifest an attacker wants: another deployment's embedding identity."""
+    body: dict[str, Any] = json.loads(json.dumps(manifest))
+    body["embedding"]["model"] = "victim-model"
+    body["embedding"]["model_version"] = "999"
+    return body
+
+
+async def test_a_rewritten_manifest_cannot_pass_verification(tmp_path: Path) -> None:
+    """TASK-0329, end to end: the archive that passed both guards before the fix.
+
+    Nothing but `manifest.json` is touched, and the pre-fix writer left that member out of
+    `checksums.sha256` entirely, so the forgery reached `require_vector_copy_compatible`
+    and permitted a copy into a different embedding space.
+    """
+    archive = await exported_with_a_lock(tmp_path)
+    with tarfile.open(archive, "r:gz") as tar:
+        manifest = json.loads(member_bytes(tar, MANIFEST_NAME))
+    attack = repacked(archive, tmp_path / "attack.fragx", **{MANIFEST_NAME: forged(manifest)})
+
+    with pytest.raises(VerificationError, match="checksum"):
+        open_archive(attack)
+
+
+async def test_a_rewritten_manifest_is_still_refused_when_the_checksums_are_recomputed(
+    tmp_path: Path,
+) -> None:
+    """The checksums are integrity, not authenticity: a repacker can rewrite the list too.
+
+    What the attacker cannot do in one edit is make the manifest agree with `index.lock`,
+    which carries the same embedding identity and is the row those fields never had.
+    """
+    archive = await exported_with_a_lock(tmp_path)
+    with tarfile.open(archive, "r:gz") as tar:
+        manifest = json.loads(member_bytes(tar, MANIFEST_NAME))
+    attack = repacked(archive, tmp_path / "attack.fragx", **{MANIFEST_NAME: forged(manifest)})
+
+    with pytest.raises(VerificationError, match=r"contradicts its own index\.lock"):
+        open_archive(relisted(attack, tmp_path / "relisted.fragx"))
+
+
+async def test_an_honest_archive_still_verifies_against_its_own_lockfile(tmp_path: Path) -> None:
+    """Guards the two tests above: a check that refused everything would satisfy them."""
+    with open_archive(await exported_with_a_lock(tmp_path)) as reader:
+        assert reader.embedding["model"] == "honest-model"
+        reader.require_vector_copy_compatible(model="honest-model", model_version="7", dimensions=2)
+
+
+def test_an_archive_with_no_lockfile_has_nothing_to_cross_check(tmp_path: Path) -> None:
+    """`index.lock` is `{}` when the deployment keeps no locks, and `{}` disagrees with nothing."""
+    with open_archive(make(tmp_path)) as reader:
+        assert reader.embedding["model"] == "m"
+
+
+def test_a_manifest_that_contradicts_the_archived_lockfile_is_refused(tmp_path: Path) -> None:
+    """Honest skew is the same defect as the forgery: two self-descriptions, one corpus."""
+    archive = make(
+        tmp_path,
+        lock={"collection": "docs", "embedding_model": "other", "dimensions": 2},
+    )
+
+    with pytest.raises(VerificationError, match=r"embedding\.model 'm' != 'other'"):
+        open_archive(archive)

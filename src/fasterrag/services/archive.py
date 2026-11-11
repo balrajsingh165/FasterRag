@@ -14,6 +14,22 @@ The manifest is written *last*, because it carries the row counts and those are 
 once the rows exist. Import verifies the counts against actual line counts, so a truncated
 export is caught rather than imported as a smaller corpus.
 
+**The manifest is itself checksummed** (TASK-0329). It used to be written after
+``checksums.sha256`` and therefore covered by nothing, while being the member the vector-copy
+compatibility guard reads: a rewritten ``model``/``model_version`` passed every check and
+permitted a copy into a different embedding space. It is now digested like any other member,
+which costs the checksums member its byte-identity across exports — the manifest carries a
+timestamp — and that is the right trade, because an unverified member is one an operator
+believes anyway. Checksums are integrity, not authenticity: they catch corruption and a
+partial rewrite, not an attacker who repacks the whole archive. Signing is the answer to
+that, and the format does not have it yet.
+
+**The manifest records the tenant-visible collection name.** A caller scopes a name before it
+reaches the backend, and recording the scoped form made the archive say ``acme__docs`` where
+the format promises the source collection name — which import then scoped a second time
+(TASK-0340). ``tenant`` keeps the provenance; the name does not, so an archive is portable
+between tenants and deployments rather than carrying one tenant's prefix into another's.
+
 **The keyword leg travels with the dense one** (TASK-0302). A hybrid collection stores two
 vectors per chunk, and until this change the archive carried one: import recomputed BM25
 from chunk text under the *target's* ``k1``/``b``, which re-derives the weights rather than
@@ -48,6 +64,7 @@ from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.lockfile import IndexLock
+from fasterrag.services.tenancy import unscoped_name
 
 __all__ = [
     "ARCHIVE_SUFFIX",
@@ -73,9 +90,12 @@ __all__ = [
 # understand to read it *faithfully*, not about which build wrote it. An archive carrying
 # the keyword leg declares the 2.x major so a 1.x reader refuses it outright instead of
 # importing a collection whose keyword ranking silently differs; one carrying no postings
-# declares 1.0.0 and stays readable by every build that ever shipped.
-FORMAT_VERSION: Final = "2.0.0"
-DENSE_ONLY_FORMAT_VERSION: Final = "1.0.0"
+# declares the 1.x major and stays readable by every build that ever shipped. The minor
+# says `checksums.sha256` covers `manifest.json` (TASK-0329): additive, because the
+# checksums member has always been read as a list rather than a fixed set, so an older
+# reader handed a newer archive verifies the manifest too and loses nothing.
+FORMAT_VERSION: Final = "2.1.0"
+DENSE_ONLY_FORMAT_VERSION: Final = "1.1.0"
 READABLE_MAJORS: Final[frozenset[str]] = frozenset({"1", "2"})
 
 ARCHIVE_SUFFIX: Final = ".fragx"
@@ -182,7 +202,11 @@ def build_manifest(
     observed_dimensions: int | None = None,
     includes_sparse: bool = False,
 ) -> dict[str, Any]:
-    """Return the archive's self-description."""
+    """Return the archive's self-description.
+
+    The recorded name is the tenant-visible one: a caller hands in the backend name it
+    iterated, and recording that would scope it twice on import (TASK-0340).
+    """
     chunking = settings.chunking
     embeddings = settings.embeddings
 
@@ -191,7 +215,7 @@ def build_manifest(
         "created_at": datetime.now(tz=UTC).isoformat(),
         "fasterrag_version": __version__,
         "collection": {
-            "name": collection,
+            "name": unscoped_name(collection, tenant),
             "distance": settings.vector_db.collection.distance,
         },
         "embedding": {
@@ -310,11 +334,18 @@ async def export_archive(
         if include_vectors:
             names.insert(2, VECTORS_NAME)
 
-        digests = {name: _digest(staging / name) for name in names}
-        (staging / CHECKSUMS_NAME).write_text(
-            "".join(f"{digests[name]}  {name}\n" for name in names), encoding="utf-8"
-        )
+        # CRITICAL: the manifest is digested with the data members, not written after them.
+        # It is the member the vector-copy compatibility guard reads, and while it sat
+        # outside `checksums.sha256` a rewritten `model` passed every check and permitted a
+        # copy into a different embedding space (TASK-0329). Only `checksums.sha256` itself
+        # is unlisted, because a file cannot carry its own digest.
         (staging / MANIFEST_NAME).write_bytes(_line(manifest))
+        covered = [*names, MANIFEST_NAME]
+
+        digests = {name: _digest(staging / name) for name in covered}
+        (staging / CHECKSUMS_NAME).write_text(
+            "".join(f"{digests[name]}  {name}\n" for name in covered), encoding="utf-8"
+        )
 
         _write_tar(target, staging, [*names, CHECKSUMS_NAME, MANIFEST_NAME])
     finally:

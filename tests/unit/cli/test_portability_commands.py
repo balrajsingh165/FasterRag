@@ -16,6 +16,7 @@ from fasterrag.errors import FasterRagError
 from fasterrag.services.archive import (
     CHECKSUMS_NAME,
     CHUNKS_NAME,
+    DENSE_ONLY_FORMAT_VERSION,
     DOCUMENTS_NAME,
     LOCK_NAME,
     MANIFEST_NAME,
@@ -374,18 +375,18 @@ def built(tmp_path: Path) -> Path:
         CHUNKS_NAME: b'{"chunk_id": "c_1", "document_id": "d_1"}\n',
         LOCK_NAME: b"{}\n",
     }
-    members[CHECKSUMS_NAME] = "".join(
-        f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in members.items()
-    ).encode("utf-8")
     members[MANIFEST_NAME] = json.dumps(
         {
-            "format_version": "1.0.0",
+            "format_version": DENSE_ONLY_FORMAT_VERSION,
             "collection": {"name": "archived-docs"},
             "embedding": {"model": "m", "model_version": "1", "dimensions": 2},
             "counts": {"documents": 1, "chunks": 1, "vectors": 0},
             "includes_vectors": False,
         },
         sort_keys=True,
+    ).encode("utf-8")
+    members[CHECKSUMS_NAME] = "".join(
+        f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in members.items()
     ).encode("utf-8")
 
     path = tmp_path / "a.fragx"

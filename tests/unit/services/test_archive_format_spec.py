@@ -210,14 +210,19 @@ def test_every_vector_row_is_as_wide_as_the_manifest_declares(exported: dict[str
 
 
 def test_the_checksums_member_covers_every_other_member(exported: dict[str, bytes]) -> None:
-    """The spec says SHA-256 of every other file; one left out is one nobody verifies."""
+    """The spec says SHA-256 of every other file; one left out is one nobody verifies.
+
+    This test pinned the defect until TASK-0329: it excused `manifest.json`, which the
+    spec never did, and that member is the one the vector-copy guard reads.
+    """
     listed = {
         line.split("  ", 1)[1]
         for line in exported["checksums.sha256"].decode("utf-8").splitlines()
         if line.strip()
     }
 
-    assert listed == set(exported) - {"manifest.json", "checksums.sha256"}
+    assert "manifest included" in spec_text()
+    assert listed == set(exported) - {"checksums.sha256"}
 
 
 @pytest.fixture
@@ -266,7 +271,7 @@ def test_an_archive_with_a_keyword_leg_declares_the_major_the_spec_assigns_it(
     declared = json.loads(hybrid_exported["manifest.json"])["format_version"]
 
     assert declared == FORMAT_VERSION
-    assert f"| `{FORMAT_VERSION}` | any vector row carries `sparse` |" in spec_text()
+    assert f"| `{FORMAT_VERSION}` | any vector row carries `sparse`," in spec_text()
 
 
 def test_the_keyword_leg_adds_no_member_the_spec_never_declared(
@@ -274,3 +279,29 @@ def test_the_keyword_leg_adds_no_member_the_spec_never_declared(
 ) -> None:
     """It extends `vectors.jsonl` rather than arriving as a member an old reader ignores."""
     assert set(hybrid_exported) <= set(declared_members())
+
+
+async def test_the_spec_and_the_writer_agree_on_the_tenant_scoped_name(tmp_path: Path) -> None:
+    """The spec forbids the backend's scoped form in `collection.name`; the writer obeys it.
+
+    Pinned against the document rather than against the exporter alone, because the two
+    agreed happily on `acme__docs` right up to TASK-0340.
+    """
+    await export_archive(
+        Settings.model_validate({}),
+        FakeAdapter([point("c_1")]),  # type: ignore[arg-type]
+        collection="acme__docs",
+        destination=tmp_path / "tenant",
+        tenant="acme",
+    )
+    with tarfile.open(tmp_path / f"tenant{ARCHIVE_SUFFIX}", "r:gz") as tar:
+        manifest = json.loads(archive_members(tar)["manifest.json"])
+
+    assert "never the backend's tenant-scoped form" in spec_text()
+    assert manifest["collection"]["name"] == "docs"
+
+
+def test_the_spec_states_the_manifest_rule_the_reader_enforces() -> None:
+    """An unconditional rule written down as a version-gated one is a rule nobody applies."""
+    assert "manifest.json` appears in `checksums.sha256`, or the archive is refused" in spec_text()
+    assert "integrity,\nnot authenticity" in spec_text()

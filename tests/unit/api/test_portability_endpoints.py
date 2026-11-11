@@ -1,7 +1,8 @@
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from fasterrag.api import admin
@@ -215,3 +216,85 @@ def test_importing_from_outside_the_allowed_roots_is_refused(tmp_path: Path) -> 
     assert response.status_code == 422
     assert response.json()["code"] == "VALIDATION_FAILED"
     assert "allowed_archive_roots" in response.json()["detail"]
+
+
+SECRET = "acme-key"
+
+
+def tenant_client(
+    monkeypatch: pytest.MonkeyPatch, root: Path, points: list[Any] | None = None
+) -> TestClient:
+    """A multi-tenant deployment whose one key may act for `acme` only."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{SECRET}:admin:acme")
+    app = create_app(
+        Settings.model_validate(
+            {
+                "security": {
+                    "auth": True,
+                    "multi_tenancy": True,
+                    "allowed_archive_roots": [str(root)],
+                }
+            }
+        )
+    )
+    app.state.vector_db = IterableStub(points)
+    return TestClient(app)
+
+
+def tenant_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {SECRET}", "X-Tenant-ID": "acme"}
+
+
+def test_a_tenant_export_records_the_name_the_tenant_gave(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TASK-0340: the backend name is `acme__docs`, and the archive must not say so.
+
+    `collection.name` is specified as the source collection name, and a tenant never
+    chose the prefix; recording it makes import scope an already-scoped name.
+    """
+    out = tmp_path / "tenant"
+
+    with tenant_client(monkeypatch, tmp_path, [point("c_1")]) as api:
+        response = api.post(
+            "/v1/admin/export",
+            json={"out": str(out), "collection": "docs", "include_vectors": True},
+            headers=tenant_headers(),
+        )
+
+    assert response.status_code == 200, response.json()
+    assert response.json()["collection"] == "docs"
+    with open_archive(out.with_suffix(".fragx")) as reader:
+        assert reader.collection == "docs"
+        assert reader.manifest["tenant"] == "acme"
+
+
+def test_a_tenant_round_trip_lands_in_the_tenants_own_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Export and import as a tenant, with no `target_collection` to paper over the name.
+
+    Before TASK-0340 this wrote `acme__acme__docs` and answered with `acme__docs`: a
+    backend-prefixed name in a 200 body, which is the TASK-0324 class of leak.
+    """
+    out = tmp_path / "roundtrip"
+
+    with tenant_client(monkeypatch, tmp_path, [point("c_1"), point("c_2")]) as api:
+        api.post(
+            "/v1/admin/export",
+            json={"out": str(out), "collection": "docs", "include_vectors": True},
+            headers=tenant_headers(),
+        )
+        response = api.post(
+            "/v1/admin/import",
+            json={"archive": str(out.with_suffix(".fragx"))},
+            headers=tenant_headers(),
+        )
+        app = cast(FastAPI, api.app)
+        created = [spec.name for spec in app.state.vector_db.created]
+
+    body = response.json()
+    assert response.status_code == 200, body
+    assert created == ["acme__docs"]
+    assert body["collection"] == "docs"
+    assert body["chunks"] == 2
