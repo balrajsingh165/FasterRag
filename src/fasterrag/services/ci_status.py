@@ -134,13 +134,7 @@ class JobSummary:
 
     @property
     def unrun_steps(self) -> tuple[str, ...]:
-        """Return the steps this job skipped after it had already gone wrong.
-
-        A failing step aborts the ones after it, and GitHub reports those as ``skipped``
-        rather than as anything alarming. On run 42522906097 one ``Typecheck`` failure
-        skipped thirteen later steps, nine of them named gates, so the run was red for one
-        stated reason and silent about thirteen checks that never objected to anything.
-        """
+        """Return the steps this job skipped after it had already gone wrong."""
         return self.skipped_steps if self.failed else ()
 
 
@@ -158,14 +152,7 @@ class RunSummary:
 
     @property
     def passed(self) -> bool:
-        """Return whether the run concluded green and at least one job actually ran.
-
-        Only ``success`` counts; a cancelled or timed-out run is not a verdict, and
-        reporting it as a pass would be a check passing because it could not run. The
-        second clause closes the same hole one level up: GitHub concludes a run
-        ``success`` when every job in it was skipped, so a workflow that ran nothing at
-        all would otherwise read as a workflow that found nothing wrong.
-        """
+        """Return whether the run concluded green and at least one job actually ran."""
         return self.conclusion == "success" and any(
             job.conclusion == "success" for job in self.jobs
         )
@@ -187,12 +174,7 @@ class RunSummary:
 
 
 def parse_remote(url: str) -> Remote | None:
-    """Return the repository a remote URL points at, or ``None`` for a non-GitHub remote.
-
-    Accepts the HTTPS and SSH forms git writes (``https://github.com/o/r.git``,
-    ``git@github.com:o/r.git``, ``ssh://git@github.com/o/r``), with or without ``.git``.
-    An HTTPS URL may carry ``user:token@`` before the host; it is parsed past and discarded.
-    """
+    """Return the repository a remote URL points at, or ``None`` for a non-GitHub remote."""
     for form in _REMOTE_FORMS:
         match = form.match(url.strip())
         if match is not None:
@@ -201,16 +183,7 @@ def parse_remote(url: str) -> Remote | None:
 
 
 async def origin_remote(cwd: Path | None = None) -> Remote | None:
-    """Return the GitHub repository ``origin`` points at, or ``None`` when there is none.
-
-    ``None`` covers every way there can be no answer: git is not installed, ``cwd`` is not
-    inside a checkout, the checkout has no ``origin``, or ``origin`` is not on github.com.
-    Each is logged at debug level without the URL, since a remote URL is allowed to embed a
-    credential and this function's whole job is to keep that out of the record.
-
-    Args:
-        cwd: The directory to ask from; defaults to the process working directory.
-    """
+    """Return the GitHub repository ``origin`` points at, or ``None`` when there is none."""
     try:
         process = await asyncio.create_subprocess_exec(
             "git",
@@ -279,14 +252,7 @@ def _rate_limit_fix(reset: str | None) -> str:
 
 
 async def _get_json(client: httpx.AsyncClient, path: str, *, params: Mapping[str, Any]) -> Any:
-    """Fetch one endpoint and decode it, mapping every failure onto the taxonomy.
-
-    Raises:
-        ProvisioningError: ``RATE_LIMITED`` when the anonymous budget is spent, with the
-            reset time in the fix; ``NOT_FOUND`` when the repository or workflow does not
-            exist for an anonymous caller; ``PROVISIONING_FAILED`` for no network, any
-            other HTTP status, and a body that is not JSON.
-    """
+    """Fetch one endpoint and decode it, mapping every failure onto the taxonomy."""
     try:
         response = await client.get(path, params=params)
     except httpx.HTTPError as exc:
@@ -379,30 +345,7 @@ async def latest_run(
     timeout: float = _REQUEST_TIMEOUT_SECONDS,
     token: str | None = None,
 ) -> RunSummary | None:
-    """Return the latest *completed* run of a workflow on a branch, with its jobs.
-
-    Completed rather than merely latest: with ``cancel-in-progress`` concurrency a run in
-    flight has no conclusion yet, and the question this answers is "what was the last
-    verdict?", not "is something running?". The summary carries the commit it applies to,
-    so a caller can see when that verdict predates the current head.
-
-    Two anonymous requests: the run list filtered to one entry, then that run's jobs.
-
-    Args:
-        remote: The repository to ask about.
-        branch: The branch whose runs are listed.
-        workflow_file: The workflow's file name under ``.github/workflows``.
-        api_base: The API root; a test points it at a fake transport's host.
-        timeout: Per-request timeout in seconds.
-        token: An explicit bearer token. Never read from the environment by this module.
-
-    Returns:
-        The summary, or ``None`` when the workflow has never completed on that branch —
-        which is an answer, not a failure, and the caller decides what it means.
-
-    Raises:
-        ProvisioningError: For every way the API could not be read; see ``_get_json``.
-    """
+    """Return the latest *completed* run of a workflow on a branch, with its jobs."""
     repository = f"/repos/{remote.owner}/{remote.repo}"
     # CRITICAL: no auth argument and trust_env=False. The only Authorization this client can
     # send is one a caller passed in by hand; it must never pick a token up from the
@@ -448,12 +391,7 @@ class WorkflowVerdict:
 
     @property
     def green(self) -> bool:
-        """Return whether this workflow is known to have concluded green.
-
-        Three states collapse to red on purpose: a red run, a workflow with no completed
-        run at all, and a workflow the API could not be asked about. Only a ``success``
-        that was actually read is green.
-        """
+        """Return whether this workflow is known to have concluded green."""
         return self.run is not None and self.run.passed
 
     @property
@@ -509,12 +447,7 @@ class BranchVerdict:
 
     @property
     def green(self) -> bool:
-        """Return whether every workflow asked about concluded green.
-
-        An empty set of workflows is red. A check that passes because it checked nothing
-        is the vacuity this gate exists to replace, and it is the shape a glob over a
-        renamed directory produces silently.
-        """
+        """Return whether every workflow asked about concluded green."""
         return bool(self.workflows) and all(workflow.green for workflow in self.workflows)
 
     @property
@@ -561,19 +494,7 @@ async def branch_verdict(
     timeout: float = _REQUEST_TIMEOUT_SECONDS,
     token: str | None = None,
 ) -> BranchVerdict:
-    """Return every named workflow's last conclusion on a branch.
-
-    Each workflow is asked independently and a failure to ask is recorded against that
-    workflow rather than raised, so one renamed file cannot hide another workflow's red.
-
-    Args:
-        remote: The repository to ask about.
-        workflows: Workflow file names under ``.github/workflows``.
-        branch: The branch whose runs are read.
-        api_base: The API root.
-        timeout: Per-request timeout in seconds.
-        token: An explicit bearer token; see ``latest_run``.
-    """
+    """Return every named workflow's last conclusion on a branch."""
     verdicts: list[WorkflowVerdict] = []
     for workflow in workflows:
         try:

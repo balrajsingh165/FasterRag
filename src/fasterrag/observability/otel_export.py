@@ -69,12 +69,7 @@ def _epoch_nanoseconds(moment: datetime) -> int:
 
 
 def _started_at(trace: Trace) -> datetime:
-    """Return the trace's start time, falling back to now when it is unusable.
-
-    A malformed timestamp must not cost the whole export: a trace in the wrong place on a
-    timeline is recoverable, a dropped one is not. The substitution is logged because an
-    export full of substituted timestamps is otherwise indistinguishable from a correct one.
-    """
+    """Return the trace's start time, falling back to now when it is unusable."""
     try:
         parsed = datetime.fromisoformat(trace.created_at)
     except (TypeError, ValueError) as exc:

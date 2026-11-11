@@ -885,6 +885,14 @@ Synchronous rather than a job id, unlike ingestion: an export reads what is alre
     indexed and writes a file, so there is no queue it could be waiting behind and no
     partial state a caller would need to poll.
 
+### `import_collection`
+
+> Import a previously exported archive (D11).
+
+Verification runs before anything is written, so a refused archive leaves the target
+    untouched rather than half-populated. The source path is confined first, by the same
+    rule the export side applies.
+
 ## `src/fasterrag/api/auth.py`
 
 ### `_parse_scopes`
@@ -1688,6 +1696,14 @@ Retryable by definition: the breaker's whole premise is that the provider is
         # an intermittent outage and hiding the one error message that explains it.
 
 A failed probe re-opens immediately: half-open exists to test recovery with one request, not to grant a fresh threshold's worth of doomed calls.
+
+### `shared_breaker`
+
+> Return the process-wide breaker for a provider, creating it on first use.
+
+A breaker counts *consecutive* failures, and a count a caller rebuilds per unit of work
+    never exceeds one. The REST API builds its services per request, so a breaker owned by
+    the service could not open there at all; sharing one instance is what makes it work.
 
 ## `src/fasterrag/core/cache/__init__.py`
 
@@ -2601,14 +2617,11 @@ Imported lazily so that a deployment with reranking switched off never pays for 
 
 ### `CrossEncoderReranker._loaded`
 
-> Return the model, loading it once on first use.
+> Return the model, loading it once per process on first use.
 
-Raises:
-            RetrievalError: If the weights cannot be loaded. A cross-encoder is a
-                multi-gigabyte download that fails for mundane environmental reasons — no
-                disk, no memory, no page file, a half-finished download — and D4 requires
-                every one of them to degrade the response to ``hybrid_only`` rather than
-                fail the query. Loading is therefore classified exactly like scoring.
+The cache is module-level because this object is not: the REST API builds a
+        reranker per request, so an instance-level cache reloaded the weights on every
+        query. The lock makes concurrent first queries wait for one load, not start several.
 
 ### `CrossEncoderReranker.score`
 
@@ -2962,6 +2975,14 @@ Returns:
 
 A 2xx whose body is not JSON is not something to fail a query over, but it is not evidence of storage either. Report it and move on.
 
+### `_parse_created_at`
+
+> Return the trace's start time, falling back to now when it is unusable.
+
+A malformed timestamp must not cost the whole export: an observation in the wrong place on
+    a timeline is recoverable, a dropped trace is not. The substitution is logged because an
+    export full of substituted timestamps is otherwise indistinguishable from a correct one.
+
 ## `src/fasterrag/observability/logging.py`
 
 ### `configure_logging`
@@ -3102,6 +3123,14 @@ Args:
 Deliberately broad: this reaches a network through protobuf serialization and a vendor SDK, each raising its own types, and none of them should be able to affect a request that has already been answered.
 
 Compared by name rather than by importing the enum, which keeps the SDK import lazy on a path that runs after every query.
+
+### `_started_at`
+
+> Return the trace's start time, falling back to now when it is unusable.
+
+A malformed timestamp must not cost the whole export: a trace in the wrong place on a
+    timeline is recoverable, a dropped one is not. The substitution is logged because an
+    export full of substituted timestamps is otherwise indistinguishable from a correct one.
 
 ## `src/fasterrag/observability/otel_metrics.py`
 
@@ -3270,6 +3299,22 @@ Raises:
                 than summarised, because "incompatible" leaves an operator guessing which of
                 three things to change.
 
+### `_verify_references`
+
+> Confirm every chunk resolves to a document and every vector to a chunk.
+
+The vector check runs in lockstep with the chunk stream and holds one row; an archive
+    whose vectors are not in chunk order falls back to an index, built here so that the
+    refusal still happens before a single row is written.
+
+### `_write_chunks`
+
+> Upsert every archived chunk, streaming the rows and batching the writes.
+
+Document rows are the one thing held: the payload join needs a chunk's document, and
+    the chunk stream does not carry it. There are far fewer of them than chunks, and the
+    lockfile's per-document hashes already require every one of them in memory.
+
 ## `src/fasterrag/services/autopilot.py`
 
 ### `tune`
@@ -3295,6 +3340,16 @@ Args:
             because someone typed the command would defeat the flag.
 
 A candidate outside the schema's bounds is skipped, never fatal: one bad grid entry must not discard the trials that already ran.
+
+## `src/fasterrag/services/backfill.py`
+
+### `inventory_untagged`
+
+> List a collection's untagged points grouped by the document they were chunked from.
+
+The evidence behind ``assume_untagged``: the tool cannot derive who owns an untagged
+    point, so it hands the operator the documents and asks. Heaviest in untagged
+    *documents*, the same cost the exporter already pays to deduplicate its own walk.
 
 ## `src/fasterrag/services/backup.py`
 
@@ -3460,6 +3515,122 @@ Recorded after the call rather than at the check, so a tenant is charged what th
 ### `ROLLING_WINDOW_SECONDS`
 
 The documented budget is "rolling" without naming a period, and a rolling window means nothing without one. A day is the shortest period over which a spend cap is normally reasoned about, and it is stated in config-reference.md rather than left to be inferred.
+
+### `CostGovernor._alive`
+
+> Evict every bucket wholly outside the window; ``None`` once none is left.
+
+A tenant whose spend has aged out is **forgotten**, not left holding an empty
+        window: this instance lives as long as the process (TASK-0337) and a tenant id is
+        chosen by the caller, so a map that only grew would be a leak keyed on client input.
+
+## `src/fasterrag/services/ci_status.py`
+
+### `parse_remote`
+
+> Return the repository a remote URL points at, or ``None`` for a non-GitHub remote.
+
+Accepts the HTTPS and SSH forms git writes (``https://github.com/o/r.git``,
+    ``git@github.com:o/r.git``, ``ssh://git@github.com/o/r``), with or without ``.git``.
+    An HTTPS URL may carry ``user:token@`` before the host; it is parsed past and discarded.
+
+### `origin_remote`
+
+> Return the GitHub repository ``origin`` points at, or ``None`` when there is none.
+
+``None`` covers every way there can be no answer: git is not installed, ``cwd`` is not
+    inside a checkout, the checkout has no ``origin``, or ``origin`` is not on github.com.
+    Each is logged at debug level without the URL, since a remote URL is allowed to embed a
+    credential and this function's whole job is to keep that out of the record.
+
+    Args:
+        cwd: The directory to ask from; defaults to the process working directory.
+
+### `_get_json`
+
+> Fetch one endpoint and decode it, mapping every failure onto the taxonomy.
+
+Raises:
+        ProvisioningError: ``RATE_LIMITED`` when the anonymous budget is spent, with the
+            reset time in the fix; ``NOT_FOUND`` when the repository or workflow does not
+            exist for an anonymous caller; ``PROVISIONING_FAILED`` for no network, any
+            other HTTP status, and a body that is not JSON.
+
+### `latest_run`
+
+> Return the latest *completed* run of a workflow on a branch, with its jobs.
+
+Completed rather than merely latest: with ``cancel-in-progress`` concurrency a run in
+    flight has no conclusion yet, and the question this answers is "what was the last
+    verdict?", not "is something running?". The summary carries the commit it applies to,
+    so a caller can see when that verdict predates the current head.
+
+    Two anonymous requests: the run list filtered to one entry, then that run's jobs.
+
+    Args:
+        remote: The repository to ask about.
+        branch: The branch whose runs are listed.
+        workflow_file: The workflow's file name under ``.github/workflows``.
+        api_base: The API root; a test points it at a fake transport's host.
+        timeout: Per-request timeout in seconds.
+        token: An explicit bearer token. Never read from the environment by this module.
+
+    Returns:
+        The summary, or ``None`` when the workflow has never completed on that branch —
+        which is an answer, not a failure, and the caller decides what it means.
+
+    Raises:
+        ProvisioningError: For every way the API could not be read; see ``_get_json``.
+
+### `branch_verdict`
+
+> Return every named workflow's last conclusion on a branch.
+
+Each workflow is asked independently and a failure to ask is recorded against that
+    workflow rather than raised, so one renamed file cannot hide another workflow's red.
+
+    Args:
+        remote: The repository to ask about.
+        workflows: Workflow file names under ``.github/workflows``.
+        branch: The branch whose runs are read.
+        api_base: The API root.
+        timeout: Per-request timeout in seconds.
+        token: An explicit bearer token; see ``latest_run``.
+
+### `JobSummary.unrun_steps`
+
+> Return the steps this job skipped after it had already gone wrong.
+
+A failing step aborts the ones after it, and GitHub reports those as ``skipped``
+        rather than as anything alarming. On run 42522906097 one ``Typecheck`` failure
+        skipped thirteen later steps, nine of them named gates, so the run was red for one
+        stated reason and silent about thirteen checks that never objected to anything.
+
+### `RunSummary.passed`
+
+> Return whether the run concluded green and at least one job actually ran.
+
+Only ``success`` counts; a cancelled or timed-out run is not a verdict, and
+        reporting it as a pass would be a check passing because it could not run. The
+        second clause closes the same hole one level up: GitHub concludes a run
+        ``success`` when every job in it was skipped, so a workflow that ran nothing at
+        all would otherwise read as a workflow that found nothing wrong.
+
+### `WorkflowVerdict.green`
+
+> Return whether this workflow is known to have concluded green.
+
+Three states collapse to red on purpose: a red run, a workflow with no completed
+        run at all, and a workflow the API could not be asked about. Only a ``success``
+        that was actually read is green.
+
+### `BranchVerdict.green`
+
+> Return whether every workflow asked about concluded green.
+
+An empty set of workflows is red. A check that passes because it checked nothing
+        is the vacuity this gate exists to replace, and it is the shape a glob over a
+        renamed directory produces silently.
 
 ## `src/fasterrag/services/doctor.py`
 
@@ -3948,6 +4119,51 @@ Returns:
 
 The same gate the Qdrant provisioner uses. A port conflict reported as a fix-it string before anything starts beats a container that exits seconds later for a reason only `docker logs` can tell you.
 
+## `src/fasterrag/services/idempotency.py`
+
+### `IdempotencyStore.begin`
+
+> Claim ``key`` for this request, or return what it returned the first time.
+
+Raises:
+            FasterRagError: ``IDEMPOTENCY_KEY_REUSED`` for a different request under the
+                same key, ``IDEMPOTENCY_IN_PROGRESS`` while the original is still running.
+
+### `FileIdempotencyStore.claim`
+
+> Take the key on disk, blocking; :meth:`begin` is this off the event loop.
+
+Raises:
+            FasterRagError: ``IDEMPOTENCY_KEY_REUSED`` for a different request under the
+                same key, ``IDEMPOTENCY_IN_PROGRESS`` while the original is still running.
+
+### `FileIdempotencyStore._reclaim_if_leased`
+
+> Run one pass off the request path, if this process wins the host's sweep lease.
+
+Every step runs in a worker thread, so a pass over a large directory never holds
+        the event loop; a failure is logged and retried next interval rather than raised at
+        a client whose own request succeeded.
+
+### `FileIdempotencyStore._take_sweep_lease`
+
+> Return whether this process holds the right to sweep for this interval.
+
+The lease is one more record taken with ``O_CREAT | O_EXCL``, so N workers on one
+        host do not each walk the directory. Two that find it stale at the same instant can
+        both take it over and both sweep, which costs a duplicated pass and nothing else.
+
+        Raises:
+            FasterRagError: When the lease cannot be written at all.
+
+### `FileIdempotencyStore._files`
+
+> Yield each regular file in ``bucket`` with its modification time.
+
+An entry whose age cannot be read is left alone and recorded, because a sweep that
+        cannot see a file is a sweep not reclaiming it. One that vanished mid-pass is the
+        exception: a concurrent ``discard`` removing it is the outcome a pass wanted.
+
 ## `src/fasterrag/services/ingestion.py`
 
 ### `_status_for`
@@ -4012,6 +4228,22 @@ Published once, at settle, rather than per document: throughput measured over a
         counts. The gauge describes a collection's *standing* backlog, and a job that
         dead-lettered nothing does not mean the collection has nothing waiting.
 
+### `_pipe`
+
+> Run the parse side and the embedding side together, failing both if either fails.
+
+The two halves are joined by a bounded queue, so each can strand the other: a dead
+    consumer leaves the producer blocked on a full queue, and a dead producer leaves the
+    consumers waiting for a close that never comes. Whichever stops first decides.
+
+### `_require_pipeline_chunker`
+
+> Refuse a job whose chunking strategy the ingestion pipeline cannot run.
+
+Semantic chunking needs an embedding model inside the parse worker, and the pipeline
+    does not provide one (TASK-0431). Refusing here costs one check per job; not refusing
+    dead-letters every document of the corpus with the same configuration error.
+
 ## `src/fasterrag/services/journal.py`
 
 ### `_write_atomically`
@@ -4057,16 +4289,11 @@ Args:
 
 ### `Journal.load_job`
 
-> Load a job record, falling back to the previous good copy.
+> Load a job record off the event loop.
 
-# CRITICAL: another tenant's job raises the same `NOT_FOUND` an unknown id does, and
-        # deliberately so. A job record carries the source paths of the corpus it ingested,
-        # and a distinct "forbidden" would confirm the id is real — job ids sort
-        # chronologically, so a caller who has one of their own can guess at neighbours.
-
-        Raises:
-            IngestionError: If the job is unknown, belongs to another tenant, or both copies
-                are unreadable.
+Raises:
+            IngestionError: ``NOT_FOUND`` for an unknown job, ``CHUNK_FAILED`` for one
+                whose record and previous copy both fail their checksum.
 
 ### `Journal.checkpoint`
 
@@ -4083,6 +4310,14 @@ Returns the record with its checkpoint updated. Writing on every document would
 The direction the index lockfile records (D1). The dedup index is stored the other
         way round because its own question is "have I seen this content", and inverting it
         is lossless: a content hash maps to exactly one document by construction.
+
+### `Journal.load_job_blocking`
+
+> Load a job record, falling back to the previous good copy.
+
+Raises:
+            IngestionError: ``NOT_FOUND`` for an unknown job, ``CHUNK_FAILED`` for one
+                whose record and previous copy both fail their checksum.
 
 ## `src/fasterrag/services/langfuse.py`
 
@@ -4506,6 +4741,22 @@ Args:
         IngestionError: If a source type is unrecognised, or a fetched body is too large.
         ParseError: If a URL cannot be fetched or an inline payload cannot be decoded.
 
+### `_guard_path`
+
+> Refuse a path source that falls outside ``ingestion.allowed_source_roots``.
+
+Raises:
+        IngestionError: If path sources are unconfined on a served deployment, or the
+            path resolves outside every configured root.
+
+### `guard_archive_path`
+
+> Return a caller-supplied archive path confined to ``security.allowed_archive_roots``.
+
+Raises:
+        FasterRagError: If archive paths are unconfined on a served deployment, or the
+            path resolves outside every configured root.
+
 ## `src/fasterrag/services/tenancy.py`
 
 ### `_validated`
@@ -4757,20 +5008,9 @@ Args:
 
 > Parse and chunk every task, streaming chunks into ``sink``.
 
-Args:
-            tasks: Documents to process, in job order.
-            sink: Bounded chunk queue. Enqueueing waits when it is full, which is how
-                backpressure reaches the parser.
-            job: Job id, when outcomes should be journalled.
-            collection: Collection the documents belong to, which scopes deduplication.
-            resume_from: Document index to start at, skipping everything a checkpoint
-                already covered.
-            on_progress: Called with each document's index once it has been handled,
-                whatever the outcome. The ingestion service checkpoints through this, so
-                progress is recorded as documents complete rather than only at the end.
-
-        Returns:
-            Counts for the pass.
+Pass ``ledger`` when something downstream writes the chunks; it then owns progress
+        reporting and ``on_progress`` is ignored. Without one, chunks are acknowledged as
+        they are enqueued and ``on_progress`` is awaited per settled document.
 
 ### `CpuWorkerPool._addressed`
 
@@ -4853,6 +5093,14 @@ One pass per document rather than one per chunk: that single pass is the whole
 > Account for one embedded batch, in tokens and in money.
 
 Recorded, never checked: a budget that refuses mid-ingest would abandon a job half-indexed, so ingestion spends and reports, and the cap bites the next query.
+
+### `EmbeddingWorkerPool._write`
+
+> Hand a batch to the sink, retrying what is retryable, and return the last failure.
+
+A sink failure is returned rather than raised. Raising it out of the worker — which
+        this pool did until 2026-11-11 — ended the worker task, lost the batch without a
+        dead-letter entry, and left the producer blocked on a queue nobody was draining.
 
 ## `src/fasterrag/workers/indexer.py`
 

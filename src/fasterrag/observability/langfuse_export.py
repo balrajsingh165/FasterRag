@@ -48,12 +48,7 @@ def _isoformat(base: datetime, offset_ms: float) -> str:
 
 
 def _parse_created_at(value: str, trace_id: str) -> datetime:
-    """Return the trace's start time, falling back to now when it is unusable.
-
-    A malformed timestamp must not cost the whole export: an observation in the wrong place on
-    a timeline is recoverable, a dropped trace is not. The substitution is logged because an
-    export full of substituted timestamps is otherwise indistinguishable from a correct one.
-    """
+    """Return the trace's start time, falling back to now when it is unusable."""
     try:
         return datetime.fromisoformat(value)
     except (TypeError, ValueError) as exc:

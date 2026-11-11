@@ -187,12 +187,7 @@ class CostGovernor:
         return sum(tokens for _, tokens in buckets.values())
 
     def _alive(self, key: str, moment: float) -> dict[int, tuple[float, int]] | None:
-        """Evict every bucket wholly outside the window; ``None`` once none is left.
-
-        A tenant whose spend has aged out is **forgotten**, not left holding an empty
-        window: this instance lives as long as the process (TASK-0337) and a tenant id is
-        chosen by the caller, so a map that only grew would be a leak keyed on client input.
-        """
+        """Evict every bucket wholly outside the window; ``None`` once none is left."""
         buckets = self._spent.get(key)
         if buckets is None:
             return None

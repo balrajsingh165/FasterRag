@@ -200,12 +200,7 @@ class IdempotencyStore(ABC):
     async def begin(
         self, key: str, *, tenant: str | None, fingerprint: str
     ) -> Reservation | StoredResponse:
-        """Claim ``key`` for this request, or return what it returned the first time.
-
-        Raises:
-            FasterRagError: ``IDEMPOTENCY_KEY_REUSED`` for a different request under the
-                same key, ``IDEMPOTENCY_IN_PROGRESS`` while the original is still running.
-        """
+        """Claim ``key`` for this request, or return what it returned the first time."""
 
     @abstractmethod
     async def commit(self, reservation: Reservation, response: StoredResponse) -> None:
@@ -265,12 +260,7 @@ class FileIdempotencyStore(IdempotencyStore):
     def claim(
         self, key: str, *, tenant: str | None, fingerprint: str
     ) -> Reservation | StoredResponse:
-        """Take the key on disk, blocking; :meth:`begin` is this off the event loop.
-
-        Raises:
-            FasterRagError: ``IDEMPOTENCY_KEY_REUSED`` for a different request under the
-                same key, ``IDEMPOTENCY_IN_PROGRESS`` while the original is still running.
-        """
+        """Take the key on disk, blocking; :meth:`begin` is this off the event loop."""
         path = self.path_for(key, tenant)
         reservation = Reservation(
             key=key, tenant=tenant, fingerprint=fingerprint, owner=token_hex(8)
@@ -401,12 +391,7 @@ class FileIdempotencyStore(IdempotencyStore):
         self._sweeping = asyncio.create_task(self._reclaim_if_leased())
 
     async def _reclaim_if_leased(self) -> None:
-        """Run one pass off the request path, if this process wins the host's sweep lease.
-
-        Every step runs in a worker thread, so a pass over a large directory never holds
-        the event loop; a failure is logged and retried next interval rather than raised at
-        a client whose own request succeeded.
-        """
+        """Run one pass off the request path, if this process wins the host's sweep lease."""
         try:
             if not await asyncio.to_thread(self._take_sweep_lease):
                 return
@@ -429,15 +414,7 @@ class FileIdempotencyStore(IdempotencyStore):
         )
 
     def _take_sweep_lease(self) -> bool:
-        """Return whether this process holds the right to sweep for this interval.
-
-        The lease is one more record taken with ``O_CREAT | O_EXCL``, so N workers on one
-        host do not each walk the directory. Two that find it stale at the same instant can
-        both take it over and both sweep, which costs a duplicated pass and nothing else.
-
-        Raises:
-            FasterRagError: When the lease cannot be written at all.
-        """
+        """Return whether this process holds the right to sweep for this interval."""
         path = self.root / _SWEEP_LEASE
         owner = token_hex(8)
         try:
@@ -473,12 +450,7 @@ class FileIdempotencyStore(IdempotencyStore):
                 yield entry
 
     def _files(self, bucket: Path, failures: list[str]) -> Iterator[tuple[os.DirEntry[str], float]]:
-        """Yield each regular file in ``bucket`` with its modification time.
-
-        An entry whose age cannot be read is left alone and recorded, because a sweep that
-        cannot see a file is a sweep not reclaiming it. One that vanished mid-pass is the
-        exception: a concurrent ``discard`` removing it is the outcome a pass wanted.
-        """
+        """Yield each regular file in ``bucket`` with its modification time."""
         try:
             with os.scandir(bucket) as entries:
                 for entry in entries:

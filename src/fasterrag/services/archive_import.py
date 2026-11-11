@@ -588,12 +588,7 @@ def _verify_counts(path: Path, reader: ArchiveReader) -> None:
 
 
 def _verify_references(path: Path, reader: ArchiveReader) -> None:
-    """Confirm every chunk resolves to a document and every vector to a chunk.
-
-    The vector check runs in lockstep with the chunk stream and holds one row; an archive
-    whose vectors are not in chunk order falls back to an index, built here so that the
-    refusal still happens before a single row is written.
-    """
+    """Confirm every chunk resolves to a document and every vector to a chunk."""
     documents = {str(row.get("document_id", "")) for row in reader.documents()}
     stream = reader.vectors()
     pending = next(stream, None)
@@ -881,12 +876,7 @@ async def _write_chunks(
     router: TieringRouter | None,
     batch_size: int,
 ) -> ImportCounts:
-    """Upsert every archived chunk, streaming the rows and batching the writes.
-
-    Document rows are the one thing held: the payload join needs a chunk's document, and
-    the chunk stream does not carry it. There are far fewer of them than chunks, and the
-    lockfile's per-document hashes already require every one of them in memory.
-    """
+    """Upsert every archived chunk, streaming the rows and batching the writes."""
     documents = {str(row.get("document_id", "")): row for row in reader.documents()}
     counts = ImportCounts()
     batch: list[Point] = []

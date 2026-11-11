@@ -225,12 +225,7 @@ async def audit_collections(
 async def inventory_untagged(
     adapter: VectorDBAdapter, collection: str, *, batch_size: int = DEFAULT_BATCH_SIZE
 ) -> list[UntaggedDocument]:
-    """List a collection's untagged points grouped by the document they were chunked from.
-
-    The evidence behind ``assume_untagged``: the tool cannot derive who owns an untagged
-    point, so it hands the operator the documents and asks. Heaviest in untagged
-    *documents*, the same cost the exporter already pays to deduplicate its own walk.
-    """
+    """List a collection's untagged points grouped by the document they were chunked from."""
     counts: dict[str, int] = {}
     sources: dict[str, str] = {}
 

@@ -280,21 +280,11 @@ class Journal:
         _write_atomically(self._job_path(record.job_id), envelope(record.as_dict()))
 
     async def load_job(self, job: str, *, tenant: str | None = None) -> JobRecord:
-        """Load a job record off the event loop.
-
-        Raises:
-            IngestionError: ``NOT_FOUND`` for an unknown job, ``CHUNK_FAILED`` for one
-                whose record and previous copy both fail their checksum.
-        """
+        """Load a job record off the event loop."""
         return await asyncio.to_thread(self.load_job_blocking, job, tenant=tenant)
 
     def load_job_blocking(self, job: str, *, tenant: str | None = None) -> JobRecord:
-        """Load a job record, falling back to the previous good copy.
-
-        Raises:
-            IngestionError: ``NOT_FOUND`` for an unknown job, ``CHUNK_FAILED`` for one
-                whose record and previous copy both fail their checksum.
-        """
+        """Load a job record, falling back to the previous good copy."""
         path = self._job_path(job)
         if not path.exists():
             raise IngestionError(f"unknown ingest job {job!r}", code=ErrorCode.NOT_FOUND)
