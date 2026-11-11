@@ -183,6 +183,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await cache.close()
             app.state.cache = None
 
+        idempotency = getattr(app.state, "idempotency", None)
+        if idempotency is not None:
+            await idempotency.close()
+
         if owns_adapter:
             adapter: VectorDBAdapter = app.state.vector_db
             await adapter.close()

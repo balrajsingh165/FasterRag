@@ -509,6 +509,9 @@ class MemoryIdempotencyStore(IdempotencyStore):
     async def release(self, reservation: Reservation) -> None:
         self.records.pop((reservation.tenant, reservation.key), None)
 
+    async def close(self) -> None:
+        return None
+
 
 def test_a_foreign_backend_drops_in_without_touching_the_middleware(
     app: FastAPI, tmp_path: Path

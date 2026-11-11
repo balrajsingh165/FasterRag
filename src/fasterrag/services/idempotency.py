@@ -41,11 +41,30 @@ and offloading to a thread is the *file* store's business, not its caller's. And
 :class:`Reservation` carries no path: it names the claim, and each backend works out where
 that lives, so nothing filesystem-shaped reaches the middleware.
 
-Expiry is lazy: a record older than its lifetime is taken over by the next request that
-reaches it, so nothing has to sweep the directory. An in-flight reservation uses a much
-shorter lease than a completed record, so a worker that died mid-request frees its key in
-minutes rather than holding it for the full day. Both durations, and the kill switch, come
-from ``reliability.idempotency`` (TASK-0356); the constants below are their defaults.
+Expiry of a *key* is lazy: a record older than its lifetime is taken over by the next
+request that reaches it. An in-flight reservation uses a much shorter lease than a completed
+record, so a worker that died mid-request frees its key in minutes rather than holding it
+for the full day. Both durations, and the kill switch, come from ``reliability.idempotency``
+(TASK-0356); the constants below are their defaults.
+
+**Expiry of a *file* is not lazy, because it cannot be** (TASK-0365). Lazy takeover only
+ever reclaims a key that comes back, and the recommended usage — a fresh UUID per request —
+never returns one, so every keyed request used to leave a file behind for good.
+:meth:`FileIdempotencyStore.reclaim` removes them, and ``_schedule_reclaim`` starts one pass
+*beside* a request rather than inside it, at most once per ``in_flight_lease_seconds`` per
+host. Three properties are what make that safe. The due check is an in-process float, so a
+request that is not due pays no syscall. Exactly one process of N sweeps per interval,
+because the lease is one more record taken with ``O_CREAT | O_EXCL``. And the pass itself
+runs in worker threads, so neither the event loop nor the request that happened to start it
+waits for a directory walk — a pass costs one cold file open per removal, which is seconds
+when a day of garbage has accumulated and is far too much to charge to any one caller
+(``docs/benchmarks.md`` BENCH-0004).
+
+All of that lives on :class:`FileIdempotencyStore` and none of it on
+:class:`IdempotencyStore`: a backend that expires keys natively has nothing to reclaim, and
+a sweeper on the interface would impose a filesystem's problem on every backend. ``close``
+is the exception and is on the interface, because releasing what a backend holds open is not
+a filesystem concern — it is what ``core.rate_limit`` already names for the same reason.
 """
 
 from __future__ import annotations
@@ -53,7 +72,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -72,9 +93,11 @@ __all__ = [
     "IN_FLIGHT_LEASE_SECONDS",
     "MAXIMUM_KEY_LENGTH",
     "MAXIMUM_STORED_BODY_BYTES",
+    "RECLAIM_GRACE_SECONDS",
     "REPLAYED_HEADER",
     "FileIdempotencyStore",
     "IdempotencyStore",
+    "Reclamation",
     "Reservation",
     "StoredResponse",
     "create_idempotency_store",
@@ -96,10 +119,24 @@ DEFAULT_TTL_SECONDS: Final = 24 * 60 * 60
 # longer than the lifetime rather than letting that inversion be configured.
 IN_FLIGHT_LEASE_SECONDS: Final = 15 * 60
 
+# CRITICAL: a record is reclaimed only once it has been expired for this long, never the
+# instant it expires. `claim` takes an expired record over by rewriting it in place, so a
+# sweep that unlinked on expiry alone could delete the fresh reservation a concurrent
+# takeover had just written and free a key whose request is still running. The margin does
+# not close that window — no filesystem offers unlink-if-unchanged, and the envelope is
+# re-read immediately before the unlink to make it as narrow as a read and a syscall — it
+# makes the only eligible records ones nothing has touched for a full minute past their
+# lifetime. It is also what makes a `.tmp` file safe to remove: `write_record` holds one for
+# microseconds, so one this old is a torn write nobody will finish.
+RECLAIM_GRACE_SECONDS: Final = 60
+
 _RECORDS_DIR: Final = "idempotency"
 _UNTENANTED: Final = "_shared"
 _IN_PROGRESS: Final = "in_progress"
 _COMPLETED: Final = "completed"
+_SWEEP_LEASE: Final = ".sweep.json"
+_RECORD_SUFFIX: Final = ".json"
+_TEMPORARY_SUFFIX: Final = ".tmp"
 
 _logger = get_logger(__name__)
 
@@ -127,6 +164,17 @@ class StoredResponse:
     status: int
     media_type: str
     body: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class Reclamation:
+    """What one reclamation pass looked at, opened, and removed."""
+
+    scanned: int = 0
+    opened: int = 0
+    removed: int = 0
+    failed: int = 0
+    duration_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +215,10 @@ class IdempotencyStore(ABC):
     async def release(self, reservation: Reservation) -> None:
         """Free ``reservation``'s key, so the client may retry it immediately."""
 
+    @abstractmethod
+    async def close(self) -> None:
+        """Release whatever this backend holds open, as ``core.rate_limit`` also names."""
+
 
 class FileIdempotencyStore(IdempotencyStore):
     """Keeps each record as one file, which every worker on the host can read."""
@@ -184,11 +236,15 @@ class FileIdempotencyStore(IdempotencyStore):
         self.ttl_seconds = ttl_seconds
         self.lease_seconds = lease_seconds
         self.enabled = enabled
+        self.sweep_interval_seconds = lease_seconds
+        self._next_sweep = _now() + lease_seconds
+        self._sweeping: asyncio.Task[None] | None = None
 
     async def begin(
         self, key: str, *, tenant: str | None, fingerprint: str
     ) -> Reservation | StoredResponse:
         """Claim ``key`` for this request, or return what it returned the first time."""
+        self._schedule_reclaim()
         return await asyncio.to_thread(self.claim, key, tenant=tenant, fingerprint=fingerprint)
 
     async def commit(self, reservation: Reservation, response: StoredResponse) -> None:
@@ -198,6 +254,13 @@ class FileIdempotencyStore(IdempotencyStore):
     async def release(self, reservation: Reservation) -> None:
         """Free ``reservation``'s key, so the client may retry it immediately."""
         await asyncio.to_thread(self.discard, reservation)
+
+    async def close(self) -> None:
+        """Wait for a reclamation pass to finish, so shutdown leaves no orphan behind."""
+        pass_in_flight = self._sweeping
+        self._sweeping = None
+        if pass_in_flight is not None and not pass_in_flight.done():
+            await pass_in_flight
 
     def claim(
         self, key: str, *, tenant: str | None, fingerprint: str
@@ -269,7 +332,197 @@ class FileIdempotencyStore(IdempotencyStore):
     def path_for(self, key: str, tenant: str | None) -> Path:
         """Return the record path, hashed so a client-chosen key cannot escape the root."""
         bucket = text_hash(tenant) if tenant else _UNTENANTED
-        return self.root / bucket / f"{text_hash(key)}.json"
+        return self.root / bucket / f"{text_hash(key)}{_RECORD_SUFFIX}"
+
+    def reclaim(self) -> Reclamation:
+        """Remove every record expired past the grace margin, and every torn write.
+
+        Blocking, and bounded by the directory rather than by the records it removes: an
+        entry young enough to be live is rejected on its modification time alone.
+        """
+        started = time.perf_counter()
+        now = _now()
+        records_before = now - self.ttl_seconds - RECLAIM_GRACE_SECONDS
+        orphans_before = now - RECLAIM_GRACE_SECONDS
+        failures: list[str] = []
+        scanned = opened = removed = 0
+
+        for bucket in self._buckets(failures):
+            for entry, modified in self._files(bucket, failures):
+                scanned += 1
+                if entry.name.endswith(_TEMPORARY_SUFFIX):
+                    if modified <= orphans_before:
+                        removed += self._remove(Path(entry.path), failures)
+                elif entry.name.endswith(_RECORD_SUFFIX) and modified <= records_before:
+                    opened += 1
+                    removed += self._reclaim_record(Path(entry.path), failures)
+
+        self._report(failures, scanned=scanned, removed=removed)
+        return Reclamation(
+            scanned=scanned,
+            opened=opened,
+            removed=removed,
+            failed=len(failures),
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
+
+    def _report(self, failures: list[str], *, scanned: int, removed: int) -> None:
+        """Log one line for a whole pass's failures, never one per file.
+
+        A pass over thousands of records that warns per record is its own incident, so this
+        follows ``TraceStore.prune``: a count, the first failure, and nothing repeated.
+        """
+        if not failures:
+            return
+
+        _logger.warning(
+            "reclamation could not remove every expired idempotency record; those files stay "
+            "on disk and the record store keeps growing past its configured lifetime",
+            extra={
+                "failed": len(failures),
+                "removed": removed,
+                "scanned": scanned,
+                "record_root": str(self.root),
+                "first_failure": failures[0],
+            },
+        )
+
+    def _schedule_reclaim(self) -> None:
+        """Start a reclamation pass beside this request when the interval has elapsed.
+
+        The in-process clock is checked first, so a request that is not due pays no syscall
+        and no task; the strong reference is what keeps a running pass from being collected.
+        """
+        now = _now()
+        if now < self._next_sweep or (self._sweeping is not None and not self._sweeping.done()):
+            return
+
+        self._next_sweep = now + self.sweep_interval_seconds
+        self._sweeping = asyncio.create_task(self._reclaim_if_leased())
+
+    async def _reclaim_if_leased(self) -> None:
+        """Run one pass off the request path, if this process wins the host's sweep lease.
+
+        Every step runs in a worker thread, so a pass over a large directory never holds
+        the event loop; a failure is logged and retried next interval rather than raised at
+        a client whose own request succeeded.
+        """
+        try:
+            if not await asyncio.to_thread(self._take_sweep_lease):
+                return
+            outcome = await asyncio.to_thread(self.reclaim)
+        except (OSError, FasterRagError) as exc:
+            _logger.warning(
+                "expired idempotency records could not be reclaimed; retrying next interval",
+                extra={"detail": str(exc)},
+            )
+            return
+
+        _logger.info(
+            "reclaimed expired idempotency records",
+            extra={
+                "scanned": outcome.scanned,
+                "opened": outcome.opened,
+                "removed": outcome.removed,
+                "duration_ms": round(outcome.duration_ms, 1),
+            },
+        )
+
+    def _take_sweep_lease(self) -> bool:
+        """Return whether this process holds the right to sweep for this interval.
+
+        The lease is one more record taken with ``O_CREAT | O_EXCL``, so N workers on one
+        host do not each walk the directory. Two that find it stale at the same instant can
+        both take it over and both sweep, which costs a duplicated pass and nothing else.
+
+        Raises:
+            FasterRagError: When the lease cannot be written at all.
+        """
+        path = self.root / _SWEEP_LEASE
+        owner = token_hex(8)
+        try:
+            self._create_exclusively(path, {"owner": owner, "created_at": _now()})
+        except FileExistsError:
+            held = self.read_record(path)
+            taken_at = held.get("created_at") if held is not None else None
+            fresh = (
+                isinstance(taken_at, (int, float))
+                and _now() - float(taken_at) < self.sweep_interval_seconds
+            )
+            if fresh:
+                return False
+            self.write_record(path, {"owner": owner, "created_at": _now()})
+            confirmed = self.read_record(path)
+            return confirmed is not None and confirmed.get("owner") == owner
+
+        return True
+
+    def _buckets(self, failures: list[str]) -> Iterator[Path]:
+        """Yield the per-tenant directories, which are the only places records live."""
+        if not self.root.is_dir():
+            return
+
+        try:
+            entries = sorted(self.root.iterdir())
+        except OSError as exc:
+            failures.append(f"{self.root}: {exc}")
+            return
+
+        for entry in entries:
+            if entry.is_dir():
+                yield entry
+
+    def _files(self, bucket: Path, failures: list[str]) -> Iterator[tuple[os.DirEntry[str], float]]:
+        """Yield each regular file in ``bucket`` with its modification time.
+
+        An entry whose age cannot be read is left alone and recorded, because a sweep that
+        cannot see a file is a sweep not reclaiming it. One that vanished mid-pass is the
+        exception: a concurrent ``discard`` removing it is the outcome a pass wanted.
+        """
+        try:
+            with os.scandir(bucket) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_file():
+                            yield entry, entry.stat().st_mtime
+                    except OSError as exc:
+                        if not isinstance(exc, FileNotFoundError):
+                            failures.append(f"{entry.name}: {exc}")
+        except OSError as exc:
+            failures.append(f"{bucket.name}: {exc}")
+
+    def _reclaim_record(self, path: Path, failures: list[str]) -> int:
+        """Remove one record if it is corrupt or expired past the grace, and report it."""
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            if not isinstance(exc, FileNotFoundError):
+                failures.append(f"{path.name}: {exc}")
+            return 0
+
+        record = open_envelope(text)
+        if record is not None and not self._reclaimable(record):
+            return 0
+        return self._remove(path, failures)
+
+    def _remove(self, path: Path, failures: list[str]) -> int:
+        """Unlink one reclaimed file, reporting whether it went."""
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            failures.append(f"{path.name}: {exc}")
+            return 0
+        return 1
+
+    def _reclaimable(self, existing: dict[str, Any]) -> bool:
+        """Return whether a record has been expired long enough to be safe to remove."""
+        created = existing.get("created_at")
+        if not isinstance(created, (int, float)):
+            return True
+
+        completed = existing.get("state") == _COMPLETED
+        lifetime = self.ttl_seconds if completed else self.lease_seconds
+        return _now() - float(created) > lifetime + RECLAIM_GRACE_SECONDS
 
     def _resolve(
         self, existing: dict[str, Any], *, fingerprint: str
