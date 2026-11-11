@@ -16,3 +16,12 @@
 # is still in the history, and still compromised". Until TASK-0315 replaced the action with
 # a pinned binary, the push path scanned one commit and called this clean.
 ce08283cf7ec6f46dff5797320d2d332181a27a2:tests/integration/test_redis_rate_limit.py:generic-api-key:114
+
+# The entry below is the same shape as the one above and was raised by the same rule on
+# 2026-11-11, on the server-backed twin of that file. `SECRET`/`OTHER_SECRET` were caller
+# identities, never credentials -- the point of the fixture is that the limiter hashes a
+# caller's key rather than sending it -- but `SECRET` next to a high-entropy token is what
+# generic-api-key matches, and it matched on entropy alone. Renamed to `CALLER` in the
+# working tree the same day, which stops it recurring and cannot touch the commit that
+# already carries it.
+41188f3d059beb77a00716e18c1639c6e05584ce:tests/integration/test_redis_rate_limit_server.py:generic-api-key:162

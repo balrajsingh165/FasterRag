@@ -45,8 +45,8 @@ pytestmark = pytest.mark.integration
 URL_VAR = "FASTERRAG_TEST_REDIS_URL"
 DEFAULT_URL = "redis://localhost:6379/0"
 
-SECRET = "caller-whose-api-key-must-never-reach-the-server"
-OTHER_SECRET = "a-second-caller-entirely"
+CALLER = "caller-identity-never-sent-to-the-server"
+OTHER_CALLER = "a-second-caller-entirely"
 
 # CRITICAL: bucket-aligned arithmetic depends on this being a plain second, so that
 # FIXED_NOW and FIXED_NOW + WINDOW_SECONDS are guaranteed to be adjacent windows.
@@ -146,7 +146,7 @@ async def test_the_ceiling_is_enforced_at_the_limit(limiters: LimiterFactory) ->
     """N requests pass and N+1 does not, decided by a real server's own INCR replies."""
     limiter = limiters(3)
 
-    decisions = [await limiter.allow(SECRET, now=FIXED_NOW) for _ in range(4)]
+    decisions = [await limiter.allow(CALLER, now=FIXED_NOW) for _ in range(4)]
 
     assert [decision.allowed for decision in decisions] == [True, True, True, False]
     assert decisions[-1].retry_after >= 1
@@ -156,10 +156,10 @@ async def test_a_refusal_is_not_permanent_once_the_window_rolls(limiters: Limite
     """The next window is a different key, so the count restarts rather than being reset."""
     limiter = limiters(2)
     for _ in range(2):
-        assert (await limiter.allow(SECRET, now=FIXED_NOW)).allowed
-    assert not (await limiter.allow(SECRET, now=FIXED_NOW)).allowed
+        assert (await limiter.allow(CALLER, now=FIXED_NOW)).allowed
+    assert not (await limiter.allow(CALLER, now=FIXED_NOW)).allowed
 
-    assert (await limiter.allow(SECRET, now=FIXED_NOW + WINDOW_SECONDS)).allowed
+    assert (await limiter.allow(CALLER, now=FIXED_NOW + WINDOW_SECONDS)).allowed
 
 
 async def test_the_server_expires_the_counter_itself(
@@ -167,8 +167,8 @@ async def test_the_server_expires_the_counter_itself(
 ) -> None:
     """An immortal counter at its ceiling refuses a key forever; the EXPIRE must land."""
     limiter = limiters(1, 0.5)
-    await limiter.allow(SECRET, now=FIXED_NOW)
-    key = limiter._key(SECRET, FIXED_NOW)
+    await limiter.allow(CALLER, now=FIXED_NOW)
+    key = limiter._key(CALLER, FIXED_NOW)
 
     assert 0 < await observer.ttl(key) <= 1
 
@@ -186,10 +186,10 @@ async def test_two_limiters_sharing_a_backend_share_one_ceiling(
     assert first._client is not second._client
 
     for limiter in (first, second, first, second):
-        assert (await limiter.allow(SECRET, now=FIXED_NOW)).allowed
+        assert (await limiter.allow(CALLER, now=FIXED_NOW)).allowed
 
-    assert not (await second.allow(SECRET, now=FIXED_NOW)).allowed
-    assert not (await first.allow(SECRET, now=FIXED_NOW)).allowed
+    assert not (await second.allow(CALLER, now=FIXED_NOW)).allowed
+    assert not (await first.allow(CALLER, now=FIXED_NOW)).allowed
 
 
 async def test_two_limiters_still_count_two_callers_apart(limiters: LimiterFactory) -> None:
@@ -197,10 +197,10 @@ async def test_two_limiters_still_count_two_callers_apart(limiters: LimiterFacto
     first = limiters(1)
     second = limiters(1)
 
-    assert (await first.allow(SECRET, now=FIXED_NOW)).allowed
+    assert (await first.allow(CALLER, now=FIXED_NOW)).allowed
 
-    assert (await second.allow(OTHER_SECRET, now=FIXED_NOW)).allowed
-    assert not (await second.allow(SECRET, now=FIXED_NOW)).allowed
+    assert (await second.allow(OTHER_CALLER, now=FIXED_NOW)).allowed
+    assert not (await second.allow(CALLER, now=FIXED_NOW)).allowed
 
 
 async def test_the_key_carries_a_fingerprint_and_never_the_api_key(
@@ -208,14 +208,14 @@ async def test_the_key_carries_a_fingerprint_and_never_the_api_key(
 ) -> None:
     """Read back off the server, because the credential disclosure would be server-side."""
     limiter = limiters(5)
-    await limiter.allow(SECRET, now=FIXED_NOW)
+    await limiter.allow(CALLER, now=FIXED_NOW)
 
     stored = [_text(key) for key in await observer.keys(f"{namespace}:*")]
 
-    fingerprint = hashlib.sha256(SECRET.encode("utf-8")).hexdigest()[:32]
+    fingerprint = hashlib.sha256(CALLER.encode("utf-8")).hexdigest()[:32]
     bucket = int(FIXED_NOW // WINDOW_SECONDS)
     assert stored == [f"{namespace}:{fingerprint}:{bucket}"]
-    assert SECRET not in stored[0]
+    assert CALLER not in stored[0]
 
 
 async def test_the_transaction_returns_what_the_unit_double_says_it_does(
@@ -223,7 +223,7 @@ async def test_the_transaction_returns_what_the_unit_double_says_it_does(
 ) -> None:
     """The reply shapes the unit suite asserts against a double, read off a server."""
     limiter = limiters(10)
-    key = limiter._key(SECRET, FIXED_NOW)
+    key = limiter._key(CALLER, FIXED_NOW)
 
     pipeline = limiter._client.pipeline(transaction=True)
     pipeline.incr(key)
@@ -251,8 +251,8 @@ async def test_the_real_server_and_fakeredis_agree_on_every_decision(
 
     try:
         moments = [FIXED_NOW] * 5 + [FIXED_NOW + WINDOW_SECONDS] * 2
-        from_server = [await against_server.allow(SECRET, now=at) for at in moments]
-        from_fake = [await against_fake.allow(SECRET, now=at) for at in moments]
+        from_server = [await against_server.allow(CALLER, now=at) for at in moments]
+        from_fake = [await against_fake.allow(CALLER, now=at) for at in moments]
     finally:
         await against_fake.close()
 
