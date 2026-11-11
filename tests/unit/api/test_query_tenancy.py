@@ -13,9 +13,8 @@ import hashlib
 import re
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -222,13 +221,24 @@ def _headers(key: str, tenant: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}", "X-Tenant-ID": tenant}
 
 
-def _body(response: httpx.Response) -> dict[str, Any]:
+class _JsonResponse(Protocol):
+    """The part of a test-client response these helpers touch.
+
+    Structural rather than `httpx.Response`: starlette returns `httpx2.Response` when
+    that package is installed, which it is in CI and is not here, so naming either one
+    makes mypy pass on one machine and fail on the other.
+    """
+
+    def json(self) -> Any: ...
+
+
+def _body(response: _JsonResponse) -> dict[str, Any]:
     """Return the decoded JSON body."""
     decoded: dict[str, Any] = response.json()
     return decoded
 
 
-def _ids(response: httpx.Response) -> list[str]:
+def _ids(response: _JsonResponse) -> list[str]:
     """Return the chunk ids a retrieve response carried."""
     return [str(chunk["chunk_id"]) for chunk in _body(response)["chunks"]]
 
