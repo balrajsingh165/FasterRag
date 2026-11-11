@@ -10,6 +10,7 @@ fasterRag is released as an installable Python package so applications can **imp
 > | Typed error taxonomy — `fasterrag.errors` (same `code`s as the API) | **Shipped** |
 > | `FasterRag` facade — `from_config`, `from_settings`, `ingest`, `query`, `query_stream`, `retrieve`, `estimate`, `index_lock` | **Shipped**. Verified end to end against live Qdrant and OpenAI — a one-off manual run, not a committed test, since a unit run must not depend on a credential or spend money (the standing gap is TASK-0205) |
 > | `FasterRag.doctor`, `.collections`, `.create_collection`, `.drop_collection`, `.replay` | **Shipped** on both facades |
+> | `FasterRag.vector_db`, `.embeddings`, `.cache`, `.journal` | **Shipped** on the async facade only. They hand back the live adapter for callers that need the backend directly; the sync facade has no counterparts, because an async adapter driven from the blocking facade's managed loop is not a thing a caller can hold |
 > | `FasterRag.export_archive` / `.import_archive` | **Not yet wrapped on the facade** (TASK-0079). The archive itself **is** built — `services/archive.py`, `services/archive_import.py`, the `export`/`import` CLI commands, and `POST /v1/admin/export` / `/import` all ship, and a Qdrant round trip is verified against a live backend (TASK-0214 ✅). Only the facade methods are missing |
 > | `fasterrag.sync` blocking facade | **Shipped**. Verified end to end against live Qdrant and OpenAI — a one-off manual run, not a committed test, since a unit run must not depend on a credential or spend money (the standing gap is TASK-0205) |
 > | Entry-point plugin groups (`fasterrag.vectordb` / `.embeddings` / `.llm`) | **Shipped**. All three factories resolve registered plugins; a built-in name always wins, so an installed package cannot silently take over a configured provider |
@@ -72,31 +73,63 @@ The same `config.yaml` + `.env` contract applies ([config-reference.md](config-r
 
 ## Public API surface (beta contract)
 
-Everything importable from the top-level `fasterrag` namespace is public and stable; anything under `fasterrag._internal` or not exported in `__all__` is private and may change without notice.
+Everything a module's `__all__` exports is public and stable; anything else is private and may change without notice, whatever its name suggests. The top-level namespace exports exactly `FasterRag` and `__version__`.
+
+**Every signature in the table below is checked against the shipped facade** by `tests/unit/docs/test_python_api_parity.py` (TASK-0368), which resolves each name with `importlib` and compares it with `inspect.signature` rather than comparing text with text. Drift fails in both directions: a row for a member that does not exist sends a caller into an `AttributeError`, and a public member with no row is stable for nobody.
 
 ### `FasterRag`
 
-| Member | Signature (intended) | Behavior |
+The async facade. Every **method** here has a blocking counterpart of the same name and parameters on the [sync facade](#sync-facade); the four adapter properties do not, because an async adapter driven from the blocking facade's managed loop is not a thing a caller can hold.
+
+| Member | Signature | Behavior |
 |---|---|---|
-| `FasterRag.from_config` | `(path: str \| Path = "config.yaml") -> FasterRag` | Load + validate config, build adapters via factories. No I/O to backends yet. |
-| `FasterRag.from_settings` | `(settings: Settings) -> FasterRag` | Construct from an in-memory validated `Settings` object (for embedding in apps that manage their own config). |
-| `__aenter__` / `__aexit__` | async context manager | Startup: connect adapters, run health checks, start in-process worker pools sized per `workers.*`. Shutdown: drain queues, flush journal, close connections. |
-| `ingest` | `(sources: list[str \| Source], *, collection: str \| None = None, metadata: dict \| None = None, priority_class: str \| None = None) -> IngestJob` | Async accept, identical semantics to `POST /v1/ingest` (journaled, deduplicated, DLQ on failure). |
-| `query` | `(text: str, *, collection: str \| None = None, top_k: int \| None = None, filters: dict \| None = None) -> QueryResult` | Full pipeline: hybrid retrieve → RRF → rerank → assemble → generate. |
-| `query_stream` | `(...) -> AsyncIterator[QueryEvent]` | Streaming variant; yields `meta`, `token`, `citations`, `usage`, `done` events mirroring the SSE contract. |
-| `retrieve` | `(text: str, *, top_k: int \| None = None, filters: dict \| None = None, rerank: bool \| None = None) -> list[ScoredChunk]` | Retrieval only — no generation. For apps that bring their own LLM step. |
-| `collections` | `CollectionsAPI` | `list()`, `create()`, `delete()`, `reindex()` (blue/green, eval-gated), `rollback()`, `verify_lock()`. |
-| `estimate` | `(sources: list[str \| Source]) -> Estimate` | D9 preflight: token counts, projected embedding cost/time per provider. Raises `FasterRagError` (`VALIDATION_FAILED`) when `cost.estimator` is false — the library obeys the same switch as the CLI and the API. |
-| `doctor` | `() -> DoctorReport` | D10 diagnostics; each check has `passed: bool` and `fix: str`. |
-| `replay` | `(trace_id: str, config_overrides: dict) -> ReplayDiff` | D8 side-by-side replay diff. |
-| `export_archive` / `import_archive` | `(path, *, include_vectors=False)` / `(path, *, reembed=False)` | D11 portability. |
+| `from_config` | `(path: str \| Path = "config.yaml") -> FasterRag` | Classmethod. Load + validate config and build adapters via factories. No I/O to backends yet, and `.env` is exported for the adapters that read credentials from the environment. |
+| `from_settings` | `(settings: Settings) -> FasterRag` | Classmethod. Construct from an in-memory validated `Settings` object, for apps that manage their own config. |
+| `__aenter__` / `__aexit__` | async context manager | Startup: connect adapters, run health checks, start in-process worker pools sized per `workers.*`. Shutdown: close each backend independently, so one refusing to shut down cleanly does not strand the others. |
+| `settings` | attribute | The validated `Settings` this instance was built from. |
+| `ingest` | `(sources: Sequence[str], *, collection: str \| None = None, metadata: dict[str, Any] \| None = None, tenant: str \| None = None, idempotency_key: str \| None = None) -> JobRecord` | Awaits completion and returns the settled job, rather than returning a job id the way `POST /v1/ingest` does. Journaled, deduplicated, DLQ on failure. |
+| `query` | `(text: str, *, collection: str \| None = None, top_k: int \| None = None, filters: Mapping[str, Any] \| None = None) -> Answer` | Full pipeline: hybrid retrieve → RRF → rerank → assemble → generate. |
+| `query_stream` | `(text: str, *, collection: str \| None = None, top_k: int \| None = None, filters: Mapping[str, Any] \| None = None) -> AsyncIterator[QueryEvent]` | Streaming variant, mirroring the SSE contract event for event. |
+| `retrieve` | `(text: str, *, collection: str \| None = None, top_k: int \| None = None, filters: Mapping[str, Any] \| None = None) -> list[ScoredChunk]` | Retrieval only — no generation, for apps that bring their own LLM step. Reranking follows `retrieval.rerank.*` rather than a per-call flag. |
+| `collections` | `() -> list[CollectionInfo]` | What the configured vector DB holds, as the adapter reports it. |
+| `create_collection` | `(name: str, *, distance: str \| None = None, shard_number: int = 1, replication_factor: int = 1) -> None` | Create a collection sized to the configured embedding dimensions. |
+| `drop_collection` | `(name: str) -> bool` | Delete a collection; `False` when there was none to delete. |
+| `estimate` | `(sources: Sequence[str], *, all_providers: bool = False) -> Estimate` | D9 preflight, and the one call on this table that is not a coroutine: it parses and counts locally and reaches no provider. Raises `FasterRagError` (`VALIDATION_FAILED`) when `cost.estimator` is false — the library obeys the same switch as the CLI and the API. |
+| `doctor` | `() -> DoctorReport` | D10 diagnostics; each check carries its own `passed` flag and `fix` string. |
+| `replay` | `(trace_id: str, candidate: Settings \| None = None) -> ReplayResult` | D8 side-by-side replay of a journaled trace, optionally against a candidate configuration. |
+| `index_lock` | `(collection: str \| None = None) -> IndexLock \| None` | The identity an index was built under, or `None` when the collection has never been written. |
+| `vector_db` | property | The live `VectorDBAdapter`. Every property here raises `CONFIG_INVALID` outside `async with`, naming the context manager, rather than failing later somewhere unrelated. |
+| `embeddings` | property | The live `TieringRouter` over the configured embedding providers. |
+| `cache` | property | The live `SemanticCache`. |
+| `journal` | property | The live `Journal`, for reading job and trace records directly. Its operations are **coroutines** — `await journal.load_job(job_id)` — each running the matching `*_blocking` twin in a worker thread so journal I/O never holds the caller's event loop (TASK-0399). The twins are public and are what a synchronous caller or a test fixture uses. |
 
-### Result models (frozen Pydantic models)
+#### Documented as deliberately absent
 
-- `QueryResult`: `answer: str | None`, `citations: list[Citation]`, `usage: Usage`, `timings_ms: Timings`, `degraded: bool`, `mode: str`, `faithfulness: float | None`, `trace_id: str`, `insufficient_evidence: bool` (D5 — `answer is None` when refused).
-- `Citation`: `chunk_id`, `source`, `page`, `span (start, end)`, `score`.
-- `ScoredChunk`: `chunk_id`, `text`, `metadata`, `dense_rank`, `bm25_rank`, `rrf_score`, `rerank_score | None`.
-- `IngestJob`: `job_id`, `status`, `counts`, `await job.wait(timeout=None)`, `async for doc in job.documents(status="dead_lettered")`, `await job.retry_dlq()`.
+Specified, built everywhere else, and deliberately not wrapped on the facade yet. These are **not** rows in the table above, because a row is a promise a caller may call today. The parity gate reads this table as its own third state: each entry must still be missing from both facades and must still cite the task that closes it, so the entry cannot outlive the gap it records.
+
+| Absent member | Closed by | Why it is absent |
+|---|---|---|
+| `export_archive` | TASK-0079 | D11 portability is built — `services/archive.py`, the `export` CLI command and `POST /v1/admin/export` all ship, and a Qdrant round trip is verified against a live backend (TASK-0214 ✅). Only the facade wrapper is missing. |
+| `import_archive` | TASK-0079 | As above, against `services/archive_import.py`, the `import` CLI command and `POST /v1/admin/import`. |
+
+### Result types
+
+Dataclasses rather than Pydantic models: they leave the service layer already validated, and a second validation pass on every answer buys nothing. Each list below is the type's complete field set, computed properties included; the parity gate fails on a field this document invents and on one it omits.
+
+Every one of them is frozen except `JobRecord`, which a running job is updated in place as it progresses — so a caller holding one is holding a view that can move under it, and should copy what it needs.
+
+- `Answer` (`fasterrag.services.generation`) — `answer`, `citations`, `mode`, `trace_id`, `prompt_tokens`, `completion_tokens`, `timings_ms`, `faithfulness`, `threshold`, `best_candidates`, `cache`, `truncated`, `estimated_cost_usd`, `evidence_dropped`, and the computed `degraded`, `insufficient_evidence`.
+- `Citation` (`fasterrag.services.generation`) — `chunk_id`, `source`, `page`, `span`, `score`.
+- `QueryEvent` (`fasterrag.services.generation`) — `type`, `data`.
+- `ScoredChunk` (`fasterrag.retrieval`) — `chunk_id`, `text`, `payload`, `dense_rank`, `dense_score`, `bm25_rank`, `bm25_score`, `rrf_score`, `rerank_score`, `final_rank`, and the computed `document_id`, `source`, `found_by_both_legs`.
+- `JobRecord` (`fasterrag.services.journal`) — `job_id`, `collection`, `status`, `counts`, `sources`, `checkpoint`, `started_at`, `finished_at`, `idempotency_key`, `tenant`.
+- `Estimate` (`fasterrag.services.estimation`) — `documents`, `unreadable`, `chunks`, `tokens`, `bytes_read`, `providers`, `parse_seconds`, `projected_seconds`, `projection_note`, `enrichment`.
+- `DoctorReport` (`fasterrag.services.doctor`) — `checks`, and the computed `passed`, `failures`.
+- `ReplayResult` (`fasterrag.services.replay`) — `trace_id`, `query`, `config_changes`, `retrieval`, `original_answer`, `replayed_answer`, `original_citations`, `replayed_citations`, and the computed `answer_changed`, `deterministic`.
+- `CollectionInfo` (`fasterrag.adapters.vectordb.base`) — `name`, `vectors`, `dimensions`, `distance`, `sparse`.
+- `IndexLock` (`fasterrag.services.lockfile`) — `collection`, `config_hash`, `embedding_model`, `embedding_model_version`, `dimensions`, `chunker_strategy`, `chunker_version`, `chunk_size`, `overlap`, `contextual_enrichment`, `identity_version`, `document_hashes`, `built_at`, `built_by`, `lock_version`.
+
+D5's refusal is `Answer.insufficient_evidence`, and the answer text is `None` when it fires.
 
 ### Exceptions
 
@@ -108,9 +141,10 @@ from fasterrag.errors import (
     EmbedError, RetrievalError, GenerationError, ProviderError, CacheError,
     ProvisioningError,
 )
+from fasterrag.errors import ErrorCode, ProblemSpec, problem_spec, PROBLEM_SPECS, PROBLEM_TYPE_BASE
 ```
 
-Every exception carries `code` (identical to the API's problem `code`), `trace_id`, and `retryable`. Library and API surface the same error identities — a wrapper service can pass `code` straight through.
+Every exception carries `code` (identical to the API's problem `code`), `trace_id`, and `retryable`. Library and API surface the same error identities — a wrapper service can pass `code` straight through. The second line is the problem table itself: `ErrorCode` is the enum of stable codes, `problem_spec` and `PROBLEM_SPECS` map a code to its RFC 9457 `ProblemSpec` (HTTP status, title, retryability), and `PROBLEM_TYPE_BASE` is the URI prefix those `type` fields are built on. A wrapper service that renders its own problem documents reads them from here rather than restating them.
 
 ### Sync facade
 
@@ -145,12 +179,16 @@ from fasterrag.parsing import parse_document            # -> ParsedDocument (rea
 from fasterrag.chunking import RecursiveChunker, SemanticChunker, LayoutChunker
 from fasterrag.retrieval import rrf_fuse                # Reciprocal Rank Fusion, k=60 default
 from fasterrag.rerank import CrossEncoderReranker
-from fasterrag.evals import evaluate                    # recall@k, MRR, nDCG, faithfulness
+from fasterrag.evals import evaluate                    # recall@k, MRR, nDCG
 
 chunks = RecursiveChunker(chunk_size=768, overlap=64).split(parse_document("spec.pdf"))
 fused = rrf_fuse(dense_ranking, bm25_ranking, k=60)
-report = evaluate(golden_set, retriever=my_retriever)
+
+async def score() -> None:
+    report = await evaluate(golden_set, retriever=my_retriever)
 ```
+
+Parsing, chunking and fusion are synchronous; `evaluate` runs the retriever it is given, so it is a coroutine and must be awaited. Calling it without `await` hands back a coroutine object rather than a report, which is why the parity gate checks the `await` in this very snippet against `inspect.iscoroutinefunction`.
 
 Each standalone component obeys the same contracts (typed errors, docstrings, tested invariants) as the full pipeline. A standalone parser needs no `config.yaml`: `parse_document`/`parse_bytes` apply the shipped defaults and accept `options=ParsingOptions(...)` to override the [`parsing`](config-reference.md#parsing) thresholds — the OCR trigger and DPI, the PDF heading rules, and CSV row grouping. Inside the pipeline the same object is built from configuration by `create_parsing_options(settings)`.
 
@@ -172,7 +210,7 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/answer")
 async def answer(q: str):
     result = await app.state.rag.query(q)
-    return {"answer": result.answer, "citations": [c.model_dump() for c in result.citations]}
+    return {"answer": result.answer, "citations": [c.as_dict() for c in result.citations]}
 ```
 
 Deployment note: in-process worker pools are suitable for small/medium loads; for heavy ingestion run dedicated `fasterrag worker` processes against the same config and queue backend ([deployment.md](deployment.md)).
@@ -186,9 +224,11 @@ Third parties add providers by implementing the adapter base classes and registe
 mydb = "my_pkg.adapter:MyDBAdapter"
 ```
 
-- `fasterrag.vectordb` → subclass `VectorDBAdapter` (`create_collection`, `upsert`, `search`, `update`, `delete`, `health`).
-- `fasterrag.embeddings` → subclass `EmbeddingAdapter`.
-- `fasterrag.llm` → subclass `LLMAdapter`.
+Each line below names the entry-point group, the base class and every abstract member a conformant plugin must implement. The lists are compared with the base class's own abstract-method set, because a plugin author implements what this document says and a name missing here is a plugin that will not instantiate.
+
+- `fasterrag.vectordb` → subclass `VectorDBAdapter` (`from fasterrag.adapters.vectordb.base import VectorDBAdapter`): `alias_target`, `close`, `create_collection`, `delete`, `delete_alias`, `delete_snapshot`, `drop_collection`, `health`, `iterate_points`, `list_collections`, `list_snapshots`, `restore_snapshot`, `search`, `set_alias`, `snapshot`, `update`, `upsert`
+- `fasterrag.embeddings` → subclass `EmbeddingAdapter` (`from fasterrag.adapters.embeddings.base import EmbeddingAdapter`): `close`, `dimensions`, `embed_documents`, `embed_query`, `health`, `model`, `model_version`
+- `fasterrag.llm` → subclass `LLMAdapter` (`from fasterrag.adapters.llm.base import LLMAdapter`): `close`, `complete`, `health`, `stream`
 
 A registered provider becomes selectable in `config.yaml` (`vector_db.provider: mydb`) and MUST pass the shared **adapter contract test suite** ([testing-strategy.md](testing-strategy.md)) to be considered conformant.
 
@@ -198,5 +238,6 @@ A registered provider becomes selectable in `config.yaml` (`vector_db.provider: 
 |---|---|
 | `fasterrag` top-level exports, `fasterrag.errors`, `fasterrag.sync` | SemVer-stable public API. |
 | Adapter base classes + entry-point group names | SemVer-stable extension contract. |
-| `fasterrag._internal.*` | No guarantees. |
-| Result-model fields | Additive-only within a major version. |
+| Standalone components — `fasterrag.parsing`, `.chunking`, `.retrieval`, `.rerank`, `.evals` | Shipped and importable, but **not yet** under the SemVer promise: they are listed separately because promising them means documenting every name they export, which is open work, not a decision already taken. |
+| Anything a module's `__all__` does not export | No guarantees. |
+| Result-type fields | Additive-only within a major version. |
