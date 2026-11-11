@@ -15,6 +15,15 @@ server exposing only 8080 skips here rather than failing halfway through the run
 
 Pointing it at a real server is the whole remaining step, and it is tracked rather than
 hidden (TASK-0049).
+
+``deploy/compose.test-backends.yml`` is now that server, publishing both ports this
+module needs, so this suite needs no environment variable against it::
+
+    docker compose -f deploy/compose.test-backends.yml up -d --wait
+    pytest -m integration tests/integration/weaviate -rs
+
+CI still starts nothing, so every case here still skips there; docs/testing-strategy.md
+§3.1 carries the count and what wiring it costs (TASK-0352).
 """
 
 from __future__ import annotations

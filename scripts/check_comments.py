@@ -30,7 +30,10 @@ The rules:
   were never read, so the file was reported clean because it could not be opened: a vacuous
   pass of exactly the kind the guard below exists to prevent, one file at a time instead of
   the whole tree (TASK-0342). A finding rather than a log line, because this gate runs in
-  CI where nothing reads a log and only the exit code is read.
+  CI where nothing reads a log and only the exit code is read. It is written out here rather
+  than shared with the two sibling gates that also carry it; the measurement behind that
+  choice, including why the usual ``-o pythonpath=`` justification for it is false, is in
+  ``check_error_taxonomy.py``'s module docstring (TASK-0373).
 * ``vacuous-scan`` (error) — the scan matched no files, tokenized no comments at all, or
   recognised no markers anywhere. Any of the three means the gate proved nothing, and a gate
   that cannot tell "clean" from "broken" is worse than no gate (rebuild-playbook trap T12).

@@ -1,0 +1,134 @@
+# The Milvus and Weaviate servers the contract suites under tests/integration/ point at.
+#
+# WHY THIS FILE EXISTS. The Qdrant, pgvector and Chroma suites provision their own backend
+# from a fixture. The Milvus and Weaviate suites deliberately do not: the machine both
+# adapters were written on has no Docker daemon (B7.2), and shipping an untested `docker run`
+# from a fixture would have made those suites *look* provisioned and skip for the wrong
+# reason forever. Both conftests say so and point here instead — they connect to a server an
+# operator already runs, and skip with the connection error when nothing answers.
+#
+# Which is exactly what happened in CI, every push, for as long as both adapters have
+# existed. Re-measured on run 42972651661 (`integration` job 130364472851, `main` at
+# `882a07e`, 2026-11-11): **99 of 380 selected cases skipped, 45 Milvus and 53 Weaviate,
+# both suites entire**, and the job concluded success in 2 m 21 s. The adapters' unit
+# coverage is the highest in the adapter set — milvus.py 94%, weaviate.py 95%, measured the
+# same day — and every line of it was measured against a fake. This file is what a real
+# server costs.
+#
+# Usage, locally or in a CI job that has a Docker daemon:
+#
+#   docker compose -f deploy/compose.test-backends.yml up -d --wait
+#   pytest -m integration tests/integration/milvus tests/integration/weaviate -rs
+#   docker compose -f deploy/compose.test-backends.yml down -v
+#
+# `--wait` is load-bearing: every service below declares a healthcheck, Milvus takes up to
+# ninety seconds to answer one, and a suite that starts before the server does would skip
+# with a connection error — which is the failure this file exists to remove, reappearing as
+# a race.
+#
+# The defaults in both conftests (`localhost:19530`, `localhost:8080`, `localhost:50051`)
+# are what the published ports below serve, so neither FASTERRAG_TEST_MILVUS_URI nor
+# FASTERRAG_TEST_WEAVIATE_HTTP needs setting against this stack.
+#
+# NO CREDENTIALS, AND ONE CASE PER SUITE IS NOT EXERCISED BY THAT. Milvus runs with
+# authorization off and Weaviate with anonymous access on, so neither server rejects a bad
+# credential — and both contract suites override `misconfigured_adapter` precisely to prove
+# that the adapter surfaces an auth failure as a typed error (one case,
+# `test_invalid_credentials_are_not_retryable`). Against this stack that case asserts nothing it could
+# not assert against an open door, so **44 of 45 Milvus and 52 of 53 Weaviate cases are
+# what this file buys**, not all of them. The
+# alternative was an `AUTHENTICATION_APIKEY_ALLOWED_KEYS` value and a Milvus
+# `authorizationEnabled` override written into this file, which puts a credential in YAML
+# where CLAUDE.md does not allow one and pins the suites to a key nobody rotates. Turning
+# auth on, with the key read from the environment, is the follow-up and is tracked rather
+# than quietly skipped.
+#
+# CRITICAL: the Milvus half is the upstream standalone topology, taken from
+# milvus-io/milvus at tag v2.5.14 (deployments/docker/standalone/docker-compose.yml) and
+# changed only by removing the host volume mounts, since a CI runner wants no state that
+# outlives the job. Milvus standalone is three containers, not one: it needs etcd for
+# metadata and an S3-compatible store for segments, and the single-container "embedded etcd"
+# recipe needs mounted config files that differ between minor versions. Do not simplify this
+# to one service.
+
+name: fasterrag-test-backends
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 20s
+      retries: 6
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 20s
+      retries: 6
+
+  milvus:
+    image: milvusdb/milvus:v2.5.14
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      MINIO_REGION: us-east-1
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      start_period: 120s
+      timeout: 20s
+      retries: 12
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # CRITICAL: both ports are published because the v4 client refuses to work over HTTP
+  # alone. A stack exposing only 8080 makes the suite skip halfway through its probe, which
+  # is the shape of failure this whole file exists to remove.
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.28.4
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --scheme
+      - http
+    environment:
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      DEFAULT_VECTORIZER_MODULE: none
+      ENABLE_MODULES: ""
+      CLUSTER_HOSTNAME: node1
+      QUERY_DEFAULTS_LIMIT: "25"
+    healthcheck:
+      test:
+        ["CMD", "wget", "-qO", "/dev/null", "http://localhost:8080/v1/.well-known/ready"]
+      interval: 5s
+      timeout: 10s
+      retries: 24
+    ports:
+      - "8080:8080"
+      - "50051:50051"

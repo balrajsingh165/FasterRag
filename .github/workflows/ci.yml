@@ -42,32 +42,47 @@ jobs:
       # The audit found CLAUDE.md and README both claiming a documentation-only repository
       # over ~200 shipped modules. CLAUDE.md is loaded as instructions every session, so a
       # false claim there is followed, not just read.
+      # CRITICAL: every gate below carries `if: !cancelled()` so each reports its own
+      # verdict. Without it they run in sequence after Typecheck with no condition, and on
+      # run 42522906097 a Typecheck failure reported all nine as `skipped` -- which reads as
+      # "not applicable" rather than "unknown". TASK-0338's widened scan and TASK-0342's
+      # unreadable rule were committed on 2026-11-08 and first executed on 2026-11-11 for
+      # exactly that reason: a gate that is declared, committed, and never run.
       - name: Docs match the repository
+        if: ${{ !cancelled() }}
         run: python scripts/check_doc_truth.py
 
       # Endpoint drift is silent both ways: an undocumented route ships a surface clients
       # find by accident, and a documented-but-absent one promises a 404. Neither shows up
       # in a test suite, because each half is individually correct.
       - name: API matches its reference
+        if: ${{ !cancelled() }}
         run: python scripts/check_openapi_drift.py
 
       # blockers.md is a view over todo.md, and a drifted view is worse than none: it either
       # hides a live blocker or presents a resolved one, and a reader cannot tell which.
       - name: Blockers view matches the ledger
+        if: ${{ !cancelled() }}
         run: python scripts/check_blockers.py
 
       # Three separate rounds shipped documents asserting that already-built work did not
       # exist, each caught by eye. A denial that cites a task the ledger has ticked is stale
       # by the ledger's own account, and that much is machine-checkable.
       - name: Denials still cite open work
+        if: ${{ !cancelled() }}
         run: python scripts/check_claims.py
 
       # The gate above asks the ledger; this one asks the tree, because an umbrella id keeps
       # every denial citing it green. TASK-0049 covers six adapters and stayed correctly open
       # while Chroma, Milvus and Weaviate shipped under it, so five documents called built
       # adapters unbuilt on three separate days and every check passed. A factory registry and
-      # a filesystem decide existence without reading a task id at all.
+      # a filesystem decide existence without reading a task id at all. It now also reads the
+      # pytest marker registry (TASK-0369) and inherits a denial from a table column header or
+      # a prose lead-in label (TASK-0371) — README's "Not yet" column carried no denial verb in
+      # any cell, which is how shipped adapters and a shipped test tier sat in it. Measured
+      # over four trees: 574 tables, 1,177 tier mentions, 3 findings, every one real.
       - name: Denials match the tree, not just the ledger
+        if: ${{ !cancelled() }}
         run: python scripts/check_unbuilt_claims.py
 
       # The sibling gates above all scan docs/ and none opens a .py file, so a docstring or
@@ -75,6 +90,7 @@ jobs:
       # which is how three rate-limit modules kept pointing at finished work. CI only: the
       # maintainer directed that doc gates stay out of pre-commit.
       - name: Task ids cited in code resolve
+        if: ${{ !cancelled() }}
         run: python scripts/check_task_ids.py
 
       # ruff's E722 catches a bare `except:` and stops there, so until this gate nothing
@@ -84,6 +100,7 @@ jobs:
       # gate, not a doc gate, so the maintainer's pre-commit exclusion for doc gates does
       # not apply. Measured at 1.67-1.83 s locally on Windows, interpreter start included.
       - name: Typed error taxonomy holds
+        if: ${{ !cancelled() }}
         run: python scripts/check_error_taxonomy.py
 
       # ruff has no rule for "this comment is prose" and mypy never reads one, so until this
@@ -93,11 +110,13 @@ jobs:
       # a documentation diff. A code gate, not a doc gate, so the pre-commit exclusion does
       # not apply. Measured at 0.37-0.39 s locally on Windows, interpreter start included.
       - name: Only permitted comments exist
+        if: ${{ !cancelled() }}
         run: python scripts/check_comments.py
 
       # The four mechanical places a version lives cannot be edited atomically by hand, and
       # a tree halfway through a stamp ships a wheel that contradicts its own README.
       - name: Version is coherent across the tree
+        if: ${{ !cancelled() }}
         run: python scripts/stamp_release.py --check
 
       # `-rs` prints every skip with its reason. A test that skips on every platform is
@@ -106,7 +125,23 @@ jobs:
       # local collection count (TASK-0328). Measured on run 42411261475: 7 of 3486 selected
       # tests skip here, and the same 7 skip on the windows job.
       - name: Unit tests
+        env:
+          FASTERRAG_MUST_RUN_REPORT: must-run-reports/must-run-ubuntu.json
         run: pytest -m "not integration and not eval" -rs --cov --cov-report=term-missing
+
+      # The other half of `-rs`, and the half a reader cannot skip (TASK-0349). The variable
+      # above makes tests/conftest.py write what this lane did with every `must_run` test;
+      # the `must-run` job at the foot of this file reads this artifact beside the windows
+      # one and fails when a marked test skipped in both. It is set on THIS step only — the
+      # two coverage runs below invoke pytest again and would overwrite the document with
+      # whatever their own `-m` selection saw.
+      - name: Upload this lane's must-run report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: must-run-ubuntu
+          path: must-run-reports/must-run-ubuntu.json
+          if-no-files-found: error
 
       # Scoped to the packages docs/testing-strategy.md gates, not the whole tree. A
       # repository-wide threshold is diluted by CLI plumbing and API wiring, so it can stay
@@ -177,7 +212,22 @@ jobs:
       # `-rs` for the reason the quality job carries it: the two platforms' skip lists are
       # only comparable when both are printed (TASK-0328).
       - name: Unit tests
+        env:
+          FASTERRAG_MUST_RUN_REPORT: must-run-reports/must-run-windows.json
         run: pytest -m "not integration and not eval" -rs
+
+      # This platform is half of the comparison the `must-run` job makes, and the half that
+      # makes the rule "ran SOMEWHERE" rather than "ran everywhere": the symlink confinement
+      # cases legitimately skip on a Windows account without SeCreateSymbolicLinkPrivilege,
+      # so a verdict read from one platform alone would either fail a correct run or accept
+      # one that skipped on both (TASK-0349).
+      - name: Upload this lane's must-run report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: must-run-windows
+          path: must-run-reports/must-run-windows.json
+          if-no-files-found: error
 
   # The only job that exercises what a `pip install fasterrag` user actually receives.
   # Nothing else can: pytest puts src/ on sys.path, so the whole suite imports the checkout
@@ -421,6 +471,77 @@ jobs:
               exit 1 ;;
           esac
 
+  # TASK-0349. `-rs` on every pytest invocation above prints each skip with its reason,
+  # which makes a skip legible to somebody who reads the log; it does not make one impossible
+  # to ignore. The census that found "all seven unit-lane skips skip on both platforms" was
+  # produced by diffing progress dots against a local collection count, by hand, once — and a
+  # test that skips on every platform is indistinguishable from a test that does not exist,
+  # with the build green either way.
+  #
+  # So `@pytest.mark.must_run` is a claim — *this test executes somewhere in CI* — and this
+  # job is what the claim costs. Its own job rather than a step on `quality`, because the
+  # evidence spans two runners: `windows` runs in parallel and its report cannot be read
+  # until it finishes, which is what `needs` is for.
+  #
+  # The rule is RAN AT LEAST ONCE, never "ran everywhere". The symlink confinement cases
+  # cannot run on a Windows account without SeCreateSymbolicLinkPrivilege, and skipping
+  # there while running on Linux is the correct outcome; skipping on BOTH is the bug, because
+  # the confinement guard's symlink leg is then unverified everywhere. scripts/check_must_run.py
+  # keeps the two platforms' verdicts apart and prints both, rather than flattening them.
+  #
+  # The roster is collected here rather than taken from a lane, and that is the vacuity guard
+  # this gate's shape demands: a lane can only report on tests it collected, so a test marked
+  # must_run and left in a lane CI never runs would appear in no report at all, and "absent
+  # everywhere" must not read as "nothing to check". `-m must_run` overrides the marker filter
+  # in `addopts`, so the collection sees the eval and integration tiers too. If a marked test
+  # ever lands in a lane that does not set FASTERRAG_MUST_RUN_REPORT, this job fails with
+  # `ran-nowhere` naming every lane — wire that lane, do not unmark the test.
+  must-run:
+    runs-on: ubuntu-latest
+    needs: [quality, windows]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # A pattern that matches nothing fails the download, and the gate below fails again on
+      # the empty directory. Both are deliberate: an artifact that silently did not arrive is
+      # the obvious way for this job to go green having read nothing.
+      - name: Download both lanes' must-run reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: must-run-*
+          merge-multiple: true
+          path: must-run-reports
+
+      # Exit 5 is pytest's "no tests collected", which here means the marker is registered
+      # and nothing carries it. That is a finding rather than a crash, so it is handed to the
+      # gate — which names it `empty-roster` and fails with an explanation. Any other non-zero
+      # exit is collection itself breaking, and is reported as that.
+      - name: Collect the roster of tests claiming the marker
+        env:
+          FASTERRAG_MUST_RUN_REPORT: roster/roster.json
+        run: |
+          set +e
+          pytest -m must_run --collect-only -q
+          collected=$?
+          set -e
+          if [ "${collected}" -ne 0 ] && [ "${collected}" -ne 5 ]; then
+            echo "::error::collecting the must_run roster exited ${collected}, so the gate below has no authoritative set to check against"
+            exit 1
+          fi
+
+      - name: Every must-run test ran in at least one lane
+        run: python scripts/check_must_run.py --roster roster/roster.json must-run-reports
+
   commit-messages:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
@@ -437,3 +558,52 @@ jobs:
         run: |
           python scripts/check_commit_message.py \
             --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
+  # Nothing in this repository read the Actions API until now, and that is the whole reason
+  # `main` was red for 81 days (TASK-0261) and then again from 2026-11-08 to 2026-11-11
+  # (TASK-0313) with every local signal green. The pre-commit hook passes on the developer's
+  # machine, so each commit looks green to the person making it, and the only evidence to
+  # the contrary lives in a tab nobody opens.
+  #
+  # This job fails the push run — the run attached to the commit, shown in the merge box,
+  # emailed on failure — when any OTHER workflow's last conclusion on `main` is not green.
+  # It is deliberately not filtered by trigger: on 2026-11-07 `main` was green on the `ci`
+  # push run and simultaneously red on the `security` and `nightly` SCHEDULED runs of the
+  # same commit, so a check that read only the visible trigger would reproduce the bug.
+  #
+  # `--exclude ci.yml` is required, not a convenience. A workflow that gates on its own
+  # previous conclusion has no working state: treat its own last red as a failure and the
+  # push that fixes the cause still reads that red and fails, so the branch can never return
+  # to green; excuse it and it excuses every red, because the latest completed `ci.yml` run
+  # on `main` is always an ancestor of the commit under test. Self-checking is deadlocked or
+  # vacuous, with nothing in between — and `ci.yml`'s own verdict is the one already visible.
+  #
+  # The anonymous GitHub budget is 60 requests an hour per ADDRESS, shared with every other
+  # job on this runner, so the step authenticates with the workflow's own `actions: read`
+  # token rather than gambling on a neighbour's spend. `fasterrag ci-status` never reads a
+  # token it was not handed the name of.
+  branch-verdict:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      # Exits 1 on a red or never-completed workflow and 3 when the API could not be read.
+      # Never 0 for either: a check that goes green because it could not ask is the same
+      # defect as the gate it replaces, and TASK-0314/0315/0316 are what that costs.
+      - name: Every other workflow's last conclusion on main is green
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: fasterrag ci-status --branch main --exclude ci.yml --token-env GITHUB_TOKEN

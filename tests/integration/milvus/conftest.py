@@ -14,6 +14,15 @@ So the suite points at a Milvus an operator already runs, named by
 ``FASTERRAG_TEST_MILVUS_URI`` or defaulting to ``localhost:19530``, and skips with the
 connection error when nothing answers. Pointing it at a real server is the whole
 remaining step, and it is tracked rather than hidden (TASK-0049).
+
+``deploy/compose.test-backends.yml`` is now that server, pinned and published on the
+default port above, so this suite needs no environment variable against it::
+
+    docker compose -f deploy/compose.test-backends.yml up -d --wait
+    pytest -m integration tests/integration/milvus -rs
+
+CI still starts nothing, so every case here still skips there; docs/testing-strategy.md
+§3.1 carries the count and what wiring it costs (TASK-0352).
 """
 
 from __future__ import annotations

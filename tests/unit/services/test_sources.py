@@ -377,6 +377,7 @@ def link(target: Path, name: Path) -> bool:
     return True
 
 
+@pytest.mark.must_run
 async def test_a_symlink_out_of_an_allowed_root_is_refused(tmp_path: Path) -> None:
     """The other half of resolve-before-compare, which `..` alone does not prove.
 
@@ -399,6 +400,7 @@ async def test_a_symlink_out_of_an_allowed_root_is_refused(tmp_path: Path) -> No
         await resolve_sources([{"type": "path", "value": str(allowed / "innocent.md")}], configured)
 
 
+@pytest.mark.must_run
 def test_a_symlink_out_of_an_allowed_archive_root_is_refused(tmp_path: Path) -> None:
     """The same escape against the verb that WRITES the file the caller names."""
     allowed = tmp_path / "archives"

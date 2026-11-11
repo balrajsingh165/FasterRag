@@ -19,22 +19,50 @@ and ask the tree, for the narrow set of claims where the tree gives a yes or no:
 * **the structure map.** ``docs/structure.md`` states its own contract in its second line:
   "paths marked *(pending)* do not exist yet; everything else is in the tree today". Both
   halves are decidable against the filesystem, and both halves were wrong — six stale
-  ``(pending)`` markers on modules that shipped, and three listed paths that do not exist.
+  ``(pending)`` markers on modules that shipped, and three listed paths that do not exist;
+* **test layers** (TASK-0369). ``[tool.pytest.ini_options].markers`` registers every tier
+  the suite knows, and ``--strict-markers`` rejects a marker that is not there, so the list
+  is executable truth the same way a factory registry is. A tier exists when
+  ``tests/<tier>/`` holds a test module or any test carries its marker, which is why
+  ``reliability.md`` calling the load harness "specified but not built (TASK-0243)" was
+  false while ``tests/load/`` held five modules;
+* **an inherited denial** (TASK-0371), in a table column header or in a prose lead-in
+  label. README's capability table puts the denial in the header — "Not yet" — and no cell
+  under it carries a denial verb, so both gates read those cells as ordinary prose; that is
+  how "Milvus/Weaviate/Pinecone adapters" and "load and soak test layers" sat in that
+  column after they shipped. "**Specified but not built** (TASK-0243): load … and 24 h
+  soak …" is the same construction written as prose. The list is split into items, and an
+  item is decided only when the item IS the thing: a list of registry or tier names, one
+  optional count before each and one optional noun after the last, and nothing else.
 
 What this gate CANNOT do, stated plainly because a check that oversells its coverage is
 the defect it exists to catch:
 
-* **it closes the umbrella hole for providers only.** The hole is general — "the load
-  layer is unbuilt (TASK-0243)" was false the same way, and no registry decides a test
-  layer. Every capability needs its own executable source of truth or its own id;
+* **the umbrella hole stays open for every capability with no registry.** Providers and
+  test tiers have one; degradation rungs and D-features do not. ``hybrid_only`` is a module
+  constant and ``cache_only`` appears nowhere, so a grep decides a rung by whether a
+  docstring happens to spell it — which is not a registry, and a wrong *yes* there fails an
+  honest sentence. A per-item sub-ledger was considered and rejected: it is a second
+  document asserting things about the tree, with nothing checking it, and anything able to
+  check it could read the tree directly and not need it. Those classes need review;
 * it reads a clause, not a meaning. A denial whose subject sits in a different clause from
-  its name is missed, and a column header that denies a whole table column (README's
-  "Not built" column lists adapters with no denial verb anywhere) is invisible;
+  its name is missed, and a denied column item is decided only when the whole item is the
+  thing — "a Milvus or Weaviate contract run against a real server" is correctly left alone,
+  and so is any real defect worded that loosely;
 * it cannot see a stale *count* — "four of them are unbuilt", "two adapters pass the
   contract suite" name nothing and decide nothing. That is the counts class;
 * "registered" is not "proven". Milvus and Weaviate are registered and have never reached a
-  server, so this gate would pass a document calling them production-ready. It decides
-  existence, which is the only thing a registry knows.
+  server, and ``tests/load/`` has never been pointed at fasterRag. This gate decides
+  existence, which is the only thing a registry knows;
+* it does not guard the *number* of denying column headers, deliberately. The vacuity guard
+  fires when no table parses at all, because the parse is the machinery; moving README's
+  denial into its cells is one of the two fixes TASK-0371 names, and a guard on the header
+  count would fail the repository for taking it.
+
+Measured over four trees (237f6f5, 671156a, 650943b, HEAD): 574 tables, 19 items under a
+denying header, 1,177 tier clause-mentions, **3 findings and no false positive**. All three
+are on 650943b — the tree the previous sweep produced, which every gate scored green: two
+README items under "Not yet" (a registered adapter, a tier with tests) and reliability.md:56.
 
 Exit codes: ``0`` when every decidable denial matches the tree, ``1`` on any finding or if
 a vacuity guard fires.
@@ -46,6 +74,7 @@ import argparse
 import ast
 import re
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -59,8 +88,16 @@ from check_claims import ROOT_DOCUMENTS, _sentences, scanned_documents
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 ADAPTERS: Final = Path("src/fasterrag/adapters")
 STRUCTURE_MAP: Final = Path("docs/structure.md")
+PROJECT_FILE: Final = Path("pyproject.toml")
+TESTS: Final = Path("tests")
+
+PROVIDER: Final = "provider"
+TIER: Final = "tier"
 
 ADAPTER_DENIAL: Final = "adapter-denial"
+LAYER_DENIAL: Final = "layer-denial"
+COLUMN_DENIAL: Final = "column-denial"
+LABEL_DENIAL: Final = "label-denial"
 STRUCTURE_PENDING: Final = "structure-pending"
 STRUCTURE_ABSENT: Final = "structure-absent"
 VACUOUS: Final = "vacuous"
@@ -100,6 +137,60 @@ CLAUSE_BREAK: Final = re.compile(r"\s*[;:]\s*|\s+[\u2014\u2013]\s+|,\s+with\s+")
 
 TREE_ENTRY: Final = re.compile(r"^(?P<lead>[^├└]*)(?:├──|└──)\s*(?P<name>\S+)(?P<rest>.*)$")
 PENDING_MARKER: Final = "(pending)"
+
+# CRITICAL: a table may sit inside a blockquote, and README's capability table — the one
+# TASK-0371 is about — does. Stripping the quote marker before matching is the difference
+# between parsing 152 tables and parsing 151, with the missing one being the only table in
+# the repository whose header denies a column.
+QUOTE_PREFIX: Final = re.compile(r"^\s*(?:>\s*)*")
+TABLE_RULE: Final = re.compile(r"^\|[\s:|-]+\|$")
+TABLE_ROW: Final = re.compile(r"^\|.*\|$")
+
+# CRITICAL: matched against a whole header cell, not searched inside a sentence, and only
+# for cells short enough to be a label. A header is "Not yet"; a paragraph that happens to
+# contain "planned" is prose and denies nothing. The corpus measurement that set this list
+# is one denying header over 152 tables, so the rule's entire input is README's third
+# column and widening it buys nothing but exposure.
+DENYING_HEADER: Final = re.compile(
+    r"^(?:not\s+yet(?:\s+(?:built|implemented|shipped|started))?|not\s+(?:built|implemented|"
+    r"shipped)|un-?built|planned|unimplemented|to\s*-?\s*build|to\s*do|backlog|missing)$",
+    re.IGNORECASE,
+)
+HEADER_LABEL_LIMIT: Final = 24
+LABEL_LIMIT: Final = 48
+
+# CRITICAL: a denied column cell is a list of capabilities, and the separator this
+# repository uses between them is the middle dot. Commas are deliberately absent: the cells
+# enumerate adapters with commas inside one item ("Milvus, Weaviate and Pinecone adapters"),
+# which is the shape the adapter rule exists for, and splitting there would destroy it.
+ITEM_BREAK: Final = re.compile(r"\s*[·•;]\s*")
+
+DISCARD: Final = " .,:;*-" + chr(0x2014) + chr(0x2013)
+MARKUP: Final = re.compile(r"[*_`]+")
+LINK: Final = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+PARENTHETICAL: Final = re.compile(r"\s*\([^)]*\)")
+ARTICLE: Final = re.compile(r"^(?:the|a|an|any|its|our|their)\s+", re.IGNORECASE)
+COPULA: Final = re.compile(
+    r"\s+(?:is|are|was|were|remains?|stays?|has|have|had|been|still|all|both)$",
+    re.IGNORECASE,
+)
+JOINER: Final = r"\s*(?:/|,\s*|\+|\band\b|\bor\b|\bnor\b)\s*"
+
+# CRITICAL: a count or duration may sit in front of a name and nothing else may. "24 h soak"
+# is the live reliability.md wording, and without it the one sentence TASK-0369 is named for
+# is undecidable. General leading modifiers were rejected: they would admit "a semantic cache
+# load", where the name is the last word of something that is not the thing.
+QUALIFIER: Final = r"(?:\d+\s*[a-z]{0,2}[\s-]+)?"
+
+# CRITICAL: the noun an item may end with, and the whole precision of the column rule. An
+# item is decided only when it is a list of registry names plus one of these and nothing
+# else, so "Pinecone adapter" is decided and "a Milvus or Weaviate contract run against a
+# real server" is not — the second denies a contract run, not an adapter, and it is the
+# live sentence that a header-inheritance rule gets wrong if it merely looks for a name.
+ADAPTER_NOUNS: Final = (
+    r"(?:adapter|backend|provider|integration|driver|client|store|connector)s?|support"
+)
+LAYER_NOUNS: Final = r"(?:(?:test[\s-]+)?(?:layer|tier|suite|harness|run)e?s?|tests)"
 
 # CRITICAL: ratcheted by path, never by line. Line numbers in these documents move every
 # time a paragraph above them is edited, and a ratchet pinned to a line turns an unrelated
@@ -142,6 +233,57 @@ def registered_providers(root: Path = REPOSITORY_ROOT) -> tuple[set[str], set[st
     return shipped, planned - shipped
 
 
+# CRITICAL: parsed as code, never grepped. This gate's own tests write "@pytest.mark.soak"
+# inside a string fixture, and the substring version of this function read that as the soak
+# tier existing: a gate fooled by a test about itself, which is the shape of defect the gate
+# is for. A string constant is not an ast.Attribute, so the parse cannot be fooled that way.
+def _markers_carried(path: Path) -> set[str]:
+    """Return the pytest markers this test module applies, read as code and not as text."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+    except SyntaxError:
+        return set()
+    decorated: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            decorated += node.decorator_list
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "pytestmark" for target in node.targets
+        ):
+            decorated.append(node.value)
+    return {
+        node.attr
+        for expression in decorated
+        for node in ast.walk(expression)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "mark"
+    }
+
+
+# CRITICAL: the vocabulary is every registered marker, not the four `addopts` deselects. At
+# 650943b `addopts` carried no `-m` expression at all, so deriving tiers from it would have
+# dropped `soak` out of the vocabulary on the exact tree whose reliability.md was wrong about
+# soak's neighbour in the same enumeration, and the rule would have decided nothing there.
+def registered_layers(root: Path = REPOSITORY_ROOT) -> tuple[set[str], set[str]]:
+    """Return the pytest tiers that have test code, and the registered ones that do not."""
+    project = root / PROJECT_FILE
+    if not project.is_file():
+        return set(), set()
+    with project.open("rb") as handle:
+        options = tomllib.load(handle).get("tool", {}).get("pytest", {}).get("ini_options", {})
+    names = {str(entry).split(":", 1)[0].strip() for entry in options.get("markers", [])}
+    names = {name for name in names if name}
+
+    carried = {
+        marker for path in (root / TESTS).rglob("test_*.py") for marker in _markers_carried(path)
+    }
+    built = {
+        name for name in names if name in carried or any((root / TESTS / name).glob("test_*.py"))
+    }
+    return built, names - built
+
+
 def _name_pattern(provider: str) -> re.Pattern[str]:
     """Match a provider's registry key as prose spells it, underscore or space or hyphen."""
     return re.compile(rf"\b{re.escape(provider).replace('_', '[ _-]?')}\b", re.IGNORECASE)
@@ -162,6 +304,199 @@ def _denied_providers(clause: str, names: dict[str, re.Pattern[str]]) -> list[st
             continue
         denied.append(provider)
     return denied
+
+
+def _normalised(text: str) -> str:
+    """Strip markdown, links, parentheticals, articles and a trailing copula from an item."""
+    plain = PARENTHETICAL.sub("", MARKUP.sub("", LINK.sub(r"\1", text)))
+    plain = re.sub(r"\s+", " ", plain).strip(DISCARD)
+    previous = ""
+    while plain != previous:
+        previous = plain
+        plain = COPULA.sub("", ARTICLE.sub("", plain)).strip()
+    return plain
+
+
+@dataclass(frozen=True)
+class Oracle:
+    """One vocabulary the tree decides: every name it knows, the built ones, their noun."""
+
+    name: str
+    known: frozenset[str]
+    built: frozenset[str]
+    noun: str
+    source: str
+
+
+def oracles(root: Path = REPOSITORY_ROOT) -> tuple[Oracle, ...]:
+    """Return the vocabularies a denial can be decided against: providers and test tiers."""
+    shipped, planned = registered_providers(root)
+    built, unbuilt = registered_layers(root)
+    return (
+        Oracle(
+            PROVIDER,
+            frozenset(shipped | planned),
+            frozenset(shipped),
+            ADAPTER_NOUNS,
+            "adapters/*/factory.py registers it",
+        ),
+        Oracle(
+            TIER,
+            frozenset(built | unbuilt),
+            frozenset(built),
+            LAYER_NOUNS,
+            "pyproject registers that tier and tests/ holds it",
+        ),
+    )
+
+
+def _subject_names(text: str, known: frozenset[str], built: frozenset[str], noun: str) -> list[str]:
+    """Return the built names an item denies, empty unless the item IS a list of names.
+
+    Parsed over every known name and reported over the built ones: the enumerations that
+    caused this mix the two, and only a trailing noun may follow them.
+    """
+    if not known:
+        return []
+    plain = _normalised(text)
+    alternatives = "|".join(
+        sorted((re.escape(name).replace("_", "[ _-]?") for name in known), key=len, reverse=True)
+    )
+    whole = re.compile(
+        rf"^{QUALIFIER}(?:{alternatives})(?:{JOINER}{QUALIFIER}(?:{alternatives}))*"
+        rf"(?:\s+(?:{noun}))?$",
+        re.IGNORECASE,
+    )
+    if whole.match(plain) is None:
+        return []
+    return sorted(name for name in built if _name_pattern(name).search(plain))
+
+
+def denied_columns(root: Path = REPOSITORY_ROOT) -> tuple[list[tuple[str, int, str]], int]:
+    """Return every item sitting under a denying column header, with the tables parsed."""
+    items: list[tuple[str, int, str]] = []
+    tables = 0
+    for path in scanned_documents(root):
+        relative = path.relative_to(root).as_posix()
+        lines = path.read_text(encoding="utf-8").split("\n")
+        columns: list[int] = []
+        for number, line in enumerate(lines, 1):
+            stripped = QUOTE_PREFIX.sub("", line).strip()
+            if not TABLE_ROW.match(stripped):
+                columns = []
+                continue
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if TABLE_RULE.match(stripped):
+                continue
+            if number < len(lines) and TABLE_RULE.match(
+                QUOTE_PREFIX.sub("", lines[number]).strip()
+            ):
+                tables += 1
+                columns = [
+                    index
+                    for index, cell in enumerate(cells)
+                    if len(cell) <= HEADER_LABEL_LIMIT and DENYING_HEADER.match(_normalised(cell))
+                ]
+                continue
+            for index in columns:
+                if index >= len(cells):
+                    continue
+                items += [
+                    (relative, number, item)
+                    for item in ITEM_BREAK.split(cells[index])
+                    if item.strip()
+                ]
+    return items, tables
+
+
+def _decided(item: str, known: tuple[Oracle, ...]) -> list[tuple[Oracle, list[str]]]:
+    """Return each oracle that decides this item against it, skipping the ones that cannot."""
+    return [
+        (oracle, names)
+        for oracle in known
+        if (names := _subject_names(item, oracle.known, oracle.built, oracle.noun))
+    ]
+
+
+def column_findings(
+    root: Path = REPOSITORY_ROOT, known: tuple[Oracle, ...] | None = None
+) -> tuple[list[Finding], int]:
+    """Return a finding per denied column item the tree says exists."""
+    known = oracles(root) if known is None else known
+    denial = re.compile("|".join(DENIAL_PATTERNS), re.IGNORECASE)
+    items, tables = denied_columns(root)
+    findings = [
+        Finding(
+            COLUMN_DENIAL,
+            relative,
+            f"line {number} lists {', '.join(names)} under a column headed as unbuilt, "
+            f"but {oracle.source}: {item.strip()[:120]}",
+        )
+        for relative, number, item in items
+        if not denial.search(item)
+        for oracle, names in _decided(item, known)
+    ]
+    return findings, tables
+
+
+def _labelled_items(sentence: str, denial: re.Pattern[str]) -> list[str]:
+    """Return the items a denying lead-in label governs, empty when there is no such label.
+
+    "Specified but not built (TASK-0243): load ... and 24 h soak ..." is reliability.md:56,
+    a column header written as prose: the label denies and no item in the list does.
+    """
+    head, separator, tail = sentence.partition(": ")
+    if not separator or denial.search(head) is None:
+        return []
+    if len(_normalised(head)) > LABEL_LIMIT or denial.search(tail) is not None:
+        return []
+    return [piece for clause in CLAUSE_BREAK.split(tail) for piece in ITEM_BREAK.split(clause)]
+
+
+def prose_findings(
+    root: Path = REPOSITORY_ROOT, known: tuple[Oracle, ...] | None = None
+) -> tuple[list[Finding], int]:
+    """Return a finding per prose denial the tree decides, by subject or by lead-in label."""
+    known = oracles(root) if known is None else known
+    # CRITICAL: the provider oracle is excluded from the subject rule and only from it.
+    # adapter_findings already reads every clause for a provider denial, with an affirmation
+    # guard this rule does not have, so including it here reports the same sentence twice and
+    # loses that guard on the duplicate.
+    subjects = tuple(oracle for oracle in known if oracle.name != PROVIDER)
+    tiers = {name: _name_pattern(name) for oracle in subjects for name in sorted(oracle.built)}
+    denial = re.compile("|".join(DENIAL_PATTERNS), re.IGNORECASE)
+    findings: list[Finding] = []
+    mentions = 0
+
+    for path in scanned_documents(root):
+        relative = path.relative_to(root).as_posix()
+        for line, sentence in _sentences(path.read_text(encoding="utf-8")):
+            for item in _labelled_items(sentence, denial):
+                findings += [
+                    Finding(
+                        LABEL_DENIAL,
+                        relative,
+                        f"line {line} lists {', '.join(names)} after a denial that labels "
+                        f"the list, but {oracle.source}: {item.strip()[:120]}",
+                    )
+                    for oracle, names in _decided(item, known)
+                ]
+            for clause in CLAUSE_BREAK.split(sentence):
+                if any(pattern.search(clause) for pattern in tiers.values()):
+                    mentions += 1
+                match = denial.search(clause)
+                if match is None:
+                    continue
+                findings += [
+                    Finding(
+                        LAYER_DENIAL,
+                        relative,
+                        f"line {line} denies {', '.join(names)}, but {oracle.source}: "
+                        f"{clause.strip()[:120]}",
+                    )
+                    for oracle, names in _decided(clause[: match.start()], subjects)
+                ]
+    return findings, mentions
 
 
 def adapter_findings(root: Path = REPOSITORY_ROOT) -> tuple[list[Finding], int]:
@@ -265,7 +600,51 @@ def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
 
     adapters, mentions = adapter_findings(root)
     structure, entries = structure_findings(root)
+    known = oracles(root)
+    columns, tables = column_findings(root, known)
+    prose, layer_mentions = prose_findings(root, known)
+    built = {name for oracle in known if oracle.name == TIER for name in oracle.built}
+    unbuilt = {
+        name for oracle in known if oracle.name == TIER for name in oracle.known - oracle.built
+    }
 
+    if not built:
+        return [
+            Finding(
+                VACUOUS,
+                PROJECT_FILE.as_posix(),
+                "no pytest marker names a tier with test code, so the tier rule decided "
+                "nothing; [tool.pytest.ini_options].markers is its whole vocabulary",
+            )
+        ]
+    if not unbuilt:
+        return [
+            Finding(
+                VACUOUS,
+                PROJECT_FILE.as_posix(),
+                "every registered tier has test code, so every tier denial this gate reads "
+                "is automatically false and the rule stopped discriminating",
+            )
+        ]
+    if tables == 0:
+        return [
+            Finding(
+                VACUOUS,
+                "docs",
+                "parsed no markdown table at all, so the column rule read nothing; a table "
+                "inside a blockquote is the one TASK-0371 is about and is easy to lose",
+            )
+        ]
+    if layer_mentions == 0:
+        return [
+            Finding(
+                VACUOUS,
+                "docs",
+                f"scanned every document and found no clause naming any of the {len(built)} "
+                "tiers that have tests; either the documentation stopped naming them or the "
+                "marker names stopped matching how prose spells them",
+            )
+        ]
     if mentions == 0:
         return [
             Finding(
@@ -294,7 +673,7 @@ def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
                 "is automatically false and the rule stopped discriminating",
             )
         ]
-    return adapters + structure
+    return adapters + structure + columns + prose
 
 
 def over_ratchet(findings: list[Finding], ratchet: dict[str, int] = RATCHET) -> list[str]:

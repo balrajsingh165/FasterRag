@@ -11,11 +11,13 @@ from typing import Any
 import pytest
 from mutation_run import (
     ARITHMETIC_SWAPS,
+    CEILING,
     COMPARISON_SWAPS,
     DEFAULT_TARGETS,
     EXIT_CODES,
     REPOSITORY_ROOT,
     STAGED_ROOTS,
+    Ceiling,
     Mutation,
     RunReport,
     Target,
@@ -24,11 +26,14 @@ from mutation_run import (
     apply,
     child_peak_rss,
     decide,
+    gate,
     generate,
     load_targets,
     main,
     markdown,
     memory_limiter,
+    ratchet_block,
+    read_report,
     render,
     resource_module,
     restrict,
@@ -247,6 +252,8 @@ def result(
     survived: int = 0,
     survivors: list[Mutation] | None = None,
     timeouts: list[Mutation] | None = None,
+    signals: list[tuple[Mutation, int]] | None = None,
+    peak: int | None = None,
     problems: list[str] | None = None,
 ) -> TargetResult:
     """Build a TargetResult for the verdict and rendering tests."""
@@ -257,8 +264,11 @@ def result(
         killed=killed,
         survived=survived,
         timed_out=len(timeouts or []),
+        signalled=len(signals or []),
+        peak_child_rss_bytes=peak,
         survivors=survivors or [],
         timeouts=timeouts or [],
+        signals=signals or [],
         problems=problems or [],
     )
 
@@ -750,7 +760,8 @@ class TestProgress:
         assert "[x] baseline: 1 staged test path(s)" in printed
         assert any(line.startswith("[x] 1/1 src/pkgy/mod.py:6:") for line in printed)
         assert any(
-            line.startswith("[x] done: 1/1 run, 1 killed (0 by the clock)") for line in printed
+            line.startswith("[x] done: 1/1 run, 1 killed (0 by the clock, 0 by a signal)")
+            for line in printed
         )
 
     def test_the_announcement_precedes_the_run_it_names(
@@ -871,3 +882,538 @@ class TestStagingScope:
         )
         for absent in ("config.yaml", "scripts", ".github", "README.md", "src"):
             assert not (tmp_path / absent).exists(), absent
+
+
+class TestSignalledChildren:
+    """TASK-0362: a cgroup OOM kill is not a test failure and may not read as one."""
+
+    def test_a_signalled_child_is_counted_as_a_kill_and_named_as_a_signal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mutation_run
+
+        root = tmp_path / "root"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+        calls: list[int] = []
+
+        def oom_killed(
+            tests: tuple[str, ...], workspace: Path, timeout: float, limiter: Any = None
+        ) -> int | None:
+            calls.append(1)
+            return 0 if len(calls) == 1 else -9
+
+        monkeypatch.setattr(mutation_run, "_pytest", oom_killed)
+
+        outcome = mutate(root, tmp_path / "workspace", "pkgy", monkeypatch)
+
+        assert (outcome.executed, outcome.killed, outcome.survived) == (1, 1, 0)
+        assert outcome.signalled == 1
+        assert outcome.timed_out == 0
+        assert [code for _, code in outcome.signals] == [-9]
+
+    def test_an_ordinary_test_failure_is_still_an_unremarkable_kill(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mutation_run
+
+        root = tmp_path / "root"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+        calls: list[int] = []
+
+        def failing(
+            tests: tuple[str, ...], workspace: Path, timeout: float, limiter: Any = None
+        ) -> int | None:
+            calls.append(1)
+            return 0 if len(calls) == 1 else 1
+
+        monkeypatch.setattr(mutation_run, "_pytest", failing)
+
+        outcome = mutate(root, tmp_path / "workspace", "pkgy", monkeypatch)
+
+        assert (outcome.killed, outcome.signalled, outcome.signals) == (1, 0, [])
+
+    def test_the_unproven_kills_are_the_clock_plus_the_signals(self) -> None:
+        outcome = result(executed=5, killed=5, timeouts=[mutation()], signals=[(mutation(), -9)])
+        assert outcome.unproven == 2
+
+    def test_a_signalled_baseline_says_a_memory_cap_could_not_have_caught_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mutation_run
+
+        root = tmp_path / "root"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+        monkeypatch.setattr(
+            mutation_run, "_pytest", lambda tests, workspace, timeout, limiter=None: -9
+        )
+
+        outcome = mutate(root, tmp_path / "workspace", "pkgy", monkeypatch)
+
+        assert outcome.executed == 0
+        assert any("SIGKILL" in problem for problem in outcome.problems)
+        assert any("--memory-mb" in problem for problem in outcome.problems)
+
+    def test_a_baseline_that_never_finished_is_described_as_a_timeout_not_an_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mutation_run
+
+        root = tmp_path / "root"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+        monkeypatch.setattr(
+            mutation_run, "_pytest", lambda tests, workspace, timeout, limiter=None: None
+        )
+
+        outcome = mutate(root, tmp_path / "workspace", "pkgy", monkeypatch)
+
+        assert any("did not finish inside" in problem for problem in outcome.problems)
+
+    def test_an_unknown_signal_number_is_still_named_rather_than_dropped(self) -> None:
+        document = result(executed=1, killed=1, signals=[(mutation(), -999)]).as_dict()
+        assert document["signals"][0]["signal_name"] == "signal 999"
+
+    def test_both_renderings_separate_a_signal_from_a_kill_a_test_earned(self) -> None:
+        killed = mutation(path="src/fasterrag/core/breaker.py", line=82, column=67)
+        report = RunReport(Verdict.CLEAN, [result(executed=4, killed=4, signals=[(killed, -9)])])
+
+        assert "signalled mutants" in render(report)
+        assert "SIGKILL src/fasterrag/core/breaker.py:82:67" in render(report)
+        assert "**Signalled**" in markdown(report)
+        assert report.as_dict()["signalled"] == 1
+
+
+class TestPerTargetPeak:
+    """TASK-0363: which target approached the cap is the question a calibrator has."""
+
+    def test_each_target_records_the_mark_as_it_stood_when_it_finished(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "root"
+        miniature(root, "pkgy", CONSTANT_MODULE, PINNING_TEST)
+        monkeypatch.setattr("mutation_run.REPOSITORY_ROOT", root)
+        rising = iter([64, 4096])
+        limits = fake_limits([])
+        limits.getrusage = lambda who: SimpleNamespace(ru_maxrss=next(rising))  # type: ignore[attr-defined]
+
+        report = run(
+            [
+                Target(name=name, source="src/pkgy/mod.py", tests=("tests/test_mod.py",))
+                for name in ("a", "b")
+            ],
+            budget=None,
+            seed=0,
+            timeout=120.0,
+            workspace=tmp_path / "workspace",
+            limits=limits,
+        )
+
+        assert [target.peak_child_rss_bytes for target in report.results] == [
+            64 * 1024,
+            4096 * 1024,
+        ]
+        assert report.peak_child_rss_bytes == 4096 * 1024
+
+    def test_the_reports_name_the_target_that_reached_the_figure(self) -> None:
+        report = RunReport(
+            Verdict.CLEAN,
+            [result("a", peak=1 * 1024 * 1024), result("b", peak=9 * 1024 * 1024)],
+            peak_child_rss_bytes=9 * 1024 * 1024,
+        )
+
+        assert "peak child RSS: 9 MiB, first reached in b" in render(report)
+        assert "first reached in `b`" in markdown(report)
+        assert "| b | 4 | 4 | 0 | 0 | 0 | 9 |" in markdown(report)
+
+    def test_a_platform_without_rusage_shows_a_dash_rather_than_a_zero(self) -> None:
+        assert "| breaker | 4 | 4 | 0 | 0 | 0 | - |" in markdown(
+            RunReport(Verdict.CLEAN, [result()])
+        )
+
+    def test_the_per_target_mark_reaches_the_artifact(self) -> None:
+        document = RunReport(Verdict.CLEAN, [result(peak=7 * 1024 * 1024)]).as_dict()
+        assert document["targets"][0]["peak_child_rss_bytes"] == 7 * 1024 * 1024
+
+
+MEASURED_NIGHTLY: dict[str, int] = {
+    "retrieval": 1,
+    "chunking": 5,
+    "identity": 2,
+    "breaker": 1,
+    "regression": 0,
+    "rate-limit": 2,
+}
+"""The per-target survivor split of nightly runs 42419161973, 42468563494, 42603353729 and
+42800995556 (2026-11-07 to 11-10, --budget 10 --seed 0), which is what CEILING records."""
+
+
+def nightly(
+    survived: dict[str, int] | None = None,
+    *,
+    timeouts: dict[str, int] | None = None,
+    planned: int | None = None,
+) -> RunReport:
+    """Build the report a whole nightly run writes, so a test can move one number."""
+    counts = dict(MEASURED_NIGHTLY if survived is None else survived)
+    clock = timeouts or {}
+    results = [
+        result(
+            name,
+            executed=10,
+            killed=10 - count,
+            survived=count,
+            survivors=[mutation(line=index + 1) for index in range(count)],
+            timeouts=[mutation(line=90 + index) for index in range(clock.get(name, 0))],
+        )
+        for name, count in counts.items()
+    ]
+    return RunReport(decide(results), results, planned=planned or len(results))
+
+
+def written(tmp_path: Path, report: RunReport) -> Path:
+    """Write a report where the gate reads one, through the artifact's own serialiser."""
+    path = tmp_path / "mutation.json"
+    path.write_text(json.dumps(report.as_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+class TestRatchetBaseline:
+    """TASK-0382: the ceiling is a measurement, and nothing may quietly raise it."""
+
+    def test_the_ceiling_covers_every_target_the_nightly_runs(self) -> None:
+        assert set(CEILING) == {target.name for target in DEFAULT_TARGETS}
+
+    def test_no_ceiling_stands_above_the_four_nights_that_measured_it(self) -> None:
+        for name, measured in MEASURED_NIGHTLY.items():
+            assert CEILING[name].survived <= measured, name
+            assert CEILING[name].unproven == 0, name
+            assert CEILING[name].sample == 10, name
+
+    def test_the_measured_run_itself_holds(self, tmp_path: Path) -> None:
+        verdict, text = gate(written(tmp_path, nightly()))
+
+        assert verdict is Verdict.CLEAN
+        assert "the mutation ratchet holds: 11 survived of 60 executed" in text
+
+
+class TestRatchetFailures:
+    """Every way the count may worsen, and the message that has to name it."""
+
+    def test_one_more_survivor_in_one_target_fails_the_whole_run(self, tmp_path: Path) -> None:
+        regressed = dict(MEASURED_NIGHTLY, chunking=6)
+
+        verdict, text = gate(written(tmp_path, nightly(regressed)))
+
+        assert verdict is Verdict.SURVIVORS
+        assert EXIT_CODES[verdict] == 1
+        assert "chunking: 6 mutants survived against a ceiling of 5 (1 more)" in text
+
+    def test_a_target_that_rots_behind_another_that_improves_is_still_caught(
+        self, tmp_path: Path
+    ) -> None:
+        offset = dict(MEASURED_NIGHTLY, identity=0, chunking=7)
+
+        verdict, text = gate(written(tmp_path, nightly(offset)))
+
+        assert verdict is Verdict.SURVIVORS
+        assert "chunking" in text
+        assert nightly(offset).survived == 11
+
+    def test_the_worst_overshoot_is_named_first(self, tmp_path: Path) -> None:
+        regressed = dict(MEASURED_NIGHTLY, breaker=2, chunking=9)
+
+        _, text = gate(written(tmp_path, nightly(regressed)))
+        reported = [line.strip().split(":")[0] for line in text.splitlines()[1:]]
+
+        assert reported == ["chunking", "breaker"]
+
+    def test_a_timeout_inside_a_perfect_kill_count_still_fails(self, tmp_path: Path) -> None:
+        verdict, text = gate(written(tmp_path, nightly(timeouts={"breaker": 1})))
+
+        assert verdict is Verdict.SURVIVORS
+        assert "breaker: 1 kills were the clock and 0 were a signal" in text
+
+    def test_a_regression_is_never_handed_a_loosened_ceiling_to_paste(self, tmp_path: Path) -> None:
+        _, text = gate(written(tmp_path, nightly(dict(MEASURED_NIGHTLY, chunking=6))))
+
+        assert "CEILING" not in text
+        with pytest.raises(ValueError, match="never printed to raise one"):
+            ratchet_block(nightly(dict(MEASURED_NIGHTLY, chunking=6)))
+
+
+class TestRatchetVacuity:
+    """Trap T12: an artifact that proves nothing must never read as a held ratchet."""
+
+    def test_a_missing_artifact_fails_rather_than_passes(self, tmp_path: Path) -> None:
+        verdict, text = gate(tmp_path / "never-written.json")
+
+        assert verdict is Verdict.NOT_RUN
+        assert EXIT_CODES[verdict] == 2
+        assert "could not be read" in text
+
+    def test_an_empty_artifact_fails_rather_than_passes(self, tmp_path: Path) -> None:
+        path = tmp_path / "mutation.json"
+        path.write_text("", encoding="utf-8")
+
+        verdict, text = gate(path)
+
+        assert verdict is Verdict.NOT_RUN
+        assert "could not be read" in text
+
+    @pytest.mark.parametrize(
+        ("document", "expected"),
+        [
+            ({}, "lists no target"),
+            ({"targets": []}, "lists no target"),
+            ([], "not a JSON object"),
+        ],
+    )
+    def test_a_document_with_nothing_in_it_fails(
+        self, tmp_path: Path, document: object, expected: str
+    ) -> None:
+        path = tmp_path / "mutation.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+        verdict, text = gate(path)
+
+        assert verdict is Verdict.NOT_RUN
+        assert expected in text
+
+    def test_a_run_that_executed_no_mutant_fails(self, tmp_path: Path) -> None:
+        empty = RunReport(Verdict.NOT_RUN, [result("breaker", executed=0, killed=0)], planned=1)
+
+        verdict, text = gate(written(tmp_path, empty))
+
+        assert verdict is Verdict.NOT_RUN
+        assert "no target executed a single mutant" in text
+
+    def test_a_red_baseline_fails_as_a_run_that_could_not_be_performed(
+        self, tmp_path: Path
+    ) -> None:
+        broken = RunReport(
+            Verdict.NOT_RUN,
+            [result("breaker", executed=0, killed=0, problems=["breaker: the suite was red"])],
+            planned=1,
+        )
+
+        verdict, text = gate(written(tmp_path, broken))
+
+        assert verdict is Verdict.NOT_RUN
+        assert "the suite was red" in text
+
+    def test_a_partial_artifact_fails_rather_than_judging_part_of_a_run(
+        self, tmp_path: Path
+    ) -> None:
+        verdict, text = gate(written(tmp_path, nightly(planned=7)))
+
+        assert verdict is Verdict.NOT_RUN
+        assert "the artifact is a partial: 6 of 7 targets finished" in text
+
+    def test_a_run_that_skipped_a_target_cannot_satisfy_the_ceiling(self, tmp_path: Path) -> None:
+        verdict, text = gate(written(tmp_path, nightly({"breaker": 1})))
+
+        assert verdict is Verdict.NOT_RUN
+        assert "the ceiling covers chunking, identity, rate-limit, regression, retrieval" in text
+
+    def test_a_target_with_no_ceiling_fails_rather_than_running_ungated(
+        self, tmp_path: Path
+    ) -> None:
+        extra = dict(MEASURED_NIGHTLY, archive=3)
+
+        verdict, text = gate(written(tmp_path, nightly(extra)))
+
+        assert verdict is Verdict.NOT_RUN
+        assert "archive ran with no ceiling" in text
+
+    def test_a_verdict_that_disagrees_with_its_own_counts_fails(self, tmp_path: Path) -> None:
+        document = nightly().as_dict()
+        document["verdict"] = "clean"
+        path = tmp_path / "mutation.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+        verdict, text = gate(path)
+
+        assert verdict is Verdict.NOT_RUN
+        assert "calls itself 'clean' while its own counts say 'survivors'" in text
+
+    @pytest.mark.parametrize(
+        ("key", "value", "expected"),
+        [
+            ("executed", 11, "is not"),
+            ("survivors", [], "are named"),
+            ("timed_out", 99, "unproven kills"),
+            ("killed", "nine", "not an integer"),
+            ("signalled", None, "not an integer"),
+            ("name", 7, "not a string"),
+        ],
+    )
+    def test_an_artifact_whose_arithmetic_cannot_be_trusted_fails(
+        self, tmp_path: Path, key: str, value: object, expected: str
+    ) -> None:
+        document = nightly().as_dict()
+        document["targets"][1][key] = value
+        path = tmp_path / "mutation.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+        verdict, text = gate(path)
+
+        assert verdict is Verdict.NOT_RUN
+        assert expected in text
+
+    def test_an_artifact_written_before_signals_were_told_apart_cannot_be_judged(
+        self, tmp_path: Path
+    ) -> None:
+        document = nightly().as_dict()
+        for target in document["targets"]:
+            del target["signalled"]
+        path = tmp_path / "mutation.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+        verdict, text = gate(path)
+
+        assert verdict is Verdict.NOT_RUN
+        assert "signalled is missing" in text
+
+
+class TestRatchetTightening:
+    """A ratchet nobody can lower is deleted; a ratchet anyone can raise is not one."""
+
+    def test_an_improvement_prints_the_block_that_records_it(self, tmp_path: Path) -> None:
+        better = dict(MEASURED_NIGHTLY, chunking=3)
+
+        verdict, text = gate(written(tmp_path, nightly(better)))
+
+        assert verdict is Verdict.CLEAN
+        assert "tighten the ceiling in scripts/mutation_run.py" in text
+        assert '"chunking": Ceiling(survived=3, sample=10),' in text
+        assert '"breaker": Ceiling(survived=1, sample=10),' in text
+
+    def test_a_run_exactly_on_the_ceiling_asks_for_nothing(self, tmp_path: Path) -> None:
+        _, text = gate(written(tmp_path, nightly()))
+
+        assert "tighten" not in text
+
+    def test_the_printed_block_records_what_ran_not_what_was_allowed(self) -> None:
+        allowed = {"breaker": Ceiling(survived=1, sample=10, unproven=2)}
+        report = RunReport(
+            Verdict.SURVIVORS,
+            [result("breaker", executed=10, killed=9, survived=1, survivors=[mutation()])],
+            planned=1,
+        )
+
+        assert ratchet_block(report, allowed) == (
+            "CEILING: Final[dict[str, Ceiling]] = {\n"
+            '    "breaker": Ceiling(survived=1, sample=10),\n}'
+        )
+
+    def test_a_block_that_carries_an_unproven_kill_says_so(self) -> None:
+        allowed = {"breaker": Ceiling(survived=0, sample=4, unproven=3)}
+        report = RunReport(Verdict.CLEAN, [result("breaker", timeouts=[mutation()])], planned=1)
+
+        assert '"breaker": Ceiling(survived=0, sample=4, unproven=1),' in ratchet_block(
+            report, allowed
+        )
+
+
+class TestRatchetCommandLine:
+    """The gate has to be runnable against a downloaded artifact, not only inside a run."""
+
+    def test_a_held_ratchet_exits_zero_and_says_so_on_stdout(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = written(tmp_path, nightly())
+
+        assert main(["--check-ratchet", str(path)]) == 0
+        assert "the mutation ratchet holds" in capsys.readouterr().out
+
+    def test_a_regression_exits_one_and_says_so_on_stderr(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        path = written(tmp_path, nightly(dict(MEASURED_NIGHTLY, retrieval=4)))
+
+        assert main(["--check-ratchet", str(path)]) == 1
+        assert "the mutation ratchet moved the wrong way" in capsys.readouterr().err
+
+    def test_a_vacuous_artifact_exits_two(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert main(["--check-ratchet", str(tmp_path / "gone.json")]) == 2
+        assert "could not be read" in capsys.readouterr().err
+
+    def test_checking_a_ratchet_runs_no_mutant_at_all(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mutation_run
+
+        def refuse(*args: Any, **kwargs: Any) -> None:
+            raise AssertionError("a ratchet check must never start a campaign")
+
+        monkeypatch.setattr(mutation_run, "run", refuse)
+
+        assert main(["--check-ratchet", str(written(tmp_path, nightly()))]) == 0
+
+    def test_the_round_trip_through_the_artifact_preserves_what_the_gate_judges(
+        self, tmp_path: Path
+    ) -> None:
+        report = nightly(timeouts={"identity": 1})
+
+        restored = read_report(json.loads(written(tmp_path, report).read_text(encoding="utf-8")))
+
+        assert [target.name for target in restored.results] == list(MEASURED_NIGHTLY)
+        assert [target.survived for target in restored.results] == list(MEASURED_NIGHTLY.values())
+        assert restored.timed_out == 1
+        assert restored.verdict is report.verdict
+
+    def test_a_shrunken_budget_cannot_satisfy_a_ceiling_measured_on_a_bigger_sample(
+        self, tmp_path: Path
+    ) -> None:
+        thin = [result(name, executed=2, killed=2, survived=0) for name in MEASURED_NIGHTLY]
+        report = RunReport(decide(thin), thin, planned=len(thin))
+
+        verdict, text = gate(written(tmp_path, report))
+
+        assert verdict is Verdict.NOT_RUN
+        assert "ran 2 of its mutants against a ceiling measured on 10" in text
+
+    def test_an_exhaustive_run_is_refused_rather_than_failed_for_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        wide = [
+            result(
+                name,
+                executed=52,
+                killed=52 - 9,
+                survived=9,
+                survivors=[mutation(line=index) for index in range(9)],
+            )
+            for name in MEASURED_NIGHTLY
+        ]
+        report = RunReport(decide(wide), wide, planned=len(wide))
+
+        verdict, text = gate(written(tmp_path, report))
+
+        assert verdict is Verdict.NOT_RUN
+        assert "cannot judge a different sample, in either direction" in text
+
+
+class TestNightlyWiring:
+    """A gate nobody wired is a gate that does not exist, which is the whole of TASK-0382."""
+
+    def mutation_job(self) -> str:
+        """The shell every step of the nightly mutation job runs, as one block of text."""
+        import yaml
+
+        workflow = yaml.safe_load(
+            (REPOSITORY_ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+        )
+        return "\n".join(step.get("run", "") for step in workflow["jobs"]["mutation"]["steps"])
+
+    def test_the_nightly_judges_its_own_artifact_against_the_ceiling(self) -> None:
+        assert "--check-ratchet artifacts/mutation.json" in self.mutation_job()
+
+    def test_the_nightly_caps_the_memory_of_every_child_it_spawns(self) -> None:
+        assert "--memory-mb" in self.mutation_job()
+
+    def test_the_ratchet_reads_the_artifact_the_campaign_actually_writes(self) -> None:
+        shell = self.mutation_job()
+        assert "--json-out artifacts/mutation.json" in shell
+        assert shell.index("--json-out") < shell.index("--check-ratchet")

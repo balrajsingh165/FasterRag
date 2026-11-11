@@ -35,7 +35,10 @@ Three rules, and they fail for different reasons:
   (TASK-0342). It is a finding rather than a log line because this gate runs in CI, where
   nothing reads a log and only the exit code is read. Measured 2026-11-09: 0 of the 394
   files under ``src/``, ``tests/`` and ``scripts/`` fail either step, so it blocks from a
-  clean base, and a half-written file still does not crash the run.
+  clean base, and a half-written file still does not crash the run. It is written out here
+  rather than shared with the two sibling gates that also carry it; the measurement behind
+  that choice, including why the usual ``-o pythonpath=`` justification for it is false, is
+  in ``check_error_taxonomy.py``'s module docstring (TASK-0373).
 
 A docstring citing a ticked id is NOT a violation. Docstrings carry history on purpose
 ("extracted behind a RateLimiter ABC under TASK-0216"), and a completed task is the correct

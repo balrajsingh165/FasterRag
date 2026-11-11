@@ -45,6 +45,15 @@
 # unavoidable: every survivor is written into $GITHUB_STEP_SUMMARY with its file, line and
 # substitution, on the run page rather than inside an artifact nobody downloads.
 #
+# That held until 2026-11-11, when a job that could only ever warn turned out to be a job
+# that could not fail: run 42419161973 reported eleven undefended lines and concluded
+# success. The count is still not a gate — A SURVIVING MUTANT IS STILL NOT A FAILURE — but
+# A SURVIVOR COUNT ABOVE THE MEASURED BASELINE NOW IS, in a ratchet step of its own
+# (TASK-0382). The distinction is the whole design: eleven survivors is the known state of
+# this repository and twelve is a regression, so the gate fires on the delta and never on
+# the level, which is what keeps an equivalent mutant from being something anybody has to
+# switch the job off over.
+#
 # A run that COULD NOT BE PERFORMED does fail the job. That is exit code 2 — the target's
 # own suite was already red, or no mutant could be generated — and it is the vacuity defect
 # (rebuild-playbook T12) this repository treats as a bug: a red baseline kills every mutant
@@ -251,10 +260,120 @@ jobs:
           run-id: ${{ steps.previous.outputs.run-id }}
           github-token: ${{ github.token }}
 
+      # The benchmark fingerprint records `cpu: "x86_64"` — an architecture, not a model —
+      # so `compare_nightly.py`'s machine-mismatch guard cannot see that two nights ran on
+      # different CPU generations. That is precisely the thing that moves these numbers
+      # (TASK-0350: 1.39 ms and 3.07 ms for the identical workload), so the model string is
+      # printed here where a red night can be diagnosed from the run page in one look,
+      # rather than inferred from a 2.2x ratio with no evidence attached. It is also the
+      # evidence a future paired-measurement fix will be argued from: whether the spread is
+      # CPU generation or neighbour contention decides how much pairing can recover, and
+      # nothing in this repository currently records which it is.
+      - name: Name the CPU this night actually ran on
+        if: ${{ !cancelled() }}
+        run: |
+          model=$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo || true)
+          echo "runner cpu: ${model:-unknown} ($(nproc) cores)"
+          {
+            echo "### Runner CPU"
+            echo ""
+            echo "\`${model:-unknown}\` on $(nproc) cores. The benchmark fingerprint records only"
+            echo "\`x86_64\`, so this line is the only record of which CPU generation produced"
+            echo "the numbers below. A large move with a changed model here is the machine, not the code."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # Expect a red night when GitHub rolls the runner image: the comparison refuses a
       # baseline taken on a different machine, and its fingerprint carries the kernel
       # string. That is the rule working — a number from another machine measures the
       # machine — and the answer is to re-read the artifact, not to relax the verdict.
+      #
+      # `--tolerance 1.25` replaces the script's 0.10 default, and the number is MEASURED
+      # rather than chosen (TASK-0350). An argument for a tolerance that is not derived from
+      # measured variance is the exact defect this repository exists to stamp out, so the
+      # derivation is here rather than in a commit message. It is also an uncomfortable
+      # number, and that discomfort is the finding — see WHAT IT LOSES below.
+      #
+      # THE CONTROLLED EXPERIMENT, because a cross-commit comparison always leaves room for
+      # "but the code changed": runs 42973481640, 42973944898 and 42974619023 are three
+      # `workflow_dispatch` runs of THE SAME COMMIT, 882a07e, inside twenty minutes. Warmed
+      # median p50 was 1.98 ms, 2.87 ms and 1.39 ms — a 2.07x spread, and a 106.5% adverse
+      # move — against a tree that did not change by one character. The second of the three
+      # FAILED this gate at the old tolerance: "ingest.p50_ms moved from 1.98 to 2.87, 44.9%
+      # worse, beyond the 10.0% tolerance". That is the defect reproduced on demand rather
+      # than argued from a hunch.
+      #
+      # Seven runs of the identical ingest workload — `6 documents, 632 tokens`, same corpus,
+      # same fingerprint (`x86_64`, 4 cores, 15.6 GB, `Linux 7.0.0-1019-azure`) — gave warmed
+      # median p50 of 3.05, 2.17, 3.03, 3.07, 1.98, 2.87 and 1.39 ms (runs 42419161973,
+      # 42468563494, 42603353729, 42800995556, 42973481640, 42973944898, 42974619023): mean
+      # 2.51 ms, sd 0.67 ms, CV 26.5%, range 1.39-3.07 ms. Nothing on the parse-and-chunk
+      # path changed across them — the only ingest-path diff in that window is a log line
+      # inside an exception handler in `core/parsing/markdown.py`, plus
+      # `chunking/semantic.py` and `chunking/tokenizer.py`, neither of which this suite
+      # enters, because the workflow pins `chunking.token_counter=estimate`. The 2026-11-09
+      # red night (42603353729, "39.6% worse") sits between a 3.05 before it and a 3.07
+      # after it, so it was the 2.17 BASELINE that was unusual, not the run that failed.
+      #
+      # The variance decomposes, and that is what decides the fix:
+      #   repetitions within one run   CV 0.19-2.54%     (the only term corpus size touches)
+      #   three runs of ONE commit     up to 106.5% worse (1.39 ms -> 2.87 ms)
+      #   full sample, 7 runs, 5 days  up to 120.9% worse (1.39 ms -> 3.07 ms)
+      #
+      # So ENLARGING THE CORPUS, the other option the ledger named, does not work. It attacks
+      # the <=2.54% repetition term; the dominant term is a multiplicative host-speed
+      # difference that scales with the corpus and survives it unchanged. The measurement is
+      # already precise — three repetitions inside a run agree to within a few tenths of a
+      # percent — it is simply accurate about a different machine each time. A corpus ten
+      # times larger would still have produced 1.39 against 2.87, both multiplied by ten.
+      #
+      # An ABSOLUTE floor, the third option, is this same percentage wearing a different hat
+      # at this corpus size: the same-commit pair above moved 1.48 ms, so a floor that
+      # suppresses it is >=1.5 ms, which against a 1.39 ms run IS a 107% tolerance. The floor
+      # is the percentage, restated in units that hide where it came from.
+      #
+      # REQUIRING A REGRESSION TO REPRODUCE TWICE costs a day of detection speed, and against
+      # this data it does not work either: every false red here came from an unusually FAST
+      # baseline rather than an unusually slow current run, and a second slow run reproduces
+      # the same false verdict against the same baseline. It buys nothing and is not taken.
+      #
+      # WHERE 1.25 COMES FROM, and why it is not the observed maximum. Setting the tolerance
+      # to the worst move yet seen (120.9%) would be fitting a bound to seven samples and
+      # would flap the first time an eighth lands outside them — and the next night's
+      # baseline is 1.39 ms, the lowest of the seven, so a 3.07 ms night would arrive at
+      # 120.9%, inside 1.25 by four points. The spread is multiplicative, so the variate is
+      # log(p50): mean 0.8838, sd 0.3026 over the seven runs. A comparison draws TWO
+      # independent samples — baseline and current — so a two-sided 2-sigma band spans
+      # exp(4*0.3026) = 3.35x, i.e. a 235% move, and THAT is the tolerance this instrument
+      # actually supports. 1.25 is deliberately tighter than that bound: a gate set at 235%
+      # fires at nothing, and the extra insensitivity buys no honesty that this comment does
+      # not already state. 1.25 keeps the gate just inside the range where a
+      # catastrophic regression is still distinguishable, accepts a residual false-red rate
+      # the sigma figure above makes explicit rather than hidden, and says so here.
+      #
+      # WHAT IT BUYS: the gate stops failing for the runner it was assigned, and therefore
+      # survives long enough to be read. WHAT IT LOSES, stated so nobody mistakes this for a
+      # working regression detector: everything short of a 2.25x slowdown is invisible. On
+      # this instrument that is not a choice between tolerances — a 2.07x spread on ONE
+      # commit means no tolerance exists that both detects a real regression and stays quiet,
+      # and pretending otherwise is what the 10% number was doing.
+      #
+      # AND THE REGRESSION VERDICT WAS NEVER THE VALUABLE PART OF THIS JOB. What TASK-0314
+      # actually caught was 83 days of measuring NOTHING while reporting success, and the
+      # checks that catch that — the benchmark-produced-a-document step, the not-comparable
+      # verdict failing, the crashed-versus-judged distinction, `if-no-files-found: error` —
+      # are unaffected by any tolerance and remain this job's real output. The comparison is
+      # a smoke alarm bolted to a working smoke detector.
+      #
+      # THIS TOLERANCE IS NOT TO BE WIDENED AGAIN. If a false red arrives, the answer is the
+      # instrument, not another round number. The instrument fix is a PAIRED measurement —
+      # benchmark the working tree and a fixed reference commit in the same job on the same
+      # VM, so host speed cancels and the tolerance can return to single digits (the
+      # within-run term is under 3%). It is not made here because a workflow change cannot be
+      # verified before it is committed — `workflow_dispatch` runs the file already on the
+      # ref — and an unverifiable rewrite of the repository's only measurement job does not
+      # belong beside a tolerance fix. The CPU step above is the evidence it will be argued
+      # from.
       - name: Compare against the previous night
         if: ${{ !cancelled() }}
         run: |
@@ -263,6 +382,7 @@ jobs:
           python scripts/compare_nightly.py \
             --previous previous/benchmark.json \
             --current artifacts/benchmark.json \
+            --tolerance 1.25 \
             --json-out artifacts/comparison.json \
             --summary "$GITHUB_STEP_SUMMARY"
           verdict=$?
@@ -278,7 +398,7 @@ jobs:
           fi
           case "${verdict}" in
             0) ;;
-            1) echo "::error::a tracked benchmark metric regressed beyond the tolerance against the previous nightly run; investigate on isolated hardware before trusting it"
+            1) echo "::error::a tracked benchmark metric regressed beyond the 125% tolerance against the previous nightly run. That tolerance is this runner's own measured spread (TASK-0350: 1.39-3.07 ms for an unchanged tree), so tripping it means a 2.25x slowdown. Check the 'Runner CPU' section above against the previous run's before investigating the code, then measure on isolated hardware. Do NOT widen this tolerance further — if this is a false red, the fix is a paired same-host measurement, not a larger number"
                exit 1 ;;
             2) echo "::error::tonight's run could not be compared with the previous one, so no regression was ruled out; the benchmark document above says why — an empty or unreadable one means the benchmark did not run, which is a failure of this job and not a note on it"
                exit 1 ;;
@@ -354,6 +474,23 @@ jobs:
       # the next SIGTERM leaves a record of which resource was gone when it arrived. It is
       # killed on exit, or the step would never close its stdout. /usr/bin/time -v prints
       # peak RSS for a run that completes, which is the measurement TASK-0316 asks for.
+      #
+      # --memory-mb 2048 is TASK-0362: the cap TASK-0321 shipped and left unused, which is
+      # what converts a runaway mutant into a MemoryError inside its own pytest run instead
+      # of a SIGTERMed runner. It binds the baseline too, so a cap below a legitimate suite's
+      # footprint fails this job loudly rather than scoring a free perfect run — which is
+      # why the number is measured rather than taken from the peak RSS this job reports.
+      # RLIMIT_AS bounds ADDRESS SPACE and peak_child_rss_bytes is RESIDENT size; they differ
+      # here by about a factor of three, so a cap read off the 337 MiB this job last reported
+      # would have turned all six baselines into `not-run`. Measured 2026-11-11 under WSL
+      # Ubuntu-24.04 (Python 3.12.3), running each of the six targets' real suites under
+      # `ulimit -v`, which is the same RLIMIT_AS the runner sets: all six pass at 896 MiB and
+      # above, all six fail below it, and between 640 and 768 MiB the interpreter does not
+      # even fail cleanly (a corrupted `ast` import, SIGABRT, SIGINT). 2048 is 2.3x that
+      # knee, and still small enough that a runaway dies in seconds rather than taking the
+      # agent with it. What no cap can catch is the other direction: a cgroup OOM kill
+      # arrives as SIGKILL from outside, which the runner now reports separately instead of
+      # counting it as a test failure.
       - name: Mutate the targeted modules
         env:
           PYTHONUNBUFFERED: "1"
@@ -378,16 +515,45 @@ jobs:
           "${runner[@]}" scripts/mutation_run.py \
             --budget 10 \
             --timeout 300 \
+            --memory-mb 2048 \
             --json-out artifacts/mutation.json \
             --summary "$GITHUB_STEP_SUMMARY"
           verdict=$?
           set -e
           case "${verdict}" in
             0) ;;
-            1) echo "::warning::mutants survived: lines in the targeted modules that no test defends. The full list, with file, line and substitution, is in this run's summary and in the mutation.json artifact" ;;
+            1) echo "::warning::mutants survived: lines in the targeted modules that no test defends. The full list, with file, line and substitution, is in this run's summary and in the mutation.json artifact. Whether this run is a regression is decided by the ratchet step below, not here" ;;
             2) echo "::error::the mutation run could not be performed — a target's own test suite was already red, or no mutant could be generated, either of which would have scored a perfect run for free"
                exit 1 ;;
             *) echo "::error::scripts/mutation_run.py exited ${verdict}, which is not a verdict it defines"
+               exit 1 ;;
+          esac
+
+      # TASK-0382: until 2026-11-11 the step above was the whole job, so a run reporting
+      # eleven undefended lines concluded success — the same class as the benchmark job that
+      # measured nothing for 83 days. The ratchet is what makes this job able to fail: it
+      # holds each target to the measured baseline in scripts/mutation_run.py's CEILING, and
+      # exits 1 when one survives more than its ceiling or leaves a kill that the clock or a
+      # signal produced rather than a test. It reads the artifact the step above wrote rather
+      # than the exit code, so an artifact that was never written, is partial, is missing a
+      # target or disagrees with its own counts fails here instead of passing silently.
+      #
+      # A separate step on purpose: the campaign's exit code says what the run found, this
+      # says whether that is worse than the baseline, and collapsing the two would put the
+      # survivor list and the verdict behind one number again.
+      - name: Hold the survivor count to the measured baseline
+        run: |
+          set +e
+          python scripts/mutation_run.py --check-ratchet artifacts/mutation.json
+          ratchet=$?
+          set -e
+          case "${ratchet}" in
+            0) ;;
+            1) echo "::error::the mutation ratchet moved the wrong way: a target survives more mutants than the measured baseline, or left a kill that no test earned. Lower the ceiling only after the new survivor is killed or proved equivalent; the diagnosis above names the target"
+               exit 1 ;;
+            2) echo "::error::the mutation artifact cannot be judged, so this run proves nothing — see the message above"
+               exit 1 ;;
+            *) echo "::error::--check-ratchet exited ${ratchet}, which is not a verdict it defines"
                exit 1 ;;
           esac
 

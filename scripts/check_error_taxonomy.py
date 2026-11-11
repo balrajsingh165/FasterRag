@@ -89,6 +89,41 @@ in that loop and the exception *is* the answer. One of one is 100%, so that rule
 block there: it is ratcheted by path below, and the ratchet still fails the file's second
 swallow. ``swallow-documented`` found two, both false positives and both already warnings.
 
+Widening the probe exemption to cover a ``continue``/``break`` arm, so that one site would
+need no ratchet entry, was measured over ``src/`` and ``scripts/`` on 2026-11-11 and
+**rejected** (TASK-0372). The structural test such a widening needs is "the ``try`` binds a
+name a later statement in the same block reads, and the handler is trivial". Over this tree
+that exempts exactly one site — ``mutation_run.py:536``, so the same outcome the ratchet
+already has — while matching **134** ``try`` statements whose handler currently does real
+work, **14** of them inside a loop where ``continue`` is already legal. Every one of those 14
+is a handler this gate catches today the moment anyone simplifies it and would not catch
+afterwards: ``config/loader.py:135`` (a ``--set`` value silently dropped), ``cli/sources.py:41``
+(a named source silently not ingested), ``workers/cpu_pool.py:223`` (a work item silently
+lost) — and ``check_error_taxonomy.py:534``, this gate's own ``unreadable`` handler, so the
+exemption would hide a revert of the rule TASK-0342 added to stop precisely that. The shape
+cannot separate "the exception is the answer" from "the exception is a failure we are
+hiding", because a loop skipping a bad item and a loop skipping a failed one are the same
+tree. A ``try``/``except``/``else`` is different in kind: writing the ``else`` is a deliberate
+act that names the success path, and nobody writes one by accident. So the ratchet entry
+stays — one measured line, keyed by path, revertible, and pinned by a test — rather than an
+exemption that would be permanent and silent.
+
+The ``unreadable`` rule is implemented here, in ``check_task_ids.py`` and in
+``check_comments.py``, deliberately rather than through a shared ``scripts/_gatelib.py``
+(TASK-0373) — but not for the reason usually given. That reason, that a sibling import would
+break ``mutation_run.py``'s ``-o pythonpath=``, was measured on 2026-11-11 and is **false**:
+under that flag ``import check_error_taxonomy`` already fails, so a sibling import adds no
+new breakage, and a sibling resolves in both real uses — as a script (``sys.path[0]`` is
+``scripts/``, checked from an unrelated working directory) and under pytest's ini
+``pythonpath``. What is true is that the three are not near-identical. They return different
+payloads (a comment map keyed by line, a comment map with block state, a list of ``Comment``
+records), they differ on whether a partial read is kept or discarded, and they report through
+three different finding types, so the genuinely common code is the ``except
+(tokenize.TokenError, IndentationError, SyntaxError)`` clause and the ``rglob`` helper —
+about seven lines. Sharing those would give all three gates one module to fail together, and
+a gate that cannot see its own unreadable files because the detector was unreadable is the
+vacuous pass this rule exists to prevent.
+
 A vacuity guard is mandatory (rebuild-playbook trap T12): a run in which any scan root
 matches no file, or which parses no handlers, or which never puts a lone fallback ``return``
 in front of the ``swallow-fallback`` matcher, fails rather than reporting a clean tree. A
@@ -154,7 +189,9 @@ BUILTIN_EXCEPTIONS: Final[frozenset[str]] = frozenset(
 # handler scan to `scripts/` (TASK-0338) measured `swallow` at one hit there, hand-classified
 # as a false positive the rule cannot see around — `mutation_run.py:536` probes whether a
 # textual mutant parses, and `continue` on a SyntaxError is the answer, not a swallow. The
-# entry is keyed by path and never by line, so the file may not grow a second one.
+# entry is keyed by path and never by line, so the file may not grow a second one. Widening
+# the probe exemption to cover that `continue` was measured and rejected on 2026-11-11
+# (TASK-0372); the module docstring above carries the numbers and the case that decided it.
 RATCHET: Final[dict[str, int]] = {"swallow:scripts/mutation_run.py": 1}
 
 

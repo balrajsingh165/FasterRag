@@ -213,6 +213,35 @@ def enter() -> None:
     assert rules(check(root), SWALLOW) == []
 
 
+def test_a_continue_arm_on_a_probing_try_is_still_a_swallow(tmp_path: Path) -> None:
+    """TASK-0372 measured this widening and refused it; the refusal is pinned here.
+
+    The shape below is the one a ``continue``/``break`` exemption would have to match, and
+    over ``src/`` and ``scripts/`` it also matches 14 handlers that do real work today.
+    """
+    root = build(
+        tmp_path,
+        **{
+            "a.py": HANDLER
+            + """
+def index(paths: list[str]) -> list[bytes]:
+    \"\"\"Read every source, skipping the ones that will not open.\"\"\"
+    kept: list[bytes] = []
+    for path in paths:
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            continue
+        kept.append(data)
+    return kept
+"""
+        },
+    )
+
+    found = rules(check(root), SWALLOW)
+    assert [finding.path for finding in found] == ["src/fasterrag/a.py"]
+
+
 def test_returning_none_from_an_optional_function_is_only_a_warning(tmp_path: Path) -> None:
     """The absence is published in the annotation, so it downgrades but never vanishes."""
     root = build(

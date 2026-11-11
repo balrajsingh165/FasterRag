@@ -69,12 +69,77 @@ resident size of the worst child reaped so far, so a run that came close to the 
 so. And ``--json-out`` is rewritten after every target, so a killed run leaves the targets it
 finished instead of nothing, with ``complete: false`` saying it is a partial.
 
+**The peak is carried per target as well as per run** (TASK-0363), because the question an
+operator has while calibrating ``--memory-mb`` is *which* target approached the cap, and one
+cumulative number cannot answer it. ``getrusage(RUSAGE_CHILDREN)`` is a high-water mark over
+every child reaped so far and nothing resets it, so each target records the mark as it stood
+when that target finished: the series only rises, and the target where it rises is the one
+that set it. A target that did not raise the mark has an upper bound and no measurement, and
+the reports say which target first reached the figure rather than implying six readings.
+
 **A timeout is counted as a kill and named as a timeout.** It stays inside ``killed`` because
 ``executed == killed + survived`` is what every consumer of this artifact adds up, and
 because the alternative — calling it a survivor — would publish "no test defends this line"
 about a line whose test never finished. But a timeout is not evidence that a test caught
 anything, so each timed-out mutant is now listed by file, line and substitution exactly as a
 survivor is: a run reporting 214 kills of which 4 were timeouts now says which 4.
+
+**The cap is calibrated, and it is not the resident figure** (TASK-0362). ``RLIMIT_AS`` bounds
+address space while ``peak_child_rss_bytes`` reports resident size, and for these six targets
+the two differ by roughly a factor of three — so a cap read off the 337 MiB the nightly last
+reported would have turned every baseline into ``not-run``. Measured 2026-11-11 under WSL
+Ubuntu-24.04 (Python 3.12.3, 16 cores) by running each target's real suite under ``ulimit
+-v``, which is the same limit this script sets: all six pass at 896 MiB and above, all six
+fail below it, and between 640 and 768 MiB the child does not even fail cleanly — a corrupted
+``ast`` import, a ``SIGABRT``, a ``SIGINT``. The nightly therefore runs at 2048 MiB, 2.3x that
+knee. The figure is an upper bound for the hosted runner rather than a reading from it: glibc
+reserves address space per arena and the runner has four cores to this machine's sixteen.
+
+**A child killed by a signal is the same class and is named too** (TASK-0362). ``RLIMIT_AS``
+converts a runaway allocation into a ``MemoryError`` inside the child's own pytest run, which
+is a real kill; what it cannot convert is a kill arriving from outside the process — a cgroup
+OOM kill, which is ``SIGKILL`` to a process that never asked for the memory itself. POSIX
+reports that as a negative return code, and a negative return code is not zero, so until now
+the one memory pathology the cap cannot catch was also the one it could not report. A
+negative code is counted as a kill, for the arithmetic reason above, and listed by signal
+name exactly as a timeout is. On Windows an abnormal termination is a large positive status
+rather than a negative one, so this separation is POSIX-only and is not claimed elsewhere.
+The calibration run above produced one of these without being asked to: at a 768 MiB cap the
+``rate-limit`` child aborted with ``SIGABRT`` rather than raising ``MemoryError``, which the
+runner would previously have recorded as a mutant some test caught.
+
+**The survivor count is ratcheted against a measured baseline** (TASK-0382). Reporting
+survivors as a warning made the job one that cannot fail, which is the class of defect that
+let the nightly benchmark measure nothing for 83 days. ``--check-ratchet ARTIFACT`` reads a
+written ``--json-out`` document and holds each target to ``CEILING``: more survivors than the
+ceiling, or any kill left unproven by the clock or a signal, exits 1. The ceiling is
+**per-target**, because a total lets one target rot behind another's improvement, and it is
+**counts rather than mutant identities**, because a seeded sample is drawn from the mutants a
+file generates and any edit to that file redraws it — an identity ratchet would fire on every
+refactor and be deleted within the week.
+
+``CEILING`` was measured, not chosen: four consecutive nightly runs — 42419161973 (2026-11-07,
+``0c7f81a``), 42468563494 (11-08, ``d1a0d4a``), 42603353729 (11-09) and 42800995556 (11-10,
+both ``6be46f9``) — all at ``--budget 10 --seed 0`` report the identical per-target split
+``retrieval 1, chunking 5, identity 2, breaker 1, regression 0, rate-limit 2`` of 60 executed,
+with zero timeouts. Each entry records the **sample** it was measured on as well as the count,
+and a run whose sample differs in either direction is refused rather than judged: a smaller
+budget would satisfy the ceiling for free, and an exhaustive run would fail it for nothing.
+Three commits, four nights, no movement, so the ceiling carries no slack: slack is a raise
+granted in advance to a number nobody has yet had to justify. The counts even survived a
+redraw — ``chunking`` generated 234 mutants on the first night and 238 on the other three, so
+its ten were a different ten, and five of them still survived. The ±1 noise the ledger
+records (TASK-0330, TASK-0331) belongs to the archive suite's ``tracemalloc`` assertions,
+which defend no module in ``DEFAULT_TARGETS`` and so cannot move these counts.
+
+**The gate lowers itself and never raises itself.** A run below its ceiling prints the exact
+replacement block to paste, so tightening is mechanical and the gate asks for it every night;
+a run above its ceiling prints the diagnosis and no block at all, because a tool that hands
+back a loosened ceiling is a rubber stamp. Raising a number is a hand edit in a reviewed diff.
+And the gate is vacuity-guarded (trap T12) by reusing ``decide()`` rather than re-deriving it:
+a missing or unparseable artifact, a partial one, a target of the ceiling that did not run, a
+target the ceiling does not cover, a stored verdict that disagrees with the recomputed one,
+and a run that executed nothing all exit 2 instead of reporting a held ratchet.
 """
 
 from __future__ import annotations
@@ -87,11 +152,12 @@ import os
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -101,10 +167,12 @@ from typing import Any, Final
 __all__ = [
     "ARITHMETIC_SWAPS",
     "BOOLEAN_SWAPS",
+    "CEILING",
     "COMPARISON_SWAPS",
     "DEFAULT_TARGETS",
     "EXIT_CODES",
     "STAGED_ROOTS",
+    "Ceiling",
     "Mutation",
     "RunReport",
     "Target",
@@ -113,11 +181,15 @@ __all__ = [
     "apply",
     "child_peak_rss",
     "decide",
+    "gate",
     "generate",
     "load_targets",
     "main",
     "markdown",
     "memory_limiter",
+    "ratchet",
+    "ratchet_block",
+    "read_report",
     "render",
     "resource_module",
     "restrict",
@@ -154,6 +226,17 @@ _MEGABYTE: Final = 1024 * 1024
 # a memory pathology look harmless.
 _RSS_SCALE: Final[dict[str, int]] = {"darwin": 1}
 _RSS_SCALE_DEFAULT: Final = 1024
+
+# CRITICAL: SIGKILL is what a cgroup OOM kill arrives as, and it is the one name this
+# repository must never fail to print. Windows has no SIGKILL in `signal.Signals`, so a
+# POSIX artifact read on a development machine would otherwise describe the same kill by a
+# bare number while CI described it by a name.
+_POSIX_SIGNALS: Final[dict[int, str]] = {
+    6: "SIGABRT",
+    9: "SIGKILL",
+    11: "SIGSEGV",
+    15: "SIGTERM",
+}
 
 
 class Verdict(StrEnum):
@@ -270,6 +353,35 @@ DEFAULT_TARGETS: Final[tuple[Target, ...]] = (
     ),
 )
 
+
+@dataclass(frozen=True)
+class Ceiling:
+    """One target's measured limits: the sample they were measured on, and the two counts.
+
+    ``sample`` is part of the measurement, not decoration: a ceiling drawn from ten
+    mutants says nothing about a run of two hundred, in either direction.
+    """
+
+    survived: int
+    sample: int
+    unproven: int = 0
+
+
+# CRITICAL: raising a number here is the one edit this file's own tooling will never make.
+# --check-ratchet prints a tightened block when a target improves and never prints a loosened
+# one, so a raise is a hand edit in a reviewed diff — and it means a line this repository used
+# to defend is no longer defended. The numbers are the measured split of four consecutive
+# nightly runs at --budget 10 --seed 0 (see the module docstring); `unproven` is zero
+# everywhere because no night has yet produced a timeout or a signalled child.
+CEILING: Final[dict[str, Ceiling]] = {
+    "retrieval": Ceiling(survived=1, sample=10),
+    "chunking": Ceiling(survived=5, sample=10),
+    "identity": Ceiling(survived=2, sample=10),
+    "breaker": Ceiling(survived=1, sample=10),
+    "regression": Ceiling(survived=0, sample=10),
+    "rate-limit": Ceiling(survived=2, sample=10),
+}
+
 COMPARISON_SWAPS: Final[dict[type[ast.cmpop], tuple[str, str]]] = {
     ast.Lt: ("<", "<="),
     ast.LtE: ("<=", "<"),
@@ -333,6 +445,33 @@ class Mutation:
         }
 
 
+def _signal_name(code: int) -> str:
+    """Name the signal a negative return code encodes, or say which number it carried.
+
+    The handful below are pinned because the artifact is written on a POSIX runner and
+    read anywhere, and ``signal.Signals`` on Windows carries no SIGKILL to name.
+    """
+    pinned = _POSIX_SIGNALS.get(-code)
+    if pinned is not None:
+        return pinned
+    try:
+        return signal.Signals(-code).name
+    except ValueError:
+        return f"signal {-code}"
+
+
+def _exit_description(code: int | None) -> str:
+    """Say how a child ended, separating a signal from an exit status a test chose."""
+    if code is None:
+        return "did not finish inside the per-mutant timeout"
+    if code < 0:
+        return (
+            f"was killed by {_signal_name(code)} from outside the process, which a "
+            "--memory-mb cap cannot convert into a MemoryError"
+        )
+    return f"exited {code}"
+
+
 @dataclass
 class TargetResult:
     """What one target's mutants did."""
@@ -343,10 +482,18 @@ class TargetResult:
     killed: int = 0
     survived: int = 0
     timed_out: int = 0
+    signalled: int = 0
     duration_s: float = 0.0
+    peak_child_rss_bytes: int | None = None
     survivors: list[Mutation] = field(default_factory=list)
     timeouts: list[Mutation] = field(default_factory=list)
+    signals: list[tuple[Mutation, int]] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
+
+    @property
+    def unproven(self) -> int:
+        """Kills that no test proved: the clock ended them, or something outside did."""
+        return self.timed_out + self.signalled
 
     def as_dict(self) -> dict[str, Any]:
         """Serialise for the JSON artifact."""
@@ -357,9 +504,15 @@ class TargetResult:
             "killed": self.killed,
             "survived": self.survived,
             "timed_out": self.timed_out,
+            "signalled": self.signalled,
             "duration_s": round(self.duration_s, 1),
+            "peak_child_rss_bytes": self.peak_child_rss_bytes,
             "survivors": [mutation.as_dict() for mutation in self.survivors],
             "timeouts": [mutation.as_dict() for mutation in self.timeouts],
+            "signals": [
+                {**mutation.as_dict(), "signal": code, "signal_name": _signal_name(code)}
+                for mutation, code in self.signals
+            ],
             "problems": list(self.problems),
         }
 
@@ -384,6 +537,11 @@ class RunReport:
         return sum(result.timed_out for result in self.results)
 
     @property
+    def signalled(self) -> int:
+        """Total mutants something outside the process ended rather than a test."""
+        return sum(result.signalled for result in self.results)
+
+    @property
     def executed(self) -> int:
         """Total mutants actually run."""
         return sum(result.executed for result in self.results)
@@ -406,6 +564,7 @@ class RunReport:
             "killed": self.killed,
             "survived": self.survived,
             "timed_out": self.timed_out,
+            "signalled": self.signalled,
             "complete": self.complete,
             "planned": max(self.planned, len(self.results)),
             "peak_child_rss_bytes": self.peak_child_rss_bytes,
@@ -654,6 +813,278 @@ def decide(results: list[TargetResult]) -> Verdict:
     return Verdict.CLEAN
 
 
+def _peak_setter(report: RunReport) -> str | None:
+    """Name the target whose children first reached the run's peak, if one can be named."""
+    reached: int | None = None
+    setter: str | None = None
+    for result in report.results:
+        peak = result.peak_child_rss_bytes
+        if peak is not None and (reached is None or peak > reached):
+            reached = peak
+            setter = result.name
+    return setter
+
+
+def _text(entry: Mapping[str, Any], key: str, where: str) -> str:
+    """Read one string the gate needs, refusing a document that does not carry it."""
+    value = entry.get(key)
+    if not isinstance(value, str):
+        raise ValueError(f"{where}: {key} is missing or not a string")
+    return value
+
+
+def _integer(entry: Mapping[str, Any], key: str, where: str) -> int:
+    """Read one count the gate has to add up, refusing anything it cannot."""
+    value = entry.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{where}: {key} is missing or not an integer")
+    return value
+
+
+def _mutation(entry: Any, where: str) -> Mutation:
+    """Rebuild one named mutant from the artifact; its offsets are never used again."""
+    if not isinstance(entry, dict):
+        raise ValueError(f"{where}: a listed mutant is not an object")
+    return Mutation(
+        path=_text(entry, "path", where),
+        line=_integer(entry, "line", where),
+        column=_integer(entry, "column", where),
+        operator=_text(entry, "operator", where),
+        before=_text(entry, "before", where),
+        after=_text(entry, "after", where),
+        start=0,
+        end=0,
+    )
+
+
+def _mutants(entry: Mapping[str, Any], key: str, where: str) -> list[Mutation]:
+    """Rebuild one of a target's named mutant lists."""
+    listed = entry.get(key, [])
+    if not isinstance(listed, list):
+        raise ValueError(f"{where}: {key} is not a list")
+    return [_mutation(item, where) for item in listed]
+
+
+def _target_result(entry: Any) -> TargetResult:
+    """Rebuild one target's counts, refusing a shape or an arithmetic no gate can judge.
+
+    ``signalled`` is required rather than defaulted: an artifact without it was written
+    by a runner that could not tell a signalled child from a test failure.
+    """
+    if not isinstance(entry, dict):
+        raise ValueError("a listed target is not an object")
+    name = _text(entry, "name", "target")
+    where = f"target {name}"
+    problems = entry.get("problems", [])
+    if not isinstance(problems, list) or not all(isinstance(item, str) for item in problems):
+        raise ValueError(f"{where}: problems is not a list of strings")
+    result = TargetResult(
+        name=name,
+        generated=_integer(entry, "generated", where),
+        executed=_integer(entry, "executed", where),
+        killed=_integer(entry, "killed", where),
+        survived=_integer(entry, "survived", where),
+        timed_out=_integer(entry, "timed_out", where),
+        signalled=_integer(entry, "signalled", where),
+        survivors=_mutants(entry, "survivors", where),
+        timeouts=_mutants(entry, "timeouts", where),
+        problems=list(problems),
+    )
+    if result.executed != result.killed + result.survived:
+        raise ValueError(
+            f"{where}: {result.executed} executed is not {result.killed} killed "
+            f"plus {result.survived} survived"
+        )
+    if result.survived != len(result.survivors):
+        raise ValueError(
+            f"{where}: {result.survived} survived but {len(result.survivors)} are named"
+        )
+    if result.unproven > result.killed:
+        raise ValueError(f"{where}: {result.unproven} unproven kills of {result.killed}")
+    return result
+
+
+def read_report(document: Any) -> RunReport:
+    """Rebuild a RunReport from a written artifact, refusing one that cannot be judged.
+
+    Every guard here is a vacuity guard: the gate must never read a document it does
+    not understand as a run that went well.
+    """
+    if not isinstance(document, dict):
+        raise ValueError("the artifact is not a JSON object")
+    targets = document.get("targets")
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("the artifact lists no target at all")
+    verdict = _text(document, "verdict", "artifact")
+    if verdict not in {member.value for member in Verdict}:
+        raise ValueError(f"the artifact carries an unknown verdict {verdict!r}")
+    complete = document.get("complete")
+    if not isinstance(complete, bool):
+        raise ValueError("the artifact does not say whether it is complete")
+    peak = document.get("peak_child_rss_bytes")
+    if peak is not None and (not isinstance(peak, int) or isinstance(peak, bool)):
+        raise ValueError("the artifact's peak child RSS is neither a number nor absent")
+    report = RunReport(
+        Verdict(verdict),
+        [_target_result(entry) for entry in targets],
+        planned=_integer(document, "planned", "artifact"),
+        peak_child_rss_bytes=peak,
+    )
+    if report.complete != complete:
+        raise ValueError(
+            f"the artifact calls itself complete={complete} while carrying "
+            f"{len(report.results)} of {report.planned} targets"
+        )
+    return report
+
+
+def ratchet(report: RunReport, ceiling: Mapping[str, Ceiling] = CEILING) -> list[str]:
+    """Every way this run exceeds the committed ceiling, worst overshoot first.
+
+    An empty list is the only result that means held. Callers guarantee the ceiling
+    covers every target in the report, which ``gate`` establishes before it asks.
+    """
+    exceeded: list[tuple[int, str]] = []
+    for result in report.results:
+        limit = ceiling[result.name]
+        if result.survived > limit.survived:
+            over = result.survived - limit.survived
+            named = "; ".join(mutation.describe() for mutation in result.survivors)
+            exceeded.append(
+                (
+                    over,
+                    f"{result.name}: {result.survived} mutants survived against a ceiling of "
+                    f"{limit.survived} ({over} more). The ceiling records a count rather than "
+                    f"an identity, so compare these against the list in the baseline run: "
+                    f"{named}",
+                )
+            )
+        if result.unproven > limit.unproven:
+            over = result.unproven - limit.unproven
+            exceeded.append(
+                (
+                    over,
+                    f"{result.name}: {result.timed_out} kills were the clock and "
+                    f"{result.signalled} were a signal, against a ceiling of {limit.unproven}. "
+                    "An unproven kill is not evidence that a test caught anything",
+                )
+            )
+    return [text for _, text in sorted(exceeded, key=lambda item: -item[0])]
+
+
+def ratchet_block(report: RunReport, ceiling: Mapping[str, Ceiling] = CEILING) -> str:
+    """Render the CEILING literal this run's counts justify, refusing to loosen one.
+
+    The gate prints this only for a run that held, which is what makes tightening
+    mechanical and raising a hand edit somebody has to defend in review.
+    """
+    lines = ["CEILING: Final[dict[str, Ceiling]] = {"]
+    for result in report.results:
+        limit = ceiling[result.name]
+        if result.survived > limit.survived or result.unproven > limit.unproven:
+            raise ValueError(
+                f"{result.name} is above its ceiling, and a block is never printed to raise one"
+            )
+        unproven = "" if result.unproven == 0 else f", unproven={result.unproven}"
+        lines.append(
+            f'    "{result.name}": Ceiling(survived={result.survived}, '
+            f"sample={result.executed}{unproven}),"
+        )
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _vacuous(report: RunReport, ceiling: Mapping[str, Ceiling]) -> str | None:
+    """Why this artifact cannot be judged at all, or ``None`` when it can."""
+    recomputed = decide(report.results)
+    if recomputed is Verdict.NOT_RUN:
+        problems = "; ".join(p for result in report.results for p in result.problems)
+        return "the mutation run could not be performed, so there is nothing to ratchet: " + (
+            problems or "no target executed a single mutant"
+        )
+    if recomputed is not report.verdict:
+        return (
+            f"the artifact calls itself {report.verdict.value!r} while its own counts say "
+            f"{recomputed.value!r}, so one of the two was written by something else"
+        )
+    if not report.complete:
+        return (
+            f"the artifact is a partial: {len(report.results)} of {report.planned} targets "
+            "finished, and a ratchet judged on part of a run is not a ratchet"
+        )
+    ran = {result.name for result in report.results}
+    missing = sorted(set(ceiling) - ran)
+    if missing:
+        return (
+            f"the ceiling covers {', '.join(missing)}, which this run did not execute — a "
+            "ratchet a run can satisfy by skipping a target is not a ratchet"
+        )
+    unknown = sorted(ran - set(ceiling))
+    if unknown:
+        return (
+            f"{', '.join(unknown)} ran with no ceiling to be held to; give each one a measured "
+            "entry in CEILING rather than leaving it ungated"
+        )
+    resampled = [
+        f"{result.name} ran {result.executed} of its mutants against a ceiling measured on "
+        f"{ceiling[result.name].sample}"
+        for result in report.results
+        if result.executed != ceiling[result.name].sample
+    ]
+    if resampled:
+        return (
+            "the ceiling cannot judge a different sample, in either direction — a smaller one "
+            "would satisfy it for free and a larger one would fail it for nothing: "
+            + "; ".join(resampled)
+        )
+    return None
+
+
+def gate(path: Path, ceiling: Mapping[str, Ceiling] = CEILING) -> tuple[Verdict, str]:
+    """Judge a written artifact against the ceiling: held, regressed, or never really run.
+
+    Exit codes keep their meaning from a live run — 0 held, 1 regressed, 2 the run
+    cannot be judged — so the workflow treats both failures the way it always has.
+    """
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return Verdict.NOT_RUN, f"the mutation artifact {path} could not be read: {exc}"
+    try:
+        report = read_report(document)
+    except ValueError as exc:
+        return Verdict.NOT_RUN, f"the mutation artifact {path} cannot be judged: {exc}"
+
+    refusal = _vacuous(report, ceiling)
+    if refusal is not None:
+        return Verdict.NOT_RUN, refusal
+
+    exceeded = ratchet(report, ceiling)
+    if exceeded:
+        return Verdict.SURVIVORS, "\n".join(
+            ["the mutation ratchet moved the wrong way:", *(f"  {line}" for line in exceeded)]
+        )
+
+    lines = [
+        f"the mutation ratchet holds: {report.survived} survived of {report.executed} executed "
+        f"over {len(report.results)} targets, none above its ceiling"
+    ]
+    if any(
+        result.survived < ceiling[result.name].survived
+        or result.unproven < ceiling[result.name].unproven
+        for result in report.results
+    ):
+        lines.extend(
+            [
+                "",
+                "a target improved; tighten the ceiling in scripts/mutation_run.py to:",
+                "",
+                ratchet_block(report, ceiling),
+            ]
+        )
+    return Verdict.CLEAN, "\n".join(lines)
+
+
 def render(report: RunReport) -> str:
     """Render the human report: counts per target, then every survivor in full."""
     lines = [f"mutation run: {report.verdict.value}"]
@@ -665,12 +1096,15 @@ def render(report: RunReport) -> str:
         lines.append(
             f"  {result.name}: {result.executed}/{result.generated} run, "
             f"{result.killed} killed, {result.survived} survived, "
-            f"{result.timed_out} timed out, {result.duration_s:.0f}s"
+            f"{result.timed_out} timed out, {result.signalled} signalled, "
+            f"{result.duration_s:.0f}s"
         )
         for problem in result.problems:
             lines.append(f"    [not-run] {problem}")
     if report.peak_child_rss_bytes is not None:
-        lines.append(f"  peak child RSS: {report.peak_child_rss_bytes // _MEGABYTE} MiB")
+        setter = _peak_setter(report)
+        reached = "" if setter is None else f", first reached in {setter}"
+        lines.append(f"  peak child RSS: {report.peak_child_rss_bytes // _MEGABYTE} MiB{reached}")
     survivors = [(result.name, m) for result in report.results for m in result.survivors]
     if survivors:
         lines.append("")
@@ -681,7 +1115,22 @@ def render(report: RunReport) -> str:
         lines.append("")
         lines.append("timed-out mutants (counted as killed; the clock ended them, not a test):")
         lines.extend(f"  [{name}] {mutation.describe()}" for name, mutation in timeouts)
+    signals = [(result.name, m, c) for result in report.results for m, c in result.signals]
+    if signals:
+        lines.append("")
+        lines.append("signalled mutants (counted as killed; something outside the process was):")
+        lines.extend(
+            f"  [{name}] {_signal_name(code)} {mutation.describe()}"
+            for name, mutation, code in signals
+        )
     return "\n".join(lines)
+
+
+def _peak_mib(result: TargetResult) -> str:
+    """Render one target's high-water mark, or a dash where the platform reports none."""
+    if result.peak_child_rss_bytes is None:
+        return "-"
+    return str(result.peak_child_rss_bytes // _MEGABYTE)
 
 
 def markdown(report: RunReport) -> str:
@@ -692,12 +1141,13 @@ def markdown(report: RunReport) -> str:
         f"**Verdict: `{report.verdict.value}`** — "
         f"{report.killed} killed, {report.survived} survived of {report.executed} run.",
         "",
-        "| Target | Run | Killed | Survived | Timed out | Seconds |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| Target | Run | Killed | Survived | Timed out | Signalled | Peak MiB | Seconds |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     lines.extend(
         f"| {result.name} | {result.executed} | {result.killed} | {result.survived} "
-        f"| {result.timed_out} | {result.duration_s:.0f} |"
+        f"| {result.timed_out} | {result.signalled} | {_peak_mib(result)} "
+        f"| {result.duration_s:.0f} |"
         for result in report.results
     )
     if not report.complete:
@@ -705,7 +1155,11 @@ def markdown(report: RunReport) -> str:
             ["", f"**Partial:** {len(report.results)} of {report.planned} targets ran.", ""]
         )
     if report.peak_child_rss_bytes is not None:
-        lines.extend(["", f"Peak child RSS: {report.peak_child_rss_bytes // _MEGABYTE} MiB.", ""])
+        setter = _peak_setter(report)
+        reached = "" if setter is None else f", first reached in `{setter}`"
+        lines.extend(
+            ["", f"Peak child RSS: {report.peak_child_rss_bytes // _MEGABYTE} MiB{reached}.", ""]
+        )
     problems = [p for result in report.results for p in result.problems]
     if problems:
         lines.extend(["", "**Could not run:**", ""])
@@ -725,6 +1179,20 @@ def markdown(report: RunReport) -> str:
             ]
         )
         lines.extend(f"- `{name}` {mutation.describe()}" for name, mutation in timeouts)
+    signals = [(result.name, m, c) for result in report.results for m, c in result.signals]
+    if signals:
+        lines.extend(
+            [
+                "",
+                f"**Signalled** — {report.signalled} child process(es) were ended from "
+                "outside rather than by a test, which no memory cap can convert into a kill:",
+                "",
+            ]
+        )
+        lines.extend(
+            f"- `{name}` {_signal_name(code)} {mutation.describe()}"
+            for name, mutation, code in signals
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -812,8 +1280,8 @@ def _run_target(
     baseline = _pytest(tests, workspace, timeout, limiter)
     if baseline != 0:
         result.problems.append(
-            f"{target.name}: the unmutated suite exited {baseline}, so every mutant would "
-            "have died for free"
+            f"{target.name}: the unmutated suite {_exit_description(baseline)}, so every "
+            "mutant would have died for free"
         )
         return result
 
@@ -845,14 +1313,18 @@ def _run_target(
         elif code == 0:
             result.survived += 1
             result.survivors.append(mutation)
+        elif code < 0:
+            result.signalled += 1
+            result.killed += 1
+            result.signals.append((mutation, code))
         else:
             result.killed += 1
 
     result.duration_s = time.monotonic() - started
     _progress(
         f"[{target.name}] done: {result.executed}/{result.generated} run, {result.killed} killed "
-        f"({result.timed_out} by the clock), {result.survived} survived, "
-        f"{result.duration_s:.0f}s"
+        f"({result.timed_out} by the clock, {result.signalled} by a signal), "
+        f"{result.survived} survived, {result.duration_s:.0f}s"
     )
     return result
 
@@ -878,13 +1350,13 @@ def run(
     results: list[TargetResult] = []
     report = RunReport(Verdict.NOT_RUN, results, planned=len(targets))
     for target in targets:
-        results.append(
-            _run_target(
-                target, workspace, budget=budget, seed=seed, timeout=timeout, limiter=limiter
-            )
+        outcome = _run_target(
+            target, workspace, budget=budget, seed=seed, timeout=timeout, limiter=limiter
         )
+        results.append(outcome)
         report.verdict = decide(results)
         report.peak_child_rss_bytes = child_peak_rss(limits)
+        outcome.peak_child_rss_bytes = report.peak_child_rss_bytes
         if after_target is not None:
             after_target(report)
     return report
@@ -942,6 +1414,12 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="cap each mutant's address space in MiB (POSIX only; a runaway dies as a kill)",
     )
+    parser.add_argument(
+        "--check-ratchet",
+        type=Path,
+        default=None,
+        help="judge an existing --json-out artifact against CEILING and run no mutant",
+    )
     parser.add_argument("--list", action="store_true", help="count the mutants and run none")
     parser.add_argument("--json-out", type=Path, default=None, help="write the report as JSON")
     parser.add_argument(
@@ -953,6 +1431,12 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run the mutation layer and exit with the verdict's code."""
     args = _parser().parse_args(argv)
+
+    if args.check_ratchet is not None:
+        verdict, text = gate(args.check_ratchet)
+        stream = sys.stdout if verdict is Verdict.CLEAN else sys.stderr
+        stream.write(f"{text}\n")
+        return EXIT_CODES[verdict]
 
     try:
         configured: list[Target] = (

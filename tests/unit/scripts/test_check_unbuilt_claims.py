@@ -9,6 +9,9 @@ from pathlib import Path
 import pytest
 from check_unbuilt_claims import (
     ADAPTER_DENIAL,
+    COLUMN_DENIAL,
+    LABEL_DENIAL,
+    LAYER_DENIAL,
     RATCHET,
     STRUCTURE_ABSENT,
     STRUCTURE_PENDING,
@@ -16,7 +19,11 @@ from check_unbuilt_claims import (
     Finding,
     adapter_findings,
     check,
+    column_findings,
+    denied_columns,
     over_ratchet,
+    prose_findings,
+    registered_layers,
     registered_providers,
     structure_findings,
 )
@@ -31,6 +38,27 @@ _BUILTIN_ADAPTERS: Final[dict[str, str]] = {
 _PLANNED_ADAPTERS: Final[frozenset[str]] = frozenset({"pinecone"})
 """
 
+PROJECT = """
+[tool.pytest.ini_options]
+addopts = "-m 'not soak'"
+markers = [
+    "integration: requires containerized backends",
+    "soak: long-running stability runs",
+]
+"""
+
+# CRITICAL: every fake tree carries one table, one tier name in prose, and one tier with no
+# tests, because four vacuity guards fire without them. A fixture that trips a guard tests
+# the guard and not the rule it was written for.
+FIXTURE = """# fixture.md
+
+| Surface | How |
+|---|---|
+| CLI | shipped |
+
+The integration suite runs on every push.
+"""
+
 MAP_HEADER = """# structure.md
 
 > Paths marked *(pending)* do not exist yet; everything else is in the tree today.
@@ -43,12 +71,22 @@ repo/
 """
 
 
-def build(root: Path, *, factory: str = FACTORY, docs: dict[str, str] | None = None) -> Path:
-    """Write a fake tree: one adapter factory, the root documents, and the given docs."""
+def build(
+    root: Path,
+    *,
+    factory: str = FACTORY,
+    project: str = PROJECT,
+    docs: dict[str, str] | None = None,
+) -> Path:
+    """Write a fake tree: an adapter factory, a marker registry, and the given docs."""
     path = root / "src" / "fasterrag" / "adapters" / "vectordb"
     path.mkdir(parents=True, exist_ok=True)
     (path / "factory.py").write_text(factory, encoding="utf-8")
+    (root / "pyproject.toml").write_text(project, encoding="utf-8")
+    (root / "tests" / "integration").mkdir(parents=True, exist_ok=True)
+    (root / "tests" / "integration" / "test_live.py").write_text("", encoding="utf-8")
     (root / "docs").mkdir(exist_ok=True)
+    (root / "docs" / "fixture.md").write_text(FIXTURE, encoding="utf-8")
     (root / "docs" / "todo.md").write_text("- [ ] TASK-0049: adapters\n", encoding="utf-8")
     (root / "docs" / "structure.md").write_text(MAP_HEADER, encoding="utf-8")
     for name in ("README.md", "CLAUDE.md"):
@@ -130,6 +168,155 @@ def test_never_run_is_not_a_denial_that_a_thing_exists(tmp_path: Path) -> None:
     found, _ = adapter_findings(root)
 
     assert found == []
+
+
+COLUMN = """# status
+
+| Shipped | Not yet |
+|---|---|
+| Qdrant | {item} |
+"""
+
+
+def test_a_column_header_denies_every_item_under_it(tmp_path: Path) -> None:
+    """README.md:9 at 650943b: the denial is in the header and no cell carries a verb."""
+    root = build(tmp_path, docs={"a.md": COLUMN.format(item="Milvus/Pinecone adapters")})
+
+    found, _ = column_findings(root)
+
+    assert len(found) == 1
+    assert found[0].rule == COLUMN_DENIAL
+    assert "milvus" in found[0].detail
+
+
+def test_a_denied_column_item_that_merely_names_a_provider_is_left_alone(tmp_path: Path) -> None:
+    """README's live item: the cell denies a contract run, which has genuinely never run."""
+    item = "a Milvus or Pinecone contract run against a real server"
+    root = build(tmp_path, docs={"a.md": COLUMN.format(item=item)})
+
+    found, _ = column_findings(root)
+
+    assert found == []
+
+
+def test_a_planned_provider_under_a_denying_header_is_not_a_finding(tmp_path: Path) -> None:
+    """An item reading "Pinecone adapter" is decided, and the denial of it is true."""
+    root = build(tmp_path, docs={"a.md": COLUMN.format(item="Pinecone adapter")})
+
+    found, _ = column_findings(root)
+
+    assert found == []
+
+
+def test_a_header_that_denies_nothing_lends_nothing(tmp_path: Path) -> None:
+    """151 of 152 tables have a header like this one, and none of them denies anything."""
+    table = COLUMN.replace("| Shipped | Not yet |", "| Backend | Notes |")
+    root = build(tmp_path, docs={"a.md": table.format(item="Milvus adapter")})
+
+    found, _ = column_findings(root)
+
+    assert found == []
+
+
+def test_a_blockquoted_table_is_still_a_table(tmp_path: Path) -> None:
+    """README's table is blockquoted, so losing the quote prefix loses the whole rule."""
+    quoted = "# status\n\n" + "\n".join(
+        f"> {line}" for line in COLUMN.format(item="Milvus adapter").split("\n")[2:]
+    )
+    root = build(tmp_path, docs={"a.md": quoted})
+
+    found, tables = column_findings(root)
+
+    assert tables == 2
+    assert [finding.rule for finding in found] == [COLUMN_DENIAL]
+
+
+def test_an_item_carrying_its_own_denial_is_left_to_the_prose_rule(tmp_path: Path) -> None:
+    """Two rules on one cell report it twice, and the prose rule has a guard this lacks."""
+    root = build(tmp_path, docs={"a.md": COLUMN.format(item="Milvus is not built")})
+
+    columns, _ = column_findings(root)
+    adapters, _ = adapter_findings(root)
+
+    assert columns == []
+    assert [finding.rule for finding in adapters] == [ADAPTER_DENIAL]
+
+
+def test_a_denial_of_a_tier_with_tests_is_a_finding(tmp_path: Path) -> None:
+    """The TASK-0369 shape with no registry to decide it, decided by the marker registry."""
+    root = build(tmp_path, docs={"a.md": "The integration harness is not yet built.\n"})
+
+    found, _ = prose_findings(root)
+
+    assert [finding.rule for finding in found] == [LAYER_DENIAL]
+    assert "integration" in found[0].detail
+
+
+def test_a_denial_of_a_tier_with_no_tests_is_not_a_finding(tmp_path: Path) -> None:
+    """Nothing is marked soak and there is no tests/soak, so the denial is true."""
+    root = build(tmp_path, docs={"a.md": "The soak harness is not yet built.\n"})
+
+    found, _ = prose_findings(root)
+
+    assert found == []
+
+
+def test_a_denial_that_labels_a_list_reaches_the_list(tmp_path: Path) -> None:
+    """reliability.md:56 at 650943b, the sentence TASK-0369 names: a header written as prose."""
+    body = (
+        "**Specified but not built** (TASK-0243): integration (testcontainers) "
+        "and 24 h soak (no memory growth) — both waiting on hardware.\n"
+    )
+    root = build(tmp_path, docs={"a.md": body})
+
+    found, _ = prose_findings(root)
+
+    assert [finding.rule for finding in found] == [LABEL_DENIAL]
+    assert found[0].detail.startswith("line 1 lists integration after a denial")
+
+
+def test_a_label_whose_list_carries_its_own_denial_is_left_alone(tmp_path: Path) -> None:
+    """An inheriting rule never covers a list that denies for itself; that is other work."""
+    body = "Not built: the integration tier is unbuilt and the soak tier is unbuilt.\n"
+    root = build(tmp_path, docs={"a.md": body})
+
+    found, _ = prose_findings(root)
+
+    assert [finding.rule for finding in found] == [LAYER_DENIAL]
+
+
+def test_a_sentence_denying_a_result_rather_than_a_tier_is_left_alone(tmp_path: Path) -> None:
+    """README's live wording: the tier exists, and a denial of its *result* is still true."""
+    body = "Not built: soak test layer and any integration *result*.\n"
+    root = build(tmp_path, docs={"a.md": body})
+
+    found, _ = prose_findings(root)
+
+    assert found == []
+
+
+def test_the_marker_registry_decides_which_tiers_exist(tmp_path: Path) -> None:
+    """--strict-markers makes the list executable truth: an unregistered marker errors."""
+    root = build(tmp_path)
+
+    built, unbuilt = registered_layers(root)
+
+    assert built == {"integration"}
+    assert unbuilt == {"soak"}
+
+
+def test_a_tier_marked_on_a_test_outside_its_directory_counts(tmp_path: Path) -> None:
+    """tests/load carries no marker and a marked test may own no directory; either counts."""
+    root = build(tmp_path)
+    (root / "tests" / "unit").mkdir(parents=True, exist_ok=True)
+    (root / "tests" / "unit" / "test_x.py").write_text(
+        "import pytest\n\n@pytest.mark.soak\ndef test_x() -> None: ...\n", encoding="utf-8"
+    )
+
+    built, unbuilt = registered_layers(root)
+
+    assert built == {"integration", "soak"}
+    assert unbuilt == set()
 
 
 def test_a_stale_pending_marker_in_the_structure_map_is_a_finding(tmp_path: Path) -> None:
@@ -222,6 +409,53 @@ def test_an_unparseable_structure_map_is_vacuous(tmp_path: Path) -> None:
     assert "no tree-diagram entries" in found[0].detail
 
 
+def test_a_registry_with_no_markers_is_vacuous(tmp_path: Path) -> None:
+    """[tool.pytest.ini_options].markers is the tier rule's whole vocabulary."""
+    root = build(tmp_path, project="[tool.pytest.ini_options]\nasyncio_mode = 'auto'\n")
+
+    found = check(root)
+
+    assert rules(found) == [VACUOUS]
+    assert "no pytest marker" in found[0].detail
+
+
+def test_a_suite_with_every_tier_built_is_vacuous(tmp_path: Path) -> None:
+    """The nothing-planned guard's sibling: with every tier built, every denial is false."""
+    root = build(tmp_path)
+    (root / "tests" / "soak").mkdir(parents=True)
+    (root / "tests" / "soak" / "test_long.py").write_text("", encoding="utf-8")
+
+    found = check(root)
+
+    assert rules(found) == [VACUOUS]
+    assert "stopped discriminating" in found[0].detail
+
+
+def test_a_corpus_with_no_table_at_all_is_vacuous(tmp_path: Path) -> None:
+    """A blockquote prefix once hid the only table that matters; an empty parse must say so."""
+    root = build(tmp_path)
+    (root / "docs" / "fixture.md").write_text("The integration suite runs.\n", encoding="utf-8")
+
+    found = check(root)
+
+    assert rules(found) == [VACUOUS]
+    assert "no markdown table" in found[0].detail
+
+
+def test_documents_that_name_no_tier_are_vacuous(tmp_path: Path) -> None:
+    """If prose stops spelling the marker names, the join silently stops existing."""
+    root = build(tmp_path)
+    (root / "docs" / "fixture.md").write_text(
+        FIXTURE.replace("The integration suite runs on every push.", "Nothing here."),
+        encoding="utf-8",
+    )
+
+    found = check(root)
+
+    assert rules(found) == [VACUOUS]
+    assert "tiers that have tests" in found[0].detail
+
+
 def test_the_ratchet_counts_by_path(tmp_path: Path) -> None:
     """Line numbers move under nine concurrent agents; paths do not."""
     findings = [
@@ -258,3 +492,19 @@ def test_the_real_registry_names_the_adapters_that_shipped(name: str) -> None:
 
     assert name in shipped
     assert planned == {"pinecone"}
+
+
+def test_the_real_suite_has_a_load_tier_and_no_soak_tier() -> None:
+    """The two facts TASK-0369 turned on: tests/load has held modules since 2026-11-07."""
+    built, unbuilt = registered_layers()
+
+    assert {"integration", "eval", "load", "chaos"} <= built
+    assert unbuilt == {"soak"}
+
+
+def test_the_only_denying_column_header_in_the_corpus_is_readmes() -> None:
+    """Measured: one denying header over 152 tables, and its items are the rule's input."""
+    items, tables = denied_columns()
+
+    assert tables > 100
+    assert {path for path, _, _ in items} == {"README.md"}

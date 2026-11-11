@@ -1,8 +1,39 @@
 # verification.md — Acceptance Verification Procedure
 
-How to prove, on any machine, that a checkout (or a rebuild per the [rebuild-playbook](rebuild-playbook.md)) actually is the system the documentation describes. Run the tiers in order; each assumes the previous passed. Expected outputs marked *(2026-08-10)* are dated observations — counts grow as the ledger moves; a **deviation in kind** (a failing gate, a missing capability) is a finding, a deviation in count is not.
+How to prove, on any machine, that a checkout (or a rebuild per the [rebuild-playbook](rebuild-playbook.md)) actually is the system the documentation describes. Run the tiers in order, starting at tier −1; each assumes the previous passed. Expected outputs marked *(2026-08-10)* are dated observations — counts grow as the ledger moves; a **deviation in kind** (a failing gate, a missing capability) is a finding, a deviation in count is not. The dated observations below were recorded before tier −1 existed and therefore carry a date but no tree state; **every observation added from 2026-11-11 carries the provenance line**, and one that does not is incomplete rather than merely terse.
 
 > **This is a procedure, not a tracker.** The one task file is [todo.md](todo.md); §7 below is a read-only cross-reference of open verification work, citing existing `TASK-` ids only — same contract as [blockers.md](blockers.md). Any deviation this procedure finds is filed **in todo.md**, then optionally reflected here.
+
+## Tier −1 — State the tree, before any number is recorded
+
+**A number without its tree state is not a measurement.** Every count this procedure produces — tests passed, files typed, coverage percent, seconds elapsed — is evidence about *one tree at one commit*, and printed without saying which tree it is an anecdote. Any run whose numbers are written into a document, a ledger entry, a task note, or a report **must paste the provenance line beside them**:
+
+```bash
+pytest -q -m "not integration and not eval"
+```
+
+prints, beside the counts and regardless of `-q`:
+
+```
+measured: 882a07e | working tree: clean | D:\Github\FasterRag
+```
+
+and the unsuppressed header form, which is the one to paste when there is room for four lines:
+
+```
+checkout: D:\Github\FasterRag
+commit: 882a07e9... (full sha)
+working tree: clean
+fasterrag imported from: D:\Github\FasterRag\src\fasterrag
+```
+
+Rules, in the order they bite:
+
+1. **A recorded number without that line is incomplete**, and is to be treated as unverified until the run is repeated. This holds for every dated observation in this document and for every `Provenance:` field in [benchmarks.md](benchmarks.md) (ledger rule 7).
+2. **`working tree:` must read `clean`** for any number that will be compared against another number — a count, a timing, a coverage figure, a release-readiness derivation. The instrument says so in capitals (`A NUMBER MEASURED HERE IS NOT REPRODUCIBLE`) because a dirty tree silently invalidates the commit beside it. A dirty-tree number may still be recorded; it may not be compared, cited, or used to close a task.
+3. **`fasterrag imported from:` must sit inside the checkout above it.** When it does not, the run measured different code than the commit names — a second worktree, a stale `site-packages`, an editable install pointing elsewhere. This has happened in this repository.
+
+**Why this is a tier and not a footnote.** TASK-0322 spent an entire session establishing whether a discrepancy between two test runs was a defect or two different trees. The question was unanswerable from either log, because neither log said what it had measured; the session's whole cost was reconstruction. Both logs would have answered it in seconds had they carried these four lines. The instrument in `tests/conftest.py` exists because of that session, and has twice since caught a measurement that was about to be recorded as if it were reproducible. The rule is written here with its cause attached so that a later reader can see what it is paying for, rather than deleting a line that looks like noise.
 
 ## Tier 0 — Environment preflight
 

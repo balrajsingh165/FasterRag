@@ -230,6 +230,7 @@ def test_an_empty_run_reports_nothing_reached() -> None:
         assert f"{check.name}: NOT RUN" in report
 
 
+@pytest.mark.must_run
 @pytest.mark.parametrize("absent", ["", "   ", "0", "false", "no", "off", "maybe"])
 def test_a_credential_alone_does_not_authorise_a_billed_call(
     monkeypatch: pytest.MonkeyPatch, ledger: LiveLedger, absent: str
@@ -247,6 +248,7 @@ def test_a_credential_alone_does_not_authorise_a_billed_call(
     assert ledger.unverified[OPENAI.name] == str(skipped.value)
 
 
+@pytest.mark.must_run
 def test_an_unset_opt_in_skips_exactly_as_a_falsey_one_does(
     monkeypatch: pytest.MonkeyPatch, ledger: LiveLedger
 ) -> None:
@@ -258,6 +260,7 @@ def test_an_unset_opt_in_skips_exactly_as_a_falsey_one_does(
     assert OPENAI.name in ledger.unverified
 
 
+@pytest.mark.must_run
 @pytest.mark.parametrize("present", ["1", "true", "TRUE", " yes ", "on"])
 def test_an_explicit_opt_in_lets_the_probe_through(
     monkeypatch: pytest.MonkeyPatch, ledger: LiveLedger, present: str
@@ -270,6 +273,7 @@ def test_an_explicit_opt_in_lets_the_probe_through(
     assert ledger.verified() == ()
 
 
+@pytest.mark.must_run
 @pytest.mark.parametrize("build", [llm_settings, embedding_settings])
 def test_no_probe_can_reach_a_provider_without_the_opt_in(
     monkeypatch: pytest.MonkeyPatch,

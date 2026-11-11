@@ -1,13 +1,17 @@
 """Test-suite-wide configuration.
 
-Three concerns: Hypothesis's per-example deadline, the provenance header that says which
-tree a run's counts describe, and the process-wide cost governors, which are reset around
-every test so a rolling spend window cannot leak between them.
+Four concerns: Hypothesis's per-example deadline, the provenance header that says which
+tree a run's counts describe, the process-wide cost governors reset around every test so a
+rolling spend window cannot leak between them, and the ``must_run`` execution report that
+``scripts/check_must_run.py`` reads across CI jobs.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
@@ -122,3 +126,57 @@ def _unspent_governors() -> Iterator[None]:
     reset_shared_governors()
     yield
     reset_shared_governors()
+
+
+MUST_RUN_MARKER: Final = "must_run"
+MUST_RUN_REPORT_VAR: Final = "FASTERRAG_MUST_RUN_REPORT"
+MUST_RUN_REPORT_VERSION: Final = 1
+MUST_RUN_RAN: Final = "ran"
+MUST_RUN_SKIPPED: Final = "skipped"
+
+_must_run_collected: set[str] = set()
+_must_run_outcomes: dict[str, str] = {}
+
+# CRITICAL: this plugin is the only evidence scripts/check_must_run.py has that a test named
+# as must-run actually executed, and it is deliberately inert unless FASTERRAG_MUST_RUN_REPORT
+# names a destination. A lane that stops setting the variable stops producing a report, which
+# the gate reads as "ran nowhere" and fails on — never as a pass. Do not make the absent
+# variable write an empty document somewhere the gate might find it.
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Record which collected tests carry the marker, before anything can skip them."""
+    if not os.environ.get(MUST_RUN_REPORT_VAR):
+        return
+    for item in items:
+        if item.get_closest_marker(MUST_RUN_MARKER) is not None:
+            _must_run_collected.add(item.nodeid)
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Record whether a marked test executed; a skip raised in the body overwrites a run.
+
+    A failure counts as having run. This gate judges execution, not verdicts, and a
+    failing test fails its own job already.
+    """
+    if report.when == "teardown" or report.nodeid not in _must_run_collected:
+        return
+    _must_run_outcomes[report.nodeid] = MUST_RUN_SKIPPED if report.skipped else MUST_RUN_RAN
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Write this lane's must-run report, saying whether it ran tests or only collected."""
+    destination = os.environ.get(MUST_RUN_REPORT_VAR)
+    if not destination:
+        return
+    path = Path(destination)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    document = {
+        "report_version": MUST_RUN_REPORT_VERSION,
+        "mode": "collect" if bool(session.config.getoption("--collect-only")) else "run",
+        "label": path.stem,
+        "platform": sys.platform,
+        "collected": sorted(_must_run_collected),
+        "outcomes": dict(sorted(_must_run_outcomes.items())),
+    }
+    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
