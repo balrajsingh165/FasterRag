@@ -3,7 +3,7 @@
 fasterRag is self-hosted software in beta (no managed cloud). Three ways to run it:
 
 1. **Library mode** — embed in your own process ([python-api.md](python-api.md)). Install from a source checkout (`pip install -e ".[all]"`) — **`pip install fasterrag` does not work yet**, because nothing has been published to PyPI (TASK-0087, blocked on the license decision TASK-0164 and the version stamp TASK-0020).
-2. **Service mode** — `fasterrag serve` (API) + `fasterrag worker` (pipelines) as processes.
+2. **Service mode** — `fasterrag serve` (API). The design pairs it with `fasterrag worker` for pipelines; today that second process does no work and ingestion runs inside the API process (TASK-0440, TASK-0130), so one `serve` process is the whole service. `serve` binds `127.0.0.1` unless `app.host` or `--host` says otherwise, and warns when it binds anything else with `security.auth` off.
 3. **Docker mode** — compose profiles for the full stack.
 
 ## 1. Compose profiles

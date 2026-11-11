@@ -32,7 +32,11 @@ Design rules:
 
 - **Streaming hand-off.** Chunks stream from the CPU pool to the embedding pool as they are produced, so expensive embedding workers never idle waiting on parsing.
 - **Stateful embedding workers.** Each embedding worker loads the embedding model into memory **once per worker** and reuses it across all batches. Reloading a model per task is a large avoidable cost — a local model takes seconds to load against milliseconds of retrieval — and is prohibited by design. The size of that gap on reference hardware is unmeasured (TASK-0084).
-- **Fault tolerance from decoupling.** Because stages communicate only via queues, a failed embedding job is retried from the queue without re-parsing its document; a crashed CPU worker loses only its in-flight item. Each stage checkpoints progress in the job record.
+- **Fault tolerance from decoupling.** Because stages communicate only via a queue, a failed embedding batch is retried without re-parsing its document, and a failed index write is retried without re-embedding it. A document that raises while parsing — including an exception a parser library did not type — costs that document only. A worker *process* dying is different and is stated plainly: the standard library marks the whole pool broken, so the job fails with a typed error, where an earlier revision of this page said it would lose only the in-flight item.
+- **"Indexed" is decided by the index side.** `workers/ledger.py` registers each parsed document with its chunk count; the embedding pool reports every chunk it wrote or gave up on; the journal records the document as indexed, and remembers its content hash, only when every chunk is in the vector database. Until 2026-11-11 this was recorded when the chunks were merely enqueued, so a document that failed downstream was both dead-lettered and remembered as indexed, and a retry skipped it (TASK-0427).
+- **Documents are parsed concurrently.** Up to `workers.cpu_pool_size` documents are in the process pool at once and are consumed in submission order. Earlier revisions awaited each document before submitting the next, which keeps one worker busy whatever the pool size. The throughput effect of the change is unmeasured (TASK-0454).
+- **The two halves fail together.** A dead consumer would leave the producer blocked on a full queue and a dead producer would leave consumers waiting for a close that never comes, so whichever stops first ends the job, which is then settled `failed`.
+- **What this section does not yet provide.** There is no queue backend and no separate worker process: both pools run inside the process that accepted the job (TASK-0130, TASK-0440). Nothing resumes a job after that process exits (TASK-0436).
 - **Backpressure.** The chunk queue is bounded (`workers.queue_depth`). If embedding lags, CPU workers block on enqueue rather than filling memory; if a remote embedding provider throttles, the queue absorbs the burst instead of hammering the rate limit.
 
 ## 3. Batching
@@ -83,7 +87,7 @@ Design rationale (**not measurements** — no ledger entry isolates either stage
 
 | Cache | Keyed by | Notes |
 |---|---|---|
-| **Embedding cache** | content hash of text + model + version | Skips re-embedding identical chunks/queries; enabled by default. |
+| **Embedding cache** | content hash of text + model + version | Skips re-embedding identical chunks/queries; enabled by default. **Status (2026-11-11): implemented, not wired** — nothing constructs it, so no embedding call is served from cache today (TASK-0442). |
 | **Semantic response cache** | embedding similarity of the query (cosine threshold, typically **~0.92–0.97**) | A sufficiently similar previous query returns its cached answer without touching the pipeline. |
 | **Provider prompt caching** | provider-side | Used for contextual-enrichment (parent doc) and long shared prompts. |
 
@@ -147,7 +151,8 @@ Same pattern: `embeddings.provider` and `llm.provider` select concrete adapters 
 
 ## 12. Fault tolerance
 
-- Stage decoupling (Section 2): failures retry at the failing stage only.
+- Stage decoupling (Section 2): failures retry at the failing stage only, and a job is always settled — an exception of any kind leaves it `failed`, never `running`.
+- Circuit breakers are process-wide (`core/breaker.py::shared_breaker`), one per provider, because the REST API builds its services per request and a breaker owned by a per-request object can never count past one. The reranker model is cached per process for the same reason.
 - Bounded retries with exponential backoff per queue item; poisoned items park in a dead-letter state on the job record for inspection.
 - Idempotent indexing: upserts keyed by deterministic chunk IDs, so replays never duplicate.
 - Health/readiness endpoints (`/healthz`, `/readyz`) gate traffic; adapters implement `health()` so a sick backend is visible before queries fail.

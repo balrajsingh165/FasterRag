@@ -83,6 +83,7 @@ fasterRag/
 │       │   ├── cpu_pool.py       # load/parse/chunk workers (CPU-bound)
 │       │   ├── embed_pool.py     # stateful embedding workers (model loaded once)
 │       │   ├── queues.py         # Bounded queues, backpressure, retry policy
+│       │   ├── ledger.py         # Per-document completion: "indexed" only once every chunk is written
 │       │   └── indexer.py        # Batch upsert: dense vector + BM25 sparse vector + payload
 │       ├── config/               # Loaders + schema
 │       │   ├── schema.py         # Pydantic v2 models mirroring config-reference.md

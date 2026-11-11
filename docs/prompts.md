@@ -154,6 +154,8 @@ Respond with JSON only:
 
 ## Overriding templates
 
+> **Status (2026-11-11): there is no override path.** The four templates are constants in the package (`P1_SYSTEM_PROMPT` in `core/generation.py` is a `Final`), and no configuration key names a replacement. The rules below describe how an override must behave once one exists (TASK-0458); they are a specification, not a shipped feature. A second gap sits beside it: retrieved text is placed in the P1 and P3 prompts unescaped, with no instruction to treat it as data (TASK-0446).
+
 Templates are package resources with a documented override path; overriding is a **quality-affecting change**:
 
 - P2 overrides alter chunk text → change the `config_hash` → register as index drift (D1) and require a reindex to take effect on existing chunks.

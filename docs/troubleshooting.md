@@ -17,6 +17,10 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 | `top_k must be ≤ rerank_top_n` and similar | A cross-field validation rule was violated | See the cross-field rules list at the end of [config-reference.md](config-reference.md) |
 | Config change appears to do nothing | Config is read at startup/provision time, not live (deliberate — it keeps the control plane auditable) | Restart the process, or re-run the relevant `fasterrag provision` command |
 
+### `fasterrag serve` prints a warning about binding with auth off
+
+`app.host` (or `--host`) names an address other machines can reach while `security.auth` is `false`. Anyone who can reach that port can ingest files the process can read and query them back. Either keep the default `127.0.0.1`, or set `security.auth: true` together with `ingestion.allowed_source_roots` ([security.md](security.md) §5.7). A reverse proxy that authenticates in front of the API is the one case where the warning can be accepted.
+
 ## Vector database
 
 | Symptom | Likely cause | Fix |
@@ -40,6 +44,18 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 | Scanned PDFs index with no useful text | OCR yielded nothing; the chunk carries a `low_text_yield` parse flag rather than silently indexing emptiness | Check the flag in document metadata; verify the OCR path is available for that source type. If the pages carry a thin text layer (a stamped header, a page number) the OCR path never ran: raise `parsing.minimum_chars_per_page` above what such a page yields, and `parsing.ocr_resolution` if OCR output is garbled on fine print |
 | Ingestion is slow, GPU underutilized | CPU parse/chunk stage is the bottleneck, so embedding workers idle | Raise `workers.cpu_pool_size`; the streaming hand-off is designed so embedding never waits on parsing |
 | Ingestion slow, CPU idle | Embedding is the bottleneck (or a provider is throttling) | Raise `workers.embedding_pool_size` / `embeddings.batch_size`; check for retry-storm logs indicating provider 429s |
+
+### An ingest job is refused with `chunking.strategy is 'semantic'`
+
+The ingestion pipeline cannot run the semantic chunker yet (TASK-0431): its parse workers have no embedding model. Set `chunking.strategy` to `recursive`, `layout`, `fixed` or `late`. Before 2026-11-11 the job was accepted and every document was dead-lettered with this same error.
+
+### A job has been `running` since the process restarted
+
+Nothing resumes a job after the process that owned it exits (TASK-0436); the record stays `running`. The job did not corrupt anything: a document is remembered as indexed only once every chunk of it is in the vector database, so re-submitting the same sources indexes whatever was missed and deduplicates the rest. An exception *inside* a live process is different — the job is settled `failed` and its documents are in the dead-letter queue.
+
+### Documents were dead-lettered with `EMBED_PROVIDER_ERROR` and a retry did nothing
+
+Fixed on 2026-11-11 (TASK-0427). Earlier builds recorded a document as indexed when its chunks were queued, so a document that then failed to embed was reported as a duplicate on retry and skipped. On a journal written by an earlier build, the stale content hashes are still in `.fasterrag/journal/` — ingest those sources once with `--set ingestion.dedup=false` to index them.
 
 ## Retrieval quality
 

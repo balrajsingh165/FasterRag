@@ -213,11 +213,13 @@ async def answer(q: str):
     return {"answer": result.answer, "citations": [c.as_dict() for c in result.citations]}
 ```
 
-Deployment note: in-process worker pools are suitable for small/medium loads; for heavy ingestion run dedicated `fasterrag worker` processes against the same config and queue backend ([deployment.md](deployment.md)).
+Deployment note: in-process worker pools are suitable for small/medium loads; for heavy ingestion run dedicated `fasterrag worker` processes against the same config and queue backend ([deployment.md](deployment.md)). **Status (2026-11-11):** the dedicated worker process is designed and not built — `fasterrag worker` starts and consumes nothing, and there is no queue backend (TASK-0440, TASK-0130). In-process pools are the only ingestion path today.
 
 ## Extending the framework (plugin contract)
 
 Third parties add providers by implementing the adapter base classes and registering them via Python entry points — no fork required:
+
+> **Status (2026-11-11): the registration half works and the selection half does not.** The three factories discover `fasterrag.vectordb`, `fasterrag.embeddings` and `fasterrag.llm` entry points, and `resolve_adapter_class("mydb")` returns a plugin's class. But `vector_db.provider`, `embeddings.provider` and `llm.provider` are closed lists in the config schema, so `provider: mydb` in `config.yaml` is refused at load before any factory runs. Until TASK-0439 lands a plugin can be constructed in code and passed to the services directly, and cannot be named in configuration. Chunkers, parsers and rerankers have no entry-point group yet (same task).
 
 ```toml
 [project.entry-points."fasterrag.vectordb"]

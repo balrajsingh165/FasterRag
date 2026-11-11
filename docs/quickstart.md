@@ -183,7 +183,7 @@ Not writing async code? `from fasterrag.sync import FasterRag` gives the same AP
 
 ```bash
 fasterrag serve                      # API on :8000
-fasterrag worker                     # pipeline pools (separate process for heavy ingestion)
+# `fasterrag worker` exists but does no pipeline work yet: ingestion runs inside `serve` (TASK-0440)
 ```
 
 ```bash

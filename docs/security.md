@@ -300,6 +300,17 @@ The setting sits under `security` rather than beside a feature section because i
 what a credential may reach on the host, which is what the rest of that section decides;
 `ingestion.allowed_source_roots` sits under `ingestion` only because that section exists.
 
+### 5.7 Closed by default at the socket, and three smaller holes (audit, 2026-11-11)
+
+An independent audit found the service **open by default twice over**: `security.auth` defaults to `false` and `app.host` defaulted to `0.0.0.0`. Either alone is defensible; together a fresh `fasterrag serve` accepted unauthenticated requests from every machine that could reach it, and with auth off the source-path guard in §5.1 is deliberately permissive, so such a caller could ingest any file the process could read and query it back. Four changes (TASK-0432, TASK-0433):
+
+- **`app.host` defaults to `127.0.0.1`.** The container image passes `--host 0.0.0.0` explicitly and compose publishes on loopback, so neither changed. `fasterrag serve` prints a warning when it binds a non-loopback address with auth off. It is a warning rather than a refusal because a reverse proxy terminating authentication in front of the API is a legitimate deployment; making it a refusal behind an explicit opt-in is recorded in TASK-0460.
+- **`POST /v1/estimate` applies the §5.1 path guard.** An estimate parses the files it is given, so unguarded it reported the existence, size and token count of any server path whatever `ingestion.allowed_source_roots` said. It also runs off the event loop now.
+- **Keys are compared as bytes.** `secrets.compare_digest` raises `TypeError` on a `str` holding a non-ASCII character and the `Authorization` header is latin-1 decoded, so one such byte in a bearer token turned a 401 into an unhandled 500 for an unauthenticated caller.
+- **The semantic cache is scoped by collection, filters and `top_k`** as well as by tenant. Its lookup ran before retrieval and matched on the query vector and tenant alone. A metadata filter is how an access-control restriction is expressed in a query, so an answer produced under one filter could be served to a request carrying another.
+
+**Still open from the same audit**, each with an entry in [todo.md](todo.md): retrieved text reaches the prompt unescaped (TASK-0446); a key with no tenant may act for any tenant, `multi_tenancy` without `auth` is accepted silently, and the `.env.example` placeholder is accepted as a live key (TASK-0460); tenant scoping of the ingest and query paths remains the opt-in described in §3 (TASK-0339, TASK-0381).
+
 ## 6. Supply chain
 
 **Known accepted advisories (`chromadb`, reviewed 2026-11-03).** `pip-audit` runs over all

@@ -19,6 +19,7 @@ exclude_docs: |
   todo.md
   blockers.md
   code-notes.md
+  engineering-scorecard.md
 
 theme:
   name: material
