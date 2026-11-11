@@ -99,8 +99,8 @@ Generation streams token-by-token over SSE. Time-to-first-token matters more tha
 
 ## 9. Incremental updates
 
-- **Deduplication** — content hashes computed at ingestion; identical documents/chunks are skipped or version-bumped, never duplicated.
-- **Versioned metadata** — every chunk records source URI, document version, ingestion timestamp, parser flags, embedding model + version.
+- **Deduplication** — content hashes computed at ingestion; an identical document is skipped, and a changed one is re-chunked under deterministic chunk ids, so re-ingesting it overwrites its chunks instead of duplicating them. *Status (2026-11-12): chunks beyond the new length of a document that shrank are left behind, and nothing can delete a document (TASK-0443).*
+- **Chunk metadata** — every chunk records its source URI, content hash, position, chunker strategy, and embedding model and version. *Status (2026-11-12): a document version and an ingestion timestamp are not stored (`workers/indexer.py::chunk_payload`); they arrive with update and delete (TASK-0443).*
 - **Re-embedding** — when the configured embedding model differs from the indexed one, the system flags drift and offers a guided `index reembed` (build a parallel collection, then atomically swap) to fight embedding drift and stale indexes.
 
 ## 10. Pluggability: adapter + factory patterns

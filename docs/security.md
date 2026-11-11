@@ -336,9 +336,9 @@ deleted the moment it exists.
 - **Dependency audit is blocking**, and runs against the *lockfile* rather than an installed environment — an environment is whatever resolved on that runner today, the lockfile is what everyone actually installs. It reported no advisories across all 135 packages on 2026-08-03 — a result that CI re-establishes on every push rather than a figure quoted from a one-off run.
 - **Secret scanning in CI** (gitleaks, full history — a credential committed and later removed is still compromised, so scanning only the tip would call it clean). A detected credential fails the build.
 - **Non-root containers** for every image **fasterRag builds itself** (the shipped `Dockerfile` runs as uid 10001, verified in a running container). Third-party images fasterRag provisions — Qdrant, the Langfuse stack, Grafana — run as their upstream images ship them; forcing a uid on an image that expects to own its storage volume risks an unstartable container. This is the narrowing recorded as AUDIT-0007 ✅ and already carried by [deployment.md](deployment.md); it was missed here until the 2026-08-09 claims audit.
-- **SBOM generated at each tagged release** and attached to the release artifacts.
-- Base images and provisioned tool versions (Qdrant, Langfuse, Grafana) are pinned by tag/digest — no `latest`.
-- Dependency update PRs run the full test pyramid plus the eval regression gate before merge.
+- **SBOM generated at each tagged release** and attached to the release artifacts. *Status (2026-11-12): not yet true. No SBOM tooling exists in the repository or in CI and no release has been tagged; the release workflow that will generate one is TASK-0445, and this statement is tracked by TASK-0496.*
+- Base images and provisioned tool versions (Qdrant, Langfuse, Grafana) are pinned by tag/digest — no `latest`. *Status (2026-11-12): by tag only. The `Dockerfile` base image is not pinned by digest, and the image installs from `pyproject.toml`, not from `uv.lock` (TASK-0496).*
+- Dependency update PRs run the full test pyramid plus the eval regression gate before merge. *Status (2026-11-12): nothing in the repository opens dependency-update pull requests yet (TASK-0496); one opened by hand runs CI like any other pull request.*
 
 ## 7. Threat-model notes (beta boundaries)
 

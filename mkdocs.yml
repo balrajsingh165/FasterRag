@@ -20,6 +20,8 @@ exclude_docs: |
   blockers.md
   code-notes.md
   engineering-scorecard.md
+  engineering-audit.md
+  task-briefs.md
 
 theme:
   name: material

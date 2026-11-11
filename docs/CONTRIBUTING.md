@@ -46,6 +46,7 @@ Optional extras, needed only for what they name: `.[huggingface]` and `.[rerank]
 ## 3. One-todo-file rule
 
 - [docs/todo.md](todo.md) is the ONLY task file in this repository. Never create any other todo/task/tracking file (no `TASKS.md`, no `ROADMAP-todo.md`, no per-module todos).
+- [task-briefs.md](task-briefs.md) is not an exception to that rule: it defines no task and records no status. It holds one step-by-step brief per open `TASK-` id — where the code is, what to change, the tests to write, the gates that will object — and its §0.4 is the table of tests that fire when you add a config key, a route, a CLI flag, an error code or a facade method. Read the brief before starting a task, and **delete it in the commit that ticks the task**. [engineering-scorecard.md](engineering-scorecard.md) says what good means; [engineering-audit.md](engineering-audit.md) says why the score is what it is.
 - Entry format: `- [ ] TASK-0001: <description>`; on completion: `- [x] TASK-0001: <description> — ✅ YYYY-MM-DD`.
 - Ticked entries are **frozen** — append-only, never edited afterwards. Task IDs are sequential and never reused.
 - Every `TASK-####` written in a comment or docstring under `src/`, `tests/` or `scripts/` must resolve to an entry in todo.md. A dangling id is unreadable: whoever greps for it cannot tell whether the task was renumbered, never filed, or imagined. `scripts/check_task_ids.py` enforces this in CI (not pre-commit).

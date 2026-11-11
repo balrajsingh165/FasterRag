@@ -11,7 +11,7 @@ fasterRag calls an LLM in exactly **four** places. Each call has a defined purpo
 | P3 | **Faithfulness scoring** | Per answer | `generation.grounded_or_refuse: true` (or when faithfulness is being recorded) | Score `null`; answer returned un-gated with `faithfulness: null` |
 | P4 | **Golden-set generation** | Autopilot / eval setup | `autopilot.enabled: true` or explicit CLI | Aborts the generation run with a typed error; never writes a partial set |
 
-Prompt-template versioning: each template carries a `template_version`; it is part of the `config_hash` in `index.lock` for P2 (enrichment changes chunk text, so it is drift) and part of the trace `config_snapshot` for P1/P3 (so replay is meaningful — D8).
+Prompt-template versioning: each template carries a `template_version`; it is part of the `config_hash` in `index.lock` for P2 (enrichment changes chunk text, so it is drift) and part of the trace `config_snapshot` for P1/P3 (so replay is meaningful — D8). *Status (2026-11-12): the P1 and P3 template versions are reported in the `usage` event but are not yet written to the trace `config_snapshot` (`core/tracing.py::config_snapshot`); TASK-0446 adds them.*
 
 ---
 

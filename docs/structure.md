@@ -36,6 +36,10 @@ fasterRag/
 │   ├── CHANGELOG.md              # Keep a Changelog + SemVer
 │   ├── CONTRIBUTING.md           # Contributor rules
 │   ├── todo.md                   # THE one and only task file
+│   ├── blockers.md               # Read-only view of the blocked subset of todo.md
+│   ├── engineering-scorecard.md  # Rubric, current score, the bar for 90, working rules
+│   ├── engineering-audit.md      # The audit behind the score (dated record)
+│   ├── task-briefs.md            # Step-by-step brief per open task (guidance, not a tracker)
 │   └── adr/                      # Architecture Decision Records (MADR, never deleted)
 │       ├── ADR-0001-qdrant-as-reference-vector-db.md
 │       ├── ADR-0002-adapter-factory-pluggability.md

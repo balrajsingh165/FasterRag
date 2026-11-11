@@ -71,6 +71,8 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 
 - [docs/todo.md](docs/todo.md) is the ONLY task file. Never create any other todo/task/tracking file. When completing a task, tick it and append `— ✅ YYYY-MM-DD`; ticked entries are append-only and frozen.
 - [docs/blockers.md](docs/blockers.md) is a **read-only view** of the blocked subset, added on maintainer instruction (2026-08-03) because a blocker buried mid-ledger is a blocker nobody sees. It creates no tasks and tracks nothing: every entry cites a `TASK-` id that already exists in todo.md. Never add an entry there without one, and delete the entry when the blocker clears.
+- [docs/task-briefs.md](docs/task-briefs.md) is **implementation guidance keyed by `TASK-` id**, added on maintainer instruction (2026-11-12) so that a contributor with no memory of this repository can finish a task. It is not a task file: it holds no checkbox and no status, every brief cites an id that already exists in todo.md, and **a brief is deleted in the commit that ticks its task**. Its §0.4 lists the tests and gates that fire when you add a config key, route, CLI flag, error code or facade method — read it before adding any of those.
+- **Taking a task:** read its entry in todo.md, its brief, and the category's bar in the scorecard (§4); write the failing test first; run the whole local gate set (task-briefs.md §0.3) before committing; tick the task, delete the brief, update the changelog and the reference page in the same commit series; re-score the scorecard row only if a defect is closed *and* proven. A finding marked NOT VERIFIED is reproduced before it is fixed.
 
 ## Folder boundaries (sensitive — change only with explicit task authorization)
 
@@ -114,6 +116,8 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 - [benchmarks.md](docs/benchmarks.md) — the benchmark ledger (backs every claim)
 - [blockers.md](docs/blockers.md) — what is waiting on a human decision, a review, or hardware
 - [engineering-scorecard.md](docs/engineering-scorecard.md) — **read before taking any task**: the scoring rubric, the evidence behind the current score, what a 90 requires per category, the working rules, and the order of work
+- [engineering-audit.md](docs/engineering-audit.md) — the audit behind the score (2026-11-11): method, findings per category, what each stage of work is expected to be worth, release readiness
+- [task-briefs.md](docs/task-briefs.md) — **read before starting a task**: one step-by-step brief per open task (where the code is, what to change, tests to write, traps), plus the tripwire table of gates
 - [integrations.md](docs/integrations.md) — supported providers and how config enables them
 - [glossary.md](docs/glossary.md) — canonical terminology; use these meanings exactly
 - [references.md](docs/references.md) — external evidence sources backing every sourced claim
@@ -126,7 +130,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 
 - Do NOT start a new build slice without explicit maintainer authorization; within an authorized slice, ship code only together with its tests and doc updates.
 - Do NOT document a capability as shipped before its code lands — specified-but-unbuilt behavior must carry an explicit status note and an open task.
-- Do NOT create more than one todo file. `docs/blockers.md` is a view over todo.md, not a second one — it may never hold a task that todo.md does not.
+- Do NOT create more than one todo file. `docs/blockers.md` is a view over todo.md, not a second one — it may never hold a task that todo.md does not. `docs/task-briefs.md` is guidance over todo.md under the same rule: no brief without an existing id, no status, and no brief for a ticked task.
 - Do NOT add Claude/AI attribution or trailers to commits.
 - Do NOT use multi-line commit messages.
 - Do NOT add inline/explanatory comments except the two allowed cases (`# CRITICAL:`; `# TODO:` / `# BLOCKED:`).
