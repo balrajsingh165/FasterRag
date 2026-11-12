@@ -29,9 +29,9 @@ journal never lies about the index: a document's dedup hash and its `indexed` re
 after its chunks, not before.
 
 !!! note "What is not built yet"
-    A job interrupted by the process exiting is not resumed automatically (TASK-0436), a document
-    cannot yet be deleted or updated in place (TASK-0443), and ingestion runs inside the API
-    process — the separate `worker` process does no work yet (TASK-0440).
+    A job interrupted by the process exiting is not resumed automatically (TASK-0436), and
+    ingestion runs inside the API process — the separate `worker` process does no work yet
+    (TASK-0440).
 
 ## A question comes out
 
@@ -87,6 +87,7 @@ module's own docstring, as of the commit this page was generated from.
     | `cli/commands/backup.py` | The `backup` and `restore` commands. |
     | `cli/commands/benchmark.py` | The `benchmark` command. |
     | `cli/commands/diagnostics.py` | The commands that inspect an installation: `config validate`, `doctor`, `status`. |
+    | `cli/commands/documents.py` | The `documents` command: per-document operations on a collection. |
     | `cli/commands/infrastructure.py` | The commands that stand things up or price them out: `provision` and `estimate`. |
     | `cli/commands/pipeline.py` | The commands that move data: `ingest`, `query`, and `index`. |
     | `cli/commands/portability.py` | The commands that move a collection between deployments: `export` and `import` (D11). |
@@ -129,8 +130,10 @@ module's own docstring, as of the commit this page was generated from.
     | `services/benchmark.py` | The benchmark suite and ledger emitter. |
     | `services/budget.py` | The D9 runtime cost governor: token budgets enforced before a provider is called. |
     | `services/ci_status.py` | Reads the latest CI verdict for a branch from the GitHub Actions API. |
+    | `services/composition.py` | Composition root: where an entry point gets the pieces it runs on. |
     | `services/degradation.py` | The degradation ladder's registry: which rungs exist, and what serves each one. |
     | `services/doctor.py` | Preflight diagnostics (D10). |
+    | `services/documents.py` | Document lifecycle: taking one document out of a collection (TASK-0443). |
     | `services/estimation.py` | Preflight cost estimation (D9). |
     | `services/evaluation.py` | Running the eval harness against a live collection. |
     | `services/generation.py` | Answer generation: retrieve, assemble, generate, cite. |
@@ -172,7 +175,7 @@ module's own docstring, as of the commit this page was generated from.
     | --- | --- |
     | `core/__init__.py` | The RAG pipeline: parsing, chunking, retrieval, reranking, assembly, generation. |
     | `core/breaker.py` | Per-provider circuit breakers (`reliability.circuit_breaker`, docs/reliability.md §3). |
-    | `core/cache/embedding.py` | Embedding cache. Implemented, and not yet wired into the pipeline (TASK-0442). |
+    | `core/cache/embedding.py` | Embedding cache: never pay twice for the same text under the same model. |
     | `core/cache/redis.py` | Redis-backed cache store: one cache shared by every process that reaches the same server. |
     | `core/cache/semantic.py` | Semantic response cache: answer a paraphrase from the answer already given. |
     | `core/cache/stats.py` | Cache hit/miss accounting. |
@@ -226,7 +229,7 @@ module's own docstring, as of the commit this page was generated from.
     | `adapters/embeddings/tiering.py` | Tiered embedding: route document classes to different models. |
     | `adapters/llm/anthropic.py` | Anthropic generation. |
     | `adapters/llm/base.py` | Vendor-neutral LLM provider contract. |
-    | `adapters/llm/cohere.py` | Cohere generation. |
+    | `adapters/llm/cohere.py` | Cohere generation through the v2 chat API. |
     | `adapters/llm/factory.py` | Selects the concrete LLM adapter from configuration. |
     | `adapters/llm/ollama.py` | Ollama generation against a local server, so no credential is required. |
     | `adapters/llm/openai.py` | OpenAI and OpenAI-compatible generation. |
@@ -246,6 +249,7 @@ module's own docstring, as of the commit this page was generated from.
     | --- | --- |
     | `config/__init__.py` | Configuration schema and loader. |
     | `config/loader.py` | Fail-fast configuration loader. |
+    | `config/plugins.py` | Which provider names configuration may select, decided without loading a provider. |
     | `config/schema.py` | Pydantic models mirroring `docs/config-reference.md`. |
     | `config/template.py` | Access to the canonical `config.yaml` that ships inside the package. |
     | `errors.py` | Typed error taxonomy shared by the API, the CLI, and the Python package. |

@@ -26,6 +26,7 @@
 - **Interpreter and dependencies.** `uv sync --locked --extra dev --python 3.12`. CI runs Python 3.12 against `uv.lock`; a venv resolved any other way has disagreed with it on dozens of packages, and stricter type stubs in CI have failed a push that was green locally.
 - **Windows.** `python` must resolve to the venv: in Git Bash, `export PATH="$PWD/.venv/Scripts:$PATH"`. The pre-commit hook runs ruff, the formatter, mypy and the whole unit tier for any commit containing Python (about six minutes).
 - **Docker** is needed for the integration tier only. The unit tier has a network guard in `tests/unit/conftest.py` and must stay offline.
+- **Committing from a linked worktree is safe since 2026-11-12.** Before `tests/conftest.py` learned to drop the variables git exports to a hook, the commit hook's test run executed `git init` against the real repository and set `core.bare`. If `git status` in the main checkout ever says "this operation must be run in a work tree", run `git config core.bare false` and find out which test leaked.
 - **This checkout may be shared with another session.** Never run `git stash`, `git stash pop`, `git reset --hard` or `git checkout -- .` here. Work in a worktree if you need a clean tree.
 - **Never read, print or commit `.env`.** `.env.example` is fine.
 
@@ -72,6 +73,9 @@ These are the checks that have failed real changes. Find the row for what you ar
 | A prompt's wording | `P1_TEMPLATE_VERSION` / `P3_TEMPLATE_VERSION`, the verbatim copies in [prompts.md](prompts.md), and the wording asserts in `tests/unit/core/test_generation.py:26-29` and `tests/unit/core/test_faithfulness.py:47-53`. |
 | A function or class docstring over four lines | Run `scripts/trim_docstrings.py --apply src`; it moves the prose to [code-notes.md](code-notes.md). |
 | A comment | Only `# CRITICAL:`, `# TODO:` and `# BLOCKED:` (plus continuation lines) are allowed in `src/` and `scripts/`. A `# TODO:` may only cite an open task. |
+| A built-in adapter | Its name in `config/plugins.py` as well as in the factory's `_BUILTIN_ADAPTERS` — `test_the_names_configuration_accepts_are_the_ones_the_factory_builds` holds the two together. Shipping a planned adapter means removing it from the factory's `_PLANNED_ADAPTERS` **and** from the planned list in `config/plugins.py`. |
+| A few hundred lines of tests | `CLAUDE.md` states the line counts of `src/` and `tests/`, and `test_the_stated_loc_figures_still_describe_the_tree` allows 10% drift. When it fires, re-measure and update the sentence; do not trim tests to fit. |
+| Anything, from a worktree | Run the gate scripts as `PYTHONPATH=src python scripts/check_….py`: without it they import `fasterrag` from the main checkout's editable install and report on the wrong tree (TASK-0522). pytest is unaffected. |
 | A test that must run somewhere | Mark it `must_run`; `scripts/check_must_run.py` fails the build if it skipped in both the Ubuntu and Windows lanes. |
 
 ### 0.5 Platform traps
@@ -106,7 +110,7 @@ Process-wide singletons (`shared_breaker`, the cross-encoder model cache, `share
 
 ## 1. P0 — blocks a credible public alpha
 
-Recommended order inside P0: TASK-0470 and TASK-0473 (small, and they stop data loss and hangs), then TASK-0436, TASK-0437, TASK-0443, TASK-0441, TASK-0439, TASK-0442, TASK-0431, TASK-0440, TASK-0444, TASK-0445.
+Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs), then TASK-0436, TASK-0437, TASK-0431, TASK-0440, TASK-0444, TASK-0445.
 
 ### TASK-0431 — Semantic chunking in the ingestion pipeline
 
@@ -170,27 +174,6 @@ Recommended order inside P0: TASK-0470 and TASK-0473 (small, and they stop data 
 
 **Done when.** The stateful test passes, the lookup is indexed, and the new ledger entry exists. **Moves:** reliability, performance, architecture.
 
-### TASK-0439 — Plugins that configuration can select
-
-**Goal.** A third party installs a package, names its provider in `config.yaml`, and it loads — for vector databases, embedders, LLMs, chunkers, parsers and rerankers — with no edit to this repository and no weakening of fail-fast validation.
-
-**Where.** `config/schema.py:59-61` declares `VectorDbProvider`, the embeddings provider and the LLM provider as closed `Literal`s, used at `:253`, `:352`, `:388` and in `TierRule.provider` (`:323`); section models are `extra="forbid"` (`:121`). `VectorDbProvider` includes `"pinecone"`, which validates and then fails in the factory. The three factories already resolve entry points: `adapters/vectordb/factory.py` (group `fasterrag.vectordb` `:30`, `_BUILTIN_ADAPTERS` `:34-40`, `_PLANNED_ADAPTERS` `:43`, `resolve_adapter_class` `:78`), `adapters/embeddings/factory.py` (`fasterrag.embeddings` `:26`), `adapters/llm/factory.py` (`fasterrag.llm` `:26`). No plugin point exists for chunkers (`core/chunking/__init__.py:55-87` is an if-chain), parsers (`core/parsing/__init__.py:80` `_PARSERS`, `:93` `_TUNED_PARSERS`) or rerankers (`api/dependencies.py:126` constructs `CrossEncoderReranker` directly). [python-api.md](python-api.md) `:235` promises `provider: mydb`; `:222` carries a status note admitting it fails.
-
-**Steps.**
-1. In `config/`, add a helper that returns the names registered under an entry-point group using `importlib.metadata` only. `config/schema.py` imports nothing from `fasterrag` today and must not start importing `adapters/`.
-2. Change the three provider fields from `Literal` to `str` with a validator: accept a built-in name or a registered entry-point name; otherwise fail at load, naming the installed alternatives. Keep the built-in name list in `config/` as plain strings and add a test asserting it equals each factory's `_BUILTIN_ADAPTERS` keys, so the two cannot drift.
-3. Remove `pinecone` from the accepted names until TASK-0049 lands, or keep it and make the validator refuse planned adapters with the task id.
-4. Revisit `PROVIDERS_REQUIRING_EMBEDDING_KEY` and `PROVIDERS_NOT_REQUIRING_LLM_KEY` (`:65-66`): a plugin name currently falls into "requires `llm.api_key_env`". Let a plugin declare whether it needs a key.
-5. Repeat the factory pattern for `fasterrag.chunkers`, `fasterrag.parsers` and `fasterrag.rerankers`, one commit each, replacing the if-chain, the private dicts and the hard-wired constructor.
-
-**Tests.** `tests/unit/adapters/test_plugin_entry_points.py` calls `resolve_adapter_class` directly (`:41`) and never touches `Settings`. Add the end-to-end case: monkeypatch `_plugin_entry_points` to return an `EntryPoint` for a fake adapter, load a `config.yaml` naming it through the real loader, build the service, serve a query. Add the negative case: an unknown name fails at load and the message lists what is installed.
-
-**Documents.** [python-api.md](python-api.md) "Extending the framework (plugin contract)" (`:218`) — remove the status note — and "Stability guarantees" (`:237`); [architecture.md](architecture.md) §10; [internals.md](internals.md) §5; [config-reference.md](config-reference.md).
-
-**Traps.** `config/` is a sensitive folder: fail-fast must not weaken, and this task is the explicit authorisation to touch it — nothing wider. `scripts/check_unbuilt_claims.py:239-274` reads every `adapters/**/factory.py` with `ast`; a new `adapters/rerankers/factory.py` joins that gate automatically. `tests/unit/docs/test_python_api_parity.py:302-311` requires every new group in the docs. `vectordb/factory.py`'s `__all__` omits `resolve_adapter_class` while the other two export it — make them consistent.
-
-**Done when.** The end-to-end plugin test passes for all six kinds. **Moves:** extensibility, architecture. Unblocks TASK-0462, TASK-0458 (hosted rerankers), TASK-0486.
-
 ### TASK-0440 — Process surfaces that do what the documents say
 
 **Goal.** Every process, flag and setting the documents name either does the work described or does not exist.
@@ -210,63 +193,6 @@ Recommended order inside P0: TASK-0470 and TASK-0473 (small, and they stop data 
 **Traps.** `tests/unit/config/test_settings_are_wired.py:59-69` passes `app.workers` only because the leaf name `.workers` appears elsewhere in `src/` — the test cannot see this defect.
 
 **Done when.** No document names a process that does nothing, and the gate decides it from the registry. **Moves:** architecture, documentation.
-
-### TASK-0441 — Cohere and Ollama adapters against the real SDKs
-
-**Goal.** Each LLM and embedding adapter is proven against a response recorded from the real client library. **NOT VERIFIED — run the experiment first.**
-
-**Where.** `adapters/llm/ollama.py:67` and `:81` gate on `isinstance(response, dict)`; the pin is `ollama>=0.3` (`pyproject.toml:60`, `:77`), and newer clients return typed response objects. `adapters/llm/cohere.py:30` imports `AsyncClient` (the v1 client) but calls `.chat(messages=…)` (`:57`) and `.chat_stream` (`:82`) and parses v2 shapes (`:84-87`, `:121-126`); the pin is `cohere>=5.5`. A `TypeError` has no `status_code`, so `classify_llm_failure` (`adapters/llm/base.py:79`) reports it as unreachable and retryable (`:118`) — a programming error would look like an outage. `adapters/embeddings/ollama.py:47` reads its host from `settings.llm.base_url`, `:78` calls the per-text `.embeddings(model, prompt)` route, `:92` checks for a dict. **Correction to the task entry:** the Cohere and Ollama *LLM* call paths have no call-path test at all — `tests/unit/adapters/llm/test_call_paths.py` fakes only OpenAI (`FakeCompletions` `:55`). The hand-written fakes exist for *embeddings* (`tests/unit/adapters/embeddings/test_usage.py`: `FakeCohereClient` `:72`, `FakeOllamaClient` `:97`, which returns a dict).
-
-**Steps.**
-1. Install the currently resolved versions (`uv.lock`) and, with no network, construct each client and feed it a recorded HTTP response through an `httpx` mock transport. Record what the client actually returns. Write down the outcome even if it is "this was not a bug".
-2. Fix the shapes that are wrong. For Cohere choose the v2 client explicitly.
-3. Give the Ollama embedder its own base-URL setting (or document that it shares the LLM's) and move to the batch route.
-4. Pin the lower bounds to what the code supports and add an upper bound if a major version is known to break.
-5. Make the fakes faithful to the recordings, and add call-path tests for both LLM adapters mirroring the OpenAI ones.
-6. Make a `TypeError`/`AttributeError` from an SDK call a non-retryable `INTERNAL` error.
-
-**Tests.** A contract-style test per adapter that imports the real client library and replays a recorded response; skip with a reason when the extra is not installed and mark it `must_run`. The billed leg lives in `tests/eval/test_live_providers.py` (`:413`).
-
-**Documents.** [integrations.md](integrations.md), [config-reference.md](config-reference.md) `llm`, [architecture.md](architecture.md) "Embedding and LLM factories".
-
-**Done when.** Both adapters pass against recorded real responses. **Moves:** core RAG, testing, embedding infrastructure.
-
-### TASK-0442 — Wire the embedding cache, correctly
-
-**Goal.** Re-ingesting an unchanged corpus with dedup off makes zero provider calls, and a query-type and a document-type embedding of the same text never collide.
-
-**Where.** `core/cache/embedding.py:62` `CachingEmbeddingAdapter` and `core/cache/__init__.py:67` `create_embedding_store` have no call site in `src/`; the package docstring (`core/cache/__init__.py:3`) says the cache is on by default. The key (`embedding.py:40`) is `emb:{model}:{model_version}:{sha256}` — it omits the provider, the configured dimensions and the input type, and `embed_query` uses the same scheme (`:148-162`). Gets and sets are per text and sequential (`:116-146`). `DiskStore._evict` globs the directory on every write (`core/cache/store.py:202-226`). The wiring point is `create_embedding_router` in `adapters/embeddings/tiering.py:120`. Settings: `EmbeddingCacheSettings` (`schema.py:304-316`, `enabled=True`, `backend="disk"`).
-
-**Steps.** In this order, each its own commit: (1) fix the key — add provider, dimensions and input type; (2) batch the store calls (`get_many`/`set_many` on `CacheStore`, pipelined in `RedisStore`); (3) make eviction amortised, not per write; (4) wrap the adapters in `create_embedding_router` when `embeddings.cache.enabled`; (5) correct the package docstring. Also remove the second embedding of the question: a cache-enabled query currently embeds it twice (`services/generation.py:377` and `services/querying.py:235`).
-
-**Tests.** Existing: `tests/unit/core/cache/test_embedding.py` (`test_the_key_separates_models` `:93`). Add: key separates input types, providers and dimensions; a re-ingest unit test counting provider calls; a query test asserting one embedding call.
-
-**Documents.** [architecture.md](architecture.md) §7 (remove the status note), [config-reference.md](config-reference.md) `:252-253`.
-
-**Traps.** `core/cache/embedding.py` imports from `adapters/` — one of the cycle edges TASK-0456 removes. Wiring the cache inside `adapters/embeddings/tiering.py` adds an `adapters → core` edge; put the wrapper where the composition lives instead. `embeddings.cache.enabled` passes the wired-settings test only by a leaf-name collision.
-
-**Done when.** The zero-provider-call test passes. **Moves:** performance, embedding infrastructure.
-
-### TASK-0443 — Delete and update a document
-
-**Goal.** A document can be removed, and re-ingesting a document that shrank leaves no stale chunk.
-
-**Where.** Nothing in `services/`, `workers/`, `api/` or `cli/` calls `VectorDBAdapter.delete`. The interface has it: `adapters/vectordb/base.py:321` `delete(selector: PointSelector) -> None`, with `PointSelector(collection, point_ids=None, filters=None)` at `:190` (exactly one of the two). A point's id is its `chunk_id` (`workers/indexer.py:127`) and its payload carries `document_id` (`indexer.py:43`), so delete-by-filter on `document_id` works today. The contract suite already proves `test_delete_by_ids_removes_only_those_points` (`tests/contract/vectordb.py:315`) and `test_delete_by_filter_removes_matching_points` (`:327`). The dedup file is append-only (`journal.py:503-509`). `SemanticCache.invalidate` (`core/cache/semantic.py:211`) is called only at `services/ingestion.py:244`.
-
-**Steps.**
-1. Service: `services/documents.py` with `delete(collection, document_id, tenant)` — delete by payload filter, write a tombstone to the journal, invalidate the semantic cache.
-2. Dedup: make `known_content` and `document_hashes` honour tombstones, so removed content can be ingested again and the lockfile stops listing it (`services/ingestion.py:296`).
-3. Shrinking re-ingest: when a known `document_id` is committed with *n* chunks, delete points of that document whose `chunk_index >= n`. Do it in the ledger's commit callback, after the new chunks are written.
-4. Surfaces: `DELETE /v1/collections/{name}/documents/{document_id}`, `fasterrag documents delete`, `FasterRag.delete_document` on both facades.
-5. Add a contract case: delete by `document_id` filter removes every chunk of that document and no other.
-
-**Tests.** Service unit tests with `RecordingAdapter`; a shrinking-document test asserting no chunk index ≥ the new count remains; a tombstone round-trip test; the new contract case on all five adapters.
-
-**Documents.** [api-reference.md](api-reference.md), [cli-reference.md](cli-reference.md), [python-api.md](python-api.md), [data-model.md](data-model.md), [architecture.md](architecture.md) §9, [disaster-recovery.md](disaster-recovery.md) "The re-ingest trap".
-
-**Traps.** A new route, a new command and two new facade methods: three rows of §0.4. Tenant scoping applies — a tenant must not delete another tenant's document; read TASK-0339 and TASK-0381 first. The contract case is proven in CI only on Qdrant, pgvector and Chroma until TASK-0412 lands; run it locally against the other two.
-
-**Done when.** The contract case passes on all five adapters and the shrinking-document test finds no stale chunk. **Moves:** core RAG, ingestion.
 
 ### TASK-0444 — A first run that needs nothing but `pip`
 
@@ -306,36 +232,6 @@ Recommended order inside P0: TASK-0470 and TASK-0473 (small, and they stop data 
 **Traps.** Depends on TASK-0087 and on TASK-0444 for the quickstart. The gate in [release.md](release.md) §1 is a confidence score of at least 85 for a beta; the last recorded score is 62. **Publishing is irreversible and outward-facing: it needs the maintainer's explicit instruction, not an agent's judgement.**
 
 **Done when.** The release exists and the post-publish job passes. **Moves:** packaging.
-
-### TASK-0470 — An empty document must not be "indexed"
-
-**Goal.** A document that produces no chunks is recorded as skipped with a reason, and never enters the dedup file. **NOT VERIFIED — read from code.**
-
-**Where.** `workers/ledger.py:104-108`: `expect(..., chunks=0)` finishes the document at once, which runs its commit callback — `record_indexed` plus the content hash. The hash of empty bytes then matches every later empty file, which is reported `deduplicated` against a document that was never in the index.
-
-**Steps.** Reproduce with a zero-byte `.md` and a whitespace-only `.txt` through `IngestionService`. Then give the parse side a third outcome beside *indexed* and *dead-lettered*: `skipped` with reason `EMPTY_DOCUMENT`, settled through `ledger.settle(index)` with no commit. Decide whether a skipped document counts toward a job's failure total (recommended: no) and surface the count in the job record.
-
-**Tests.** `tests/unit/services/test_ingestion.py`: an empty file is `skipped`, the dedup file is unchanged, a second empty file is also `skipped`. Update `tests/unit/workers/test_ledger.py` for the zero-chunk case.
-
-**Documents.** [api-reference.md](api-reference.md) (job document statuses), [data-model.md](data-model.md), [troubleshooting.md](troubleshooting.md).
-
-**Done when.** Both tests pass. **Moves:** ingestion, reliability.
-
-### TASK-0473 — A parser that hangs must cost one document
-
-**Goal.** A document whose parse exceeds a configured time is dead-lettered with `PARSE_TIMEOUT` and the job continues.
-
-**Where.** `workers/cpu_pool.py:322` awaits the pool future with no timeout. A size limit exists (`ingestion.max_document_mb`, `schema.py:560`, enforced at `cpu_pool.py:130-151`), a time limit does not.
-
-**Steps.** Add `ingestion.parse_timeout_seconds`. Wrap the await in `asyncio.wait_for`. A timed-out task in a `ProcessPoolExecutor` keeps running and keeps its worker: `Future.cancel()` does not stop it. Either recycle the pool on timeout (build a fresh executor, let the stuck process be terminated with the old one) or run each parse in a worker that enforces its own deadline. Recycling is simpler; make sure in-flight documents in the old pool are resubmitted, not lost.
-
-**Tests.** A module-level slow parser (it must be importable by a spawned child) with a short timeout: the slow document is dead-lettered, the others index, and a later document still parses — proving the worker slot was recovered. Mark it `must_run`; it needs the real process pool (TASK-0455).
-
-**Documents.** [config-reference.md](config-reference.md), [failure-modes.md](failure-modes.md) (new row), [troubleshooting.md](troubleshooting.md).
-
-**Traps.** New config key and, if a new code is added, the `ErrorCode` row of §0.4.
-
-**Done when.** The recovery test passes on Ubuntu and Windows. **Moves:** reliability, ingestion.
 
 ---
 
@@ -482,18 +378,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 **Traps.** Changing how hits are counted changes every recorded eval number: re-record `baseline.json` in the same commit and say so. Nightly numbers are non-citable by design.
 
 **Done when.** At least one citable quality entry and one throughput entry exist, or the reason they cannot is recorded. **Moves:** performance, retrieval, testing — the largest single lever.
-
-### TASK-0455 — Run the real process pool in a test
-
-**Goal.** Three documents ingest through the production executor, and a killed worker yields the typed error, in both CI lanes.
-
-**Where.** The only construction is `workers/cpu_pool.py:183-185`: `executor_factory or (lambda workers: ProcessPoolExecutor(max_workers=workers))`. The task crossing the boundary is `parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome` (`:74`); `BrokenProcessPool` maps to `_unguarded_entry_point_error()` (`:154`, `:323-324`). Every test injects threads: `tests/unit/workers/test_cpu_pool.py:38`, `tests/unit/services/test_ingestion.py:38`, `tests/integration/test_ingest_pipeline.py:98`.
-
-**Steps.** Add `tests/unit/workers/test_real_process_pool.py`, marked `must_run`: (1) ingest three small Markdown files with no `executor_factory`; (2) a module-level parse target that calls `os._exit(1)`, asserting the typed error and that the job settles. Use the fixed chunking strategy with the character-based token counter so children load no model.
-
-**Traps.** Pickling of `Settings` (a pydantic settings object) and of the frozen slots dataclasses in `workers/queues.py` (`DocumentTask` `:38`, `ChunkPayload` `:55`, `ParseOutcome` `:81`) has **never been exercised** — this test may find a real defect; if it does, that is the point. Under `spawn` the target must be importable: no closures, no `monkeypatch`. Children re-import `fasterrag`; keep the test's configuration minimal so that is fast.
-
-**Done when.** Both tests run (not skip) on Ubuntu and Windows. **Moves:** testing, reliability.
 
 ### TASK-0456 — One dependency direction, enforced
 
@@ -915,15 +799,15 @@ Use this to choose work by the category you want to move. The bar each category 
 | Category | Tasks |
 |---|---|
 | Architecture and design | TASK-0456, TASK-0466, TASK-0440, TASK-0130, TASK-0457, TASK-0437 |
-| Core RAG functionality | TASK-0443, TASK-0449, TASK-0441, TASK-0458, TASK-0467, TASK-0468, TASK-0469, TASK-0485 |
-| Document ingestion and processing | TASK-0470, TASK-0473, TASK-0431, TASK-0436, TASK-0459, TASK-0471, TASK-0472, TASK-0462, TASK-0504 |
+| Core RAG functionality | TASK-0449, TASK-0458, TASK-0467, TASK-0468, TASK-0469, TASK-0485 |
+| Document ingestion and processing | TASK-0431, TASK-0436, TASK-0459, TASK-0471, TASK-0472, TASK-0462, TASK-0504 |
 | Retrieval and search quality | TASK-0454, TASK-0447, TASK-0448, TASK-0481, TASK-0463, TASK-0480 |
-| Embedding and vector infrastructure | TASK-0442, TASK-0451, TASK-0452, TASK-0412, TASK-0352, TASK-0477, TASK-0478, TASK-0464, TASK-0479, TASK-0049 |
+| Embedding and vector infrastructure | TASK-0451, TASK-0452, TASK-0412, TASK-0352, TASK-0477, TASK-0478, TASK-0464, TASK-0479, TASK-0049 |
 | Advanced RAG capabilities | TASK-0465, TASK-0448, TASK-0482, TASK-0483, TASK-0484, TASK-0463 |
-| Extensibility and modularity | TASK-0439, TASK-0486 |
-| Performance and scalability | TASK-0454, TASK-0130, TASK-0437, TASK-0442, TASK-0466, TASK-0487, TASK-0488, TASK-0407 to TASK-0410 |
-| Reliability and error handling | TASK-0436, TASK-0437, TASK-0473, TASK-0449, TASK-0450, TASK-0453, TASK-0474, TASK-0475, TASK-0476 |
-| Testing and quality assurance | TASK-0455, TASK-0412, TASK-0441, TASK-0454, TASK-0481, TASK-0489, TASK-0490, TASK-0300 |
+| Extensibility and modularity | TASK-0486 |
+| Performance and scalability | TASK-0454, TASK-0130, TASK-0437, TASK-0466, TASK-0487, TASK-0488, TASK-0407 to TASK-0410 |
+| Reliability and error handling | TASK-0436, TASK-0437, TASK-0449, TASK-0450, TASK-0453, TASK-0474, TASK-0475, TASK-0476 |
+| Testing and quality assurance | TASK-0412, TASK-0454, TASK-0481, TASK-0489, TASK-0490, TASK-0300 |
 | Security | TASK-0339, TASK-0381, TASK-0446, TASK-0460, TASK-0326, TASK-0491, TASK-0492, TASK-0493, TASK-0494, TASK-0495, TASK-0496 |
 | Developer experience and APIs | TASK-0444, TASK-0461, TASK-0497, TASK-0498, TASK-0500 |
 | Documentation | TASK-0440, TASK-0499, TASK-0500, TASK-0501, TASK-0486 |
