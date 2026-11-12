@@ -3,7 +3,7 @@
 fasterRag is self-hosted software in beta (no managed cloud). Three ways to run it:
 
 1. **Library mode** — embed in your own process ([python-api.md](python-api.md)). Install from a source checkout (`pip install -e ".[all]"`) — **`pip install fasterrag` does not work yet**, because nothing has been published to PyPI (TASK-0087, blocked on the license decision TASK-0164 and the version stamp TASK-0020).
-2. **Service mode** — `fasterrag serve` (API). One `serve` process is the whole service: ingestion runs inside it, in the CPU and embedding pools that `workers.*` sizes. A separate worker process that takes ingestion load off the API is not built (TASK-0130). `serve` binds `127.0.0.1` unless `app.host` or `--host` says otherwise, and warns when it binds anything else with `security.auth` off.
+2. **Service mode** — `fasterrag serve` (API). One `serve` process is the whole service: ingestion runs inside it, in the CPU and embedding pools that `workers.*` sizes. A separate worker process that takes ingestion load off the API is not built (TASK-0130). `serve` binds `127.0.0.1` unless `app.host` or `--host` says otherwise, and **refuses** to bind anything else with `security.auth` off unless `security.allow_unauthenticated: true` is set (§3). The dashboard has its own bind, `observability.dashboard_host`, loopback by default.
 3. **Docker mode** — compose profiles for the full stack.
 
 ## 1. Compose profiles
@@ -34,6 +34,20 @@ Sizing presets live in `deploy/compose.{small,medium,large}.yml` and map to the 
 The image fasterRag builds (`Dockerfile`) runs as uid 10001, carries no compiler or build backend in its runtime layer, and healthchecks against `/readyz` rather than `/healthz` — the latter answers as soon as the process is up, so a container reporting healthy on it gets traffic before it can serve a query. Containers whose images **fasterRag builds itself** run non-root; third-party images fasterRag provisions (Qdrant, the Langfuse stack, Grafana) run as their upstream images ship — forcing a `--user` onto an image that expects to own its storage volume risks an unstartable container (resolved AUDIT-0007, 2026-08-02). Images are pinned by tag (no `latest`); provisioning is idempotent, with doctor-gating shipped for Qdrant and pending for Langfuse/Grafana (TASK-0147/0149 in [todo.md](todo.md)).
 
 It is built from the lockfile: `uv sync --locked` installs exactly what `uv.lock` names, and the build fails rather than re-resolving when `uv.lock` no longer matches `pyproject.toml`, so the same commit builds the same dependency set on any day. Both base images (`python:3.12-slim` and the image the `uv` binary is copied from) are pinned by digest, with the tag beside each; Dependabot proposes the new digest when a tag moves. `--build-arg EXTRAS=` takes a comma-separated list of extras (`huggingface`, `huggingface,redis`, `all`) and installs their locked versions too; an empty value (the default) installs none. Measured 2026-11-12, Docker 29.7.2 on Windows 11: the default build succeeds, `docker run --rm <image> --help` exits 0, `id -u` is 10001, and the 49 distributions in the image are exactly the versions `uv.lock` names; an `EXTRAS=redis,openai` build imports both.
+
+### Running the image: the unauthenticated-bind refusal (TASK-0460, 2026-11-12)
+
+The image runs `fasterrag serve --host 0.0.0.0` — inside a container a loopback bind is unreachable through any published port — and the `config.yaml` it carries has `security.auth: false`. Since TASK-0460 `serve` **refuses** a non-loopback bind with auth off unless `security.allow_unauthenticated: true` is set, so what a default container does now depends on how it is started:
+
+| Started as | What happens | What an operator must change |
+|---|---|---|
+| `docker compose … up` with the shipped files | Starts. Every `FASTERRAG_SET` in `docker-compose.yml` and `deploy/compose.*.yml` carries `security.allow_unauthenticated=true`, because every port they publish is on the host's `127.0.0.1` | Nothing — but **an override file that sets `FASTERRAG_SET` must repeat the flag** (compose merges `environment` per key), or the container exits at start with `refusing to bind 0.0.0.0` and the healthcheck never passes |
+| `docker run fasterrag` (bare) | **Exits with code 2**: `refusing to bind 0.0.0.0 with security.auth off`. It used to start and warn | Either turn auth on — mount a config with `security.auth: true` and pass `-e FASTERRAG_API_KEY=<16+ characters>` — or, for a loopback-only port mapping, `docker run -p 127.0.0.1:8000:8000 -e FASTERRAG_SET=security.allow_unauthenticated=true fasterrag` |
+| Behind an authenticating reverse proxy | Same as the bare case | Set `security.allow_unauthenticated: true` deliberately, and keep the container's port off every network the proxy does not front |
+
+The flag is a statement that something other than fasterRag stands between the port and the network. **Never keep it while publishing on a routable address** — remove the `127.0.0.1:` prefix from a `ports:` entry and you must turn auth on instead. The `large` preset drops the published port for a load balancer; put auth on before that load balancer faces anyone. With the flag set `serve` still prints a `WARNING` on every start, and with `security.auth: true` the flag does nothing.
+
+The container `HEALTHCHECK` probes `/readyz` without a key. Its status code keeps its meaning under auth: `/readyz` stays unauthenticated and answers `200` or `503` for every caller; only the per-dependency detail is withheld from a caller without an `admin` key ([api-reference.md](api-reference.md)).
 
 ## 2. Vector DB deployment modes (Qdrant reference)
 

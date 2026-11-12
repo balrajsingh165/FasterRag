@@ -84,8 +84,11 @@ def test_serve_announces_where_it_is_listening(
 
 
 def test_the_host_and_port_flags_override_the_configured_ones(
-    config: str, uvicorn_stub: types.ModuleType
+    tmp_path: Path, uvicorn_stub: types.ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("FASTERRAG_API_KEY", "test-key")
+    config = write_config(tmp_path, "security:\n  allow_unauthenticated: true\n")
+
     main(["serve", "--config", config, "--host", "0.0.0.0", "--port", "9999"])
 
     assert (FakeConfig.built[0]["host"], FakeConfig.built[0]["port"]) == ("0.0.0.0", 9999)
@@ -280,3 +283,85 @@ def test_the_default_bind_is_loopback() -> None:
 
     assert configured.app.host == "127.0.0.1"
     assert not exposed_without_auth(configured.app.host, configured)
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "10.0.0.5", "api.internal"])
+def test_an_unauthenticated_non_loopback_bind_is_refused(
+    config: str, uvicorn_stub: types.ModuleType, capsys: pytest.CaptureFixture[str], host: str
+) -> None:
+    """It was only a warning, so the open-by-default service still started (TASK-0460)."""
+    code = main(["serve", "--config", config, "--host", host])
+
+    err = capsys.readouterr().err
+    assert code == ExitCode.USAGE
+    assert FakeConfig.built == []
+    assert f"refusing to bind {host} with security.auth off" in err
+    assert "security.allow_unauthenticated: true" in err
+
+
+def test_the_explicit_opt_in_binds_and_still_warns(
+    tmp_path: Path,
+    uvicorn_stub: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A proxy that authenticates in front is legitimate, but it has to be said in config."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "test-key")
+    config = write_config(tmp_path, "security:\n  allow_unauthenticated: true\n")
+
+    code = main(["serve", "--config", config, "--host", "0.0.0.0"])
+
+    assert code == ExitCode.SUCCESS
+    assert FakeConfig.built[0]["host"] == "0.0.0.0"
+    assert "WARNING: binding 0.0.0.0 with security.auth off" in capsys.readouterr().err
+
+
+def test_an_unauthenticated_dashboard_bind_is_refused_too(
+    tmp_path: Path,
+    uvicorn_stub: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The dashboard renders corpus text, so its bind meets the same rule as the API's."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "test-key")
+    config = write_config(
+        tmp_path, "observability:\n  dashboard: true\n  dashboard_host: 0.0.0.0\n"
+    )
+
+    code = main(["serve", "--config", config])
+
+    assert code == ExitCode.USAGE
+    assert FakeConfig.built == []
+    assert "refusing to bind 0.0.0.0" in capsys.readouterr().err
+
+
+def test_an_authenticated_wide_bind_starts_without_a_warning(
+    tmp_path: Path,
+    uvicorn_stub: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("FASTERRAG_API_KEY", "test-key-long-enough")
+    config = write_config(tmp_path, "security:\n  auth: true\n")
+
+    code = main(["serve", "--config", config, "--host", "0.0.0.0"])
+
+    assert code == ExitCode.SUCCESS
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_every_compose_service_that_binds_wide_without_auth_opts_in() -> None:
+    """The image runs `serve --host 0.0.0.0`; without the opt-in no compose stack starts."""
+    root = Path(__file__).resolve().parents[3]
+    files = [root / "docker-compose.yml"] + [
+        root / "deploy" / f"compose.{size}.yml" for size in ("small", "medium", "large")
+    ]
+    overrides = [
+        line
+        for path in files
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("FASTERRAG_SET:")
+    ]
+
+    assert overrides
+    assert all("security.allow_unauthenticated=true" in line for line in overrides), overrides

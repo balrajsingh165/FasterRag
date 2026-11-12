@@ -12,7 +12,8 @@
 # limits are what one API replica and one replica of the removed worker service were given
 # between them.
 #
-# CRITICAL: every FASTERRAG_SET below repeats `vector_db.host=qdrant` from the base file.
+# CRITICAL: every FASTERRAG_SET below repeats `vector_db.host=qdrant` and
+# `security.allow_unauthenticated=true` from the base file.
 # Compose merges `environment` per key, so setting FASTERRAG_SET here replaces the base value
 # rather than extending it, and dropping the host sends the API at its own localhost.
 # Point it at the external cluster this preset assumes as soon as there is one.
@@ -41,4 +42,4 @@ services:
           cpus: "20"
           memory: 36G
     environment:
-      FASTERRAG_SET: vector_db.host=qdrant,workers.cpu_pool_size=0,workers.embedding_pool_size=4
+      FASTERRAG_SET: vector_db.host=qdrant,security.allow_unauthenticated=true,workers.cpu_pool_size=0,workers.embedding_pool_size=4

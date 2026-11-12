@@ -860,6 +860,11 @@ class SecuritySettings(Section):
     # on, so leaving it empty breaks a served deployment loudly instead of exposing it.
     allowed_archive_roots: list[str] = []
 
+    # CRITICAL: the only way `fasterrag serve` binds a non-loopback address with `auth` off.
+    # It exists for a proxy that authenticates in front, or a container whose port is
+    # published on the host's loopback; defaulting it on reopens TASK-0460's finding.
+    allow_unauthenticated: bool = False
+
     @field_validator("rate_limit_redis_url")
     @classmethod
     def _check_rate_limit_redis_url(cls, value: str) -> str:

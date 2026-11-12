@@ -18,9 +18,15 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 | Config change appears to do nothing | Config is read at startup/provision time, not live (deliberate — it keeps the control plane auditable) | Restart the process, or re-run the relevant `fasterrag provision` command |
 | `security.multi_tenancy requires security.auth` at load | Tenancy was turned on with auth off. The tenant of a request is resolved by the authentication middleware, so this combination used to load and enforce nothing (TASK-0460) | Set `security.auth: true` and give every key a tenant (`secret:scopes:tenant`), or set `security.multi_tenancy: false` |
 
-### `fasterrag serve` prints a warning about binding with auth off
+### `fasterrag serve` exits with `refusing to bind … with security.auth off`
 
-`app.host` (or `--host`) names an address other machines can reach while `security.auth` is `false`. Anyone who can reach that port can ingest files the process can read and query them back. Either keep the default `127.0.0.1`, or set `security.auth: true` together with `ingestion.allowed_source_roots` ([security.md](security.md) §5.7). A reverse proxy that authenticates in front of the API is the one case where the warning can be accepted.
+`app.host` (or `--host`), or `observability.dashboard_host` with the dashboard on, names an address other machines can reach while `security.auth` is `false`. Anyone who can reach that port could ingest files the process can read and query them back, so since TASK-0460 (2026-11-12) this is a refusal with exit code 2, not the warning it used to be. Three fixes, in order of preference:
+
+1. Turn auth on: `security.auth: true`, a key of at least 16 characters in `FASTERRAG_API_KEY`, and `ingestion.allowed_source_roots` ([security.md](security.md) §2).
+2. Bind loopback: keep the default `127.0.0.1`.
+3. Opt in with `security.allow_unauthenticated: true` — only when a reverse proxy that authenticates stands in front, or the port is published on the host's loopback, as in the shipped compose files. `serve` then starts and prints a `WARNING`.
+
+**A bare `docker run fasterrag` hits this**: the image runs `serve --host 0.0.0.0` with the shipped config, which has auth off. Pass `-e FASTERRAG_SET=security.allow_unauthenticated=true` together with `-p 127.0.0.1:8000:8000`, or mount a config with auth on ([deployment.md](deployment.md) §3).
 
 ### Startup refuses an API key: `is the placeholder shipped in .env.example` or `is shorter than 16 characters`
 
