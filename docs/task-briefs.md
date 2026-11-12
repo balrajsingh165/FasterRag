@@ -608,14 +608,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 
 **Moves:** security.
 
-### TASK-0496 — Supply-chain claims with nothing behind them
-
-**Where.** [security.md](security.md) `:339` says an SBOM is generated at each tagged release — there is no SBOM tooling and no release. `:340` says images are pinned by tag or digest — the `Dockerfile` base is a tag, and it installs from `pyproject.toml`, not `uv.lock`. `:341` says dependency-update pull requests run the full pyramid — nothing produces such pull requests. No licence check exists.
-
-**Steps.** Status notes were added to those three lines on 2026-11-12. To remove them: a Dependabot or Renovate configuration; the base image pinned by digest; the image built from `uv.lock`; a licence allow-list check in the `supply-chain` job; the SBOM in TASK-0445's release workflow.
-
-**Moves:** security, packaging.
-
 ### TASK-0497 — The blocking facade in a notebook
 
 **Where.** `sync.py:68-80` refuses to start inside a running event loop (`CONFIG_INVALID`), and its module docstring names "a notebook" as a use. Jupyter always has a running loop. Test: `tests/unit/test_sync_facade.py:72`.
@@ -787,7 +779,7 @@ Use this to choose work by the category you want to move. The bar each category 
 | Performance and scalability | TASK-0454, TASK-0130, TASK-0437, TASK-0466, TASK-0487, TASK-0488, TASK-0407 to TASK-0410 |
 | Reliability and error handling | TASK-0437, TASK-0449, TASK-0450, TASK-0453, TASK-0474, TASK-0475, TASK-0476 |
 | Testing and quality assurance | TASK-0412, TASK-0454, TASK-0481, TASK-0489, TASK-0490, TASK-0300 |
-| Security | TASK-0339, TASK-0381, TASK-0446, TASK-0460, TASK-0326, TASK-0491, TASK-0492, TASK-0493, TASK-0494, TASK-0495, TASK-0496 |
+| Security | TASK-0339, TASK-0381, TASK-0446, TASK-0460, TASK-0326, TASK-0491, TASK-0492, TASK-0493, TASK-0494, TASK-0495 |
 | Developer experience and APIs | TASK-0444, TASK-0461, TASK-0497, TASK-0498, TASK-0500 |
 | Documentation | TASK-0440, TASK-0499, TASK-0500, TASK-0501, TASK-0486 |
-| Packaging and release readiness | TASK-0445, TASK-0087, TASK-0444, TASK-0502, TASK-0496, TASK-0503 |
+| Packaging and release readiness | TASK-0445, TASK-0087, TASK-0444, TASK-0502, TASK-0503 |
