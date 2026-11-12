@@ -62,8 +62,15 @@ physical backup: it lives in the same directory as the data it protects, so it s
 bad delete but not the loss of the disk, and it cannot be shipped elsewhere as a file.
 
 **Everything blocking runs off the event loop.** The Chroma client is synchronous, so
-every call is dispatched through ``asyncio.to_thread``; nothing here touches sqlite or the
-HNSW index on the loop thread.
+every call is dispatched to a worker thread; nothing here touches sqlite or the HNSW index on
+the loop thread.
+
+**And every such call is bounded by ``reliability.timeouts.vector_db_ms``** (TASK-0476), as it
+is on the four networked adapters, failing with the same retryable ``ProviderError``. A thread
+cannot be cancelled, so a call past its budget keeps its worker until Chroma returns; at most
+``_CONCURRENT_CALLS`` calls hold a worker at once, which keeps a wedged store from occupying
+the whole default thread pool the rest of the process shares. Waiting for a free slot counts
+against the same budget.
 
 **Remaining limits of this first cut**, none of them silent: ``shard_number`` and
 ``replication_factor`` have no embedded equivalent and are ignored rather than
@@ -74,6 +81,8 @@ embedded client exposes no per-instance shutdown.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import hashlib
 import json
 import math
@@ -154,6 +163,11 @@ _ALIAS_KIND: Final = "alias"
 _LAYOUT_VERSION: Final = 1
 _ALIAS_VECTOR: Final[tuple[float, ...]] = (0.0,)
 _FALLBACK_BATCH: Final = 1000
+
+# CRITICAL: below the smallest default thread pool asyncio can build — min(32, CPUs + 4),
+# so five workers on one CPU. A bound at or above that size would let timed-out Chroma calls,
+# whose threads cannot be cancelled, starve every other `to_thread` caller in the process.
+_CONCURRENT_CALLS: Final = 4
 
 _SLUG_LIMIT: Final = 32
 _DIGEST_LIMIT: Final = 12
@@ -271,6 +285,8 @@ class ChromaAdapter(VectorDBAdapter):
         self._client: ClientAPI | None = None
         self._handles: dict[str, ChromaCollection] = {}
         self._lock = asyncio.Lock()
+        self._timeout_ms = settings.reliability.timeouts.vector_db_ms
+        self._slots = asyncio.Semaphore(_CONCURRENT_CALLS)
 
     def _translate(self, exc: BaseException, operation: str) -> FasterRagError:
         """Map a Chroma failure onto the typed error taxonomy."""
@@ -322,11 +338,42 @@ class ChromaAdapter(VectorDBAdapter):
         )
 
     async def _call(self, operation: str, work: Callable[[], _T]) -> _T:
-        """Run one blocking Chroma call off the loop, letting no vendor type escape."""
+        """Run one blocking Chroma call off the loop within its budget, leaking no vendor type."""
+        running: asyncio.Future[_T] | None = None
         try:
-            return await asyncio.to_thread(work)
+            async with asyncio.timeout(self._timeout_ms / 1000):
+                await self._slots.acquire()
+                running = asyncio.get_running_loop().run_in_executor(
+                    None, functools.partial(contextvars.copy_context().run, work)
+                )
+                running.add_done_callback(self._release)
+                return await asyncio.shield(running)
+        except TimeoutError as exc:
+            if running is not None:
+                running.add_done_callback(functools.partial(self._abandoned, operation))
+            raise ProviderError(
+                f"chroma did not finish {operation} within "
+                f"reliability.timeouts.vector_db_ms ({self._timeout_ms} ms)",
+                code=ErrorCode.EMBED_PROVIDER_ERROR,
+                retryable=True,
+            ) from exc
         except _VENDOR_ERRORS as exc:
             raise self._translate(exc, operation) from exc
+
+    def _release(self, _: asyncio.Future[Any]) -> None:
+        """Free the call's slot once its thread has actually returned, not when it timed out."""
+        self._slots.release()
+
+    def _abandoned(self, operation: str, finished: asyncio.Future[Any]) -> None:
+        """Report how a call that already timed out eventually ended."""
+        error = None if finished.cancelled() else finished.exception()
+        _logger.warning(
+            "a chroma call that exceeded its timeout has now returned",
+            extra={
+                "operation": operation,
+                "error": type(error).__name__ if error is not None else None,
+            },
+        )
 
     def _build_client(self) -> ClientAPI:
         """Open the persistent directory, refusing a path that is not a usable one."""
