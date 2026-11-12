@@ -2,7 +2,7 @@
 
 The REST API is one half of the control plane (the other is the [CLI](cli-reference.md)). All endpoints are versioned under `/v1`. All request/response bodies are JSON except SSE streams and problem responses (`application/problem+json`).
 
-- Authentication: `Authorization: Bearer <api-key>` when `security.auth: true`. Keys carry scopes (`ingest`, `query`, `collections`, `admin`). A route needs the scope of its path prefix — `/v1/ingest` `ingest`, `/v1/query` and `/v1/retrieve` `query`, `/v1/collections` `collections`, everything else `admin` — with one exception by method: `DELETE /v1/collections/{name}` drops a whole collection and needs `admin` (TASK-0520). See [security.md](security.md).
+- Authentication: `Authorization: Bearer <api-key>` when `security.auth: true`. Keys carry scopes (`ingest`, `query`, `collections`, `admin`). A route needs the scope of its path prefix — `/v1/ingest` `ingest`, `/v1/query` and `/v1/retrieve` `query`, `/v1/collections` `collections`, everything else `admin` — with one exception by method: `DELETE /v1/collections/{name}` drops a whole collection and needs `admin` (TASK-0520). Under `security.multi_tenancy` a key bound to no tenant is refused `403 TENANT_FORBIDDEN` on every route unless it holds the `cross-tenant` scope, which no route requires and nothing implies — not `*`, not `admin` (TASK-0460). See [security.md](security.md).
 - Multi-tenancy: `X-Tenant-ID` header (configurable) when `security.multi_tenancy: true`.
 - Idempotency: every mutating endpoint accepts an optional `Idempotency-Key` header (TASK-0318 ✅ 2026-11-08). See [Idempotency](#idempotency) below for its scope, lifetime, conflict codes and replay signal.
 - Backpressure: when queues are full the API returns `429` with a `Retry-After` header.

@@ -28,6 +28,10 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 
 **A bare `docker run fasterrag` hits this**: the image runs `serve --host 0.0.0.0` with the shipped config, which has auth off. Pass `-e FASTERRAG_SET=security.allow_unauthenticated=true` together with `-p 127.0.0.1:8000:8000`, or mount a config with auth on ([deployment.md](deployment.md) §3).
 
+### `403 TENANT_FORBIDDEN`: `this key is bound to no tenant and does not hold the 'cross-tenant' scope`
+
+With `security.multi_tenancy` on, a key whose entry has no tenant field used to act for any tenant it named; since TASK-0460 (2026-11-12) it is refused on every request, and startup warns about it by its positional name (`key-2`). Either bind it — `secret:query:acme` — or, for an operator key that genuinely must act for every tenant, add the scope by name: `secret:query,cross-tenant`, or `secret:*,cross-tenant` for every scope. `*` and `admin` do not imply it.
+
 ### Startup refuses an API key: `is the placeholder shipped in .env.example` or `is shorter than 16 characters`
 
 With `security.auth: true`, every key in `FASTERRAG_API_KEY` is checked at startup (TASK-0460). `change-me` — the value `.env.example` ships — is refused by name, and any key under 16 characters is refused as guessable. The message names the entry by its 1-based position and never prints the key. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.

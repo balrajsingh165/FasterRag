@@ -47,6 +47,7 @@ from fasterrag.observability.logging import get_logger
 __all__ = [
     "ALL_SCOPES",
     "ALL_SCOPES_TOKEN",
+    "CROSS_TENANT_SCOPE",
     "PUBLIC_PATHS",
     "ApiKey",
     "AuthMiddleware",
@@ -62,6 +63,11 @@ ALL_SCOPES: Final[frozenset[str]] = frozenset({"ingest", "query", "collections",
 # what it writes to keep them all. Without it, failing an empty scope field closed would
 # leave `secret::tenant` with no replacement spelling at all.
 ALL_SCOPES_TOKEN: Final[str] = "*"
+
+# CRITICAL: under `security.multi_tenancy`, the only thing that lets a key with no tenant act
+# for one. It is not in ALL_SCOPES and `*` does not grant it, and `admin` does not imply it:
+# acting for every tenant has to be written into the key entry by name (TASK-0460).
+CROSS_TENANT_SCOPE: Final[str] = "cross-tenant"
 
 # CRITICAL: liveness and readiness are unauthenticated on purpose. A load balancer or
 # orchestrator probes them without credentials, and a health check that needs a key reports
@@ -156,14 +162,14 @@ def _parse_scopes(raw: str, where: str = "this key entry") -> frozenset[str]:
             f"needs ({', '.join(sorted(ALL_SCOPES))}), or drop the colon entirely for a "
             f"bare operator key"
         )
-    unknown = scopes - ALL_SCOPES - {ALL_SCOPES_TOKEN}
+    unknown = scopes - ALL_SCOPES - {ALL_SCOPES_TOKEN, CROSS_TENANT_SCOPE}
     if unknown:
         raise ConfigError(
             f"unknown scope(s) {', '.join(sorted(unknown))}; "
-            f"valid scopes are {', '.join(sorted(ALL_SCOPES))}"
+            f"valid scopes are {', '.join(sorted(ALL_SCOPES | {CROSS_TENANT_SCOPE}))}"
         )
     if ALL_SCOPES_TOKEN in scopes:
-        return ALL_SCOPES
+        return ALL_SCOPES | (scopes & {CROSS_TENANT_SCOPE})
     return frozenset(scopes)
 
 
@@ -268,18 +274,8 @@ class AuthMiddleware:
                     "rate_limit_backend": settings.security.rate_limit_backend,
                 },
             )
-            # CRITICAL: a key whose entry omits the third field parses as `tenant=None`,
-            # which `_tenant_refusal` treats as an operator credential free to act for ANY
-            # tenant. That is deliberate (docs/security.md), but the dangerous state is the
-            # one you get by leaving a field off, so it is announced rather than inferred.
-            # Never log the secret — only the positional name the parser assigned.
-            unbound = [key.name for key in keys if key.tenant is None]
-            if self.multi_tenancy and unbound:
-                _logger.warning(
-                    "keys with no tenant may act for any tenant; bind them or drop the "
-                    "operator capability",
-                    extra={"keys": ", ".join(unbound), "count": len(unbound)},
-                )
+            if self.multi_tenancy:
+                _announce_unbound_keys(keys)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Authenticate an HTTP request, or pass it through when auth is off."""
@@ -409,8 +405,43 @@ class AuthMiddleware:
         await response(scope, receive, send)
 
 
+def _announce_unbound_keys(keys: Sequence[ApiKey]) -> None:
+    """Warn about every key with no tenant, naming the fix and never the secret.
+
+    Without ``cross-tenant`` such a key is refused on every request; with it, it may act for
+    any tenant, which is the grant worth seeing at startup (TASK-0460).
+    """
+    refused = [key.name for key in keys if key.tenant is None and not _crosses(key)]
+    crossing = [key.name for key in keys if key.tenant is None and _crosses(key)]
+    if refused:
+        _logger.warning(
+            "keys with no tenant are refused on every request while security.multi_tenancy "
+            "is on; bind each to a tenant (secret:scopes:tenant) or, for an operator key "
+            "that may act for any tenant, add the 'cross-tenant' scope",
+            extra={"keys": ", ".join(refused), "count": len(refused)},
+        )
+    if crossing:
+        _logger.warning(
+            "keys holding the 'cross-tenant' scope may act for any tenant",
+            extra={"keys": ", ".join(crossing), "count": len(crossing)},
+        )
+
+
+def _crosses(key: ApiKey) -> bool:
+    """Return whether ``key`` was granted the explicit cross-tenant scope."""
+    return CROSS_TENANT_SCOPE in key.scopes
+
+
 def _tenant_refusal(key: ApiKey, declared: str | None) -> FasterRagError | None:
     """Return the error for a tenant mismatch, or ``None`` when the request is in bounds."""
+    # CRITICAL: before TASK-0460 an omitted tenant field was an operator credential for every
+    # tenant. It now needs the scope by name, so leaving a field off narrows, never widens.
+    if key.tenant is None and not _crosses(key):
+        return FasterRagError(
+            f"this key is bound to no tenant and does not hold the {CROSS_TENANT_SCOPE!r} "
+            f"scope, so it may not act for a tenant",
+            code=ErrorCode.TENANT_FORBIDDEN,
+        )
     if declared is None:
         return FasterRagError(
             "security.multi_tenancy is on, so every request must carry a tenant header",

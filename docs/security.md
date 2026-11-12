@@ -43,7 +43,7 @@ Until 2026-11-08 the last row loaded as a key with **all four scopes, `admin` in
 
 Failing it closed alone would only have moved the problem: the operator writing `k::acme` would have gotten a hard startup failure with no documented replacement. So the refusal ships with the replacement — `*` — and the refusal message names it. Mixing is harmless and allowed (`*,query` is all four), since the token is a union, not an override.
 
-**This does not change what an omitted *tenant* means** (`k:query:` and `k:query` are both operator keys free to act for any tenant, §5.3). That is the same shape one field over and is a separate, deliberate grant with its own open decision (TASK-0295); fixing it is an incompatible change to every key file, which `*` is not. If that decision later lands on an explicit any-tenant marker, `*` is the token already in this grammar — note that `k:query:*` today means the literal tenant id `*`, not "any tenant".
+**An omitted *tenant* no longer means "any tenant" (TASK-0460, 2026-11-12).** Under `security.multi_tenancy`, `k:query:` and `k:query` are keys bound to no tenant, and such a key is refused `403 TENANT_FORBIDDEN` on every request unless its scopes name **`cross-tenant`** — `k:query,cross-tenant`, or `k:*,cross-tenant` for an operator key with every scope. The scope is never implied: a bare secret, `*` and `admin` all leave it out, so acting for every tenant has to be written into the entry by name. With `multi_tenancy` off the tenant field is unused and nothing changes. This was the open decision TASK-0295 recorded — the secure shape was known and its price was that it is **breaking for every unbound key in a multi-tenant deployment**; TASK-0460 took that price with an additive spelling rather than reserving `*` in the tenant field, so `k:query:*` still means the literal tenant id `*`.
 
 **Three parser edges, recorded rather than rediscovered.** A trailing colon after the scopes (`k:query:`) is an empty tenant and reads as no tenant. A *third* colon is not a fourth field: `k:query:acme:extra` yields the tenant `acme:extra`, which then matches no header and fails closed. An entry with an empty secret (`:query`) is refused, naming its 1-based position.
 
@@ -90,7 +90,7 @@ Enabling auth with no usable key **refuses to start**. Starting would refuse eve
 **Shipped so far** (TASK-0179): the tenant is resolved once, in `AuthMiddleware`, from the key's own tenant and the request header, and placed on the request scope — one place decides who the caller is, so a second reader cannot disagree with the first. Three rules:
 
 - A key **bound to a tenant** may act only as that tenant.
-- A key with **no tenant** is an operator credential and may act as any tenant, but must still name one. An unstated tenant would silently read and write the untenanted namespace while multi-tenancy is supposedly on.
+- A key with **no tenant** is refused unless it holds the explicit `cross-tenant` scope (TASK-0460); with it, it is an operator credential and may act as any tenant, but must still name one. An unstated tenant would silently read and write the untenanted namespace while multi-tenancy is supposedly on.
 - A refusal **never echoes the key's own tenant**, or a caller could enumerate tenants by trying values and reading the error.
 
 **Semantic-cache isolation is the part that matters most, and it is enforced on the entry rather than the key.** Lookup compares the query vector against *every* stored entry, so a key prefix alone would not help — the scan ignores keys. Each entry carries its owning tenant and a mismatch is skipped, so a sufficiently similar question from one tenant can never return another's answer at a cache hit's latency with no error anywhere. The tenant is also part of the key, because otherwise two tenants asking the same question collide and the second write silently overwrites the first.
@@ -251,14 +251,16 @@ are individually legal. Tar member names were already validated against traversa
 
 **One guarantee did change, and it is a real trade.** “Nothing is written before verification” now means nothing is written *to the target collection*: unauthenticated archive bytes do land on local disk first, because hashing them without holding them requires it. They land in a private temp directory, bounded by the same 4 GiB budget, refused on any member that is not a plain file at the archive root — the traversal check that was previously belt-and-braces is now what keeps members inside that directory — and removed on every failure path. An import therefore needs free temp space for the uncompressed archive, and a full disk becomes a refusal rather than a silent partial import.
 
-### 5.3 An unbound key is now announced
+### 5.3 An unbound key is now announced, and refused without `cross-tenant`
 
 A key entry is `<secret>[:<scopes>[:<tenant>]]`, so omitting the third field yields
-`tenant=None`, which §3 defines as an operator credential free to act for any tenant. That
-is deliberate, but it means the broader capability is what you get by leaving a field off.
-Startup now logs a `WARNING` naming each unbound key — by its positional name, never its
-secret — whenever `security.multi_tenancy` is on. The underlying grant is unchanged;
-requiring an explicit marker instead would break every existing key file (TASK-0295).
+`tenant=None`. Until TASK-0460 that was an operator credential free to act for any tenant,
+so the broader capability was what you got by leaving a field off. Startup logged a
+`WARNING` naming each unbound key — by its positional name, never its secret — whenever
+`security.multi_tenancy` is on. Since 2026-11-12 such a key is **refused** unless it holds
+the `cross-tenant` scope (§2), and the warning names the fix: bind the key to a tenant
+(`secret:scopes:tenant`) or add `cross-tenant`. Keys that do hold it are announced in a
+second warning, because acting for every tenant is the grant worth seeing at startup.
 
 ### 5.4 Still open after this audit
 
@@ -321,8 +323,9 @@ An independent audit found the service **open by default twice over**: `security
 - **Problem `instance` echoes the request path — decided not a leak, and kept.** `instance` is `request.url.path`: the path *this caller* sent, without its query string. Every path parameter it can carry — a collection name, a document id, a job or trace id, a provisioning tool name — is a value the caller supplied in that same request, so echoing it to that caller discloses nothing they did not already hold. Three things that would make it a leak were checked and are absent: the query string, where a token pasted into a URL would sit, is not part of it; the tenant-scoped backend name (`<tenant>__<name>`) is resolved below the router and never reaches it; and a resource that belongs to another tenant answers with the same `NOT_FOUND` and the same `instance` as one that does not exist. The response is `application/problem+json`, never rendered as HTML. Pinned by `test_instance_is_the_callers_own_path_without_its_query_string` and `test_a_tenant_never_sees_the_backend_name_in_instance`. What would change the decision: a route that puts a secret in its path, which none does and none should.
 - **The dashboard has its own bind address.** `observability.dashboard_host` (default `127.0.0.1`); it reused `app.host`, so widening the API's bind widened the corpus view with it.
 - **An unauthenticated non-loopback bind is refused.** `fasterrag serve` exits with code 2 rather than bind a non-loopback `app.host` (or `--host`), or a non-loopback `observability.dashboard_host`, while `security.auth` is off. `security.allow_unauthenticated: true` is the explicit opt-in for an authenticating proxy or a loopback-only port mapping; the shipped compose files set it because every port they publish is on `127.0.0.1`. **Breaking:** a bare `docker run fasterrag` with the shipped config no longer starts ([deployment.md](deployment.md) §1 says what to change).
+- **A key with no tenant no longer acts for any tenant by default.** Under `multi_tenancy`, a key whose entry omits its tenant is refused `403 TENANT_FORBIDDEN` unless it carries the explicit `cross-tenant` scope (§3, §5.3).
 
-**Still open from the same audit**, each with an entry in [todo.md](todo.md): retrieved text reaches the prompt unescaped (TASK-0446); a key with no tenant may act for any tenant (TASK-0460); tenant scoping of the ingest and query paths remains the opt-in described in §3 (TASK-0339, TASK-0381).
+**Still open from the same audit**, each with an entry in [todo.md](todo.md): retrieved text reaches the prompt unescaped (TASK-0446); tenant scoping of the ingest and query paths remains the opt-in described in §3 (TASK-0339, TASK-0381).
 
 ## 6. Supply chain
 

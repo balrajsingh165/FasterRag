@@ -8,6 +8,7 @@ from starlette.types import Message, Receive, Scope, Send
 from fasterrag.api.auth import (
     ALL_SCOPES,
     ALL_SCOPES_TOKEN,
+    CROSS_TENANT_SCOPE,
     MINIMUM_KEY_LENGTH,
     PUBLIC_PATHS,
     ApiKey,
@@ -387,7 +388,7 @@ def test_shutdown_releases_the_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_an_unbound_key_is_announced_when_multi_tenancy_is_on(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A key that omitted its tenant is an operator credential; say so at startup."""
+    """A key that omitted its tenant is refused under tenancy; say so at startup."""
     monkeypatch.setenv("FASTERRAG_API_KEY", "alpha-secret-0001:query;beta-secret-00001:query:acme")
     settings = Settings.model_validate(
         {"security": {"auth": True, "multi_tenancy": True, "api_key_env": "FASTERRAG_API_KEY"}}
@@ -397,7 +398,7 @@ def test_an_unbound_key_is_announced_when_multi_tenancy_is_on(
         AuthMiddleware(_unreached, settings)
 
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
-    assert any("may act for any tenant" in record.getMessage() for record in warnings)
+    assert any("refused on every request" in record.getMessage() for record in warnings)
     assert not any("alpha-secret" in record.getMessage() for record in warnings)
 
 
@@ -413,7 +414,9 @@ def test_a_fully_bound_key_set_is_announced_quietly(
     with caplog.at_level(logging.WARNING):
         AuthMiddleware(_unreached, settings)
 
-    assert not any("may act for any tenant" in record.getMessage() for record in caplog.records)
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any("refused on every request" in message for message in messages)
+    assert not any("may act for any tenant" in message for message in messages)
 
 
 class _Recorder:
@@ -516,7 +519,7 @@ async def test_an_operator_key_acts_as_the_tenant_it_declared(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The declared tenant has to reach downstream, or the operator acts untenanted instead."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", SECRET)
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{SECRET}:*,{CROSS_TENANT_SCOPE}")
     settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}})
     recorder = _Recorder()
 
@@ -683,3 +686,73 @@ def test_the_server_refuses_to_start_on_the_placeholder(monkeypatch: pytest.Monk
 
     with pytest.raises(ConfigError, match="placeholder"), TestClient(app):
         pass
+
+
+async def test_an_unbound_key_is_refused_for_every_tenant_without_the_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key that omitted its tenant used to act for any tenant it named (TASK-0460)."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{SECRET}:admin")
+    settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}})
+    recorder = _Recorder()
+
+    await drive(
+        AuthMiddleware(recorder, settings),
+        [
+            (b"authorization", f"Bearer {SECRET}".encode("latin-1")),
+            (b"x-tenant-id", b"globex"),
+        ],
+    )
+
+    assert recorder.state == {}
+
+
+def test_the_unbound_refusal_names_the_scope_that_fixes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FASTERRAG_API_KEY", SECRET)
+    app = create_app(Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}}))
+    app.state.vector_db = StubVectorDB()
+
+    with TestClient(app) as client:
+        response = client.get("/metrics", headers={**bearer(), "X-Tenant-ID": "acme"})
+
+    assert response.status_code == 403
+    assert response.json()["code"] == ErrorCode.TENANT_FORBIDDEN.value
+    assert f"'{CROSS_TENANT_SCOPE}'" in response.json()["detail"]
+
+
+def test_the_cross_tenant_scope_is_never_implied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neither a bare secret, `*`, nor `admin` grants it: it must be written by name."""
+    monkeypatch.setenv(
+        "FASTERRAG_API_KEY",
+        f"bare-operator-key-01;star-operator-key-1:*;admin-operator-key-1:admin;"
+        f"named-operator-key-1:*,{CROSS_TENANT_SCOPE}",
+    )
+
+    keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+    assert [CROSS_TENANT_SCOPE in key.scopes for key in keys] == [False, False, False, True]
+    assert keys[3].scopes == ALL_SCOPES | {CROSS_TENANT_SCOPE}
+
+
+def test_the_startup_warning_names_the_fix(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The warning used to say the key may act for any tenant; now it is refused instead."""
+    monkeypatch.setenv(
+        "FASTERRAG_API_KEY",
+        f"unbound-key-000001:query;crossing-key-00001:query,{CROSS_TENANT_SCOPE}",
+    )
+    settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}})
+
+    with caplog.at_level(logging.WARNING):
+        AuthMiddleware(_unreached, settings)
+
+    messages = [record.getMessage() for record in caplog.records]
+    refused = [message for message in messages if "refused on every request" in message]
+    assert refused
+    assert f"'{CROSS_TENANT_SCOPE}'" in refused[0]
+    assert "secret:scopes:tenant" in refused[0]
+    assert any("may act for any tenant" in message for message in messages)
+    assert not any("unbound-key-000001" in message for message in messages)
