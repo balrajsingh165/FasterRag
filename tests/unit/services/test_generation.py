@@ -117,6 +117,14 @@ async def collect(service: GenerationService, question: str = "q") -> list[Query
     return [event async for event in service.stream(question)]
 
 
+async def collect_into(
+    events: list[QueryEvent], service: GenerationService, question: str = "q"
+) -> None:
+    """Append each event as it arrives, so what preceded a failure is still observable."""
+    async for event in service.stream(question):
+        events.append(event)
+
+
 async def test_an_answer_carries_its_resolved_citations() -> None:
     service, _ = build()
 
@@ -904,11 +912,13 @@ async def test_a_streamed_query_over_the_budget_is_refused_before_any_token() ->
     retrieval = ScriptedRetrieval([chunk("c_a", "Either party may terminate.")])
     service = GenerationService(settings, retrieval, llm)  # type: ignore[arg-type]
 
+    events: list[QueryEvent] = []
     with pytest.raises(FasterRagError) as caught:
-        [event async for event in service.stream("what is the notice period")]
+        await collect_into(events, service, "what is the notice period")
 
     assert caught.value.code is ErrorCode.BUDGET_EXCEEDED
     assert llm.prompts == []
+    assert events == [], "`meta` went out before the refusal, committing the stream to a 200"
 
 
 async def test_an_unset_budget_permits_everything() -> None:

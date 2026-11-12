@@ -227,7 +227,9 @@ event: usage      data: {"usage": {...}, "timings_ms": {...}, "faithfulness": 0.
 event: done       data: {}
 ```
 
-On mid-stream failure: `event: error` with a problem document, then the stream closes. Clients must treat a missing `done` as an incomplete answer.
+**A query refused before its first event is an ordinary problem response, not a stream.** Everything that can refuse a query outright — retrieval failing (`503 RETRIEVAL_FAILED`), the token budget (`402 BUDGET_EXCEEDED`) — happens before `meta` is produced, and the server produces `meta` before it sends the status line. Such a request gets the same status and `application/problem+json` body as `stream: false`, with no SSE frame at all. Before 2026-11-12 the budget check ran after `meta`, so a streamed request over its budget received `200` and then an `error` event (TASK-0438).
+
+On mid-stream failure — anything after `meta` has been sent — the status is already `200` and cannot change: `event: error` with a problem document, then the stream closes. Clients must treat a missing `done` as an incomplete answer.
 
 Grounded-or-refuse while streaming: a token cannot be unsaid once sent, so with `generation.grounded_or_refuse: true` no `token` event is emitted until the whole answer has been graded — time-to-first-token is traded for the guarantee the flag exists to provide, and the flag defaults to `false` so the trade is only made on request. A withheld answer replaces the `token`, `citations`, and `usage` events with one `insufficient_evidence` event carrying the same body as the non-streamed refusal, followed by `done`:
 

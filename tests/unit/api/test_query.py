@@ -6,14 +6,17 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from fasterrag.adapters.llm.base import Completion, LLMAdapter
+from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.api import query as query_router
 from fasterrag.api.dependencies import shared_cache, shared_embedding_router
 from fasterrag.api.problems import PROBLEM_MEDIA_TYPE
 from fasterrag.api.query import encode_event
+from fasterrag.config.schema import Settings
 from fasterrag.core.context import Citation, Span
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ErrorCode, GenerationError, RetrievalError
-from fasterrag.services.generation import Answer, QueryEvent
+from fasterrag.services.generation import Answer, GenerationService, QueryEvent
 from fasterrag.services.querying import FULL_MODE, HYBRID_ONLY_MODE, Retrieval
 
 DEFAULT_EVENTS = [
@@ -237,14 +240,97 @@ def test_the_error_event_carries_the_stable_code(
     install_generation(
         monkeypatch,
         app,
-        StubGeneration(events=[], error=RetrievalError("qdrant is unreachable", retryable=True)),
+        StubGeneration(
+            events=[QueryEvent(type="meta", data={"trace_id": "t"})],
+            error=RetrievalError("qdrant is unreachable", retryable=True),
+        ),
     )
 
-    _, data = frames(client.post("/v1/query", json={"query": "q", "stream": True}).text)[0]
+    _, data = frames(client.post("/v1/query", json={"query": "q", "stream": True}).text)[-1]
 
     assert data["code"] == ErrorCode.RETRIEVAL_FAILED.value
     assert data["retryable"] is True
     assert data["status"] == 503
+
+
+class IdleLLM(LLMAdapter):
+    """A provider that must never be reached; it counts the calls that got through."""
+
+    provider = "idle"
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(settings)
+        self.calls = 0
+
+    async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
+        self.calls += 1
+        return Completion(text="an answer", model="idle")
+
+    async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
+        self.calls += 1
+        yield "an answer"
+
+    async def health(self) -> HealthStatus:
+        return HealthStatus(healthy=True)
+
+    async def close(self) -> None:
+        return None
+
+
+def test_a_streamed_query_over_the_budget_is_a_402_problem_not_an_event_stream(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, app: FastAPI
+) -> None:
+    """A streamed budget refusal arrived as an SSE `error` over HTTP 200, after `meta`."""
+    settings = Settings.model_validate(
+        {"cost": {"per_query_token_budget": 10}, "llm": {"max_tokens": 1024}}
+    )
+    llm = IdleLLM(settings)
+    chunks = [ScoredChunk(chunk_id="c_a", text="Either party may terminate.", rrf_score=0.5)]
+    service = GenerationService(settings, StubRetrieval(chunks), llm)  # type: ignore[arg-type]
+    stub_shared(app)
+    monkeypatch.setattr(
+        query_router,
+        "build_generation",
+        lambda settings, adapter, router, cache=None, traces=None, tenant=None: service,
+    )
+
+    response = client.post("/v1/query", json={"query": "notice period?", "stream": True})
+
+    assert response.status_code == 402
+    assert response.headers["content-type"].startswith(PROBLEM_MEDIA_TYPE)
+    assert response.json()["code"] == ErrorCode.BUDGET_EXCEEDED.value
+    assert "event:" not in response.text
+    assert llm.calls == 0
+
+
+def test_a_stream_that_fails_before_its_first_event_closes_its_service(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, app: FastAPI
+) -> None:
+    """The early failure leaves through the problem handler, so nothing else would close it."""
+    service = install_generation(
+        monkeypatch,
+        app,
+        StubGeneration(events=[], error=RetrievalError("qdrant is unreachable", retryable=True)),
+    )
+
+    response = client.post("/v1/query", json={"query": "q", "stream": True})
+
+    assert response.status_code == 503
+    assert response.headers["content-type"].startswith(PROBLEM_MEDIA_TYPE)
+    assert service.closed is True
+
+
+def test_a_stream_with_no_events_is_an_empty_event_stream(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, app: FastAPI
+) -> None:
+    """Looking at the first event before answering must not break a stream that has none."""
+    service = install_generation(monkeypatch, app, StubGeneration(events=[]))
+
+    response = client.post("/v1/query", json={"query": "q", "stream": True})
+
+    assert response.status_code == 200
+    assert frames(response.text) == []
+    assert service.closed is True
 
 
 def test_a_failure_before_the_stream_becomes_a_problem_document(

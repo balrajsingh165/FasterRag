@@ -766,6 +766,13 @@ class GenerationService:
         if vector is not None:
             timings["cache"] = cache_ms
 
+        # CRITICAL: above the first `yield`, and deliberately so (TASK-0438). Once `meta` has
+        # gone out the HTTP status is committed to 200, so a refusal raised after it could
+        # only reach a REST client as an SSE `error` event — a 402 the client never sees as
+        # a 402. Raised here, nothing has been sent and the router can still answer with the
+        # problem document the non-streamed path returns.
+        self._charge_budget(prepared)
+
         yield QueryEvent(
             type="meta",
             data={
@@ -774,8 +781,6 @@ class GenerationService:
                 "degraded": prepared.mode != FULL_MODE,
             },
         )
-
-        self._charge_budget(prepared)
 
         started = time.perf_counter()
         parts: list[str] = []

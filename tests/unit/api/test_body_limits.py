@@ -11,11 +11,13 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from fasterrag.api import query as query_router
 from fasterrag.api.limits import BodyLimitMiddleware
 from fasterrag.api.main import create_app
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 from tests.unit.api.conftest import StubVectorDB
+from tests.unit.api.test_query import StubGeneration
 
 MEGABYTE = 1024 * 1024
 
@@ -30,7 +32,18 @@ def body(megabytes: float) -> dict[str, Any]:
     return {"query": "what is the allowance", "filters": {"pad": "x" * int(megabytes * MEGABYTE)}}
 
 
-def test_a_body_within_the_limit_is_served() -> None:
+def answering(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put a scripted answer behind `/v1/query`, so a 200 means the body was let through.
+
+    These cases used to pass on a 200 the stream had committed before the query crashed on
+    the stub backend; a query that fails before its first event is no longer a 200.
+    """
+    monkeypatch.setattr(query_router, "build_generation", lambda *args, **kwargs: StubGeneration())
+
+
+def test_a_body_within_the_limit_is_served(monkeypatch: pytest.MonkeyPatch) -> None:
+    answering(monkeypatch)
+
     assert client().post("/v1/query", json=body(0.25)).status_code == 200
 
 
@@ -58,8 +71,10 @@ def test_the_refusal_does_not_echo_the_size_sent() -> None:
     assert "8388608" not in response.text
 
 
-def test_the_limit_follows_configuration() -> None:
+def test_the_limit_follows_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     """A limit that ignored its setting would be a constant with a knob next to it."""
+    answering(monkeypatch)
+
     assert client(limit_mb=16).post("/v1/query", json=body(8)).status_code == 200
 
 
