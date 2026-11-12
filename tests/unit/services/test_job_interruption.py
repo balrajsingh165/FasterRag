@@ -329,6 +329,18 @@ async def test_a_running_job_that_went_quiet_can_be_resumed(tmp_path: Path) -> N
     assert (ready.job_id, ready.status) == (record.job_id, "queued")
 
 
+async def test_a_queued_job_that_went_quiet_can_be_resumed(tmp_path: Path) -> None:
+    """A job orphaned before its task started had no key to replay and no way to run."""
+    configured = one_at_a_time()
+    service, _ = service_for(tmp_path, configured, StubEmbedder(configured))
+    record = left_behind(service.journal, "queued", quiet_for=3600)
+
+    ready = await service.accept_resume(record.job_id)
+
+    assert (ready.job_id, ready.status) == (record.job_id, "queued")
+    assert service.journal.load_job_blocking(record.job_id).reason_code is None
+
+
 async def test_a_running_job_still_being_written_cannot_be_resumed(tmp_path: Path) -> None:
     """Resuming a job another process is running would run one corpus twice at once."""
     configured = one_at_a_time()

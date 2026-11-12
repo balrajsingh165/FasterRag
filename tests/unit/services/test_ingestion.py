@@ -594,6 +594,31 @@ async def test_a_source_that_cannot_be_resolved_settles_the_job_as_failed(tmp_pa
     assert service.journal.load_job_blocking(record.job_id).status == "failed"
 
 
+async def test_a_failed_job_records_the_code_of_the_error_that_failed_it(
+    tmp_path: Path, corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an interruption recorded a reason, so a failed job could not say why it failed."""
+    service, adapter = build(tmp_path)
+    unresolvable = service.journal.create_job_blocking(
+        "default", [{"type": "url", "value": "ftp://example.invalid/file.md"}]
+    )
+
+    async def explode(points: list[Point]) -> UpsertResult:
+        raise RuntimeError("a bug in the adapter")
+
+    with pytest.raises(FasterRagError) as typed:
+        await service.run(unresolvable)
+    monkeypatch.setattr(adapter, "upsert", explode)
+    untyped = await service.accept(sources(corpus))
+    with pytest.raises(FasterRagError):
+        await service.run(untyped)
+
+    first = service.journal.load_job_blocking(unresolvable.job_id)
+    second = service.journal.load_job_blocking(untyped.job_id)
+    assert (first.status, first.reason_code) == ("failed", typed.value.code.value)
+    assert (second.status, second.reason_code) == ("failed", ErrorCode.INTERNAL.value)
+
+
 @pytest.fixture
 def empties(corpus: Path) -> list[str]:
     """Return a zero-byte Markdown file and a whitespace-only text file."""

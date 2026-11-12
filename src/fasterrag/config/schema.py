@@ -664,6 +664,7 @@ class JournalSettings(Section):
 
     enabled: bool = True
     checkpoint_every: Annotated[int, Field(ge=1)] = 100
+    retention_days: Annotated[int, Field(ge=0, le=36500)] = 0
 
 
 class DlqSettings(Section):

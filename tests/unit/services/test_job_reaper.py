@@ -86,8 +86,34 @@ async def test_a_job_still_recording_documents_is_not_stale(journal: Journal) ->
     assert report.settled == ()
 
 
-@pytest.mark.parametrize("status", ["queued", "completed", "partial", "failed"])
-async def test_a_job_that_is_not_running_is_never_touched(journal: Journal, status: str) -> None:
+async def test_a_stale_queued_job_is_settled_and_a_fresh_one_is_left_alone(
+    journal: Journal,
+) -> None:
+    """A job orphaned between its 202 and its task starting stayed ``queued`` for good."""
+    orphan = left_behind(journal, "queued")
+    fresh = left_behind(journal, "queued", quiet_for=1)
+
+    report = await reap_interrupted(journal, stale_seconds=STALE_SECONDS)
+
+    settled = await journal.load_job(orphan.job_id)
+    assert (settled.status, settled.reason_code) == ("failed", INTERRUPTED)
+    assert (await journal.load_job(fresh.job_id)).status == "queued"
+    assert report.settled == (orphan.job_id,)
+    assert report.recent == 1
+
+
+async def test_a_queued_job_this_process_is_about_to_run_is_skipped(journal: Journal) -> None:
+    """Resolving a large source can keep a live job ``queued`` past the window."""
+    mine = left_behind(journal, "queued")
+
+    report = await reap_interrupted(journal, stale_seconds=STALE_SECONDS, skip={mine.job_id})
+
+    assert (await journal.load_job(mine.job_id)).status == "queued"
+    assert report.settled == ()
+
+
+@pytest.mark.parametrize("status", ["completed", "partial", "failed"])
+async def test_a_job_that_already_finished_is_never_touched(journal: Journal, status: str) -> None:
     record = left_behind(journal, status)
 
     report = await reap_interrupted(journal, stale_seconds=STALE_SECONDS)

@@ -39,7 +39,9 @@ job that will never run would leave a ``queued`` record with nothing to pick it 
 
 **A process that is killed settles nothing, so the next one does.** :func:`reap_interrupted`
 finds every ``running`` job whose record and document log have both been quiet for
-``reliability.stale_job_seconds`` and settles it ``failed`` / ``INTERRUPTED``. Quiet for how
+``reliability.stale_job_seconds`` and settles it ``failed`` / ``INTERRUPTED`` — and every
+``queued`` one, which a process killed between the ``202`` and the job's task starting left
+with nothing to run it (TASK-0526). Quiet for how
 long is the whole question, because the journal may be shared: a second worker on the same
 host owns jobs this process knows nothing about, and the only evidence that a job is alive
 is that something is still writing to it. A job is never resumed here — only settled. The
@@ -74,6 +76,7 @@ __all__ = [
     "DrainReport",
     "JobRegistry",
     "ReapReport",
+    "prune_when_due",
     "reap_at_startup",
     "reap_interrupted",
     "requeue",
@@ -165,14 +168,14 @@ class ReapReport:
 async def reap_interrupted(
     journal: Journal, *, stale_seconds: float, skip: Collection[str] = ()
 ) -> ReapReport:
-    """Settle every ``running`` job that has been quiet for ``stale_seconds``.
+    """Settle every ``running`` or ``queued`` job that has been quiet for ``stale_seconds``.
 
-    ``skip`` names the jobs the caller is running itself, which a slow document can make
-    look abandoned to the very process working on them.
+    ``skip`` names the jobs the caller is running itself, which a slow document — or a
+    slow source still being fetched — can make look abandoned to the process working on them.
     """
     quiet = await journal.quiet_running_jobs(stale_seconds)
     settled: list[str] = []
-    for record in quiet.running:
+    for record in (*quiet.running, *quiet.queued):
         if record.job_id in skip:
             continue
         outcome = await settle_interrupted(journal, record)
@@ -191,6 +194,7 @@ async def reap_at_startup(journal: Journal, registry: JobRegistry, *, stale_seco
     try:
         report = await reap_interrupted(journal, stale_seconds=stale_seconds, skip=registry.active)
         _log_reap(report, stale_seconds)
+        await prune_when_due(journal)
         if not report.recent:
             return
 
@@ -209,6 +213,22 @@ async def reap_at_startup(journal: Journal, registry: JobRegistry, *, stale_seco
             "the look for interrupted ingest jobs failed; jobs a previous process left "
             "running stay that way until the next start",
             extra={"detail": str(exc), "error": type(exc).__name__},
+        )
+
+
+async def prune_when_due(journal: Journal) -> None:
+    """Apply ``ingestion.journal.retention_days`` if a pass is due; a failure is only logged.
+
+    Called after a job settles and at startup, so a journal is pruned wherever it grows.
+    """
+    if not journal.prune_due():
+        return
+    try:
+        await journal.prune()
+    except FasterRagError as exc:
+        _logger.warning(
+            "the journal retention pass failed; nothing was lost, and it runs again later",
+            extra={"code": exc.code.value, "detail": exc.detail, "trace_id": exc.trace_id},
         )
 
 

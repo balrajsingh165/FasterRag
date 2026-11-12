@@ -85,6 +85,7 @@ class ErrorCode(StrEnum):
     NESTING_TOO_DEEP = "NESTING_TOO_DEEP"
     SOURCE_LINK_ESCAPES = "SOURCE_LINK_ESCAPES"
     DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
+    DLQ_RETRIES_EXHAUSTED = "DLQ_RETRIES_EXHAUSTED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +175,9 @@ PROBLEM_SPECS: Final[dict[ErrorCode, ProblemSpec]] = {
     ),
     ErrorCode.DEADLINE_EXCEEDED: ProblemSpec(
         504, "deadline-exceeded", "Request deadline exceeded", True
+    ),
+    ErrorCode.DLQ_RETRIES_EXHAUSTED: ProblemSpec(
+        409, "dlq-retries-exhausted", "Dead-letter retries are exhausted", False
     ),
 }
 
