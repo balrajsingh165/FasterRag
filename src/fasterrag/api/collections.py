@@ -19,6 +19,14 @@ the client is told the thing exists. The create is therefore followed by
 the server, refuses the mismatch with the same 409 ``CONFLICT`` ``POST /v1/ingest`` returns,
 and otherwise supplies the ``sparse`` the response reports. ``fasterrag index create``
 re-checks after creating for the same reason.
+
+``DELETE /v1/collections/{name}/documents/{document_id}`` lives here rather than under
+``/v1/ingest`` because a document is addressed inside a collection, and so that it resolves
+the collection exactly as its siblings do — through :func:`scoped_name` — instead of
+introducing a third way to spell one (TASK-0443). The chunk filter additionally requires the
+caller's tenant tag, so the route is correct under either tenancy model TASK-0339 may choose.
+Until TASK-0381 makes ingest apply the same scoping, a tenant's documents ingested through
+``POST /v1/ingest`` live under the unprefixed name, which this route does not address.
 """
 
 from __future__ import annotations
@@ -30,9 +38,12 @@ from fastapi import APIRouter, Query, Response, status
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
 from fasterrag.adapters.vectordb.base import CollectionSpec
 from fasterrag.api.dependencies import (
+    CurrentCache,
     CurrentSettings,
     CurrentTenant,
     CurrentVectorDB,
+    JournalDep,
+    build_documents,
     build_embedding_router,
 )
 from fasterrag.api.schemas import CollectionRequest
@@ -156,3 +167,25 @@ async def delete_collection(
         )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/{name}/documents/{document_id}")
+async def delete_document(
+    name: str,
+    document_id: str,
+    settings: CurrentSettings,
+    adapter: CurrentVectorDB,
+    journal: JournalDep,
+    cache: CurrentCache,
+    tenant: CurrentTenant,
+) -> dict[str, Any]:
+    """Delete one document's chunks from a collection, and every record it was indexed.
+
+    Idempotent: a document nothing holds is a 200 with ``known: false``, because the
+    backend cannot say whether a filter matched anything. A missing collection is a 404.
+    """
+    service = build_documents(settings, adapter, journal, cache)
+    deletion = await service.delete(
+        scoped_name(name, tenant), document_id, tenant=tenant, display=name
+    )
+    return deletion.as_dict()

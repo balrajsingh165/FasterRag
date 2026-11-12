@@ -66,6 +66,7 @@ fasterRag/
 │       │   ├── estimation.py     # D9 preflight token counts and projected cost
 │       │   ├── composition.py    # Composition root: the embedding router every entry point uses, cached when configured
 │       │   ├── ingestion.py      # Job lifecycle: run both pools, checkpoint, settle
+│       │   ├── documents.py      # Delete one document: chunks, dedup tombstone, lockfile, cache
 │       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate
 │       │   └── collections.py    # Collection lifecycle (pending)
 │       ├── core/                 # RAG pipeline (pure domain logic)

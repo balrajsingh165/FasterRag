@@ -336,6 +336,93 @@ class VectorDBContract:
 
         assert {hit.point_id for hit in hits} == {"c_c"}
 
+    async def seed_documents(self, adapter: VectorDBAdapter, collection: str) -> None:
+        """Write two documents' chunks carrying the payload keys ``workers.indexer`` writes."""
+        await adapter.upsert(
+            [
+                point("d1_0", collection, VECTORS["a"], document_id="d_one", chunk_index=0),
+                point("d1_1", collection, VECTORS["b"], document_id="d_one", chunk_index=1),
+                point("d1_2", collection, VECTORS["c"], document_id="d_one", chunk_index=2),
+                point("d2_0", collection, VECTORS["a"], document_id="d_two", chunk_index=0),
+                point("d2_1", collection, VECTORS["b"], document_id="d_two", chunk_index=1),
+            ]
+        )
+
+    async def remaining(self, adapter: VectorDBAdapter, collection: str) -> set[str]:
+        """Return the ids of every point a collection still holds."""
+        hits = await adapter.search(
+            SearchQuery(collection=collection, vector=VECTORS["a"], limit=10)
+        )
+        return {hit.point_id for hit in hits}
+
+    async def test_delete_by_document_id_removes_every_chunk_of_that_document_and_no_other(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        """What deleting a document rests on (TASK-0443): one filter, the whole document."""
+        await self.seed_documents(adapter, collection)
+
+        await adapter.delete(PointSelector(collection=collection, filters={"document_id": "d_one"}))
+
+        assert await self.remaining(adapter, collection) == {"d2_0", "d2_1"}
+
+    async def test_delete_by_document_id_and_chunk_index_removes_only_that_documents_tail(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        """What trimming a shrunken document rests on: equality and a range, conjoined."""
+        await self.seed_documents(adapter, collection)
+
+        await adapter.delete(
+            PointSelector(
+                collection=collection,
+                filters={"document_id": "d_one", "chunk_index": {"$gte": 1}},
+            )
+        )
+
+        assert await self.remaining(adapter, collection) == {"d1_0", "d2_0", "d2_1"}
+
+    async def test_delete_by_document_id_within_a_tenant_spares_another_tenants_chunks(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        """Two equalities conjoined, and a point without the second key never matches."""
+        await adapter.upsert(
+            [
+                point("t_a", collection, VECTORS["a"], document_id="d_one", tenant="acme"),
+                point("t_b", collection, VECTORS["b"], document_id="d_one", tenant="globex"),
+                point("t_c", collection, VECTORS["c"], document_id="d_one"),
+            ]
+        )
+
+        await adapter.delete(
+            PointSelector(collection=collection, filters={"document_id": "d_one", "tenant": "acme"})
+        )
+
+        assert await self.remaining(adapter, collection) == {"t_b", "t_c"}
+
+    async def test_deleting_a_document_nothing_holds_is_not_an_error(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        """A delete has to be repeatable, so a filter that matches nothing must not raise."""
+        await self.seed_documents(adapter, collection)
+
+        await adapter.delete(
+            PointSelector(collection=collection, filters={"document_id": "d_absent"})
+        )
+
+        assert len(await self.remaining(adapter, collection)) == 5
+
+    async def test_deleting_from_an_unknown_collection_is_not_found(
+        self, adapter: VectorDBAdapter
+    ) -> None:
+        """The code a caller branches on to answer 404 rather than a retryable 503."""
+        with pytest.raises(FasterRagError) as caught:
+            await adapter.delete(
+                PointSelector(
+                    collection="collection-that-does-not-exist", filters={"document_id": "d_one"}
+                )
+            )
+
+        assert caught.value.code is ErrorCode.NOT_FOUND
+
     async def test_dimension_mismatch_is_rejected(
         self, adapter: VectorDBAdapter, collection: str
     ) -> None:

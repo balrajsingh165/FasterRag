@@ -13,6 +13,14 @@ The payload mirrors the ``Chunk`` entity rather than inventing fields. Anything 
 a filter, or drift detection needs later has to be written now — a chunk that reaches the
 index without its span or its embedding model cannot be cited or checked for drift
 afterwards.
+
+Deterministic ids make a re-ingested document overwrite itself, but only as far as its new
+length: a version with fewer chunks leaves the old tail in place. :meth:`Indexer.trim`
+removes it, by the ``document_id`` and ``chunk_index`` this module writes into every payload
+(TASK-0443). It is called from the document's commit callback, so it runs after the new
+chunks are in — trimming first would leave a window in which the document has no chunks —
+and only for a document the journal already knew, because a filtered delete per document on
+a first bulk load would be paid for tails that cannot exist.
 """
 
 from __future__ import annotations
@@ -23,12 +31,15 @@ from typing import Any
 from fasterrag.adapters.vectordb.base import (
     CollectionSpec,
     Point,
+    PointSelector,
     VectorDBAdapter,
 )
 from fasterrag.config.schema import Settings
 from fasterrag.core.retrieval.bm25 import encode_document
+from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.tenancy import TENANT_PAYLOAD_KEY
+from fasterrag.workers.embed_pool import backoff_delay
 from fasterrag.workers.queues import ChunkPayload, EmbeddedBatch
 
 __all__ = ["Indexer", "chunk_payload"]
@@ -84,6 +95,7 @@ class Indexer:
         self.collection = collection or settings.vector_db.collection.default_name
         self.hybrid = settings.retrieval.hybrid
         self.written = 0
+        self.trimmed = 0
         self._ready = False
         self._creating = asyncio.Lock()
 
@@ -152,4 +164,48 @@ class Indexer:
                 "points": result.upserted,
                 "model": batch.model,
             },
+        )
+
+    async def trim(self, document_id: str, keep: int) -> None:
+        """Delete a document's chunks at index ``keep`` and beyond: a longer version's tail.
+
+        Retries what is retryable and then raises, so an update is never recorded as
+        indexed while chunks of the version it replaced are still retrievable (TASK-0443).
+        """
+        selector = PointSelector(
+            collection=self.collection,
+            filters={"document_id": document_id, "chunk_index": {"$gte": keep}},
+        )
+        attempts = self.settings.reliability.retries.max_attempts
+        for attempt in range(attempts + 1):
+            try:
+                await self.adapter.delete(selector)
+            except FasterRagError as exc:
+                if exc.code is ErrorCode.NOT_FOUND:
+                    _logger.info(
+                        "no collection to trim; a collection that does not exist holds no tail",
+                        extra={"collection": self.collection, "trace_id": exc.trace_id},
+                    )
+                    return
+                if not exc.retryable or attempt == attempts:
+                    raise
+                delay = backoff_delay(attempt + 1, self.settings)
+                _logger.warning(
+                    "retrying a document trim",
+                    extra={
+                        "document_id": document_id,
+                        "attempt": attempt + 1,
+                        "delay_seconds": round(delay, 3),
+                        "code": exc.code.value,
+                        "trace_id": exc.trace_id,
+                    },
+                )
+                await asyncio.sleep(delay)
+                continue
+            break
+
+        self.trimmed += 1
+        _logger.info(
+            "trimmed a re-ingested document",
+            extra={"collection": self.collection, "document_id": document_id, "keep": keep},
         )

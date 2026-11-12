@@ -23,6 +23,7 @@ from fasterrag.core.cache import create_semantic_store
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.rerank import CrossEncoderReranker
 from fasterrag.services.composition import create_embedding_router
+from fasterrag.services.documents import DocumentService
 from fasterrag.services.generation import GenerationService
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import Journal, create_journal
@@ -146,6 +147,20 @@ def build_generation(
         tenant=tenant,
         embedder=router.default,
     )
+
+
+def build_documents(
+    settings: Settings,
+    adapter: VectorDBAdapter,
+    journal: Journal,
+    cache: SemanticCache | None,
+) -> DocumentService:
+    """Assemble document deletion over the application's adapter, journal and cache.
+
+    The cache is the application's, not a new one: invalidating a cache built for this
+    call would clear nothing a query will ever read.
+    """
+    return DocumentService(adapter, journal, cache=cache, locks=create_lock_store(settings))
 
 
 def build_ingestion(

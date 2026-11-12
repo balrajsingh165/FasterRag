@@ -30,6 +30,7 @@ from fasterrag.cli.commands.diagnostics import (
     run_doctor_command,
     run_status,
 )
+from fasterrag.cli.commands.documents import run_documents
 from fasterrag.cli.commands.infrastructure import run_estimate, run_provision
 from fasterrag.cli.commands.pipeline import run_index, run_ingest, run_query
 from fasterrag.cli.commands.portability import run_export, run_import
@@ -79,6 +80,8 @@ def _resolve(args: argparse.Namespace) -> Handler | None:
         return run_import
     if args.command == "index":
         return run_index
+    if args.command == "documents":
+        return run_documents
     if args.command == "traces":
         return run_traces
     if args.command == "autopilot":
