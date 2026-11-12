@@ -106,6 +106,14 @@ Fixed on 2026-11-11 (TASK-0427). Earlier builds recorded a document as indexed w
 | Grafana edits vanish | Working as designed: provisioned resources are read-only (`editable: false`, `allowUiUpdates: false`) to enforce GitOps | Edit the provisioning YAML/JSON files; they reload on the poll interval without a restart |
 | Dashboard down | Observability-only — RAG serving is entirely unaffected | Restart the dashboard container; no query impact (FMEA row 36) |
 
+## Python package
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `USAGE_ERROR: this FasterRag instance has not been started` | A facade method was called outside `async with` (async facade) or `with` (blocking facade) | Enter the context manager first: `async with FasterRag.from_config(...) as rag:` or, with `fasterrag.sync`, `with FasterRag.from_config(...) as rag:`. Builds before TASK-0461 reported this as `CONFIG_INVALID` |
+| `USAGE_ERROR: fasterrag.sync.FasterRag was called from the thread that runs its own event loop` | Code that the blocking facade is itself running — a callback scheduled on its private loop — called back into the blocking facade, which would wait on itself forever | Use the async facade there (`from fasterrag import FasterRag`, `async with`). Calling the blocking facade from a notebook cell or from under `asyncio.run` is fine: it runs its loop on a thread of its own (TASK-0497) |
+| `TENANT_FORBIDDEN` from `rag.query`, `rag.query_stream` or `rag.retrieve` | `security.tenant_scoped_retrieval` is on and the call named no tenant | Pass `tenant="<id>"` to the call. Before TASK-0461 the facade had no way to name one, so every read was refused under that flag |
+
 ## Performance
 
 | Symptom | Likely cause | Fix |

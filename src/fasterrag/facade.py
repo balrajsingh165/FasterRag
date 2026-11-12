@@ -17,6 +17,11 @@ either per call is not a small inefficiency: a local embedding model takes secon
 and a cache constructed per call starts empty every time, so it can never hit while still
 costing a query embedding. Both were real, measured regressions in the REST path.
 
+**The LLM adapter is shared; the generation service is not** (TASK-0461). The service carries
+the caller's tenant and the candidates of the query in flight, so one cached instance would
+answer one tenant with another's state. Each query therefore builds its own service, as a
+REST request does, and borrows the one provider client this facade owns and closes.
+
 The facade is an async context manager because those resources need closing. Using it without
 ``async with`` is a leak, so every entry point checks and says so rather than failing later
 somewhere unrelated.
@@ -30,6 +35,7 @@ from types import TracebackType
 from typing import Any, Self, cast
 
 from fasterrag.adapters.embeddings.tiering import TieringRouter
+from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.adapters.vectordb.base import CollectionInfo, VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
@@ -44,6 +50,7 @@ from fasterrag.services.composition import (
     build_ingestion,
     build_retrieval,
     create_embedding_router,
+    create_llm_adapter,
     create_semantic_cache,
 )
 from fasterrag.services.doctor import DoctorReport
@@ -75,7 +82,7 @@ class FasterRag:
         self._embeddings: TieringRouter | None = None
         self._cache: SemanticCache | None = None
         self._journal: Journal | None = None
-        self._generation: GenerationService | None = None
+        self._llm: LLMAdapter | None = None
 
     @classmethod
     def from_config(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> Self:
@@ -122,9 +129,9 @@ class FasterRag:
         """
         self._started = False
 
-        if self._generation is not None:
-            await self._close_quietly(self._generation.close(), "generation")
-            self._generation = None
+        if self._llm is not None:
+            await self._close_quietly(self._llm.close(), "llm")
+            self._llm = None
         if self._cache is not None:
             await self._close_quietly(self._cache.close(), "cache")
             self._cache = None
@@ -154,7 +161,7 @@ class FasterRag:
             raise FasterRagError(
                 "this FasterRag instance has not been started; use it as an async context "
                 "manager: 'async with FasterRag.from_config(...) as rag:'",
-                code=ErrorCode.CONFIG_INVALID,
+                code=ErrorCode.USAGE_ERROR,
             )
 
     @property
@@ -185,21 +192,34 @@ class FasterRag:
         assert self._journal is not None
         return self._journal
 
-    def _retrieval(self) -> RetrievalService:
-        """Build the retrieval service exactly as the API does."""
-        return build_retrieval(self.settings, self.vector_db, self.embeddings)
+    def _retrieval(self, tenant: str | None = None) -> RetrievalService:
+        """Build the retrieval service exactly as the API does, on behalf of ``tenant``."""
+        return build_retrieval(self.settings, self.vector_db, self.embeddings, tenant)
 
-    def _generation_service(self) -> GenerationService:
-        """Return the generation service, built once and reused.
+    def _shared_llm(self) -> LLMAdapter:
+        """Return this instance's LLM adapter, built on first use and closed on exit.
 
-        Reused rather than rebuilt because it owns the LLM adapter's client, and a new one
-        per query opens a connection pool per query.
+        Shared rather than built per query, because a new client per query opens a
+        connection pool per query (TASK-0466).
         """
-        if self._generation is None:
-            self._generation = build_generation(
-                self.settings, self.vector_db, self.embeddings, cache=self.cache
-            )
-        return self._generation
+        self._require_started()
+        if self._llm is None:
+            self._llm = create_llm_adapter(self.settings)
+        return self._llm
+
+    def _generation_service(self, tenant: str | None = None) -> GenerationService:
+        """Build one query's generation service for ``tenant``, lending it the shared LLM.
+
+        Per call, never cached: the service holds its tenant and its query's candidates.
+        """
+        return build_generation(
+            self.settings,
+            self.vector_db,
+            self.embeddings,
+            cache=self.cache,
+            tenant=tenant,
+            llm=self._shared_llm(),
+        )
 
     async def ingest(
         self,
@@ -244,12 +264,15 @@ class FasterRag:
         collection: str | None = None,
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
+        tenant: str | None = None,
     ) -> Answer:
-        """Answer a question through the full pipeline."""
+        """Answer a question through the full pipeline, on behalf of ``tenant`` if given."""
         self._require_started()
-        return await self._generation_service().answer(
-            text, collection=collection, top_k=top_k, filters=filters
-        )
+        service = self._generation_service(tenant)
+        try:
+            return await service.answer(text, collection=collection, top_k=top_k, filters=filters)
+        finally:
+            await service.close()
 
     async def query_stream(
         self,
@@ -258,13 +281,18 @@ class FasterRag:
         collection: str | None = None,
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
+        tenant: str | None = None,
     ) -> AsyncIterator[QueryEvent]:
-        """Answer a question as a stream of typed events."""
+        """Answer a question as a stream of typed events, on behalf of ``tenant`` if given."""
         self._require_started()
-        async for event in self._generation_service().stream(
-            text, collection=collection, top_k=top_k, filters=filters
-        ):
-            yield event
+        service = self._generation_service(tenant)
+        try:
+            async for event in service.stream(
+                text, collection=collection, top_k=top_k, filters=filters
+            ):
+                yield event
+        finally:
+            await service.close()
 
     async def retrieve(
         self,
@@ -273,10 +301,11 @@ class FasterRag:
         collection: str | None = None,
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
+        tenant: str | None = None,
     ) -> list[ScoredChunk]:
         """Retrieve without generating, for applications bringing their own LLM step."""
         self._require_started()
-        return await self._retrieval().retrieve(
+        return await self._retrieval(tenant).retrieve(
             text, collection=collection, top_k=top_k, filters=filters
         )
 

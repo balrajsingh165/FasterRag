@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -69,14 +70,28 @@ def test_an_unstarted_call_leaves_no_unawaited_coroutine(
     assert not [w for w in recwarn if "never awaited" in str(w.message)]
 
 
-async def test_starting_inside_a_running_loop_is_refused_not_deadlocked() -> None:
-    """Blocking on a future from the thread driving the loop hangs with no message."""
-    rag = sync.FasterRag.from_settings(settings())
+async def test_starting_inside_a_running_loop_is_neither_refused_nor_deadlocked() -> None:
+    """It used to refuse here; a notebook always has a running loop (TASK-0497)."""
 
-    with pytest.raises(FasterRagError, match="running event loop") as caught:
-        rag.__enter__()
+    class Idle:
+        settings = None
 
-    assert "async with" in caught.value.detail
+        async def __aenter__(self) -> "Idle":
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    rag = sync.FasterRag(cast(Any, Idle()))
+    rag.__enter__()
+    thread = rag._thread
+    assert thread is not None
+    assert thread.is_alive()
+
+    rag.__exit__(None, None, None)
+
+    assert not thread.is_alive()
+    assert rag._loop is None
 
 
 def test_exiting_without_entering_is_a_no_op() -> None:

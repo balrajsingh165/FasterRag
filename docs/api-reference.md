@@ -62,6 +62,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `CACHE_ERROR` | 500 | `CacheError` | Cache backend failure (system degrades to cache-off rather than failing queries; surfaced on admin endpoints). |
 | `NOT_READY` | 503 | — | A readiness dependency check failed: returned by `/readyz`, with a `dependencies[]` extension member naming each check and its state. Also returned, retryable, by `POST /v1/ingest` and `POST /v1/ingest/{job_id}/retry-dlq` while the server is shutting down and has stopped starting jobs (see [`POST /v1/ingest`](#post-v1ingest)); that refusal carries no `dependencies[]`. |
 | `INTERNAL` | 500 | `FasterRagError` | Anything unclassified. Always carries `trace_id`. Never returned without a problem body. |
+| `USAGE_ERROR` | 400 | `FasterRagError` | The Python package was called the wrong way: a facade method before `async with` / `with`, or a blocking-facade call made from the thread that runs that facade's own event loop. Raised by the library only — no REST request is answered with it. Not retryable: the calling code has to change (TASK-0461). |
 
 ---
 

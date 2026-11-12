@@ -50,6 +50,7 @@ DOCUMENTED_STATUSES = {
     ErrorCode.CACHE_ERROR: 500,
     ErrorCode.NOT_READY: 503,
     ErrorCode.INTERNAL: 500,
+    ErrorCode.USAGE_ERROR: 400,
 }
 
 DEFAULT_CODES = [
