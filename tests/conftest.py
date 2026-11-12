@@ -28,6 +28,24 @@ REPO_ROOT: Final = Path(__file__).resolve().parent.parent
 
 _GIT_TIMEOUT_SECONDS: Final = 10
 
+# CRITICAL: git exports these to a hook, and the pre-commit hook runs this suite. In a linked
+# worktree GIT_DIR names the real repository, so a test that ran `git init` in a temporary
+# directory acted on this repository instead: five tests in test_ci_status.py failed in every
+# worktree, and `git init` set core.bare in the shared config, which broke the main checkout
+# until it was reset by hand. They are removed for the whole test process, at import, so that
+# every git call a test makes resolves from its own working directory.
+GIT_HOOK_VARIABLES: Final = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+)
+for _name in GIT_HOOK_VARIABLES:
+    os.environ.pop(_name, None)
+
 # CRITICAL: the deadline is disabled, not merely raised. Hypothesis fails an example that
 # takes longer than 200 ms by default, which makes every property test in this repo
 # timing-dependent — and they assert *behaviour*, never latency. Under load (a machine
