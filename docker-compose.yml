@@ -1,7 +1,8 @@
 # fasterRag compose profiles (docs/deployment.md §1).
 #
-# Covers only the services fasterRag itself owns: the API, the worker pool, the vector
-# database, and the read-only dashboard.
+# Covers only the services fasterRag itself owns: the API, the vector database, and the
+# read-only dashboard. Ingestion runs inside the API process; there is no separate worker
+# service, because no worker process exists yet to consume a queue (TASK-0130).
 #
 # **Langfuse and Grafana are deliberately absent.** Both are provisioned by their config
 # toggles — `observability.langfuse: true` writes and runs its own compose file under
@@ -38,8 +39,7 @@ x-fasterrag-common: &fasterrag-common
     FASTERRAG_CONFIG: /app/config.yaml
     # CRITICAL: config.yaml ships `vector_db.host: localhost`, which is right for a process
     # run on the host and wrong inside a container, where localhost is the container itself.
-    # Without this override /readyz never leaves 503, the api healthcheck never passes, and
-    # the worker exits VECTOR_DB_UNAVAILABLE into a restart loop.
+    # Without this override /readyz never leaves 503 and the api healthcheck never passes.
     #
     # Compose merges `environment` per key, so a sizing preset that sets FASTERRAG_SET
     # replaces this value outright rather than adding to it. Every deploy/compose.*.yml
@@ -64,25 +64,6 @@ services:
       # corpus to the network the moment the stack starts. Put a TLS-terminating proxy in
       # front and change this deliberately (docs/deployment.md §3).
       - "127.0.0.1:8000:8000"
-    depends_on:
-      qdrant:
-        condition: service_healthy
-        required: false
-
-  worker:
-    <<: *fasterrag-common
-    profiles: ["core"]
-    command: ["worker"]
-    # No ports: a worker serves nothing. It is alive if the process is, and its real progress
-    # signal is the ingestion journal, not a socket.
-    #
-    # CRITICAL: the healthcheck is disabled explicitly, not merely left unset. The image
-    # carries a HEALTHCHECK that probes http://127.0.0.1:8000/readyz, and a container
-    # inherits it whatever its command is — a worker binds no socket, so the inherited probe
-    # reports the container unhealthy forever and any orchestrator watching health restarts
-    # a process that is working fine.
-    healthcheck:
-      disable: true
     depends_on:
       qdrant:
         condition: service_healthy

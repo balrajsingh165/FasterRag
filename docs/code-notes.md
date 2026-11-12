@@ -1388,16 +1388,6 @@ The routing class is ordinary chunk metadata, because that is what the tiering r
 
 Streaming is the default because time-to-first-token is what a person at a terminal actually waits on. It is skipped for --json, where a partial document is not a document, and for --show-chunks, which needs the candidate set the non-streaming call returns.
 
-## `src/fasterrag/cli/commands/processes.py`
-
-### `run_worker`
-
-> Run the pipeline worker pools until interrupted.
-
-The pools are owned by the ingestion service rather than started here, so a job runs
-    identically whether it arrived through the API, the CLI, or the library. This command
-    validates the environment, reports the pool sizes it would run, and waits.
-
 ## `src/fasterrag/cli/main.py`
 
 ### `main`

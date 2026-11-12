@@ -3,14 +3,14 @@
 fasterRag is self-hosted software in beta (no managed cloud). Three ways to run it:
 
 1. **Library mode** — embed in your own process ([python-api.md](python-api.md)). Install from a source checkout (`pip install -e ".[all]"`) — **`pip install fasterrag` does not work yet**, because nothing has been published to PyPI (TASK-0087, blocked on the license decision TASK-0164 and the version stamp TASK-0020).
-2. **Service mode** — `fasterrag serve` (API). The design pairs it with `fasterrag worker` for pipelines; today that second process does no work and ingestion runs inside the API process (TASK-0440, TASK-0130), so one `serve` process is the whole service. `serve` binds `127.0.0.1` unless `app.host` or `--host` says otherwise, and warns when it binds anything else with `security.auth` off.
+2. **Service mode** — `fasterrag serve` (API). One `serve` process is the whole service: ingestion runs inside it, in the CPU and embedding pools that `workers.*` sizes. A separate worker process that takes ingestion load off the API is not built (TASK-0130). `serve` binds `127.0.0.1` unless `app.host` or `--host` says otherwise, and warns when it binds anything else with `security.auth` off.
 3. **Docker mode** — compose profiles for the full stack.
 
 ## 1. Compose profiles
 
 | Profile | Containers | Enabled by |
 |---|---|---|
-| `core` | API, workers | always |
+| `core` | API (ingestion runs inside it) | always |
 | `qdrant` | Qdrant (system-managed) | `vector_db.mode: docker` |
 | `dashboard` | fasterRag read-only dashboard | `observability.dashboard: true` |
 | *(langfuse)* | Langfuse v3 stack (web, worker, Postgres, ClickHouse, Redis, MinIO) | `observability.langfuse: true` — **provisioned, not in this file** |
@@ -55,11 +55,13 @@ It is built from the lockfile: `uv sync --locked` installs exactly what `uv.lock
 
 ## 4. Sizing guidance (starting points, not measurements)
 
-| Corpus scale | API tier | Workers | Vector DB | Notes |
+| Corpus scale | API tier | Pools (inside each API process) | Vector DB | Notes |
 |---|---|---|---|---|
-| ≤ 1M chunks (dev/small) | 1× (2 vCPU, 2 GB) | cpu_pool 4 / embed_pool 1 (CPU embeddings OK) | Qdrant 2 vCPU, 4 GB, SSD | Single machine fine. |
-| 1M–50M chunks | 2× (4 vCPU, 4 GB) | cpu_pool = cores; embed_pool 1–2 GPU workers | Qdrant 8 vCPU, 32 GB, NVMe | Separate DB host recommended (remote mode). |
-| 50M–500M chunks | 3+× stateless API replicas | dedicated worker hosts; GPU embed pool | Qdrant cluster: shards ≥ 4, replication ≥ 2 | Use `collection.shard_number` / `replication_factor`; queue backend on Redis. |
+| ≤ 1M chunks (dev/small) | 1× (4 vCPU, 6 GB) | cpu_pool 4 / embed_pool 1 (CPU embeddings OK) | Qdrant 2 vCPU, 4 GB, SSD | Single machine fine. |
+| 1M–50M chunks | 1× (12 vCPU, 20 GB) | cpu_pool = cores; embed_pool 2 | Qdrant 8 vCPU, 32 GB, NVMe | Separate DB host recommended (remote mode). |
+| 50M–500M chunks | 3× API replicas (20 vCPU, 36 GB each) | cpu_pool = cores; embed_pool 4 | Qdrant cluster: shards ≥ 4, replication ≥ 2 | Use `collection.shard_number` / `replication_factor`. Each replica runs the ingestion jobs it accepts. |
+
+These rows are the limits `deploy/compose.{small,medium,large}.yml` set. Ingestion runs inside the API process, so the API tier carries both loads: dedicated worker hosts, and a queue backend that lets them take ingestion off the API, are not built (TASK-0130). Until 2026-11-12 the presets also started a `worker` container; it checked the vector database and waited, so its limits are now the API's.
 
 Rules of thumb: vector RAM ≈ `vectors × dimensions × 4 bytes` (plus index overhead — budget 1.5×); embedding throughput scales linearly with `embedding_pool_size` until GPU saturation; `queue_depth` × average chunk size bounds pipeline memory. These are planning defaults — real numbers come from the [benchmark ledger](benchmarks.md) once measured (see provable-claims policy).
 

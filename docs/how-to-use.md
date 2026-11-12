@@ -83,7 +83,7 @@ Ready-made profiles (air-gapped, max-accuracy, cost-optimized, multi-tenant, ret
 
 **Watch it**: `fasterrag status` (queues, DLQ, breaker states, cache hit rates) · `observability.dashboard: true` → read-only UI on `:8080` (authenticated, tenant-scoped — internal networks only, it displays prompts) · `fasterrag provision langfuse` → full trace UI at `:3000` · `provision grafana` → dashboards over the metrics endpoint · `[otel]` + `observability.otel: true` → your collector.
 
-**Ingestion at scale**: jobs are journaled and checkpointed — a crash resumes, never restarts; failures land in the DLQ with machine-readable reasons (`GET /v1/ingest/{job}/documents?status=dead_lettered`, then `retry-dlq`). Run `fasterrag serve` and heavy ingestion in separate processes; queues are bulkheaded so ingest storms cannot starve queries.
+**Ingestion at scale**: jobs are journaled and checkpointed — a crash resumes, never restarts; failures land in the DLQ with machine-readable reasons (`GET /v1/ingest/{job}/documents?status=dead_lettered`, then `retry-dlq`). Ingestion runs inside the `fasterrag serve` process, so size it for both loads: a separate worker process that keeps heavy ingestion away from queries is not built (TASK-0130). `fasterrag ingest` runs a job inline in its own process, which can sit on another host.
 
 **Protect it**: `security.auth: true` (+ `FASTERRAG_API_KEY` in `.env`) turns on key auth with scopes and per-key rate limiting; `security.multi_tenancy: true` isolates collections, caches, traces, and budgets per tenant via `X-Tenant-ID`. Details and threat notes: [security.md](security.md).
 

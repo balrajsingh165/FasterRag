@@ -67,6 +67,13 @@ _DOCKER_VOLUME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 _HTTP_HEADER_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 _PATH_LIKE_RE = re.compile(r"^(~|\.{1,2}[\\/]|[A-Za-z]:[\\/])|[\\/]")
 
+_REMOVED_APP_WORKERS = (
+    "app.workers was removed on 2026-11-12: it was validated and read by nothing, because "
+    "'fasterrag serve' runs one server process whatever it said. Delete the line; the "
+    "pipeline pools are sized by workers.cpu_pool_size and workers.embedding_pool_size, "
+    "and a separate worker process is tracked as TASK-0130"
+)
+
 ChunkStrategy = Literal["fixed", "recursive", "semantic", "layout", "late"]
 TokenCounterMode = Literal["auto", "estimate", "model"]
 
@@ -155,8 +162,15 @@ class AppSettings(Section):
 
     host: str = "127.0.0.1"
     port: Annotated[int, Field(ge=1, le=65535)] = 8000
-    workers: Annotated[int, Field(ge=1)] = 4
     log_level: Literal["debug", "info", "warning", "error"] = "info"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_removed_keys(cls, data: Any) -> Any:
+        """Name a removed key and say why, where ``extra="forbid"`` would only call it unknown."""
+        if isinstance(data, dict) and "workers" in data:
+            raise ValueError(_REMOVED_APP_WORKERS)
+        return data
 
     @field_validator("host")
     @classmethod

@@ -4,6 +4,7 @@ An override that skipped validation would be a way to put the system into a stat
 config file cannot express — the opposite of what a fail-fast loader is for.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from fasterrag.cli.output import ExitCode
 from fasterrag.config.loader import apply_overrides, load_settings
 from fasterrag.config.template import canonical_config_text
 from fasterrag.errors import ConfigError
+from tests.unit.config.conftest import REPO_ROOT
 
 
 @pytest.fixture
@@ -185,6 +187,32 @@ def test_a_blank_environment_override_changes_nothing(
     monkeypatch.setenv("FASTERRAG_SET", "   ")
 
     assert load_settings(config, require_env=False).chunking.chunk_size == 768
+
+
+COMPOSE_FILES = [
+    REPO_ROOT / "docker-compose.yml",
+    *(REPO_ROOT / "deploy" / f"compose.{size}.yml" for size in ("small", "medium", "large")),
+]
+COMPOSE_OVERRIDE = re.compile(r"^\s*FASTERRAG_SET:\s*(?P<value>\S.*?)\s*$", re.MULTILINE)
+
+
+def test_every_override_a_shipped_compose_file_sets_loads(
+    config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sizing presets set ``app.workers`` after nothing read it, and it would now refuse."""
+    found = [
+        (path.name, match.group("value"))
+        for path in COMPOSE_FILES
+        for match in COMPOSE_OVERRIDE.finditer(path.read_text(encoding="utf-8"))
+    ]
+    assert len(found) >= 4
+
+    for name, value in found:
+        monkeypatch.setenv("FASTERRAG_SET", value)
+        try:
+            load_settings(config, require_env=False)
+        except ConfigError as exc:
+            pytest.fail(f"{name} sets FASTERRAG_SET={value}, which does not load: {exc.detail}")
 
 
 def test_trailing_separators_are_tolerated(config: Path, monkeypatch: pytest.MonkeyPatch) -> None:

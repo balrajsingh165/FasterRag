@@ -23,7 +23,7 @@ from fasterrag.services.backup import DEFAULT_RETAIN
 from fasterrag.services.ci_status import DEFAULT_BRANCH
 from fasterrag.services.provision_registry import PROVISIONABLE_TOOLS
 
-__all__ = ["PENDING_COMMANDS", "build_parser"]
+__all__ = ["PENDING_COMMANDS", "REMOVED_COMMANDS", "build_parser", "removed_command"]
 
 
 class _StoreTrueNoDefault(argparse.Action):
@@ -49,6 +49,18 @@ class _StoreTrueNoDefault(argparse.Action):
 # TODO: each entry ships with the task named. Listed here so `fasterrag <name>` explains
 # which slice implements it rather than printing a bare "invalid choice".
 PENDING_COMMANDS: Final[dict[str, str]] = {}
+
+# CRITICAL: a removed command is refused by name before argparse runs, and is never
+# registered. Registering it would list it in `--help` and oblige docs/cli-reference.md to
+# carry a heading for a command that does nothing, and argparse would still answer
+# `worker --pools cpu` with a bare "unrecognized arguments". Each reason names the open task
+# the command would return under, so the message says where to follow it.
+REMOVED_COMMANDS: Final[dict[str, str]] = {
+    "worker": (
+        "ingestion runs inside 'fasterrag serve', and this command only checked the vector "
+        "database and waited. A separate worker process is tracked as TASK-0130"
+    ),
+}
 
 
 def _add_global_flags(parser: argparse.ArgumentParser, *, root: bool = False) -> None:
@@ -83,15 +95,6 @@ def _add_serve(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--reload", action="store_true", help="development auto-reload")
     parser.add_argument("--host", default=None, help="override the configured bind host")
     parser.add_argument("--port", type=int, default=None, help="override the configured port")
-
-
-def _add_worker(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register ``worker``."""
-    parser = subparsers.add_parser("worker", help="run the pipeline worker pools")
-    _add_global_flags(parser)
-    parser.add_argument("--pools", default="cpu,embed,index", help="pools this process runs")
-    parser.add_argument("--cpu-workers", type=int, default=None, help="override workers.cpu")
-    parser.add_argument("--embed-workers", type=int, default=None, help="override workers.embed")
 
 
 def _add_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -425,6 +428,20 @@ def _add_ci_status(subparsers: argparse._SubParsersAction[argparse.ArgumentParse
     )
 
 
+def removed_command(argv: Sequence[str]) -> str | None:
+    """Return the removed command ``argv`` asks for, or ``None`` when it asks for a live one.
+
+    Only the command position counts, so a collection or a source path may spell a removed
+    name: the global flags are parsed away first and the first word left over is the command.
+    """
+    if not set(REMOVED_COMMANDS) & set(argv):
+        return None
+    probe = argparse.ArgumentParser(prog="fasterrag", add_help=False)
+    _add_global_flags(probe, root=True)
+    _, rest = probe.parse_known_args(list(argv))
+    return rest[0] if rest and rest[0] in REMOVED_COMMANDS else None
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Return the parser for the whole CLI surface."""
     parser = argparse.ArgumentParser(
@@ -435,7 +452,6 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     _add_serve(subparsers)
-    _add_worker(subparsers)
     _add_ingest(subparsers)
     _add_query(subparsers)
     _add_index(subparsers)

@@ -182,8 +182,7 @@ Not writing async code? `from fasterrag.sync import FasterRag` gives the same AP
 ## Path C — REST service
 
 ```bash
-fasterrag serve                      # API on :8000
-# `fasterrag worker` exists but does no pipeline work yet: ingestion runs inside `serve` (TASK-0440)
+fasterrag serve                      # API on :8000; ingestion runs inside it
 ```
 
 ```bash

@@ -7,30 +7,24 @@
 #
 # Planning defaults, not measurements (docs/benchmarks.md, TASK-0084).
 #
+# The pools run inside the API process, because ingestion does; there is no separate worker
+# service to size (TASK-0130). The API's limits are what the API and the removed worker
+# service were given between them.
+#
 # CRITICAL: every FASTERRAG_SET below repeats `vector_db.host=qdrant` from the base file.
 # Compose merges `environment` per key, so setting FASTERRAG_SET here replaces the base value
-# rather than extending it, and dropping the host sends both services at their own localhost.
+# rather than extending it, and dropping the host sends the API at its own localhost.
 
 services:
   api:
-    environment:
-      FASTERRAG_SET: vector_db.host=qdrant,app.workers=4
-    deploy:
-      resources:
-        limits:
-          cpus: "4"
-          memory: 4G
-
-  worker:
-    # cpu_pool_size=0 means "one per core", which is what the schema documents and what a
-    # dedicated worker host wants.
+    # cpu_pool_size=0 means "one per core", which is what the schema documents.
     environment:
       FASTERRAG_SET: vector_db.host=qdrant,workers.cpu_pool_size=0,workers.embedding_pool_size=2
     deploy:
       resources:
         limits:
-          cpus: "8"
-          memory: 16G
+          cpus: "12"
+          memory: 20G
 
   qdrant:
     deploy:

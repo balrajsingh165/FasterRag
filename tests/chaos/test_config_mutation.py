@@ -86,7 +86,6 @@ entry points, so the generic string edit is refused and another built-in is name
 IRRELEVANT: Final[tuple[tuple[str, Any], ...]] = (
     ("app.port", 9999),
     ("app.log_level", "debug"),
-    ("app.workers", 8),
     ("embeddings.batch_size", 128),
     ("embeddings.cache.enabled", False),
     ("embeddings.cache.backend", "memory"),

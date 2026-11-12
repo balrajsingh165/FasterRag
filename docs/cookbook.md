@@ -224,9 +224,7 @@ vector_db:
     replication_factor: 2
 ```
 
-Run the API and workers as separate processes (`fasterrag serve` / `fasterrag worker`) so ingestion load can never starve live queries — the pools and queues are bulkheaded ([reliability.md](reliability.md)).
-
-> **Status (2026-11-12).** `fasterrag worker` does not consume work yet: it health-checks the vector database and waits, and ingestion runs inside the API process (TASK-0440, TASK-0130). Until that lands this recipe isolates nothing — size the API process for both loads.
+Ingestion runs inside the API process, so size that process for both loads. A separate worker process that takes ingestion load off the API, fed by a queue backend, is not built (TASK-0130). What exists today is `fasterrag ingest`, which runs the job inline in its own process: started on another host against the same vector database it keeps parsing and embedding off the API host, but its job lives in that host's journal, not in the API's `GET /v1/ingest/{job_id}`.
 
 **Why:** checkpointing makes a multi-day ingest resumable rather than restartable; sharding and replication scale the index; a dedicated DB host removes resource contention. **Trade-off:** more moving parts — run `fasterrag doctor` on every host, and remember remote Qdrant needs both 6333 and 6334 reachable.
 

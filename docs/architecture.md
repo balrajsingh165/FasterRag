@@ -37,7 +37,7 @@ Design rules:
 - **Documents are parsed concurrently.** Up to `workers.cpu_pool_size` documents are in the process pool at once and are consumed in submission order. Earlier revisions awaited each document before submitting the next, which keeps one worker busy whatever the pool size. The throughput effect of the change is unmeasured (TASK-0454).
 - **A parse has a deadline.** `ingestion.parse_timeout_seconds` bounds each document's time in the pool. A running process-pool task cannot be cancelled, so an overdue document costs its pool rather than only its future: the workers are killed, a new pool is started, the documents in flight beside it are submitted again, and the overdue one alone is dead-lettered as `PARSE_TIMEOUT`. What a recycle costs in throughput is unmeasured.
 - **The two halves fail together.** A dead consumer would leave the producer blocked on a full queue and a dead producer would leave consumers waiting for a close that never comes, so whichever stops first ends the job, which is then settled `failed`.
-- **What this section does not yet provide.** There is no queue backend and no separate worker process: both pools run inside the process that accepted the job (TASK-0130, TASK-0440). A job that process was running when it exited is settled, and resumed only on request (§12).
+- **What this section does not yet provide.** There is no queue backend and no separate worker process: both pools run inside the process that accepted the job — `fasterrag serve`, `fasterrag ingest` or the Python facade (TASK-0130). The `fasterrag worker` command, which only checked the vector database and waited, was removed on 2026-11-12. A job that process was running when it exited is settled, and resumed only on request (§12).
 - **Backpressure.** The chunk queue is bounded (`workers.queue_depth`). If embedding lags, CPU workers block on enqueue rather than filling memory; if a remote embedding provider throttles, the queue absorbs the burst instead of hammering the rate limit.
 
 ## 3. Batching
@@ -150,7 +150,7 @@ Each of the three factories also resolves a name registered under its entry-poin
 ## 11. Scaling patterns
 
 - **Vertical**: raise `workers.cpu_pool_size` / `workers.embedding_pool_size` to saturate cores/GPUs; bounded queues keep memory flat.
-- **Horizontal (beta)**: multiple worker processes can attach to the same queue backend; the API tier scales as stateless replicas behind a load balancer.
+- **Horizontal (beta)**: API replicas behind a load balancer, each running the ingestion jobs it accepts. Worker processes that attach to a shared queue backend, so ingestion scales apart from the API, are not built (TASK-0130). Replicas are not yet stateless either: rate limits, token budgets, circuit breakers and the file journal are per process (TASK-0437, TASK-0426).
 - **Vector DB**: sharding/replication configured per collection through the adapter (`collection.shard_number`, `collection.replication_factor` for Qdrant); remote mode moves the DB to dedicated hardware.
 - **Streaming ingestion**: no stage ever materializes an entire corpus in memory — documents flow through queues in bounded batches, which is what makes very large datasets feasible.
 

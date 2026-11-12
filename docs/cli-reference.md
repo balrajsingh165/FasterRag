@@ -49,16 +49,7 @@ Run the API server (`app.host`/`app.port` from config).
 | `--reload` | Dev auto-reload. |
 | `--host`, `--port` | Override config bind address. |
 
-## `fasterrag worker`
-
-Run the pipeline worker pools (CPU pool + embedding pool + indexer) for the configured queues.
-
-> **Status (2026-11-11): this process does no pipeline work.** `fasterrag worker` checks that the vector database answers, prints `worker ready`, and waits. Ingestion runs inside the process that accepted the job — a task held by the API's job registry (`services/jobs.py`), or inline in the CLI and the Python facade — because there is no queue backend for a separate process to consume (TASK-0130). Running it is harmless and gains nothing; whether to build the queue-backed worker or remove the command is TASK-0440.
-
-| Flag | Description |
-|---|---|
-| `--pools cpu,embed,index` | Restrict which pools this process runs (default: all). |
-| `--cpu-workers N`, `--embed-workers N` | Override `workers.*` sizes. |
+Ingestion runs inside this process, as a task held by the API's job registry (`services/jobs.py`), or inline in `fasterrag ingest` and the Python facade. There is no separate worker process to start beside it: the `fasterrag worker` command was removed on 2026-11-12, because it only checked that the vector database answered and then waited. Typing it exits `2` with that explanation. A queue-backed worker is not built (TASK-0130).
 
 ## `fasterrag ingest [path|url] [...]`
 

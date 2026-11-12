@@ -12,6 +12,7 @@ from check_unbuilt_claims import (
     COLUMN_DENIAL,
     LABEL_DENIAL,
     LAYER_DENIAL,
+    PROCESS_SURFACE,
     RATCHET,
     RUNG_DENIAL,
     STRUCTURE_ABSENT,
@@ -23,8 +24,10 @@ from check_unbuilt_claims import (
     column_findings,
     denied_columns,
     over_ratchet,
+    process_findings,
     prose_findings,
     registered_layers,
+    registered_processes,
     registered_providers,
     registered_rungs,
     structure_findings,
@@ -49,6 +52,13 @@ _BUILTIN_RUNGS: Final[dict[str, str]] = {
 _PLANNED_RUNGS: Final[frozenset[str]] = frozenset({"cache_only"})
 """
 
+PROCESSES = """
+from typing import Final
+
+BUILTIN_PROCESSES: Final[dict[str, object]] = {"serve": run_serve}
+PLANNED_PROCESSES: Final[frozenset[str]] = frozenset({"worker"})
+"""
+
 PROJECT = """
 [tool.pytest.ini_options]
 addopts = "-m 'not soak'"
@@ -69,6 +79,7 @@ FIXTURE = """# fixture.md
 | CLI | shipped |
 
 The integration suite runs on every push, and a reranker outage serves hybrid_only.
+Start the API with `fasterrag serve`.
 """
 
 MAP_HEADER = """# structure.md
@@ -89,6 +100,7 @@ def build(
     factory: str = FACTORY,
     project: str = PROJECT,
     ladder: str = LADDER,
+    processes: str = PROCESSES,
     docs: dict[str, str] | None = None,
 ) -> Path:
     """Write a fake tree: the three registries the gate reads, and the given docs."""
@@ -98,6 +110,9 @@ def build(
     services = root / "src" / "fasterrag" / "services"
     services.mkdir(parents=True, exist_ok=True)
     (services / "degradation.py").write_text(ladder, encoding="utf-8")
+    commands = root / "src" / "fasterrag" / "cli" / "commands"
+    commands.mkdir(parents=True, exist_ok=True)
+    (commands / "processes.py").write_text(processes, encoding="utf-8")
     (root / "pyproject.toml").write_text(project, encoding="utf-8")
     (root / "tests" / "integration").mkdir(parents=True, exist_ok=True)
     (root / "tests" / "integration" / "test_live.py").write_text("", encoding="utf-8")
@@ -578,6 +593,100 @@ def test_documents_that_name_no_rung_are_vacuous(tmp_path: Path) -> None:
     assert "rungs the ladder serves" in found[0].detail
 
 
+def test_a_document_that_tells_an_operator_to_run_an_unbuilt_process_is_a_finding(
+    tmp_path: Path,
+) -> None:
+    """python-api.md:218 said to run `fasterrag worker` processes; the command only waited."""
+    root = build(
+        tmp_path,
+        docs={"a.md": "For heavy ingestion run dedicated `fasterrag worker` processes.\n"},
+    )
+
+    found, mentions = process_findings(root)
+
+    assert rules(found) == [PROCESS_SURFACE]
+    assert "worker" in found[0].detail
+    assert mentions == 1
+
+
+def test_an_unbuilt_process_in_a_code_block_is_a_finding(tmp_path: Path) -> None:
+    """quickstart.md's Path C put it in a fence, the most direct instruction a page gives."""
+    root = build(tmp_path, docs={"a.md": "Run:\n\n```bash\nfasterrag worker --pools cpu\n```\n"})
+
+    found, _ = process_findings(root)
+
+    assert rules(found) == [PROCESS_SURFACE]
+    assert "line 4" in found[0].detail
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "The `fasterrag worker` command was removed on 2026-11-12.",
+        "There is no `fasterrag worker` process yet (TASK-0130).",
+        "A separate `fasterrag worker` is not built (TASK-0130).",
+        "`fasterrag worker` no longer exists.",
+    ],
+)
+def test_a_sentence_saying_the_process_is_absent_is_left_alone(
+    tmp_path: Path, sentence: str
+) -> None:
+    """The documents must be able to say where the command went."""
+    root = build(tmp_path, docs={"a.md": f"{sentence}\n"})
+
+    assert process_findings(root)[0] == []
+
+
+def test_a_built_process_and_an_unrelated_worker_are_left_alone(tmp_path: Path) -> None:
+    """Only `fasterrag <planned name>` is decided: pools of workers are real."""
+    root = build(
+        tmp_path,
+        docs={"a.md": "Run `fasterrag serve`; it starts embedding workers and the worker pool.\n"},
+    )
+
+    assert process_findings(root)[0] == []
+
+
+def test_a_process_moved_into_the_registry_stops_being_decided(tmp_path: Path) -> None:
+    """The day TASK-0130 ships a worker, the same sentence becomes true and must pass."""
+    shipped = PROCESSES.replace('{"serve": run_serve}', '{"serve": run_serve, "worker": w}')
+    root = build(
+        tmp_path,
+        processes=shipped,
+        docs={"a.md": "Run `fasterrag worker` beside the API.\n"},
+    )
+
+    assert process_findings(root)[0] == []
+
+
+def test_a_cli_with_no_registered_process_is_vacuous(tmp_path: Path) -> None:
+    root = build(tmp_path, processes="BUILTIN_PROCESSES: dict[str, object] = {}\n")
+
+    found = check(root)
+
+    assert rules(found) == [VACUOUS]
+    assert "BUILTIN_PROCESSES" in found[0].detail
+
+
+def test_documents_that_name_no_built_process_are_vacuous(tmp_path: Path) -> None:
+    root = build(tmp_path)
+    fixture = root / "docs" / "fixture.md"
+    fixture.write_text(
+        fixture.read_text(encoding="utf-8").replace("Start the API with `fasterrag serve`.", ""),
+        encoding="utf-8",
+    )
+
+    found = check(root)
+
+    assert rules(found) == [VACUOUS]
+    assert "fasterrag serve" in found[0].detail
+
+
+def test_the_real_registry_runs_serve_and_names_the_removed_worker() -> None:
+    """Pinned so a rename in processes.py cannot quietly empty the rule's vocabulary."""
+    assert registered_processes() == ({"serve"}, {"worker"})
+
+
 def test_the_ratchet_counts_by_path(tmp_path: Path) -> None:
     """Line numbers move under nine concurrent agents; paths do not."""
     findings = [
@@ -597,14 +706,24 @@ def test_a_ratchet_entry_nothing_uses_is_itself_reported() -> None:
     assert "delete the entry" in messages[0]
 
 
-def test_the_shipped_ratchet_is_empty() -> None:
-    """Every finding this gate has reported was real and was fixed in the same series."""
-    assert RATCHET == {}
+def test_the_shipped_ratchet_holds_only_the_stale_worker_sentences() -> None:
+    """Every other finding was fixed in its own series; these wait for the document edits."""
+    assert RATCHET == {
+        "CLAUDE.md": 1,
+        "README.md": 1,
+    }
 
 
 def test_the_real_tree_is_clean() -> None:
-    """The gate ships green, and the five documents it found are the proof it was not."""
-    assert check() == []
+    """The gate ships green, and the five documents it found are the proof it was not.
+
+    The only findings left are the ratcheted worker sentences, and nothing goes past them.
+    """
+    found = check()
+
+    assert over_ratchet(found) == []
+    assert {finding.rule for finding in found} <= {PROCESS_SURFACE}
+    assert {finding.path for finding in found} <= set(RATCHET)
 
 
 @pytest.mark.parametrize("name", ["milvus", "weaviate", "chroma", "qdrant", "pgvector"])

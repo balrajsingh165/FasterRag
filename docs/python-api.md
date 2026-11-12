@@ -215,7 +215,7 @@ async def answer(q: str):
     return {"answer": result.answer, "citations": [c.as_dict() for c in result.citations]}
 ```
 
-Deployment note: in-process worker pools are suitable for small/medium loads; for heavy ingestion run dedicated `fasterrag worker` processes against the same config and queue backend ([deployment.md](deployment.md)). **Status (2026-11-11):** the dedicated worker process is designed and not built — `fasterrag worker` starts and consumes nothing, and there is no queue backend (TASK-0440, TASK-0130). In-process pools are the only ingestion path today.
+Deployment note: ingestion runs in worker pools inside the process that holds the facade, sized by `workers.*`. That is the only ingestion path: a dedicated worker process fed by a queue backend, which would take heavy ingestion off this process, is not built (TASK-0130), and there is no command to start one ([deployment.md](deployment.md)).
 
 ## Extending the framework (plugin contract)
 

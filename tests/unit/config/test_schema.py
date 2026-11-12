@@ -67,6 +67,21 @@ def test_unknown_nested_keys_are_rejected() -> None:
         Settings.model_validate({"retrieval": {"top_kk": 5}})
 
 
+@pytest.mark.parametrize("value", [4, 1, None, "four"])
+def test_the_removed_app_workers_key_is_refused_by_name_whatever_its_value(value: object) -> None:
+    """A library caller building ``Settings`` directly gets the same reason the loader gives."""
+    with pytest.raises(ValidationError, match=r"app\.workers was removed"):
+        Settings.model_validate({"app": {"workers": value}})
+
+
+def test_the_pipeline_worker_section_is_not_the_removed_key() -> None:
+    """``workers.*`` sizes the real pools and must keep loading."""
+    settings = Settings.model_validate({"workers": {"cpu_pool_size": 2}})
+
+    assert settings.workers.cpu_pool_size == 2
+    assert not hasattr(settings.app, "workers")
+
+
 def test_rule_1_top_k_must_not_exceed_rerank_top_n() -> None:
     with pytest.raises(ValidationError, match="less than or equal to"):
         RetrievalSettings(top_k=50, rerank_top_n=20)
