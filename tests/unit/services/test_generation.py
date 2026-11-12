@@ -928,10 +928,14 @@ async def test_a_success_clears_the_failure_count_rather_than_only_the_state() -
     """A success resets the failure count, not merely the state."""
     service, _ = build()
     service.breaker.failure_threshold = 2
-    service.breaker.record_failure(GenerationError("transient", retryable=True))
+    service.breaker.record_failure(
+        service.breaker.check(), GenerationError("transient", retryable=True)
+    )
 
     await service.answer("what is the notice period", collection="policies")
-    service.breaker.record_failure(GenerationError("another blip", retryable=True))
+    service.breaker.record_failure(
+        service.breaker.check(), GenerationError("another blip", retryable=True)
+    )
 
     assert service.breaker.is_open is False
 
@@ -1381,7 +1385,9 @@ async def _observe(case: ParityCase, root: Path, *, streamed: bool) -> Observed:
             await service.answer(PARITY_QUESTION)
     if case.tripped:
         service.breaker.failure_threshold = 1
-        service.breaker.record_failure(GenerationError("an earlier outage", retryable=True))
+        service.breaker.record_failure(
+            service.breaker.check(), GenerationError("an earlier outage", retryable=True)
+        )
 
     before = _metric_values()
     raised: str | None = None
