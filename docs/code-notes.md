@@ -322,6 +322,8 @@ The client slot lives here because every provider needs one and every provider
 
 A timeout gets its own code, mirroring the embedding side's split between EMBED_PROVIDER_TIMEOUT and EMBED_PROVIDER_ERROR. The two call for different actions — a timeout says raise reliability.timeouts.llm_ms or reduce the context, a hard failure says look at the provider — and one code for both cannot say which.
 
+A TypeError or AttributeError that carries no status is neither: it was raised while the adapter was driving the client library or reading what it returned, and means the two disagree about a call or a response shape. It used to fall through to "unreachable, retryable", so a programming error was retried and then failed over as an outage; it is INTERNAL and non-retryable (TASK-0441). A status still wins, so a vendor error class that happens to subclass TypeError keeps what the provider said. The detail names the exception type only, never its text, which can quote argument values.
+
 ## `src/fasterrag/adapters/llm/factory.py`
 
 ### `resolve_adapter_class`

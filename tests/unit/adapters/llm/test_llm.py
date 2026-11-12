@@ -175,6 +175,42 @@ def test_an_unclassified_transport_failure_is_retryable() -> None:
     assert "unreachable" in error.detail
 
 
+@pytest.mark.parametrize(
+    "mistake",
+    [
+        TypeError("AsyncBaseCohere.chat() got an unexpected keyword argument 'messages'"),
+        AttributeError("'ChatResponse' object has no attribute 'choices'"),
+    ],
+)
+def test_a_programming_error_is_not_mistaken_for_an_outage(mistake: Exception) -> None:
+    """It has no status, so it read as "unreachable, retryable" and was retried as an outage."""
+    error = classify(mistake)
+
+    assert error.code is ErrorCode.INTERNAL
+    assert error.retryable is False
+    assert "unreachable" not in error.detail
+    assert type(mistake).__name__ in error.detail
+
+
+def test_a_programming_error_does_not_quote_the_failing_call() -> None:
+    """The exception text can carry argument values; only its type is safe to publish."""
+    error = classify(TypeError("chat() got an unexpected keyword argument 'sk-secret'"))
+
+    assert "sk-secret" not in error.detail
+
+
+def test_a_status_outranks_the_exception_type() -> None:
+    """A vendor error that subclasses TypeError still says what the provider answered."""
+
+    class StatusTypeError(TypeError):
+        status_code = 429
+
+    error = classify(StatusTypeError("rate limited"))
+
+    assert error.retryable is True
+    assert error.code is ErrorCode.GENERATION_FAILED
+
+
 def test_a_secret_never_appears_in_a_classified_error() -> None:
     assert "sk-" not in classify(FakeStatusError(401)).detail
 
