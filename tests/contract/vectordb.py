@@ -179,6 +179,17 @@ class VectorDBContract:
 
         assert caught.value.code is ErrorCode.CONFLICT
 
+    async def test_a_keyword_leg_the_collection_lacks_is_refused(
+        self, adapter: VectorDBAdapter, collection: str
+    ) -> None:
+        """Accepting it deferred the failure to the first upsert, far from its cause."""
+        with pytest.raises(FasterRagError) as caught:
+            await adapter.create_collection(
+                CollectionSpec(name=collection, dimensions=DIMENSIONS, sparse=True)
+            )
+
+        assert caught.value.code is ErrorCode.CONFLICT
+
     async def test_upserted_points_are_searchable_by_their_own_ids(
         self, adapter: VectorDBAdapter, collection: str
     ) -> None:

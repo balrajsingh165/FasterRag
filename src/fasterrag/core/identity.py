@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import string
 import threading
 import time
 from secrets import token_hex
@@ -52,6 +53,9 @@ __all__ = [
 #      so no field can forge a boundary and the constraint is gone rather than
 #      policed. Every document and chunk id changed. Made at the release boundary,
 #      while no adopter holds an index built under version 2 (TASK-0210)
+#   3  2026-11-13, deliberately not bumped: a drive letter is now exactly [A-Za-z].
+#      Only a source opening with a non-ASCII letter and ":/" gets a new id, which is
+#      the collision being fixed; every other id is pinned unchanged (TASK-0304)
 IDENTITY_VERSION: Final = 3
 
 # CRITICAL: written as chr(0) rather than as an escape so the byte cannot end up in this
@@ -61,6 +65,8 @@ IDENTITY_VERSION: Final = 3
 # one byte no filesystem or URL scheme permits, which `normalise_source` refuses as plain
 # input validation.
 _NUL: Final = chr(0)
+
+_DRIVE_LETTERS: Final = frozenset(string.ascii_letters)
 
 _DOCUMENT_PREFIX: Final = "d_"
 _CHUNK_PREFIX: Final = "c_"
@@ -113,7 +119,7 @@ def normalise_source(source_uri: str) -> str:
 
     normalised = source_uri.replace("\\", "/")
     drive, separator, rest = normalised.partition(":/")
-    if separator and len(drive) == 1 and drive.isalpha():
+    if separator and len(drive) == 1 and drive in _DRIVE_LETTERS:
         return f"{drive.lower()}:/{rest}".lower()
     return normalised
 

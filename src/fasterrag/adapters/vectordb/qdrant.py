@@ -155,6 +155,15 @@ def to_qdrant_filter(filters: Filter | None) -> models.Filter | None:
     return models.Filter(must=must or None, must_not=must_not or None)
 
 
+def _has_keyword_leg(info: Any) -> bool:
+    """Return whether a collection carries fasterRag's own named sparse vector.
+
+    Any other sparse vector is not one fasterRag writes or searches, so it is not the leg.
+    """
+    sparse_vectors = info.config.params.sparse_vectors
+    return isinstance(sparse_vectors, dict) and SPARSE_VECTOR_NAME in sparse_vectors
+
+
 def _to_sparse(stored: Any) -> SparseVector | None:
     """Convert a stored named sparse vector into the neutral type, terms ascending.
 
@@ -312,7 +321,7 @@ class QdrantAdapter(VectorDBAdapter):
     def _describe(self, name: str, info: Any) -> CollectionInfo:
         """Translate one Qdrant collection description into the neutral form."""
         vectors = info.config.params.vectors
-        sparse = bool(info.config.params.sparse_vectors)
+        sparse = _has_keyword_leg(info)
         if isinstance(vectors, dict):
             vectors = vectors.get(DENSE_VECTOR_NAME)
 
@@ -464,6 +473,14 @@ class QdrantAdapter(VectorDBAdapter):
             raise FasterRagError(
                 f"collection {spec.name!r} already exists with distance "
                 f"{vectors.distance}, but the configuration expects {expected}",
+                code=ErrorCode.CONFLICT,
+            )
+        if spec.sparse and not _has_keyword_leg(info):
+            raise FasterRagError(
+                f"collection {spec.name!r} already exists without a keyword leg (no "
+                f"{SPARSE_VECTOR_NAME!r} sparse vector); Qdrant cannot add one to an existing "
+                "collection, so rebuild it through a blue/green reindex or set "
+                "retrieval.hybrid: false",
                 code=ErrorCode.CONFLICT,
             )
         self._dimensions[spec.name] = vectors.size

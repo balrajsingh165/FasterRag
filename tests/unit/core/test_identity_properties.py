@@ -7,7 +7,7 @@ inputs instead of the one hand-picked pair the example suite carries.
 """
 
 import pytest
-from hypothesis import assume, given
+from hypothesis import assume, example, given
 from hypothesis import strategies as st
 
 from fasterrag.core.identity import (
@@ -108,6 +108,30 @@ def test_the_digest_is_deterministic(fields: list[str]) -> None:
 def test_the_identity_version_is_three() -> None:
     """Pinned because the lockfile records it."""
     assert IDENTITY_VERSION == 3
+
+
+NON_ASCII = st.characters(min_codepoint=128, exclude_categories=["Cs"])
+
+
+@given(first=NON_ASCII, second=NON_ASCII, rest=SOURCE, tenant=TENANT)
+@example(first="É", second="é", rest="Docs/A.PDF", tenant=None)
+def test_sources_differing_only_in_a_non_ascii_first_character_stay_distinct(
+    first: str, second: str, rest: str, tenant: str | None
+) -> None:
+    """A Unicode letter before `:/` was taken for a drive and case-folded (TASK-0304)."""
+    assume(first != second)
+
+    assert document_id(f"{first}:/{rest}", tenant) != document_id(f"{second}:/{rest}", tenant)
+
+
+@given(source=SOURCE)
+@example(source="É:/Docs/A.PDF")
+def test_only_an_ascii_drive_letter_folds_case(source: str) -> None:
+    """A Windows drive is exactly `[A-Za-z]`; anything else is only separator-normalised."""
+    assume(not ("a" <= source[0].lower() <= "z" and source[0].isascii()))
+    assume("://" not in source)
+
+    assert normalise_source(source) == source.replace("\\", "/")
 
 
 @given(source=SOURCE)

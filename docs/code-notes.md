@@ -2423,6 +2423,9 @@ Two spellings of one local file must produce one document id. On Windows the fil
 
 A Windows path. The whole thing is case-insensitive, not just the drive letter.
 
+A drive letter is exactly `[A-Za-z]`. `str.isalpha` is Unicode-wide, and on POSIX a directory
+may be named `É:`, so the wider test merged distinct files into one document (TASK-0304).
+
 ### `job_id`
 
 > Return a fresh job id that sorts chronologically.

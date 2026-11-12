@@ -133,6 +133,11 @@ class MemoryVectorDB(VectorDBAdapter):
                 f"dimensions, not {spec.dimensions}",
                 code=ErrorCode.CONFLICT,
             )
+        if spec.sparse and not held.spec.sparse:
+            raise FasterRagError(
+                f"collection {spec.name!r} already exists without a keyword leg",
+                code=ErrorCode.CONFLICT,
+            )
 
     async def list_collections(self) -> list[CollectionInfo]:
         """Return every collection with its size and shape."""
