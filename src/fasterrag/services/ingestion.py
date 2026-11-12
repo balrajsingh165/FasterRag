@@ -41,7 +41,7 @@ from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache.semantic import SemanticCache
-from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError
+from fasterrag.errors import ErrorCode, FasterRagError, IngestionError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger, use_trace_id
 from fasterrag.services.embedding_router import create_embedding_router
@@ -50,7 +50,7 @@ from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.lockfile import LockStore, build_lock
 from fasterrag.services.reindex import require_keyword_leg
 from fasterrag.services.sources import resolve_sources, typed_source
-from fasterrag.workers.cpu_pool import CpuWorkerPool, PoolReport
+from fasterrag.workers.cpu_pool import CpuWorkerPool, PoolReport, require_runnable_chunker
 from fasterrag.workers.embed_pool import EmbeddingWorkerPool, EmbedReport
 from fasterrag.workers.indexer import Indexer
 from fasterrag.workers.ledger import IndexLedger
@@ -98,7 +98,7 @@ class IngestionService:
         keyword leg — one metadata round trip per job, covering every caller (TASK-0320).
         """
         target = collection or self.settings.vector_db.collection.default_name
-        _require_pipeline_chunker(self.settings)
+        require_runnable_chunker(self.settings)
         await require_keyword_leg(target, self.settings, self.adapter)
 
         typed = [
@@ -130,7 +130,7 @@ class IngestionService:
         if not resumable(record):
             raise IngestionError(_not_resumable(record, stale_seconds), code=ErrorCode.CONFLICT)
 
-        _require_pipeline_chunker(self.settings)
+        require_runnable_chunker(self.settings)
         await require_keyword_leg(record.collection, self.settings, self.adapter)
         return await requeue(self.journal, record)
 
@@ -453,17 +453,6 @@ def _not_resumable(record: JobRecord, stale_seconds: int) -> str:
         "to continue from. Submit its sources again to index what is missing — "
         "deduplication skips the rest"
     )
-
-
-def _require_pipeline_chunker(settings: Settings) -> None:
-    """Refuse a job whose chunking strategy the ingestion pipeline cannot run."""
-    if settings.chunking.strategy == "semantic":
-        raise ConfigError(
-            "chunking.strategy is 'semantic', which the ingestion pipeline cannot run yet: "
-            "the parse workers have no embedding model to find sentence boundaries with. "
-            "Choose 'recursive', 'layout', 'fixed' or 'late'; SemanticChunker remains usable "
-            "as a standalone component (fasterrag.chunking)"
-        )
 
 
 def _status_for(counts: dict[str, int]) -> str:

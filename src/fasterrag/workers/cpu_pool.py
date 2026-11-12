@@ -34,6 +34,17 @@ A document that parses without error and yields no chunk — zero bytes, whitesp
 is a third outcome, neither indexed nor dead-lettered: it is recorded ``skipped`` with the
 reason ``EMPTY_DOCUMENT``, counted in :attr:`PoolReport.empty`, and never reaches the dedup
 file, where the hash of nothing would match every empty file that came after (TASK-0470).
+
+The semantic strategy needs a sentence embedder, and a pool task receives only the task and
+the settings, so no model object can be handed to a worker. Each worker builds its own, once,
+on first use, cached by model name (TASK-0431) — a local model only, because a provider
+reached over the network cannot be driven from here. Loading a model can take longer than a
+parse is allowed, so before any document is submitted — at pool start and after every
+recycle — every worker loads it: warm-up tasks are sent until each worker process has
+answered one, and no document's deadline is running while a model loads. A worker that never
+takes a warm-up task within ``_WARM_STALL_SECONDS`` is logged and left to load on first use
+rather than hanging the job. Each worker holds its own copy of the model, so the memory it
+takes is ``workers.cpu_pool_size`` times the model's.
 """
 
 from __future__ import annotations
@@ -47,15 +58,16 @@ from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field, replace
 from multiprocessing.process import BaseProcess
 from pathlib import Path
+from threading import Lock
 from time import perf_counter
 from typing import Final
 
 from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.config.schema import Settings
-from fasterrag.core.chunking import create_chunker, create_token_counter
+from fasterrag.core.chunking import SentenceEmbedder, create_chunker, create_token_counter
 from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
 from fasterrag.core.parsing import create_parsing_options, parse_bytes
-from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
+from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError, ParseError
 from fasterrag.observability.logging import current_trace_id, get_logger
 from fasterrag.services.journal import DocumentRecord, Journal
 from fasterrag.workers.ledger import IndexLedger
@@ -63,10 +75,16 @@ from fasterrag.workers.queues import BoundedQueue, ChunkPayload, DocumentTask, P
 
 __all__ = [
     "EMPTY_DOCUMENT",
+    "LOCAL_SENTENCE_EMBEDDERS",
     "CpuWorkerPool",
     "PoolReport",
+    "SentenceEmbedderFactory",
     "parse_and_chunk",
+    "require_runnable_chunker",
+    "reset_shared_sentence_embedders",
     "resolve_pool_size",
+    "sentence_embedder",
+    "use_sentence_embedder_factory",
 ]
 
 EMPTY_DOCUMENT: Final = "EMPTY_DOCUMENT"
@@ -83,6 +101,17 @@ Documents submitted together are due microseconds apart. Without this, the secon
 hung documents would be resubmitted and given a whole new deadline to hang through.
 """
 
+_WARM_RETRY_SECONDS: Final = 0.05
+
+_WARM_STALL_SECONDS: Final = 30.0
+"""How long warm-up waits for a worker that has started no warm-up task before giving up."""
+
+LOCAL_SENTENCE_EMBEDDERS: Final[frozenset[str]] = frozenset({"huggingface"})
+"""The ``embeddings.provider`` values whose model a parse worker can load for itself."""
+
+SentenceEmbedderFactory = Callable[[Settings], SentenceEmbedder]
+"""Builds the sentence embedder a worker process uses for the semantic strategy."""
+
 _logger = get_logger(__name__)
 
 
@@ -91,6 +120,69 @@ def resolve_pool_size(configured: int) -> int:
     if configured > 0:
         return configured
     return os.cpu_count() or 1
+
+
+def _local_sentence_embedder(settings: Settings) -> SentenceEmbedder:
+    """Return a sentence embedder over the configured local model, loaded on first use."""
+    from fasterrag.adapters.embeddings.huggingface import HuggingFaceEmbedder
+    from fasterrag.adapters.embeddings.sync import SentenceEmbedderBridge
+
+    return SentenceEmbedderBridge(HuggingFaceEmbedder(settings))
+
+
+_sentence_embedders: Final[dict[str, SentenceEmbedder]] = {}
+_sentence_embedder_factory: SentenceEmbedderFactory = _local_sentence_embedder
+_SENTENCE_EMBEDDER_LOCK: Final = Lock()
+
+
+def use_sentence_embedder_factory(factory: SentenceEmbedderFactory | None) -> None:
+    """Set how this process builds sentence embedders, dropping any it already built.
+
+    ``None`` restores the local model. A spawned worker does not see the parent's state, so
+    a test installs its own factory from the executor's worker initializer.
+    """
+    global _sentence_embedder_factory
+    with _SENTENCE_EMBEDDER_LOCK:
+        _sentence_embedder_factory = factory or _local_sentence_embedder
+        _sentence_embedders.clear()
+
+
+def reset_shared_sentence_embedders() -> None:
+    """Drop this process's sentence embedders and restore the local-model factory."""
+    use_sentence_embedder_factory(None)
+
+
+def require_runnable_chunker(settings: Settings) -> None:
+    """Refuse a chunking strategy the parse workers cannot run with these settings."""
+    provider = settings.embeddings.provider
+    if settings.chunking.strategy != "semantic" or provider in LOCAL_SENTENCE_EMBEDDERS:
+        return
+    raise ConfigError(
+        "chunking.strategy is 'semantic', which needs a local embedding model: the parse "
+        "workers find sentence boundaries with a model each of them loads, and "
+        f"embeddings.provider is {provider!r}, a provider reached over the network, whose "
+        "client cannot run there. Set embeddings.provider to 'huggingface' (a local "
+        "sentence-transformers model), or set chunking.strategy to 'recursive', 'layout', "
+        "'fixed' or 'late'"
+    )
+
+
+def sentence_embedder(settings: Settings) -> SentenceEmbedder:
+    """Return this process's sentence embedder for the configured model, building it once."""
+    require_runnable_chunker(settings)
+    model = settings.embeddings.model
+    with _SENTENCE_EMBEDDER_LOCK:
+        embedder = _sentence_embedders.get(model)
+        if embedder is None:
+            embedder = _sentence_embedder_factory(settings)
+            _sentence_embedders[model] = embedder
+    return embedder
+
+
+def _warm_sentence_embedder(settings: Settings) -> int:
+    """Load this worker's sentence embedder, and return the process it lives in."""
+    sentence_embedder(settings).embed(["warm"])
+    return os.getpid()
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +222,8 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
         options=create_parsing_options(settings),
     )
 
-    chunker = create_chunker(settings)
+    embedder = sentence_embedder(settings) if settings.chunking.strategy == "semantic" else None
+    chunker = create_chunker(settings, embedder=embedder)
     chunker_hash = chunker_config_hash(settings)
     digest = content_hash(data)
 
@@ -282,6 +375,70 @@ class CpuWorkerPool:
             await loop.run_in_executor(self._executor, _ready)
         except BrokenProcessPool as exc:
             raise _unguarded_entry_point_error() from exc
+        await self._warm_sentence_embedders()
+
+    async def _warm_sentence_embedders(self) -> None:
+        """Load the sentence embedder in every worker before any document's deadline runs.
+
+        Threads share their process's embedder, so a thread pool needs one warm-up.
+        """
+        if self.settings.chunking.strategy != "semantic":
+            return
+
+        started = perf_counter()
+        expected = self.size if isinstance(self._executor, ProcessPoolExecutor) else 1
+        try:
+            warmed = await self._warmed_processes(expected)
+        except BrokenProcessPool as exc:
+            raise IngestionError(
+                "a parse worker died while loading the sentence embedding model "
+                f"{self.settings.embeddings.model!r} for chunking.strategy 'semantic'. Every "
+                "worker loads its own copy, so the memory needed is workers.cpu_pool_size "
+                "times the model's; lower workers.cpu_pool_size or choose a smaller model",
+                code=ErrorCode.CHUNK_FAILED,
+                retryable=False,
+            ) from exc
+
+        details = {
+            "seconds": round(perf_counter() - started, 2),
+            "workers": warmed,
+            "model": self.settings.embeddings.model,
+        }
+        if warmed < expected:
+            _logger.warning(
+                "not every parse worker loaded the sentence embedding model before the first "
+                "document; one that loads it later does so inside a document's parse deadline",
+                extra={**details, "expected": expected},
+            )
+        else:
+            _logger.info("loaded the sentence embedding model in every parse worker", extra=details)
+
+    async def _warmed_processes(self, expected: int) -> int:
+        """Send warm-up tasks until ``expected`` processes have answered, and return how many did.
+
+        Gives up after ``_WARM_STALL_SECONDS`` in which only already-warm processes answered, so
+        an executor that never starts the workers it was asked for cannot hang the job.
+        """
+        loop = asyncio.get_running_loop()
+        warmed: set[int] = set()
+        stalled_since: float | None = None
+        while len(warmed) < expected:
+            replies = await asyncio.gather(
+                *(
+                    loop.run_in_executor(self._executor, _warm_sentence_embedder, self.settings)
+                    for _ in range(expected - len(warmed))
+                )
+            )
+            fresh = set(replies) - warmed
+            warmed |= fresh
+            if fresh:
+                stalled_since = None
+                continue
+            stalled_since = stalled_since or perf_counter()
+            if perf_counter() - stalled_since > _WARM_STALL_SECONDS:
+                break
+            await asyncio.sleep(_WARM_RETRY_SECONDS)
+        return len(warmed)
 
     async def _warm_token_counter(self) -> None:
         """Load the embedding tokenizer before the first document rather than during it."""

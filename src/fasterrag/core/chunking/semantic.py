@@ -6,6 +6,12 @@ spikes. The spike threshold is a percentile of the distances observed *in this d
 not a fixed number, so the strategy adapts to prose that is uniformly similar as well as
 to documents that jump between topics. No configuration key is needed for it.
 
+A boundary found by similarity is still subject to the token budget. Sentences are merged up
+to a character window, which is ``chunk_size`` tokens only for text that runs at the assumed
+characters per token; where it runs denser — CJK, code, accented scripts — a group the
+tokenizer counts above ``chunk_size`` is re-split at the largest separator that fits, as the
+recursive strategy does. Until 2026-11-12 this strategy alone skipped that pass.
+
 Embedding is supplied by the caller through :class:`SentenceEmbedder`. Chunking runs in
 the CPU worker pool rather than on the event loop, so the interface is deliberately
 synchronous.
@@ -33,8 +39,9 @@ from fasterrag.core.chunking.models import (
     TokenCounter,
     assemble,
     hard_split,
+    within_budget,
 )
-from fasterrag.core.chunking.recursive import pack
+from fasterrag.core.chunking.recursive import pack, split_span
 from fasterrag.core.parsing.models import ParsedDocument
 from fasterrag.errors import EmbedError
 
@@ -125,6 +132,7 @@ class SemanticChunker:
         self._percentile = percentile
         self._embedder = embedder
         self._counter = counter or EstimatingTokenCounter()
+        self._budget = chunk_size
         self._limit = chunk_size * self._counter.chars_per_token
         self._overlap_tokens = overlap
         self._overlap = overlap * self._counter.chars_per_token
@@ -150,7 +158,14 @@ class SemanticChunker:
 
         return assemble(
             text,
-            segments,
+            within_budget(
+                text,
+                segments,
+                counter=self._counter,
+                budget=self._budget,
+                limit=self._limit,
+                split=split_span,
+            ),
             overlap_chars=self._overlap,
             overlap_tokens=self._overlap_tokens,
             strategy=self.strategy,

@@ -2436,6 +2436,11 @@ Only boundary-affecting keys are included. Contextual enrichment is *not* one of
     it changes a chunk's embedded text but not where the chunk starts and ends, so
     toggling it must not renumber every chunk in the corpus.
 
+    The semantic strategy also places boundaries by `chunking.semantic_percentile` and by
+    the embedding model that measures sentence similarity (`embeddings.model`), so both
+    are hashed — for that strategy only (TASK-0431). Every other strategy hashes exactly
+    the three keys it always did, so its chunk ids did not move.
+
 ## `src/fasterrag/core/parsing/__init__.py`
 
 ### `parse_bytes`
@@ -4233,14 +4238,6 @@ Published once, at settle, rather than per document: throughput measured over a
 The two halves are joined by a bounded queue, so each can strand the other: a dead
     consumer leaves the producer blocked on a full queue, and a dead producer leaves the
     consumers waiting for a close that never comes. Whichever stops first decides.
-
-### `_require_pipeline_chunker`
-
-> Refuse a job whose chunking strategy the ingestion pipeline cannot run.
-
-Semantic chunking needs an embedding model inside the parse worker, and the pipeline
-    does not provide one (TASK-0431). Refusing here costs one check per job; not refusing
-    dead-letters every document of the corpus with the same configuration error.
 
 ## `src/fasterrag/services/journal.py`
 

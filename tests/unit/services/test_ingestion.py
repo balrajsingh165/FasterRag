@@ -26,10 +26,12 @@ from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.adapters.vectordb.base import CollectionInfo, CollectionSpec, Point, UpsertResult
 from fasterrag.config.schema import Settings
+from fasterrag.core import chunking
 from fasterrag.errors import EmbedError, ErrorCode, FasterRagError
 from fasterrag.observability import metrics
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import Journal
+from fasterrag.workers import cpu_pool
 from tests.unit.workers.test_indexer import RecordingAdapter
 
 DIMENSIONS = 8
@@ -499,18 +501,65 @@ async def test_a_failed_document_is_dead_lettered_once_not_once_per_chunk(
     assert sorted(entry.source for entry in dead) == sorted(sources(corpus))
 
 
-async def test_semantic_chunking_is_refused_before_a_job_is_recorded(
+class DenseTokenCounter:
+    """Every non-space character is a token, as CJK very nearly is."""
+
+    def count(self, text: str) -> int:
+        return len(text.strip())
+
+    @property
+    def chars_per_token(self) -> int:
+        return 4
+
+
+class ShiftingSentenceEmbedder:
+    """Moves to a new topic every fifteenth sentence, so similarity alone makes long groups."""
+
+    def embed(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
+        return [[1.0, 0.0] if index // 15 % 2 else [0.0, 1.0] for index in range(len(texts))]
+
+
+async def test_a_semantic_job_with_a_local_model_completes_within_the_token_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Semantic chunking was refused at acceptance: the parse workers had no embedding model.
+
+    The counter makes every character a token, so a group of sentences merged up to the
+    character window is four times the budget unless the budget pass re-splits it.
+    """
+    counter = DenseTokenCounter()
+    monkeypatch.setattr(chunking, "create_token_counter", lambda _settings: counter)
+    cpu_pool.use_sentence_embedder_factory(lambda _settings: ShiftingSentenceEmbedder())
+    sentences = ["汉字" * (5 + index % 9) for index in range(40)]
+    document = tmp_path / "dense.txt"
+    document.write_text(". ".join(sentences) + ".", encoding="utf-8")
+    configured = settings(chunking={"strategy": "semantic", "chunk_size": 64, "overlap": 8})
+    service, adapter = build(tmp_path, configured)
+
+    settled = await service.run(await service.accept([str(document)]))
+
+    texts = [str(point.payload["text"]) for point in adapter.points]
+    assert settled.status == "completed"
+    assert settled.counts["indexed"] == len(texts) > 1
+    assert all(counter.count(text) <= 64 + 8 for text in texts)
+
+
+async def test_semantic_chunking_with_a_hosted_provider_is_refused_before_a_job_is_recorded(
     tmp_path: Path, corpus: Path
 ) -> None:
-    """It used to be accepted and then dead-letter every document with a config error."""
-    configured = settings(chunking={"strategy": "semantic", "chunk_size": 128, "overlap": 16})
+    """A hosted provider's client cannot run in a parse worker; every document would fail."""
+    configured = settings(
+        chunking={"strategy": "semantic", "chunk_size": 128, "overlap": 16},
+        embeddings={"provider": "openai", "model": "text-embedding-3-small", "api_key_env": "K"},
+    )
     service, _ = build(tmp_path, configured)
 
     with pytest.raises(FasterRagError) as refused:
         await service.accept(sources(corpus))
 
     assert refused.value.code is ErrorCode.CONFIG_INVALID
-    assert "recursive" in refused.value.detail
+    assert "needs a local embedding model" in refused.value.detail
+    assert "Set embeddings.provider to 'huggingface'" in refused.value.detail
     assert not list(service.journal.root.rglob("*.json"))
 
 
