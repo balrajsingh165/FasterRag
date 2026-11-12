@@ -79,6 +79,7 @@ from fasterrag.core.parsing.models import (
     DocumentBuilder,
     ParsedDocument,
     ParseFlag,
+    normalise_text,
 )
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
 
@@ -149,7 +150,8 @@ LF_SOURCE = SOURCE.filter(lambda source: "\r" not in source)
 
 # CRITICAL: everything here is removed by ``str.strip``, plus an optional leading BOM, so a
 # source built from it carries no content at all. Two things are deliberately absent: NUL,
-# which Python does not strip, so a document of NUL bytes has content and keeps its block;
+# which ``str.strip`` keeps and only the builder's normalisation removes (TASK-0459), so it
+# is the other test's case, not this one's;
 # and a BOM anywhere but the front, which is a zero-width no-break space and is content.
 BLANK_SOURCE = st.tuples(
     st.sampled_from(["", BOM]),
@@ -458,11 +460,16 @@ def test_the_lenient_decode_strips_the_mark_too(tail: bytes) -> None:
 @given(source=SOURCE)
 @SETTINGS
 def test_plaintext_loses_no_character_of_its_source(source: str) -> None:
-    """Only whitespace is ever removed: everything else has to come out the other side."""
+    """Only whitespace and the normalisation ever change: everything else comes out the other side.
+
+    Since TASK-0459 the text is NFC with non-whitespace control codes removed, so the
+    source is compared in that form.
+    """
     assume(not source.startswith(BOM))
     document = parse_plaintext(source.encode())
+    expected = normalise_text(source)
 
-    assert [c for c in document.text if not c.isspace()] == [c for c in source if not c.isspace()]
+    assert [c for c in document.text if not c.isspace()] == [c for c in expected if not c.isspace()]
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -568,9 +575,9 @@ def test_docx_keeps_body_order(items: Sequence[tuple[str, str, int]]) -> None:
     assert [block.kind for block in document.blocks] == expected
     for (kind, text, _), block in zip(items, document.blocks, strict=True):
         if kind != "table":
-            assert block.text == text
+            assert block.text == normalise_text(text)
         else:
-            assert block.text.startswith(text.replace("\n", " "))
+            assert block.text.startswith(normalise_text(text.replace("\n", " ")))
 
 
 @given(items=st.lists(DOCX_ITEM, min_size=1, max_size=6))
