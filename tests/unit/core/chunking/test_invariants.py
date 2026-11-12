@@ -199,6 +199,9 @@ def dense_chunkers() -> list[Chunker]:
         RecursiveChunker(chunk_size=DENSE_BUDGET, overlap=DENSE_OVERLAP, counter=counter),
         LayoutChunker(chunk_size=DENSE_BUDGET, overlap=DENSE_OVERLAP, counter=counter),
         LateChunker(chunk_size=DENSE_BUDGET, overlap=DENSE_OVERLAP, counter=counter),
+        SemanticChunker(
+            RotatingEmbedder(), chunk_size=DENSE_BUDGET, overlap=DENSE_OVERLAP, counter=counter
+        ),
     ]
 
 
@@ -267,3 +270,40 @@ def test_dense_text_terminates_without_degenerate_chunks(chunker: Chunker, body:
 
     assert all(chunk.text.strip() for chunk in chunks)
     assert len(chunks) <= max(len(body), 1)
+
+
+DENSE_SENTENCES = st.lists(
+    st.text(
+        alphabet=st.characters(
+            min_codepoint=0x4E00,
+            max_codepoint=0x9FFF,
+            blacklist_categories=("Cs", "Cc", "Zs"),
+        ),
+        min_size=1,
+        max_size=30,
+    ),
+    min_size=12,
+    max_size=40,
+).map(lambda sentences: ". ".join(sentences) + ".")
+
+
+@given(body=DENSE_SENTENCES)
+@settings(max_examples=60)
+def test_semantic_groups_of_dense_sentences_respect_the_token_budget(body: str) -> None:
+    """Sentences were merged up to a character limit, so a group ran to four times the budget.
+
+    The unbroken runs above never reach the grouping pass: with no sentence end in them they
+    take the short-document path. These documents have a dozen sentences or more, so every
+    chunk here is a group the embedder's distances put together.
+    """
+    counter = DenseCounter()
+    chunker = SemanticChunker(
+        RotatingEmbedder(), chunk_size=DENSE_BUDGET, overlap=DENSE_OVERLAP, counter=counter
+    )
+    document = parse_plaintext(body.encode())
+
+    chunks = chunker.split(document)
+
+    assert reconstruct(chunks) == document.text
+    for chunk in chunks:
+        assert counter.count(chunk.text) <= DENSE_BUDGET + DENSE_OVERLAP
