@@ -18,7 +18,7 @@ import pytest
 from fasterrag.config.schema import Settings
 from fasterrag.core.retrieval.models import ScoredChunk
 
-pytestmark = pytest.mark.eval
+pytestmark = [pytest.mark.eval, pytest.mark.timeout(1800)]
 
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 EMBED_DIMENSIONS = 384

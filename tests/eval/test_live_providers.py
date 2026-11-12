@@ -73,7 +73,7 @@ from fasterrag.adapters.llm.base import Completion
 from fasterrag.adapters.llm.factory import create_llm_adapter
 from fasterrag.config.schema import Settings
 
-pytestmark = pytest.mark.eval
+pytestmark = [pytest.mark.eval, pytest.mark.timeout(1800)]
 
 PROMPT = "Reply with the single word: ok"
 SYSTEM = "You are a connectivity probe. Answer in one word."

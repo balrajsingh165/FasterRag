@@ -28,7 +28,7 @@ from fasterrag.core.identity import document_id
 from fasterrag.errors import FasterRagError
 from fasterrag.services.regression import load_baseline, write_baseline
 
-pytestmark = pytest.mark.eval
+pytestmark = [pytest.mark.eval, pytest.mark.timeout(1800)]
 
 DATASET = Path(__file__).parent / "datasets" / "handbook"
 CORPUS = DATASET / "corpus"
