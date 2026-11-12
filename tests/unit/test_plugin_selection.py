@@ -82,7 +82,8 @@ async def test_a_plugin_named_in_config_yaml_ingests_and_answers_a_query(workspa
 
     async with FasterRag.from_config(write_config(workspace)) as rag:
         assert type(rag.vector_db) is AcmeVectorDB
-        assert type(rag.embeddings.default) is AcmeEmbedder
+        embedder = rag.embeddings.default
+        assert type(getattr(embedder, "inner", embedder)) is AcmeEmbedder
 
         job = await rag.ingest([str(document)])
         assert job.status == "completed"
