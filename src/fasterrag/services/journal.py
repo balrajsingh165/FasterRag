@@ -169,6 +169,18 @@ def _modified(path: Path, *, missing: float) -> float:
         return missing
 
 
+def _read_text(path: Path) -> str | None:
+    """Return a file's text, or None when no such file is on disk.
+
+    Bytes that are not UTF-8 are replaced rather than raised, so a damaged record reaches
+    the checksum and fails there like any other torn write.
+    """
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
 def _write_atomically(path: Path, payload: str) -> None:
     """Write a file atomically, keeping the previous version as a fallback."""
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -313,17 +325,20 @@ class Journal:
         return await asyncio.to_thread(self.load_job_blocking, job, tenant=tenant)
 
     def load_job_blocking(self, job: str, *, tenant: str | None = None) -> JobRecord:
-        """Load a job record, falling back to the previous good copy."""
-        path = self._job_path(job)
-        if not path.exists():
-            raise IngestionError(f"unknown ingest job {job!r}", code=ErrorCode.NOT_FOUND)
+        """Load a job record, falling back to the previous good copy.
 
-        payload = open_envelope(path.read_text(encoding="utf-8"))
+        A live record that is missing is read exactly like one that is torn: the job is
+        unknown only when neither the record nor its previous copy is on disk (TASK-0437).
+        """
+        path = self._job_path(job)
+        live = _read_text(path)
+        payload = open_envelope(live) if live is not None else None
         if payload is None:
-            previous = path.with_suffix(path.suffix + _PREVIOUS_SUFFIX)
-            payload = (
-                open_envelope(previous.read_text(encoding="utf-8")) if previous.exists() else None
-            )
+            kept = _read_text(path.with_suffix(path.suffix + _PREVIOUS_SUFFIX))
+            if live is None and kept is None:
+                raise IngestionError(f"unknown ingest job {job!r}", code=ErrorCode.NOT_FOUND)
+
+            payload = open_envelope(kept) if kept is not None else None
             if payload is None:
                 raise IngestionError(
                     f"the journal record for job {job!r} is corrupt and has no readable "
@@ -332,8 +347,9 @@ class Journal:
                     retryable=False,
                 )
             _logger.warning(
-                "journal record failed its checksum; resuming from the previous checkpoint",
-                extra={"job_id": job},
+                "journal record is missing or failed its checksum; resuming from the "
+                "previous checkpoint",
+                extra={"job_id": job, "live_record": "missing" if live is None else "torn"},
             )
 
         record = JobRecord.from_dict(payload)

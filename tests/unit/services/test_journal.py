@@ -114,6 +114,55 @@ def test_a_truncated_record_falls_back_too(journal: Journal) -> None:
     assert journal.load_job_blocking(record.job_id).job_id == record.job_id
 
 
+def test_a_missing_live_record_falls_back_to_the_previous_good_record(journal: Journal) -> None:
+    """A reader between a rewrite's two renames got NOT_FOUND for a job that existed."""
+    record = journal.create_job_blocking("default", SOURCES)
+    record = journal.checkpoint_blocking(record, 2)
+    path = journal._job_path(record.job_id)
+    path.replace(path.with_suffix(path.suffix + ".prev"))
+
+    recovered = journal.load_job_blocking(record.job_id)
+
+    assert recovered.job_id == record.job_id
+    assert recovered.checkpoint is not None
+    assert recovered.checkpoint.last_document_index == 2
+
+
+def test_a_missing_live_record_with_a_torn_previous_copy_is_corrupt_not_unknown(
+    journal: Journal,
+) -> None:
+    """A job that left a trace on disk is damaged, which is not the same as never created."""
+    record = journal.create_job_blocking("default", SOURCES)
+    path = journal._job_path(record.job_id)
+    path.unlink()
+    path.with_suffix(path.suffix + ".prev").write_text("garbage", encoding="utf-8")
+
+    with pytest.raises(IngestionError, match="corrupt") as caught:
+        journal.load_job_blocking(record.job_id)
+
+    assert caught.value.code is ErrorCode.CHUNK_FAILED
+
+
+def test_a_record_that_is_not_text_falls_back_like_any_other_torn_write(journal: Journal) -> None:
+    """Bytes that are not UTF-8 raised a decode error instead of reaching the checksum."""
+    record = journal.create_job_blocking("default", SOURCES)
+    record = journal.checkpoint_blocking(record, 2)
+    journal.save_job_blocking(record)
+    journal._job_path(record.job_id).write_bytes(b"\xff\xfe\x00torn")
+
+    assert journal.load_job_blocking(record.job_id).job_id == record.job_id
+
+
+def test_a_job_looked_up_under_a_root_that_is_a_file_is_unknown(tmp_path: Path) -> None:
+    blocker = tmp_path / "journal"
+    blocker.write_text("a file where the journal directory should be", encoding="utf-8")
+
+    with pytest.raises(IngestionError) as caught:
+        Journal(blocker).load_job_blocking("job_missing")
+
+    assert caught.value.code is ErrorCode.NOT_FOUND
+
+
 def test_an_unrecoverable_record_is_a_typed_error(journal: Journal) -> None:
     record = journal.create_job_blocking("default", SOURCES)
     path = journal._job_path(record.job_id)
