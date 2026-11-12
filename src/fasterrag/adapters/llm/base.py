@@ -26,6 +26,7 @@ from fasterrag.config.schema import Settings
 from fasterrag.errors import ConfigError, ErrorCode, GenerationError
 
 __all__ = [
+    "ADAPTER_API_VERSION",
     "Completion",
     "LLMAdapter",
     "classify_llm_failure",
@@ -33,6 +34,8 @@ __all__ = [
     "require_llm_key",
     "retry_after_of",
 ]
+
+ADAPTER_API_VERSION: Final = "1.0"
 
 _AUTH_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
 _TIMEOUT_STATUSES: Final[frozenset[int]] = frozenset({408, 504})

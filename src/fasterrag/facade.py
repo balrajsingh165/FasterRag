@@ -212,11 +212,14 @@ class FasterRag:
 
         Per call, never cached: the service holds its tenant and its query's candidates.
         """
+        from fasterrag.services.traces import create_trace_store
+
         return build_generation(
             self.settings,
             self.vector_db,
             self.embeddings,
             cache=self.cache,
+            traces=create_trace_store(self.settings),
             tenant=tenant,
             llm=self._shared_llm(),
         )

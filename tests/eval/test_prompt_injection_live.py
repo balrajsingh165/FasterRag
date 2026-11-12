@@ -36,7 +36,7 @@ from fasterrag.core.generation import P1_SYSTEM_PROMPT, build_prompt, citation_m
 from tests.eval.test_live_providers import LIVE_TESTS_ON, LIVE_TESTS_VAR, LLM_CHECKS
 from tests.unit.core.test_prompt_injection import CASES, Case
 
-pytestmark = pytest.mark.eval
+pytestmark = [pytest.mark.eval, pytest.mark.timeout(1800)]
 
 ENV_FILE_VAR: Final = "FASTERRAG_LIVE_ENV_FILE"
 KEY_VAR: Final = "ANTHROPIC_API_KEY"

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fasterrag-scripted-llm"
+version = "1.0.0"
+description = "A deterministic, offline stand-in LLM for running the fasterRag examples in CI."
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = ["fasterrag"]
+
+# After `pip install`, `llm.provider: scripted` (or FASTERRAG_SET=llm.provider=scripted)
+# selects it in place of a real model.
+[project.entry-points."fasterrag.llm"]
+scripted = "fasterrag_scripted_llm:ScriptedLLM"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fasterrag_scripted_llm"]

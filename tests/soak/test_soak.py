@@ -55,7 +55,7 @@ from tests.soak.workload import (
     write_corpus,
 )
 
-pytestmark = pytest.mark.soak
+pytestmark = [pytest.mark.soak, pytest.mark.timeout(0)]
 
 MINIMUM_CYCLES = 3
 

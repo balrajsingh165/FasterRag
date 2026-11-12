@@ -84,7 +84,7 @@ def test_a_plugin_that_is_not_an_adapter_is_rejected(monkeypatch: pytest.MonkeyP
 
 def test_a_conformant_plugin_is_selectable(monkeypatch: pytest.MonkeyPatch) -> None:
     class Custom(QdrantAdapter):
-        pass
+        adapter_api_version = "1.0"
 
     class Entry:
         value = "somewhere:Custom"

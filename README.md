@@ -118,7 +118,8 @@ observability only and has no write endpoint
 ## Quickstart
 
 **Requirements:** Python 3.12+, and Docker if you want fasterRag to start Qdrant for you. The
-local profile below needs neither Docker nor an API key.
+local profile below needs neither Docker nor an API key. CI tests Python 3.12 and 3.13 on Linux and 3.12 on
+Windows; macOS is not tested.
 
 ### 1. Install from source
 

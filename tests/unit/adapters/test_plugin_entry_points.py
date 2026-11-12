@@ -35,7 +35,7 @@ def test_a_registered_plugin_is_resolvable(
     factory: object, base: type, group: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No fork required: implementing the base class and registering it must be enough."""
-    plugin = type("AcmeAdapter", (base,), {})
+    plugin = type("AcmeAdapter", (base,), {"adapter_api_version": "1.0"})
     register(monkeypatch, factory, "acme", plugin)
 
     assert factory.resolve_adapter_class("acme") is plugin  # type: ignore[attr-defined]
@@ -45,7 +45,9 @@ def test_a_registered_plugin_is_resolvable(
 def test_a_plugin_is_listed_with_its_origin(
     factory: object, base: type, group: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    register(monkeypatch, factory, "acme", type("AcmeAdapter", (base,), {}))
+    register(
+        monkeypatch, factory, "acme", type("AcmeAdapter", (base,), {"adapter_api_version": "1.0"})
+    )
 
     providers = factory.available_providers()  # type: ignore[attr-defined]
 

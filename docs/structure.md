@@ -32,6 +32,7 @@ fasterRag/
 │   ├── internals.md  rebuild-playbook.md  verification.md
 │   ├── release.md  release-readiness.md
 │   ├── glossary.md  references.md
+│   ├── plugins.md                # Writing a plugin: the procedure, around examples/plugin-vectordb
 │   ├── differentiators.md        # The twelve flagship capabilities (uniqueness contract)
 │   ├── reliability.md            # Reliability doctrine + resilience patterns
 │   ├── failure-modes.md          # FMEA table (component failure analysis)
@@ -53,6 +54,10 @@ fasterRag/
 │       ├── ADR-0006-python-package-surface.md
 │       └── ADR-0007-bm25-as-backend-sparse-vectors.md
 ├── userdocs/                     # Source of the published site (mkdocs.yml docs_dir): a short user guide linking back to docs/
+├── examples/                     # Runnable scripts, each executed by CI's `examples` job
+│   ├── README.md                 # What each shows, and how CI runs them without a model or a key
+│   ├── plugin-vectordb/          # Sample installable plugin; passes tests/contract/vectordb.py
+│   └── scripted-llm/             # Offline stand-in LLM selected by config for the generation examples
 ├── src/
 │   └── fasterrag/
 │       ├── errors.py             # Typed error taxonomy + stable error-code table
@@ -91,7 +96,8 @@ fasterRag/
 │       │   │                     # pgvector.py, chroma.py (pinecone.py pending)
 │       │   ├── embeddings/       # base, factory, huggingface, openai, cohere, ollama,
 │       │   │                     # tiering (metadata-routed model selection), sync bridge
-│       │   └── llm/              # base, factory, provider clients (streaming)
+│       │   ├── llm/              # base, factory, provider clients (streaming)
+│       │   └── plugin_api.py     # adapter API version check applied to every loaded plugin
 │       ├── workers/              # Parallel pools
 │       │   ├── cpu_pool.py       # load/parse/chunk workers (CPU-bound)
 │       │   ├── embed_pool.py     # stateful embedding workers (model loaded once)

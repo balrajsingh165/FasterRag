@@ -43,7 +43,7 @@ from fasterrag.workers.queues import BoundedQueue
 from tests.soak.workload import build_service, soak_settings, write_corpus
 from tests.unit.api.conftest import StubVectorDB
 
-pytestmark = pytest.mark.load
+pytestmark = [pytest.mark.load, pytest.mark.timeout(0)]
 
 CAPACITY = 10
 STORM_ITEMS = 2_000

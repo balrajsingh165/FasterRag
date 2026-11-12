@@ -52,6 +52,8 @@ def _vector(text: str) -> list[float]:
 class AcmeVectorDB(VectorDBAdapter):
     """An in-memory vector database honouring the whole adapter contract."""
 
+    adapter_api_version: ClassVar[str] = "1.0"
+
     def __init__(self, settings: Settings) -> None:
         """Start with no collections, aliases or snapshots."""
         super().__init__(settings)
@@ -200,6 +202,7 @@ class AcmeEmbedder(EmbeddingAdapter):
     """A deterministic embedder that needs no model and no network."""
 
     provider: ClassVar[str] = "acme"
+    adapter_api_version: ClassVar[str] = "1.0"
 
     @property
     def model(self) -> str:
@@ -240,6 +243,7 @@ class AcmeLLM(LLMAdapter):
     """Answers with the prompt it was given, marked so its origin is visible."""
 
     provider: ClassVar[str] = "acme"
+    adapter_api_version: ClassVar[str] = "1.0"
 
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         """Return the prompt back as the answer."""
