@@ -260,6 +260,22 @@ requiring an explicit marker instead would break every existing key file (TASK-0
 
 - Prompt injection through retrieved content is inherent to RAG and is bounded by the P1–P4
   call-site contracts, not eliminated. The library never executes model output.
+  **How P1 and P3 bound it (TASK-0446, 2026-11-12).** Retrieved text sits inside a context
+  block whose closing tag carries a boundary no document author can compute (an HMAC of the
+  prompt under a per-process random key), so a passage cannot close the block or append a
+  `Question:` of its own; a citation marker inside chunk text or a source is rewritten to the
+  inert `[\^id]`, so a passage cannot pose as another chunk's header and have
+  `resolve_citations` accept the forged citation; both system prompts say the bounded text is
+  data, not instructions; and the grader's verdict is the last complete JSON object in its
+  reply, read with a real decoder, so a reply that quotes an injected verdict before its own
+  no longer becomes unparseable — which, because an ungraded answer is never withheld, had
+  turned the grounded-or-refuse gate off exactly when it was attacked. The adversarial set is
+  `tests/eval/datasets/injection/cases.jsonl` (instruction override, delimiter break-out,
+  forged citation, grader manipulation). `tests/unit/core/test_prompt_injection.py` gates
+  prompt construction and verdict parsing on every commit with no model call;
+  `tests/eval/test_prompt_injection_live.py` runs the same set through a real model only
+  with `FASTERRAG_LIVE_PROVIDER_TESTS=1`. A live pass is evidence about one model on one day:
+  no prompt can prove that a model will obey it.
 
 Closed since: the admin archive paths (TASK-0296, §5.6) and DNS rebinding (TASK-0294, §5.1),
 both on 2026-11-04.
@@ -309,7 +325,7 @@ An independent audit found the service **open by default twice over**: `security
 - **Keys are compared as bytes.** `secrets.compare_digest` raises `TypeError` on a `str` holding a non-ASCII character and the `Authorization` header is latin-1 decoded, so one such byte in a bearer token turned a 401 into an unhandled 500 for an unauthenticated caller.
 - **The semantic cache is scoped by collection, filters and `top_k`** as well as by tenant. Its lookup ran before retrieval and matched on the query vector and tenant alone. A metadata filter is how an access-control restriction is expressed in a query, so an answer produced under one filter could be served to a request carrying another.
 
-**Still open from the same audit**, each with an entry in [todo.md](todo.md): retrieved text reaches the prompt unescaped (TASK-0446); a key with no tenant may act for any tenant, `multi_tenancy` without `auth` is accepted silently, and the `.env.example` placeholder is accepted as a live key (TASK-0460); tenant scoping of the ingest and query paths remains the opt-in described in §3 (TASK-0339, TASK-0381).
+**Still open from the same audit**, each with an entry in [todo.md](todo.md): a key with no tenant may act for any tenant, `multi_tenancy` without `auth` is accepted silently, and the `.env.example` placeholder is accepted as a live key (TASK-0460); tenant scoping of the ingest and query paths remains the opt-in described in §3 (TASK-0339, TASK-0381).
 
 ## 6. Supply chain
 
