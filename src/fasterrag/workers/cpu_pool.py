@@ -65,6 +65,7 @@ from typing import Final
 from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.chunking import SentenceEmbedder, create_chunker, create_token_counter
+from fasterrag.core.confinement import resolved_within
 from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
 from fasterrag.core.parsing import create_parsing_options, parse_bytes
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError, ParseError
@@ -214,10 +215,12 @@ def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
 def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
     """Do the work of :func:`parse_and_chunk`, raising whatever the parsers raise."""
     limit = settings.ingestion.max_document_mb * _MEGABYTE
+    if task.location is None:
+        _confine(task.source, settings)
     data = _read(task.readable, limit)
     document = parse_bytes(
         data,
-        filename=Path(task.source).name,
+        filename=Path(task.readable).name,
         max_bytes=limit,
         options=create_parsing_options(settings),
     )
@@ -253,6 +256,22 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
             else ""
         ),
     )
+
+
+def _confine(source: str, settings: Settings) -> None:
+    """Refuse a path source that resolves outside ``ingestion.allowed_source_roots``.
+
+    Checked here, immediately before the read, because the service lets a path written
+    inside a root through so that an escaping link costs one document (TASK-0504).
+    """
+    roots = settings.ingestion.allowed_source_roots
+    if roots and resolved_within(source, roots) is None:
+        raise IngestionError(
+            f"{source} resolves outside every directory in ingestion.allowed_source_roots; "
+            "a symbolic link in the corpus points out of it",
+            code=ErrorCode.SOURCE_LINK_ESCAPES,
+            retryable=False,
+        )
 
 
 def _read(source: str, max_bytes: int) -> bytes:

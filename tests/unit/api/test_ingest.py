@@ -21,9 +21,11 @@ class RecordingIngestion:
         self.outcome = outcome
         self.ran: list[str] = []
         self.error: Exception | None = None
+        self.accepted: list[Any] = []
         RecordingIngestion.instances.append(self)
 
     async def accept(self, sources: Any, **kwargs: Any) -> JobRecord:
+        self.accepted.append(sources)
         return self.journal.create_job_blocking(
             kwargs.get("collection") or "default",
             [{"type": "path", "value": source} for source in sources],
@@ -175,6 +177,36 @@ def test_an_inline_source_is_accepted(client: TestClient) -> None:
     )
 
     assert response.status_code == 202
+
+
+def test_an_inline_source_carries_its_media_type_and_filename_to_the_service(
+    client: TestClient, ingestion: RecordingIngestion
+) -> None:
+    """Without the two fields an inline payload's format could only be guessed (TASK-0459)."""
+    inline = {
+        "type": "inline",
+        "value": "# Notes",
+        "media_type": "text/markdown",
+        "filename": "notes.md",
+    }
+
+    response = client.post("/v1/ingest", json={"sources": [inline]})
+
+    assert response.status_code == 202
+    assert ingestion.accepted == [[inline]]
+
+
+@pytest.mark.parametrize("descriptor", [{"media_type": "text/html"}, {"filename": "a.html"}])
+def test_a_descriptor_on_a_path_or_url_source_is_refused(
+    client: TestClient, descriptor: dict[str, str]
+) -> None:
+    """A path's type comes from the file and a URL's from the server, never from the caller."""
+    for kind, value in (("path", "a.md"), ("url", "https://example.com/a")):
+        response = client.post(
+            "/v1/ingest", json={"sources": [{"type": kind, "value": value, **descriptor}]}
+        )
+
+        assert response.status_code == 422
 
 
 def test_an_invented_source_type_is_still_rejected(client: TestClient) -> None:

@@ -15,7 +15,10 @@ from typing import Any
 
 import pytest
 from docx import Document
+from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.pdfencrypt import StandardEncryption
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 from fasterrag.core.parsing.models import ParsedDocument
@@ -203,3 +206,28 @@ def sources(tmp_path: Path) -> Path:
     (tmp_path / "agreement.docx").write_bytes(docx_bytes())
     (tmp_path / "agreement.pdf").write_bytes(pdf_bytes())
     return tmp_path
+
+
+def encrypted_pdf_bytes(*, user_password: str) -> bytes:
+    """Build an encrypted PDF; an empty user password opens without one, as most do."""
+    buffer = io.BytesIO()
+    encryption = StandardEncryption(user_password, ownerPassword="owner", strength=128)
+    pdf = canvas.Canvas(buffer, pagesize=LETTER, encrypt=encryption)
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(72, 720, "Secret body text that is long enough to count as a page.")
+    pdf.save()
+    return buffer.getvalue()
+
+
+SCANNED_TEXT = "SCANNED INVOICE 4471"
+
+
+def scanned_pdf_bytes() -> bytes:
+    """Build a PDF whose only page is a picture of text, the shape a scanner produces."""
+    image = Image.new("L", (1700, 300), 255)
+    ImageDraw.Draw(image).text((60, 90), SCANNED_TEXT, fill=0, font=ImageFont.load_default(96))
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=LETTER)
+    pdf.drawImage(ImageReader(image), 36, 560, width=540, height=95)
+    pdf.save()
+    return buffer.getvalue()

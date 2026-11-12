@@ -46,6 +46,7 @@ and a BOM in front of undecodable bytes — are out of reach of generation regar
 pinned as constructed cases; both survived a mutation run before those were written.
 """
 
+import codecs
 import io
 import json
 from collections.abc import Callable, Sequence
@@ -78,8 +79,10 @@ from fasterrag.core.parsing.models import (
     DocumentBuilder,
     ParsedDocument,
     ParseFlag,
+    normalise_text,
 )
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
+from tests.unit.core.parsing.conftest import docx_bytes, pdf_bytes
 
 BOM = "﻿"
 MAX_HEADING_LEVEL = 6
@@ -148,7 +151,8 @@ LF_SOURCE = SOURCE.filter(lambda source: "\r" not in source)
 
 # CRITICAL: everything here is removed by ``str.strip``, plus an optional leading BOM, so a
 # source built from it carries no content at all. Two things are deliberately absent: NUL,
-# which Python does not strip, so a document of NUL bytes has content and keeps its block;
+# which ``str.strip`` keeps and only the builder's normalisation removes (TASK-0459), so it
+# is the other test's case, not this one's;
 # and a BOM anywhere but the front, which is a zero-width no-break space and is content.
 BLANK_SOURCE = st.tuples(
     st.sampled_from(["", BOM]),
@@ -396,28 +400,57 @@ def test_arbitrary_bytes_parse_without_an_untyped_error(data: bytes) -> None:
             continue
 
 
+def _strict_codec(data: bytes) -> str | None:
+    """Return the codec that reads ``data`` without a guess: its byte-order mark's, or UTF-8."""
+    marks = [
+        (codecs.BOM_UTF32_LE, "utf-32"),
+        (codecs.BOM_UTF32_BE, "utf-32"),
+        (codecs.BOM_UTF8, "utf-8-sig"),
+        (codecs.BOM_UTF16_LE, "utf-16"),
+        (codecs.BOM_UTF16_BE, "utf-16"),
+    ]
+    codec = next((name for mark, name in marks if data.startswith(mark)), "utf-8")
+    try:
+        data.decode(codec)
+    except UnicodeDecodeError:
+        return None
+    return codec
+
+
 @given(data=st.binary(max_size=120))
 @settings(max_examples=150, deadline=None)
-def test_undecodable_bytes_are_flagged_rather_than_failing(data: bytes) -> None:
-    """A mangled encoding must be visible in the flags, never a silent partial parse."""
+@example(data=b"\xff\xfeh\x00i\x00")
+@example(data=b"\x81\x8d\x8f")
+def test_undecodable_bytes_are_flagged_or_refused_never_silent(data: bytes) -> None:
+    """A mangled encoding must be visible in the flags, never a silent partial parse.
+
+    Since TASK-0472 a byte-order mark is believed, so a clean UTF-16 file is not a guess,
+    and a lenient decode that is mostly replacement characters is refused outright.
+    """
+    strict = _strict_codec(data)
+    refusal: ErrorCode | None = None
+    flags: tuple[str, ...] = ()
     try:
-        data.decode("utf-8")
-    except UnicodeDecodeError:
-        decodable = False
+        flags = parse_plaintext(data).flags
+    except ParseError as refused:
+        refusal = refused.code
+
+    if refusal is not None:
+        assert strict is None
+        assert refusal is ErrorCode.ENCODING_UNREADABLE
     else:
-        decodable = True
-
-    flags = parse_plaintext(data).flags
-
-    assert (ParseFlag.ENCODING_FALLBACK.value in flags) is not decodable
+        assert (ParseFlag.ENCODING_FALLBACK.value in flags) is (strict is None)
 
 
 @given(tail=st.binary(max_size=60))
 @settings(max_examples=80, deadline=None)
 def test_the_lenient_decode_strips_the_mark_too(tail: bytes) -> None:
-    """A file can be both BOM'd and mangled, and the fallback is a separate ``decode`` call."""
-    data = b"\xef\xbb\xbf" + tail + b"\xff\xfe"
-    assume(b"".join([tail, b"\xff\xfe"]))
+    """A file can be both BOM'd and mangled, and the fallback is a separate ``decode`` call.
+
+    The readable prefix keeps the mangled share under the refusal threshold, so the
+    mark-stripping is what is being tested rather than the refusal.
+    """
+    data = b"\xef\xbb\xbf" + b"readable text " * 10 + tail + b"\xff\xfe"
 
     document = parse_plaintext(data)
 
@@ -428,11 +461,16 @@ def test_the_lenient_decode_strips_the_mark_too(tail: bytes) -> None:
 @given(source=SOURCE)
 @SETTINGS
 def test_plaintext_loses_no_character_of_its_source(source: str) -> None:
-    """Only whitespace is ever removed: everything else has to come out the other side."""
+    """Only whitespace and the normalisation ever change: everything else comes out the other side.
+
+    Since TASK-0459 the text is NFC with non-whitespace control codes removed, so the
+    source is compared in that form.
+    """
     assume(not source.startswith(BOM))
     document = parse_plaintext(source.encode())
+    expected = normalise_text(source)
 
-    assert [c for c in document.text if not c.isspace()] == [c for c in source if not c.isspace()]
+    assert [c for c in document.text if not c.isspace()] == [c for c in expected if not c.isspace()]
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -476,8 +514,20 @@ def test_json_without_content_yields_no_blocks(empty: bytes) -> None:
 # than in the parser. Everything XML does permit and this parser might mishandle is here:
 # BOM, tab, newline, CJK, RTL, combining marks, zero-width, and an astral pair.
 _DOCX_FRAGMENTS = ["a", "Z", "0", " ", "\t", "\n", BOM, "é", "é", "日本語", "العربية", "🙂"]
+# Everything else XML 1.0 can carry, generated rather than picked (TASK-0489): no surrogate,
+# no control code, and neither of the two non-characters the XML grammar excludes.
+_XML_CHARACTER = st.characters(
+    blacklist_categories=("Cs", "Cc"), blacklist_characters=[chr(0xFFFE), chr(0xFFFF)]
+)
 DOCX_TEXT = (
-    st.lists(st.sampled_from(_DOCX_FRAGMENTS), min_size=1, max_size=8)
+    st.lists(
+        st.one_of(
+            st.sampled_from(_DOCX_FRAGMENTS),
+            st.text(alphabet=_XML_CHARACTER, min_size=1, max_size=6),
+        ),
+        min_size=1,
+        max_size=8,
+    )
     .map("".join)
     .map(str.strip)
     .filter(bool)
@@ -538,9 +588,9 @@ def test_docx_keeps_body_order(items: Sequence[tuple[str, str, int]]) -> None:
     assert [block.kind for block in document.blocks] == expected
     for (kind, text, _), block in zip(items, document.blocks, strict=True):
         if kind != "table":
-            assert block.text == text
+            assert block.text == normalise_text(text)
         else:
-            assert block.text.startswith(text.replace("\n", " "))
+            assert block.text.startswith(normalise_text(text.replace("\n", " ")))
 
 
 @given(items=st.lists(DOCX_ITEM, min_size=1, max_size=6))
@@ -567,9 +617,11 @@ def test_a_heading_zero_style_does_not_outrank_every_real_heading() -> None:
     assert parsed.blocks[-1].section == "Chapter One"
 
 
+# Full Unicode since TASK-0489. A standard PDF font cannot draw most of it, so extraction
+# returns whatever it returns; the invariants below are about offsets, never content.
 PDF_LINE = st.tuples(
     st.text(
-        alphabet=st.characters(min_codepoint=32, max_codepoint=126),
+        alphabet=_ANY_CHARACTER,
         min_size=1,
         max_size=40,
     ).filter(lambda line: line.strip() != ""),
@@ -711,3 +763,52 @@ def test_a_file_within_the_limit_is_read_normally(tmp_path: Path, size: int) -> 
     document = parse_document(path, max_bytes=size)
 
     assert document.text == "x" * size
+
+
+def _parses_or_fails_typed(parse: Parser, data: bytes) -> None:
+    """A damaged file may parse to anything, or fail, but only inside the taxonomy."""
+    try:
+        parse(data)
+    except FasterRagError:
+        return
+
+
+_DOCX_SAMPLE: Final = docx_bytes()
+_PDF_SAMPLE: Final = pdf_bytes(pages=2)
+_BINARY_PARSERS: Final[dict[str, tuple[Parser, bytes]]] = {
+    "docx": (parse_docx, _DOCX_SAMPLE),
+    "pdf": (parse_pdf, _PDF_SAMPLE),
+}
+EVERY_BINARY_PARSER = pytest.mark.parametrize("format_name", sorted(_BINARY_PARSERS))
+BIT_FLIPS = st.lists(
+    st.tuples(st.integers(min_value=0), st.integers(min_value=0, max_value=7)),
+    min_size=1,
+    max_size=8,
+)
+
+
+@EVERY_BINARY_PARSER
+@given(fraction=st.floats(min_value=0.0, max_value=1.0, exclude_max=True))
+@settings(max_examples=40, deadline=None)
+def test_a_truncated_binary_document_fails_inside_the_taxonomy(
+    format_name: str, fraction: float
+) -> None:
+    """A download cut short. ``parse_docx`` let ``BadZipFile`` and friends escape untyped."""
+    parse, sample = _BINARY_PARSERS[format_name]
+
+    _parses_or_fails_typed(parse, sample[: int(len(sample) * fraction)])
+
+
+@EVERY_BINARY_PARSER
+@given(flips=BIT_FLIPS)
+@settings(max_examples=40, deadline=None)
+def test_a_bit_flipped_binary_document_fails_inside_the_taxonomy(
+    format_name: str, flips: Sequence[tuple[int, int]]
+) -> None:
+    """Storage or transfer corruption. A CRC, zlib or XML error must still be a ParseError."""
+    parse, sample = _BINARY_PARSERS[format_name]
+    damaged = bytearray(sample)
+    for position, bit in flips:
+        damaged[position % len(damaged)] ^= 1 << bit
+
+    _parses_or_fails_typed(parse, bytes(damaged))

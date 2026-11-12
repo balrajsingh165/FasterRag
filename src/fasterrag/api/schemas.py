@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
     "CollectionRequest",
@@ -28,6 +28,9 @@ __all__ = [
 
 MAXIMUM_QUERY_LENGTH = 8192
 MAXIMUM_TOP_K = 100
+MAXIMUM_DESCRIPTOR_LENGTH = 255
+
+Descriptor = Annotated[str, Field(min_length=1, max_length=MAXIMUM_DESCRIPTOR_LENGTH)]
 
 
 class Strict(BaseModel):
@@ -37,10 +40,19 @@ class Strict(BaseModel):
 
 
 class Source(Strict):
-    """One ingestion source."""
+    """One ingestion source; ``media_type`` and ``filename`` describe an inline payload only."""
 
     type: Literal["path", "url", "inline"]
     value: str = Field(min_length=1)
+    media_type: Descriptor | None = None
+    filename: Descriptor | None = None
+
+    @model_validator(mode="after")
+    def _descriptors_describe_inline_payloads(self) -> Source:
+        """Refuse a descriptor on a path or URL, whose type comes from the file or the server."""
+        if self.type != "inline" and (self.media_type is not None or self.filename is not None):
+            raise ValueError("media_type and filename apply to inline sources only")
+        return self
 
 
 class IngestRequest(Strict):

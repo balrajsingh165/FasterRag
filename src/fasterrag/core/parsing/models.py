@@ -8,10 +8,17 @@ which is what lets a chunk record ``span``, ``page``, and ``section`` later
 One invariant makes the whole chain trustworthy and is property-tested: for every block,
 ``document.text[block.start:block.end] == block.text``. Chunk offsets are only meaningful
 because parser offsets are.
+
+Every block's text is normalised once, here, so no parser can forget to (TASK-0459): NFC,
+so a composed and a decomposed ``é`` are the same word to BM25 and to an embedder; line
+feeds for every CRLF and lone CR; and control characters that are not whitespace
+removed — a NUL in particular, which PostgreSQL refuses in a text column outright. Offsets
+index the normalised text, so the invariant above holds unchanged.
 """
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -24,12 +31,25 @@ __all__ = [
     "DocumentBuilder",
     "ParseFlag",
     "ParsedDocument",
+    "normalise_text",
 ]
 
 BlockKind = Literal["heading", "paragraph", "list_item", "table", "code"]
 
 BLOCK_SEPARATOR: Final = "\n\n"
 SECTION_SEPARATOR: Final = " > "
+
+_CONTROLS: Final[dict[int, None]] = {
+    code: None
+    for code in range(0xA0)
+    if unicodedata.category(chr(code)) == "Cc" and not chr(code).isspace()
+}
+
+
+def normalise_text(text: str) -> str:
+    """Return text as it is indexed: NFC, LF line ends, no non-whitespace controls, stripped."""
+    unified = text.replace("\r\n", "\n").replace("\r", "\n").translate(_CONTROLS)
+    return unicodedata.normalize("NFC", unified).strip()
 
 
 class ParseFlag(StrEnum):
@@ -128,8 +148,8 @@ class DocumentBuilder:
         page: int | None = None,
         level: int | None = None,
     ) -> None:
-        """Append a block, skipping anything that is empty after stripping."""
-        cleaned = text.strip()
+        """Append a block, skipping anything that is empty once normalised."""
+        cleaned = normalise_text(text)
         if not cleaned:
             return
 
@@ -155,7 +175,7 @@ class DocumentBuilder:
 
     def heading(self, text: str, level: int, *, page: int | None = None) -> None:
         """Append a heading and update the heading path."""
-        cleaned = text.strip()
+        cleaned = normalise_text(text)
         if not cleaned:
             return
 

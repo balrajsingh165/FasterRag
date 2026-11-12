@@ -37,7 +37,7 @@ from fasterrag.api.dependencies import (
     CurrentVectorDB,
     JournalDep,
 )
-from fasterrag.api.schemas import IngestRequest
+from fasterrag.api.schemas import IngestRequest, Source
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import current_trace_id, get_logger, use_trace_id
 from fasterrag.services.composition import build_ingestion, create_embedding_router
@@ -53,6 +53,16 @@ _logger = get_logger(__name__)
 
 
 DEPRECATED_KEY_FIELD_DOC = "https://fasterrag.dev/docs/api-reference#idempotency"
+
+
+def _source_entry(source: Source) -> dict[str, str]:
+    """Return the journalled form of one source, carrying an inline payload's descriptors."""
+    entry = {"type": source.type, "value": source.value}
+    if source.media_type is not None:
+        entry["media_type"] = source.media_type
+    if source.filename is not None:
+        entry["filename"] = source.filename
+    return entry
 
 
 def _mark_deprecated(response: Response) -> None:
@@ -178,7 +188,7 @@ async def start_ingest(
     # untenanted, and scoping the read path would then refuse a tenant access to the job it
     # just started — the isolation would present as a total outage rather than as isolation.
     record = await service.accept(
-        [{"type": source.type, "value": source.value} for source in body.sources],
+        [_source_entry(source) for source in body.sources],
         collection=body.collection,
         idempotency_key=body.idempotency_key,
         tenant=tenant,

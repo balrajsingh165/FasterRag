@@ -47,7 +47,6 @@ _MARKER: Final = "**no test**"
 _COLUMNS: Final = 7
 
 UNPROVEN_ROWS: Final[dict[int, str]] = {
-    2: "no scanned-document fixture exists and nothing asserts the low_text_yield flag",
     19: "a load suite exists since TASK-0243, and cannot prove this row because the row's "
     "own per-call rerank timeout and stage=rerank label are unbuilt (TASK-0165)",
     30: "no case injects an unhealthy container into a compose bring-up",

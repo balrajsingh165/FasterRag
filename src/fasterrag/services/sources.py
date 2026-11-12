@@ -19,6 +19,15 @@ This module also owns the confinement applied to every *caller-supplied server p
 is why :func:`guard_archive_path` lives here beside the ingestion guard rather than next to
 the archive service: both answer the same question with the same rule, and a second shape of
 the same check is a second place for it to be wrong.
+
+**The parser is chosen from the staged file's suffix, and the suffix is chosen with care**
+(TASK-0459). For a URL, a specific ``Content-Type`` wins — so ``/about`` served as
+``text/html``, or a ``.php`` page, parses as HTML — then a suffix in the URL path that a
+parser knows, then a generic ``text/plain``; a URL that offers none of these keeps its own
+suffix and is refused by the parser as unsupported. For an inline payload the caller may say
+what it is with ``filename`` or ``media_type``; otherwise a PDF or DOCX signature in the
+decoded bytes is recognised and anything else is plain text. The payload text itself is never
+read for a suffix: ``Version 1.2`` is not a file called ``.2``.
 """
 
 from __future__ import annotations
@@ -41,7 +50,9 @@ from urllib.parse import urlparse
 import httpx
 
 from fasterrag.config.schema import Settings
+from fasterrag.core.confinement import resolved_within, written_within
 from fasterrag.core.identity import text_hash
+from fasterrag.core.parsing import SUPPORTED_SUFFIXES
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
 from fasterrag.observability.logging import get_logger
 
@@ -61,6 +72,24 @@ _FETCH_TIMEOUT_SECONDS: Final = 60.0
 _ALLOWED_SCHEMES: Final = frozenset({"http", "https"})
 _MAXIMUM_REDIRECTS: Final = 5
 _NO_REUSE: Final = httpx.Limits(max_connections=10, max_keepalive_connections=0)
+
+_DOCX_MEDIA_TYPE: Final = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_MEDIA_TYPE_SUFFIXES: Final[dict[str, str]] = {
+    "text/plain": ".txt",
+    "text/markdown": ".md",
+    "text/x-markdown": ".md",
+    "text/html": ".html",
+    "application/xhtml+xml": ".xhtml",
+    "application/json": ".json",
+    "text/json": ".json",
+    "text/csv": ".csv",
+    "text/tab-separated-values": ".tsv",
+    "application/pdf": ".pdf",
+    _DOCX_MEDIA_TYPE: ".docx",
+}
+_GENERIC_SUFFIX: Final = ".txt"
+_SIGNATURES: Final[tuple[tuple[bytes, str], ...]] = ((b"%PDF-", ".pdf"), (b"PK\x03\x04", ".docx"))
+_BINARY_SUFFIXES: Final = frozenset({".pdf", ".docx"})
 
 _logger = get_logger(__name__)
 
@@ -96,16 +125,95 @@ def _extension_for(uri: str) -> str:
     return suffix if 1 < len(suffix) <= 10 else ".txt"
 
 
+def suffix_for_media_type(media_type: str | None) -> str | None:
+    """Return the parser suffix a media type names, ignoring its parameters, or None."""
+    if not media_type:
+        return None
+    essence = media_type.split(";", 1)[0].strip().lower()
+    if essence.endswith("+json"):
+        return ".json"
+    return _MEDIA_TYPE_SUFFIXES.get(essence)
+
+
+def _fetched_suffix(uri: str, content_type: str | None) -> str:
+    """Choose a fetched document's suffix from its ``Content-Type`` and its URL path."""
+    declared = suffix_for_media_type(content_type)
+    named = _extension_for(uri)
+    if declared is not None and declared != _GENERIC_SUFFIX:
+        return declared
+    if named in SUPPORTED_SUFFIXES:
+        return named
+    return declared or named
+
+
+def _signature(data: bytes) -> str | None:
+    """Return the suffix a binary format's leading bytes announce, if any."""
+    return next((suffix for magic, suffix in _SIGNATURES if data.startswith(magic)), None)
+
+
+def _declared_suffix(entry: Mapping[str, Any]) -> str | None:
+    """Return the suffix an inline source's ``filename`` or ``media_type`` names."""
+    filename = entry.get("filename")
+    if filename:
+        suffix = Path(str(filename)).suffix.lower()
+        if suffix not in SUPPORTED_SUFFIXES:
+            raise IngestionError(
+                f"inline filename {filename!r} has no suffix a parser reads; supported: "
+                f"{', '.join(sorted(SUPPORTED_SUFFIXES))}",
+                code=ErrorCode.VALIDATION_FAILED,
+                retryable=False,
+            )
+        return suffix
+
+    media_type = entry.get("media_type")
+    if media_type:
+        named = suffix_for_media_type(str(media_type))
+        if named is None:
+            raise IngestionError(
+                f"inline media_type {media_type!r} names no format a parser reads; supported: "
+                f"{', '.join(sorted(_MEDIA_TYPE_SUFFIXES))}",
+                code=ErrorCode.VALIDATION_FAILED,
+                retryable=False,
+            )
+        return named
+    return None
+
+
 def typed_source(value: str) -> dict[str, str]:
     """Classify a bare string the way the CLI and library accept them."""
     kind = "url" if value.startswith(("http://", "https://")) else "path"
     return {"type": kind, "value": value}
 
 
-def _decode_inline(value: str) -> bytes:
-    """Return the bytes an inline source carries."""
+def _readable_text(data: bytes) -> bool:
+    """Return whether bytes are UTF-8 text holding nothing but printable characters and space."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return bool(text) and all(character.isprintable() or character.isspace() for character in text)
+
+
+def _decode_inline(value: str, *, binary: bool = False) -> bytes:
+    """Return the bytes an inline source carries.
+
+    Base64 is believed when the declared format is binary, or when it decodes to a known
+    binary format or to readable text; a word that is merely valid base64 stays that word.
+    """
+    decoded: bytes | None = None
     with suppress(binascii.Error, ValueError):
-        return base64.b64decode(value, validate=True)
+        decoded = base64.b64decode(value, validate=True)
+
+    if binary:
+        if decoded is None:
+            raise IngestionError(
+                "an inline PDF or DOCX must be base64-encoded",
+                code=ErrorCode.VALIDATION_FAILED,
+                retryable=False,
+            )
+        return decoded
+    if decoded is not None and (_signature(decoded) is not None or _readable_text(decoded)):
+        return decoded
 
     try:
         return value.encode("utf-8")
@@ -119,10 +227,7 @@ def _within(value: str, roots: Sequence[str]) -> Path | None:
     ``resolve()`` is what makes the comparison sound: it collapses ``..`` and follows
     symlinks, so neither traversal nor a link planted inside a root can escape it.
     """
-    candidate = Path(value).resolve()
-    if any(candidate.is_relative_to(Path(root).resolve()) for root in roots):
-        return candidate
-    return None
+    return resolved_within(value, roots)
 
 
 def _guard_path(value: str, settings: Settings) -> None:
@@ -145,7 +250,13 @@ def _guard_path(value: str, settings: Settings) -> None:
             )
         return
 
-    if _within(value, roots) is not None:
+    # CRITICAL: a path WRITTEN inside a root is let through here even when a symbolic link
+    # makes it resolve outside, so that one planted link costs one document rather than the
+    # whole job (TASK-0504). That is safe only because the parse worker resolves the path
+    # again immediately before reading it and dead-letters an escape as SOURCE_LINK_ESCAPES
+    # (`workers/cpu_pool.py::_confine`). Removing that check turns this return into an
+    # arbitrary file read.
+    if written_within(value, roots) or _within(value, roots) is not None:
         return
 
     raise IngestionError(
@@ -301,8 +412,11 @@ async def _read_body(response: httpx.Response, uri: str, limit: int) -> bytes:
     return b"".join(chunks)
 
 
-async def _fetch(uri: str, limit: int) -> bytes:
-    """Download a URL, guarding every hop and refusing an over-large body."""
+async def _fetch(uri: str, limit: int) -> tuple[bytes, str | None]:
+    """Download a URL, guarding every hop and refusing an over-large body.
+
+    Returns the body and the ``Content-Type`` the final hop declared.
+    """
     try:
         # CRITICAL: redirects are followed by hand, not by httpx. `follow_redirects=True`
         # would send the later hops without passing them through `_guard_url`, so a public
@@ -336,7 +450,8 @@ async def _fetch(uri: str, limit: int) -> bytes:
                         current = str(httpx.URL(current).join(location))
                         continue
                     response.raise_for_status()
-                    return await _read_body(response, uri, limit)
+                    body = await _read_body(response, uri, limit)
+                    return body, response.headers.get("content-type")
             raise ParseError(f"{uri} exceeded {_MAXIMUM_REDIRECTS} redirects")
     except httpx.HTTPStatusError as exc:
         raise ParseError(f"{uri} returned HTTP {exc.response.status_code}") from exc
@@ -375,13 +490,16 @@ async def resolve_sources(
 
         if kind == "url":
             uri = value
-            data = await _fetch(value, limit)
+            data, content_type = await _fetch(value, limit)
+            suffix = _fetched_suffix(value, content_type)
         else:
-            data = _decode_inline(value)
+            declared = _declared_suffix(entry)
+            data = _decode_inline(value, binary=declared in _BINARY_SUFFIXES)
+            suffix = declared or _signature(data) or _GENERIC_SUFFIX
             # CRITICAL: the canonical URI hashes the *content*, not the position in the
             # request. Two identical inline payloads must be one document — keying on an
             # index would make re-sending the same snippet a new document every time.
-            uri = f"{INLINE_SCHEME}{text_hash(value)[:32]}{_extension_for(value)}"
+            uri = f"{INLINE_SCHEME}{text_hash(value)[:32]}{suffix}"
 
         if len(data) > limit:
             raise IngestionError(
@@ -391,7 +509,7 @@ async def resolve_sources(
             )
 
         staged = resolved.staging / f"{hashlib.sha256(uri.encode()).hexdigest()[:16]}"
-        staged = staged.with_suffix(_extension_for(uri))
+        staged = staged.with_suffix(suffix)
         staged.write_bytes(data)
 
         resolved.sources.append(uri)

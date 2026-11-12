@@ -8,6 +8,7 @@ hand-picked examples.
 
 from collections.abc import Sequence
 from itertools import pairwise
+from typing import Final, Literal
 
 import pytest
 from hypothesis import HealthCheck, given, settings
@@ -58,8 +59,12 @@ def ids() -> list[str]:
 
 ALL_CHUNKERS = pytest.mark.parametrize("chunker", chunkers(), ids=ids())
 
+_SURROGATES: Final[Sequence[Literal["Cs"]]] = ("Cs",)
+
+# Full Unicode, surrogates aside, since TASK-0489: CJK, combining marks, control codes and
+# astral characters are what real corpora hold and what character arithmetic gets wrong.
 TEXT = st.text(
-    alphabet=st.characters(min_codepoint=32, max_codepoint=126),
+    alphabet=st.characters(blacklist_categories=_SURROGATES),
     min_size=1,
     max_size=600,
 )
@@ -158,9 +163,9 @@ DENSE_BUDGET = 40
 DENSE_OVERLAP = 6
 
 
-# The invariants above generate ASCII only. The token-budget pass added under TASK-0114
-# exists precisely for text where characters and tokens diverge — CJK, accented scripts,
-# emoji — so it had never been property-tested against the inputs it was written for.
+# The invariants above generated ASCII only until TASK-0489. The token-budget pass added
+# under TASK-0114 exists precisely for text where characters and tokens diverge — CJK,
+# accented scripts, emoji — so it had never been property-tested against those inputs.
 # CRITICAL: no whitespace in the alphabet, and a minimum length above the character limit
 # these chunkers derive (40 tokens x 4 chars). A strategy that emitted spaces would let the
 # separator splitting break every run into small pieces, so the budget pass would never
