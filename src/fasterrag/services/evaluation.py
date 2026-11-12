@@ -25,6 +25,7 @@ from fasterrag.core.identity import document_id
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger
+from fasterrag.services.composition import build_generation
 from fasterrag.services.querying import RetrievalService
 from fasterrag.services.regression import Baseline, GateResult, check_regression
 
@@ -172,8 +173,6 @@ async def score_faithfulness(
     collection: str,
 ) -> dict[str, Any]:
     """Answer every answerable golden query and grade each answer with P3."""
-    from fasterrag.api.dependencies import build_generation
-
     service = build_generation(settings, adapter, router)
     answerable = [record for record in dataset.resolved() if not record.adversarial]
 

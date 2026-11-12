@@ -92,7 +92,7 @@ async def running(
         "build_ingestion",
         lambda settings, adapter, journal, cache, **kwargs: ingestion,
     )
-    monkeypatch.setattr(ingest_router, "build_embedding_router", lambda settings: StubRouter())
+    monkeypatch.setattr(ingest_router, "create_embedding_router", lambda settings: StubRouter())
 
     lifespan = app.router.lifespan_context(app)
     await lifespan.__aenter__()

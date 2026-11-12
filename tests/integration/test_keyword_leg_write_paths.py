@@ -77,7 +77,7 @@ def hybrid_client(
     """Return an API client configured for hybrid retrieval over that live backend."""
     settings = configured(hybrid=True)
     stub = StubRouter(StubEmbedder(settings))
-    monkeypatch.setattr(collections_router, "build_embedding_router", lambda _: stub)
+    monkeypatch.setattr(collections_router, "create_embedding_router", lambda _: stub)
 
     application: FastAPI = create_app(settings)
     application.state.vector_db = dense_only

@@ -36,13 +36,12 @@ from fasterrag.api.dependencies import (
     CurrentSettings,
     CurrentTenant,
     CurrentVectorDB,
-    build_generation,
-    build_retrieval,
 )
 from fasterrag.api.schemas import QueryRequest
 from fasterrag.api.traces import get_trace_store
 from fasterrag.errors import FasterRagError, problem_spec
 from fasterrag.observability.logging import current_trace_id, get_logger
+from fasterrag.services.composition import build_generation, build_retrieval
 from fasterrag.services.generation import GenerationService, QueryEvent
 
 __all__ = ["router"]

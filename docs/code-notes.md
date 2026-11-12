@@ -1017,14 +1017,6 @@ Another tenant's collection is reported as *absent* rather than forbidden: a dis
     # every request, so it can never hit — it would cost a query embedding per call and
     # return nothing, which is strictly worse than having no cache at all.
 
-### `build_generation`
-
-> Assemble the query path the CLI also assembles, so the two cannot diverge.
-
-``cache`` and ``traces`` are used exactly as given, including ``None``. Replay depends
-    on that: it must run with neither, and a helper that quietly substituted a default would
-    have it populating the cache and writing traces while investigating one.
-
 ## `src/fasterrag/api/health.py`
 
 ### `readyz`
@@ -3633,6 +3625,16 @@ Three states collapse to red on purpose: a red run, a workflow with no completed
 An empty set of workflows is red. A check that passes because it checked nothing
         is the vacuity this gate exists to replace, and it is the shape a glob over a
         renamed directory produces silently.
+
+## `src/fasterrag/services/composition.py`
+
+### `build_generation`
+
+> Assemble the query path every entry point uses, so no two of them can diverge.
+
+``cache`` and ``traces`` are used exactly as given, including ``None``. Replay depends
+    on that: it must run with neither, and a helper that quietly substituted a default would
+    have it populating the cache and writing traces while investigating one.
 
 ## `src/fasterrag/services/doctor.py`
 

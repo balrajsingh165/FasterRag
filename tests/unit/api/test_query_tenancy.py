@@ -32,6 +32,7 @@ from fasterrag.api.main import create_app
 from fasterrag.config.schema import Settings
 from fasterrag.core.retrieval.bm25 import encode_document
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.services import composition
 from fasterrag.services.journal import Journal
 from fasterrag.services.traces import TraceStore
 
@@ -198,7 +199,7 @@ def _build(
 ) -> FastAPI:
     """Assemble the application against the in-memory backend."""
     monkeypatch.setenv("FASTERRAG_API_KEY", KEYS)
-    monkeypatch.setattr(deps, "create_llm_adapter", lambda _settings: EchoLLM(_settings))
+    monkeypatch.setattr(composition, "create_llm_adapter", lambda _settings: EchoLLM(_settings))
     application = create_app(settings)
     application.state.vector_db = store
     application.state.journal = Journal(tmp_path / "journal")

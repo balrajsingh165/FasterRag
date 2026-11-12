@@ -98,8 +98,10 @@ class RecordingIngestion:
 def stubbed(monkeypatch: pytest.MonkeyPatch, app: FastAPI) -> RecordingIngestion:
     RecordingIngestion.instances.clear()
     service = RecordingIngestion(app.state.journal)
-    monkeypatch.setattr(collections_router, "build_embedding_router", lambda settings: StubRouter())
-    monkeypatch.setattr(ingest_router, "build_embedding_router", lambda settings: StubRouter())
+    monkeypatch.setattr(
+        collections_router, "create_embedding_router", lambda settings: StubRouter()
+    )
+    monkeypatch.setattr(ingest_router, "create_embedding_router", lambda settings: StubRouter())
     monkeypatch.setattr(
         ingest_router,
         "build_ingestion",
@@ -430,7 +432,9 @@ def test_an_oversized_keyed_body_is_still_a_413_problem_document(
     application = create_app(settings)
     application.state.vector_db = StubVectorDB()
     application.state.journal = Journal(tmp_path / "limit-journal")
-    monkeypatch.setattr(collections_router, "build_embedding_router", lambda settings: StubRouter())
+    monkeypatch.setattr(
+        collections_router, "create_embedding_router", lambda settings: StubRouter()
+    )
 
     def chunks() -> Any:
         yield b'{"name": "'

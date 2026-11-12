@@ -27,7 +27,7 @@ from fasterrag.core.cache import (
     create_semantic_store,
 )
 from fasterrag.core.cache.store import CacheStore
-from fasterrag.services import composition
+from fasterrag.services import embedding_router
 from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import JobRecord, Journal
@@ -312,7 +312,7 @@ async def test_closing_the_router_releases_every_provider_and_the_shared_store_o
         built.append(configured)
         return store
 
-    monkeypatch.setattr(composition, "create_embedding_store", one_store)
+    monkeypatch.setattr(embedding_router, "create_embedding_store", one_store)
     router = create_embedding_router(tiered())
 
     await router.close()
@@ -378,7 +378,7 @@ def _router_imports(tree: ast.AST) -> list[str]:
 
 def test_nothing_outside_the_adapters_builds_a_router_that_bypasses_the_cache() -> None:
     """An entry point importing the bare builder gets a router the cache switch cannot reach."""
-    allowed = {SRC / "services" / "composition.py"}
+    allowed = {SRC / "services" / "embedding_router.py"}
     offenders: Mapping[str, list[str]] = {
         str(path.relative_to(SRC)): modules
         for path in sorted(SRC.rglob("*.py"))

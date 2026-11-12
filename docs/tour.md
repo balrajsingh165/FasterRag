@@ -65,7 +65,7 @@ module's own docstring, as of the commit this page was generated from.
     | `api/admin.py` | Administrative endpoints: doctor, provisioning, and preflight estimation. |
     | `api/auth.py` | Control-plane authentication, scopes, and per-key rate limiting. |
     | `api/collections.py` | Collection management endpoints. |
-    | `api/dependencies.py` | Shared request-scoped construction for the routers. |
+    | `api/dependencies.py` | FastAPI dependencies: what a router reads from `app.state` and the request. |
     | `api/health.py` | Liveness and readiness endpoints. |
     | `api/idempotency.py` | `Idempotency-Key` handling for every mutating endpoint (TASK-0318). |
     | `api/ingest.py` | Ingestion endpoints. |
@@ -135,6 +135,7 @@ module's own docstring, as of the commit this page was generated from.
     | `services/degradation.py` | The degradation ladder's registry: which rungs exist, and what serves each one. |
     | `services/doctor.py` | Preflight diagnostics (D10). |
     | `services/documents.py` | Document lifecycle: taking one document out of a collection (TASK-0443). |
+    | `services/embedding_router.py` | The embedding router every entry point uses, behind the embedding cache when configured. |
     | `services/estimation.py` | Preflight cost estimation (D9). |
     | `services/evaluation.py` | Running the eval harness against a live collection. |
     | `services/generation.py` | Answer generation: retrieve, assemble, generate, cite. |

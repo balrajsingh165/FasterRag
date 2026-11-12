@@ -22,7 +22,7 @@ by an exact brute-force store in this process (:class:`InMemoryVectorDB`), so th
 measurement runs without a container. Everything else is the shipped pipeline: the real
 parser and chunker (``workers.cpu_pool.parse_and_chunk``), the real embedding adapter, the
 real BM25 encoder, the real RRF fusion, the real ``CrossEncoderReranker``, assembled by the
-real ``api.dependencies.build_retrieval``. The store searches *exactly* rather than
+real ``services.composition.build_retrieval``. The store searches *exactly* rather than
 approximately, so at these corpus sizes it is if anything a better retriever than an HNSW
 index; and because every configuration is scored against the same store, the differences
 between configurations are unaffected by the substitution. The absolute numbers are not a
@@ -72,12 +72,12 @@ from fasterrag.adapters.vectordb.base import (
     UpsertResult,
     VectorDBAdapter,
 )
-from fasterrag.api.dependencies import build_retrieval
 from fasterrag.config.schema import Settings
 from fasterrag.core.evals import EvalReport, evaluate
 from fasterrag.core.rerank import Reranker
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.services.benchmark import REPETITIONS, commit_hash, fingerprint, percentile
+from fasterrag.services.composition import build_retrieval
 from fasterrag.services.evaluation import EvalDataset, load_dataset
 from fasterrag.workers.cpu_pool import CpuWorkerPool, parse_and_chunk
 from fasterrag.workers.indexer import Indexer

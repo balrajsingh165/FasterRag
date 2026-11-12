@@ -1,12 +1,11 @@
-"""Shared request-scoped construction for the routers.
+"""FastAPI dependencies: what a router reads from ``app.state`` and the request.
 
-Services are built per request from ``app.state``, not stored on it, with one exception:
-the vector database adapter is long-lived because it holds a connection pool, and rebuilding
-it per request would open and close sockets on every call.
-
-Everything else here exists so a router never constructs a service inline. Routers hold zero
-business logic (``docs/structure.md``), which in practice means they receive a ready service
-and return whatever it produced.
+Only wrappers live here. The services themselves are assembled by
+:mod:`fasterrag.services.composition`, which the CLI and the facade call too; this module
+hands that code the process-scoped parts the application holds — the vector database
+adapter, the journal, the embedding router, the semantic cache — and the tenant the auth
+middleware resolved. Routers hold zero business logic (``docs/structure.md``), which in
+practice means they receive a ready service and return whatever it produced.
 """
 
 from __future__ import annotations
@@ -16,21 +15,12 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from fasterrag.adapters.embeddings.tiering import TieringRouter
-from fasterrag.adapters.llm.factory import create_llm_adapter
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.config.schema import Settings
-from fasterrag.core.cache import create_semantic_store
 from fasterrag.core.cache.semantic import SemanticCache
-from fasterrag.core.rerank import CrossEncoderReranker
-from fasterrag.services.composition import create_embedding_router
-from fasterrag.services.documents import DocumentService
-from fasterrag.services.generation import GenerationService
-from fasterrag.services.ingestion import IngestionService
+from fasterrag.services.composition import create_embedding_router, create_semantic_cache
 from fasterrag.services.jobs import JobRegistry
 from fasterrag.services.journal import Journal, create_journal
-from fasterrag.services.lockfile import create_lock_store
-from fasterrag.services.querying import RetrievalService
-from fasterrag.services.traces import TraceStore
 
 __all__ = [
     "AcceptingJobs",
@@ -86,15 +76,6 @@ def accepting_jobs(request: Request) -> JobRegistry:
     return jobs
 
 
-def build_embedding_router(settings: Settings) -> TieringRouter:
-    """Build a fresh embedding router.
-
-    Prefer :func:`shared_embedding_router` inside a request. This exists for the background
-    ingest path, whose work outlives the request that started it.
-    """
-    return create_embedding_router(settings)
-
-
 def shared_embedding_router(request: Request) -> TieringRouter:
     """Return the application's long-lived embedding router."""
     router: TieringRouter | None = getattr(request.app.state, "embeddings", None)
@@ -108,8 +89,7 @@ def shared_cache(request: Request) -> SemanticCache:
     """Return the application's long-lived semantic response cache."""
     cache: SemanticCache | None = getattr(request.app.state, "cache", None)
     if cache is None:
-        settings = request.app.state.settings
-        cache = SemanticCache(settings, create_semantic_store(settings))
+        cache = create_semantic_cache(request.app.state.settings)
         request.app.state.cache = cache
     return cache
 
@@ -132,75 +112,3 @@ CurrentCache = Annotated[SemanticCache, Depends(shared_cache)]
 JournalDep = Annotated[Journal, Depends(get_journal)]
 CurrentJobs = Annotated[JobRegistry, Depends(get_jobs)]
 AcceptingJobs = Annotated[JobRegistry, Depends(accepting_jobs)]
-
-
-def build_retrieval(
-    settings: Settings,
-    adapter: VectorDBAdapter,
-    router: TieringRouter,
-    tenant: str | None = None,
-) -> RetrievalService:
-    """Assemble hybrid retrieval, with reranking only when configuration asks for it.
-
-    The tenant is passed in rather than read here, so the one middleware that decided who
-    the caller is stays the only thing that decides it (``security.tenant_scoped_retrieval``).
-    """
-    reranker = CrossEncoderReranker(settings) if settings.retrieval.rerank else None
-    return RetrievalService(settings, adapter, router, reranker, tenant=tenant)
-
-
-def build_generation(
-    settings: Settings,
-    adapter: VectorDBAdapter,
-    router: TieringRouter,
-    cache: SemanticCache | None = None,
-    traces: TraceStore | None = None,
-    tenant: str | None = None,
-) -> GenerationService:
-    """Assemble the query path the CLI also assembles, so the two cannot diverge."""
-    return GenerationService(
-        settings,
-        build_retrieval(settings, adapter, router, tenant),
-        create_llm_adapter(settings),
-        cache=cache,
-        traces=traces,
-        tenant=tenant,
-        embedder=router.default,
-    )
-
-
-def build_documents(
-    settings: Settings,
-    adapter: VectorDBAdapter,
-    journal: Journal,
-    cache: SemanticCache | None,
-) -> DocumentService:
-    """Assemble document deletion over the application's adapter, journal and cache.
-
-    The cache is the application's, not a new one: invalidating a cache built for this
-    call would clear nothing a query will ever read.
-    """
-    return DocumentService(adapter, journal, cache=cache, locks=create_lock_store(settings))
-
-
-def build_ingestion(
-    settings: Settings,
-    adapter: VectorDBAdapter,
-    journal: Journal,
-    cache: SemanticCache | None,
-    *,
-    router: TieringRouter | None = None,
-) -> IngestionService:
-    """Assemble ingestion against the application's adapter.
-
-    The adapter is passed in rather than built, so a background job shares the connection
-    pool the request that started it was using instead of opening a second one.
-    """
-    return IngestionService(
-        settings,
-        journal=journal,
-        adapter=adapter,
-        router=router,
-        cache=cache,
-        locks=create_lock_store(settings),
-    )

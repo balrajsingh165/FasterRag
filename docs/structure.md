@@ -64,7 +64,8 @@ fasterRag/
 │       │   ├── doctor.py         # D10 preflight checks; gates provisioning
 │       │   ├── journal.py        # D3 checkpoints, dedup, DLQ; async over *_blocking twins
 │       │   ├── estimation.py     # D9 preflight token counts and projected cost
-│       │   ├── composition.py    # Composition root: the embedding router every entry point uses, cached when configured
+│       │   ├── composition.py    # Composition root: the service builders the API, CLI, facade and eval harness share
+│       │   ├── embedding_router.py # The embedding router every entry point uses, cached when configured
 │       │   ├── ingestion.py      # Job lifecycle: run both pools, checkpoint, settle
 │       │   ├── documents.py      # Delete one document: chunks, dedup tombstone, lockfile, cache
 │       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate

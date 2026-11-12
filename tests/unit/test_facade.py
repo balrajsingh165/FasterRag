@@ -1,4 +1,7 @@
 import inspect
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +14,8 @@ from fasterrag.errors import ConfigError, FasterRagError
 from fasterrag.facade import FasterRag
 from fasterrag.services import doctor
 from fasterrag.services.provisioning import ContainerState
+
+SOURCE_TREE = Path(fasterrag.__file__).resolve().parents[1]
 
 
 def settings() -> Settings:
@@ -78,6 +83,49 @@ def test_from_settings_touches_no_backend() -> None:
 
     assert rag.settings is not None
     assert not rag._started
+
+
+WITHOUT_THE_WEB_FRAMEWORK = """
+import asyncio
+import sys
+
+for blocked in ("fastapi", "starlette"):
+    sys.modules[blocked] = None
+
+from fasterrag import FasterRag
+from fasterrag.config.schema import Settings
+from fasterrag.services import composition, evaluation
+
+
+async def build() -> None:
+    async with FasterRag.from_settings(Settings.model_validate({})) as rag:
+        rag._retrieval()
+        rag._generation_service()
+
+
+asyncio.run(build())
+loaded = sorted(name for name in sys.modules if name.startswith("fasterrag.api"))
+assert not loaded, loaded
+print("built without fastapi")
+"""
+
+
+def test_the_facade_builds_its_services_without_the_web_framework(tmp_path: Path) -> None:
+    """The facade and services/evaluation.py imported their builders from api/ (TASK-0456)."""
+    environment = {**os.environ, "PYTHONPATH": str(SOURCE_TREE)}
+
+    child = subprocess.run(
+        [sys.executable, "-c", WITHOUT_THE_WEB_FRAMEWORK],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env=environment,
+        timeout=180,
+        check=False,
+    )
+
+    assert child.returncode == 0, child.stderr
+    assert "built without fastapi" in child.stdout
 
 
 def test_from_config_reports_a_missing_file_as_a_config_error(tmp_path: Path) -> None:
@@ -253,9 +301,7 @@ def started(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, list[list[str]]]:
             received.append(list(sources))
             return "settled"
 
-    monkeypatch.setattr(
-        "fasterrag.api.dependencies.build_ingestion", lambda *args, **kwargs: Recording()
-    )
+    monkeypatch.setattr("fasterrag.facade.build_ingestion", lambda *args, **kwargs: Recording())
     rag: Any = FasterRag.from_settings(Settings.model_validate({}))
     rag._started = True
     rag._vector_db = rag._journal = rag._cache = rag._embeddings = object()

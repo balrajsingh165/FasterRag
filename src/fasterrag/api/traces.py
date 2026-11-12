@@ -19,12 +19,11 @@ from fasterrag.api.dependencies import (
     CurrentSettings,
     CurrentTenant,
     CurrentVectorDB,
-    build_generation,
 )
 from fasterrag.api.schemas import ReplayRequest
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
-from fasterrag.services.composition import create_embedding_router
+from fasterrag.services.composition import build_generation, create_embedding_router
 from fasterrag.services.replay import replay_trace
 from fasterrag.services.traces import TraceStore, create_trace_store
 

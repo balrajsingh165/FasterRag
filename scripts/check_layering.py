@@ -145,12 +145,6 @@ As a *target* the package root is skipped. Importing any submodule already runs 
 # it needs down a layer. Keyed by module pair and never by line number: several people edit
 # this tree at once and a line-keyed waiver would excuse a different import within the hour.
 EXCEPTIONS: Final[dict[str, str]] = {
-    "fasterrag.facade -> fasterrag.api.dependencies": (
-        "TASK-0456 step 2: the service builders live in the REST layer"
-    ),
-    "fasterrag.services.evaluation -> fasterrag.api.dependencies": (
-        "TASK-0456 step 2: the service builders live in the REST layer"
-    ),
     "fasterrag.facade -> fasterrag.cli.sources": (
         "TASK-0456: directory expansion lives in the CLI; it belongs beside services/sources.py"
     ),
