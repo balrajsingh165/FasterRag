@@ -382,11 +382,6 @@ def test_layout_packs_following_blocks_against_the_chunk_it_is_filling() -> None
     assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 47), (47, 89)]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="TASK-0300: LayoutChunker never runs the packing pass, so a block larger than "
-    "chunk_size degrades to one chunk per separator occurrence",
-)
 def test_layout_packs_an_oversized_block_back_up_to_the_chunk_size() -> None:
     """Measured 2026-11-04: 121 chunks of ~50 characters where recursive produces 3 full ones."""
     budget = 768
@@ -398,6 +393,37 @@ def test_layout_packs_an_oversized_block_back_up_to_the_chunk_size() -> None:
     )
 
     assert min(chunk.token_count for chunk in chunks[1:-1]) > budget // 2
+
+
+def test_an_oversized_layout_block_chunks_like_the_recursive_baseline() -> None:
+    """TASK-0307: a 6,207-character heading-plus-paragraph document gave 101 layout chunks."""
+    prose = "The meal allowance is forty-one pounds per day for UK travel. " * 100
+    document = parse_markdown(("## Policy\n\n" + prose).encode())
+    counter = EstimatingTokenCounter()
+
+    layout = LayoutChunker(chunk_size=768, overlap=64, counter=counter).split(document)
+    recursive = RecursiveChunker(chunk_size=768, overlap=64, counter=counter).split(document)
+
+    assert len(document.text) == 6207
+    assert len(recursive) == 3
+    assert len(layout) <= len(recursive) + 1
+    assert sum(len(chunk.text) for chunk in layout) < 1.2 * len(document.text)
+    assert layout[0].text.startswith("Policy\n\nThe meal allowance")
+
+
+def test_layout_packs_a_document_with_no_blocks_like_the_recursive_baseline() -> None:
+    """TASK-0307: the no-blocks fallback split 3,000 words into 3,000 one-word chunks."""
+    text = " ".join(["word"] * 3000)
+    document = ParsedDocument(text=text, blocks=(), mime_type="text/plain", parser="test")
+    counter = EstimatingTokenCounter()
+
+    layout = LayoutChunker(chunk_size=768, overlap=64, counter=counter).split(document)
+    recursive = RecursiveChunker(chunk_size=768, overlap=64, counter=counter).split(document)
+
+    assert len(layout) == 5
+    assert [(chunk.start, chunk.end) for chunk in layout] == [
+        (chunk.start, chunk.end) for chunk in recursive
+    ]
 
 
 def test_an_injected_counter_reaches_the_chunker_the_factory_builds() -> None:
