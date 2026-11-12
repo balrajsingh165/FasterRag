@@ -2,7 +2,6 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 
-import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -111,8 +110,8 @@ class SettlingClient(TestClient):
     here keeps each test a sequence of settled steps while still running the real registry.
     """
 
-    def request(self, *args: Any, **kwargs: Any) -> httpx.Response:
-        response: httpx.Response = super().request(*args, **kwargs)
+    def request(self, *args: Any, **kwargs: Any) -> Any:
+        response = super().request(*args, **kwargs)
         portal = self.portal
         assert portal is not None, "use the client as a context manager, so one loop is shared"
         portal.call(cast(FastAPI, self.app).state.jobs.idle)
