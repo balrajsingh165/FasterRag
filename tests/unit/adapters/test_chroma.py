@@ -8,8 +8,12 @@ flattening that scalar-only metadata forces, and the BM25 ranking the adapter ha
 itself because Chroma has no corpus-rarity primitive.
 """
 
+import asyncio
 import re
-from typing import Any
+import threading
+import time
+from collections.abc import AsyncIterator
+from typing import Any, cast
 
 import pytest
 from chromadb import errors as chroma_errors
@@ -28,7 +32,7 @@ from fasterrag.adapters.vectordb.chroma import (
     to_chroma_where,
 )
 from fasterrag.config.schema import Settings
-from fasterrag.errors import EmbedError, ErrorCode, FasterRagError
+from fasterrag.errors import EmbedError, ErrorCode, FasterRagError, ProviderError
 
 CHROMA_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,510}[a-zA-Z0-9]$")
 
@@ -331,3 +335,121 @@ class TestWriteGuards:
         ]
 
         ChromaAdapter._require_sparse_index(described(sparse=True), batch)
+
+
+TIMEOUT_MS = 100
+"""The smallest budget ``reliability.timeouts.vector_db_ms`` accepts."""
+
+BOUND_SECONDS = 2.0
+CEILING_SECONDS = 30.0
+
+
+class BlockingClient:
+    """A Chroma client whose every call blocks until the test lets it go."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.running = 0
+        self.peak = 0
+        self._count = threading.Lock()
+
+    def _block(self) -> None:
+        with self._count:
+            self.running += 1
+            self.peak = max(self.peak, self.running)
+        try:
+            self.release.wait(CEILING_SECONDS)
+        finally:
+            with self._count:
+                self.running -= 1
+
+    def heartbeat(self) -> int:
+        self._block()
+        return 0
+
+    def list_collections(self) -> list[Any]:
+        self._block()
+        return []
+
+
+@pytest.fixture
+async def blocked() -> AsyncIterator[tuple[ChromaAdapter, BlockingClient]]:
+    """An adapter over a client that never returns until the test ends."""
+    subject = ChromaAdapter(
+        Settings.model_validate(
+            {
+                "vector_db": {"provider": "chroma", "chroma": {"path": ".fasterrag/unit"}},
+                "reliability": {"timeouts": {"vector_db_ms": TIMEOUT_MS}},
+            }
+        )
+    )
+    client = BlockingClient()
+    subject._client = cast(Any, client)
+    try:
+        yield subject, client
+    finally:
+        client.release.set()
+        await drained(client)
+
+
+async def drained(client: BlockingClient) -> None:
+    """Wait for every blocked thread to return, so no slot is released after the loop closes."""
+    for _ in range(200):
+        if client.running == 0:
+            break
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.05)
+
+
+class TestCallTimeout:
+    """Embedded Chroma had no timeout at all (TASK-0476); the four networked adapters do."""
+
+    async def test_a_blocked_call_fails_typed_and_retryable_within_the_budget(
+        self, blocked: tuple[ChromaAdapter, BlockingClient]
+    ) -> None:
+        """A wedged Chroma call used to hold its caller for as long as Chroma held the thread."""
+        subject, _ = blocked
+        started = time.perf_counter()
+
+        with pytest.raises(ProviderError) as raised:
+            await asyncio.wait_for(subject.list_collections(), CEILING_SECONDS)
+
+        assert time.perf_counter() - started < BOUND_SECONDS
+        assert raised.value.code is ErrorCode.EMBED_PROVIDER_ERROR
+        assert raised.value.retryable is True
+        assert "reliability.timeouts.vector_db_ms" in raised.value.detail
+
+    async def test_a_blocked_heartbeat_reports_unhealthy_rather_than_hanging(
+        self, blocked: tuple[ChromaAdapter, BlockingClient]
+    ) -> None:
+        subject, _ = blocked
+
+        status = await asyncio.wait_for(subject.health(), CEILING_SECONDS)
+
+        assert status.healthy is False
+        assert "vector_db_ms" in (status.detail or "")
+
+    async def test_timed_out_calls_cannot_take_the_shared_thread_pool(
+        self, blocked: tuple[ChromaAdapter, BlockingClient]
+    ) -> None:
+        """A thread cannot be cancelled, so the bound is on how many may be held at once."""
+        subject, client = blocked
+        calls = [subject.health() for _ in range(20)]
+
+        statuses = await asyncio.wait_for(asyncio.gather(*calls), CEILING_SECONDS)
+
+        assert not any(status.healthy for status in statuses)
+        assert client.peak <= 4
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 5) == "free"
+
+    async def test_a_slot_comes_back_when_the_thread_returns(
+        self, blocked: tuple[ChromaAdapter, BlockingClient]
+    ) -> None:
+        """The slot is freed by the thread finishing, not by the caller giving up."""
+        subject, client = blocked
+        await asyncio.gather(*(subject.health() for _ in range(4)))
+
+        client.release.set()
+        await drained(client)
+
+        assert (await subject.health()).healthy is True

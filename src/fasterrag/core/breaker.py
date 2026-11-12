@@ -13,6 +13,14 @@ Three states, per the specification:
 * **half-open** — one probe is allowed through. It closes the breaker if it succeeds and
   re-opens it if it does not, so recovery costs one request rather than a flood.
 
+**Admissions are tokens** (TASK-0450). ``check`` returns an :class:`Admission` carrying the
+state generation it was issued in, and ``record_success`` / ``record_failure`` take it back.
+Every state change starts a new generation, so the outcome of a call admitted before the
+circuit opened — a late success above all — cannot close a circuit it never tested. In
+half-open exactly one admission is issued; every other caller is refused until it resolves.
+A probe whose caller never reports back (cancelled, crashed) is not waited on forever: its
+lease lapses after ``reset_timeout_ms`` and the next caller becomes the probe.
+
 **Only retryable failures count.** A 401 is a configuration error that will fail identically
 forever, and opening a breaker on it would turn a permanent misconfiguration into an
 intermittent one that appears to heal every ``reset_timeout_ms``. A breaker exists to protect
@@ -21,6 +29,7 @@ against a provider that is *temporarily* unwell.
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from enum import IntEnum
@@ -32,6 +41,7 @@ from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger
 
 __all__ = [
+    "Admission",
     "CircuitBreaker",
     "CircuitOpenError",
     "CircuitState",
@@ -67,6 +77,13 @@ class CircuitOpenError(FasterRagError):
         self.retry_after_seconds = retry_after_seconds
 
 
+@dataclass(frozen=True)
+class Admission:
+    """Permission for one call, valid only in the state generation that issued it."""
+
+    generation: int
+
+
 @dataclass
 class CircuitBreaker:
     """Tracks one provider's health and refuses traffic while it is open."""
@@ -81,14 +98,18 @@ class CircuitBreaker:
         self._state = CircuitState.CLOSED
         self._failures = 0
         self._opened_at = 0.0
+        self._generation = 0
+        self._probe_issued_at: float | None = None
+        self._lock = threading.RLock()
         self._publish()
 
     @property
     def state(self) -> CircuitState:
         """Return the current state, opening into half-open once the timeout has passed."""
-        if self._state is CircuitState.OPEN and self._elapsed_ms() >= self.reset_timeout_ms:
-            self._transition(CircuitState.HALF_OPEN)
-        return self._state
+        with self._lock:
+            if self._state is CircuitState.OPEN and self._elapsed_ms() >= self.reset_timeout_ms:
+                self._transition(CircuitState.HALF_OPEN)
+            return self._state
 
     @property
     def is_open(self) -> bool:
@@ -110,6 +131,8 @@ class CircuitBreaker:
 
         previous = self._state
         self._state = state
+        self._generation += 1
+        self._probe_issued_at = None
         if state is CircuitState.OPEN:
             self._opened_at = time.monotonic()
         self._publish()
@@ -124,53 +147,84 @@ class CircuitBreaker:
             },
         )
 
-    def check(self) -> None:
-        """Refuse the call when the breaker is open.
+    def check(self) -> Admission:
+        """Admit one call and return its token, or refuse it while the provider is shed.
 
         Raises:
-            CircuitOpenError: If the provider is currently being shed.
+            CircuitOpenError: If the circuit is open, or half-open with its probe outstanding.
         """
-        if not self.enabled:
+        with self._lock:
+            if not self.enabled:
+                return Admission(self._generation)
+
+            state = self.state
+            if state is CircuitState.CLOSED:
+                return Admission(self._generation)
+
+            if state is CircuitState.OPEN:
+                remaining = max(self.reset_timeout_ms - self._elapsed_ms(), 0.0)
+                raise CircuitOpenError(self.provider, remaining / _MILLISECONDS)
+
+            now = time.monotonic()
+            if self._probe_issued_at is not None:
+                held_ms = (now - self._probe_issued_at) * _MILLISECONDS
+                # CRITICAL: the probe's admission is a lease, not a lock. A probe whose caller
+                # is cancelled never reports back, and a slot held until it did would refuse
+                # every call forever; after `reset_timeout_ms` the next caller probes instead.
+                if held_ms < self.reset_timeout_ms:
+                    remaining = (self.reset_timeout_ms - held_ms) / _MILLISECONDS
+                    raise CircuitOpenError(self.provider, remaining)
+            self._probe_issued_at = now
+            return Admission(self._generation)
+
+    def record_success(self, admission: Admission | None) -> None:
+        """Note a call that worked, closing the breaker if it was admitted in this state."""
+        if admission is None:
             return
 
-        if self.state is CircuitState.OPEN:
-            remaining = max(self.reset_timeout_ms - self._elapsed_ms(), 0.0) / _MILLISECONDS
-            raise CircuitOpenError(self.provider, remaining)
+        with self._lock:
+            if admission.generation != self._generation:
+                return
+            self._failures = 0
+            self._transition(CircuitState.CLOSED)
 
-    def record_success(self) -> None:
-        """Note a call that worked, closing the breaker and clearing the failure count."""
-        self._failures = 0
-        self._transition(CircuitState.CLOSED)
+    def record_failure(
+        self, admission: Admission | None, error: FasterRagError | None = None
+    ) -> None:
+        """Note a failed call, opening the breaker once the threshold is reached.
 
-    def record_failure(self, error: FasterRagError | None = None) -> None:
-        """Note a call that failed, opening the breaker once the threshold is reached."""
-        if not self.enabled:
+        A call ``check`` refused has no admission; passing ``None`` for it records nothing.
+        """
+        if not self.enabled or admission is None:
             return
 
         if error is not None and not error.retryable:
             return
 
-        # CRITICAL: `self.state`, not `self._state`. The half-open transition is lazy — it
-        # happens when the state is *read* — so consulting the raw field here would miss a
-        # breaker whose timeout has expired but which nothing has looked at yet. It would
-        # then fall through to the counter below, leave `_opened_at` stale, and half-open
-        # again on the very next call: one probe admitted per call instead of per timeout.
-        current = self.state
+        with self._lock:
+            # CRITICAL: `self.state`, not `self._state`. The half-open transition is lazy — it
+            # happens when the state is *read* — so consulting the raw field here would miss a
+            # breaker whose timeout has expired but which nothing has looked at yet. It would
+            # then fall through to the counter below, leave `_opened_at` stale, and half-open
+            # again on the very next call: one probe admitted per call instead of per timeout.
+            current = self.state
+            if admission.generation != self._generation:
+                return
 
-        if current is CircuitState.HALF_OPEN:
-            self._opened_at = time.monotonic()
-            self._transition(CircuitState.OPEN)
-            return
+            if current is CircuitState.HALF_OPEN:
+                self._transition(CircuitState.OPEN)
+                return
 
-        self._failures += 1
-        if self._failures >= self.failure_threshold:
-            self._transition(CircuitState.OPEN)
+            self._failures += 1
+            if self._failures >= self.failure_threshold:
+                self._transition(CircuitState.OPEN)
 
     def reset(self) -> None:
         """Force the breaker closed. For tests and for an operator-driven recovery."""
-        self._failures = 0
-        self._opened_at = 0.0
-        self._transition(CircuitState.CLOSED)
+        with self._lock:
+            self._failures = 0
+            self._opened_at = 0.0
+            self._transition(CircuitState.CLOSED)
 
 
 _SHARED: Final[dict[tuple[object, ...], CircuitBreaker]] = {}

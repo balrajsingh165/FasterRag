@@ -135,6 +135,7 @@ reliability:
     vector_db_ms: 5000
     embeddings_ms: 30000
     llm_ms: 120000
+    redis_ms: 1000
   retries:
     max_attempts: 3
     backoff_base_ms: 250

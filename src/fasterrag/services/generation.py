@@ -64,7 +64,7 @@ from typing import Any, Final
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
 from fasterrag.adapters.llm.base import Completion, LLMAdapter
 from fasterrag.config.schema import GenerationSettings, Settings
-from fasterrag.core.breaker import CircuitBreaker, shared_breaker
+from fasterrag.core.breaker import Admission, CircuitBreaker, shared_breaker
 from fasterrag.core.cache.semantic import MISS, CacheHit, SemanticCache
 from fasterrag.core.chunking.models import EstimatingTokenCounter, TokenCounter
 from fasterrag.core.context import AssembledContext, Citation, Span, assemble_context
@@ -834,12 +834,13 @@ class GenerationService:
         sent = False
         parts: list[str] = []
         started = time.perf_counter()
+        admission: Admission | None = None
         try:
             # CRITICAL: inside the try, so an open circuit takes the same route a live
             # provider failure takes. `CircuitOpenError` is retryable by construction, which
             # makes shedding load a rung on the degradation ladder rather than a 503 — the
             # behaviour FMEA row 20 describes as "retries → breaker opens → extractive".
-            self.breaker.check()
+            admission = self.breaker.check()
             if streaming:
                 async for delta in self.llm.stream(prepared.prompt, system=P1_SYSTEM_PROMPT):
                     if not parts:
@@ -859,7 +860,7 @@ class GenerationService:
             else:
                 completion = await self.llm.complete(prepared.prompt, system=P1_SYSTEM_PROMPT)
         except FasterRagError as exc:
-            self.breaker.record_failure(exc)
+            self.breaker.record_failure(admission, exc)
             # CRITICAL: only a retryable failure is a rung on the degradation ladder. A
             # rejected key, an unknown model, or a missing provider extra will never succeed
             # on a retry, so degrading one would answer every query extractively forever
@@ -892,7 +893,7 @@ class GenerationService:
             yield _Completed(answer=degraded)
             return
 
-        self.breaker.record_success()
+        self.breaker.record_success(admission)
         generate_ms = int((time.perf_counter() - started) * 1000)
         timings["generate"] = generate_ms
         self._record_generation(generate_ms, completion.prompt_tokens, completion.completion_tokens)

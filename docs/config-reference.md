@@ -142,6 +142,7 @@ reliability:
     vector_db_ms: 5000
     embeddings_ms: 30000
     llm_ms: 120000
+    redis_ms: 1000
   retries:
     max_attempts: 3
     backoff_base_ms: 250
@@ -409,6 +410,7 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | `reliability.timeouts.vector_db_ms` | int | `5000` | ≥ 100 | Timeout for every vector-DB call. Every external interaction MUST have an explicit timeout. |
 | `reliability.timeouts.embeddings_ms` | int | `30000` | ≥ 100 | Timeout per embedding batch call. |
 | `reliability.timeouts.llm_ms` | int | `120000` | ≥ 1000 | Timeout per LLM call (streaming: per-connection). |
+| `reliability.timeouts.redis_ms` | int | `1000` | ≥ 10 | Socket and connect timeout for every Redis client — the `redis` cache backends and the `redis` rate limiter — so one Redis call waits at most this long for a connection and at most this long for a reply. A Redis that accepts connections and never answers then degrades exactly as a stopped one does: the cache misses, and the limiter serves the request unthrottled with a `WARNING` (TASK-0453). |
 | `reliability.retries.max_attempts` | int | `3` | 0–10 | Retries on errors flagged `retryable` only. |
 | `reliability.retries.backoff_base_ms` | int | `250` | ≥ 1 | Exponential backoff base. |
 | `reliability.retries.backoff_max_ms` | int | `10000` | ≥ `backoff_base_ms` | Backoff ceiling. |

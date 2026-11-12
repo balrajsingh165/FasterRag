@@ -234,14 +234,14 @@ class RetrievalService:
         # provider behind the wrong gauge.
         vector = await self.router.default.embed_query(text)
 
-        self.breaker.check()
+        admission = self.breaker.check()
         try:
             legs = await self._execute_legs(vector, text, collection, candidates, filters)
         except FasterRagError as exc:
-            self.breaker.record_failure(exc)
+            self.breaker.record_failure(admission, exc)
             raise
 
-        self.breaker.record_success()
+        self.breaker.record_success(admission)
         return legs
 
     async def _execute_legs(

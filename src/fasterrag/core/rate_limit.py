@@ -47,13 +47,19 @@ untested claim. ``tests/integration/test_redis_rate_limit_server.py`` closes it 
 server-side ``EXPIRE``, the shared ceiling, the per-identity split and the fingerprinted
 key all hold, and one case drives the same decisions through both the server and
 ``FakeAsyncRedis`` and finds **no divergence**. What is still untested, and keeps TASK-0290
-open: timeouts, resets, partitions, failover and pool exhaustion, so the fail-open path
-below is still reachable only by injecting an error; and replicas sharing one ceiling
+open: resets, partitions, failover and pool exhaustion; and replicas sharing one ceiling
 across *processes*, which is the topology this backend exists for.
 
+**A hung server fails open as a dead one does** (TASK-0453). The client is bounded by
+``reliability.timeouts.redis_ms``, the options shared with ``fasterrag.core.cache.redis``
+through ``bounded_client_options``; without them a server that accepted the connection and
+never answered held every authenticated request for as long as the installed redis-py
+allowed — indefinitely on the 5.x releases ``pyproject.toml`` admits.
+``tests/unit/core/test_redis_timeouts.py`` drives the fail-open path over a real socket that
+accepts and never replies.
+
 The connection handling deliberately mirrors ``fasterrag.core.cache.redis``: same optional
-import, same ``ConfigError`` when the extra is missing, same ``from_url``. Folding the two
-into one shared helper is the obvious next step and belongs to whoever may edit both files.
+import, same ``ConfigError`` when the extra is missing, same ``from_url``.
 """
 
 from __future__ import annotations
@@ -66,6 +72,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from fasterrag.config.schema import Settings
+from fasterrag.core.cache.redis import DEFAULT_REDIS_TIMEOUT_MS, bounded_client_options
 from fasterrag.errors import ConfigError
 from fasterrag.observability.logging import current_trace_id, get_logger
 
@@ -168,6 +175,7 @@ class RedisRateLimiter(RateLimiter):
         namespace: str = RATE_LIMIT_NAMESPACE,
         setting: str = _BACKEND_SETTING,
         client: Any | None = None,
+        timeout_ms: int = DEFAULT_REDIS_TIMEOUT_MS,
     ) -> None:
         """Count ``limit`` requests per window against the Redis server at ``url``."""
         self.limit = limit
@@ -191,7 +199,7 @@ class RedisRateLimiter(RateLimiter):
             return
 
         try:
-            self._client = Redis.from_url(url)
+            self._client = Redis.from_url(url, **bounded_client_options(timeout_ms))
         except ValueError as exc:
             raise ConfigError(
                 f"{setting} is 'redis' but security.rate_limit_redis_url could not be parsed: {exc}"
@@ -244,4 +252,8 @@ def create_rate_limiter(settings: Settings) -> RateLimiter:
     limit = settings.security.rate_limit_per_minute
     if settings.security.rate_limit_backend == "memory":
         return InProcessRateLimiter(limit)
-    return RedisRateLimiter(settings.security.rate_limit_redis_url, limit=limit)
+    return RedisRateLimiter(
+        settings.security.rate_limit_redis_url,
+        limit=limit,
+        timeout_ms=settings.reliability.timeouts.redis_ms,
+    )

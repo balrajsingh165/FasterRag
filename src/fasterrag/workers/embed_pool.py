@@ -33,7 +33,7 @@ from typing import Protocol, cast, runtime_checkable
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.config.schema import Settings
-from fasterrag.core.breaker import CircuitBreaker, CircuitOpenError, shared_breaker
+from fasterrag.core.breaker import Admission, CircuitBreaker, CircuitOpenError, shared_breaker
 from fasterrag.core.chunking.models import Segment
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError
 from fasterrag.observability import metrics
@@ -263,11 +263,12 @@ class EmbeddingWorkerPool:
         )
 
         for attempt in range(attempts + 1):
+            admission: Admission | None = None
             try:
                 # CRITICAL: checked inside the retry loop, not before it. A breaker that
                 # opens mid-batch must stop the *remaining* attempts — checking once at the
                 # top would spend the whole retry budget on a provider already known dead.
-                self.breaker.check()
+                admission = self.breaker.check()
                 result = (
                     await self._embed_pooled(cast(PoolingAdapter, adapter), documents)
                     if documents
@@ -276,7 +277,7 @@ class EmbeddingWorkerPool:
             except FasterRagError as exc:
                 last = exc
                 if not isinstance(exc, CircuitOpenError):
-                    self.breaker.record_failure(exc)
+                    self.breaker.record_failure(admission, exc)
                 if not exc.retryable or attempt == attempts or self.breaker.is_open:
                     break
 
@@ -295,7 +296,7 @@ class EmbeddingWorkerPool:
                 await asyncio.sleep(delay)
                 continue
 
-            self.breaker.record_success()
+            self.breaker.record_success(admission)
             self._charge(adapter, ordered, result)
             self.report.embedded += len(group)
             self.report.batches += 1

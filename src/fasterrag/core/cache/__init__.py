@@ -32,7 +32,12 @@ from fasterrag.core.cache.embedding import (
     PoolingCachingEmbeddingAdapter,
     cache_embeddings,
 )
-from fasterrag.core.cache.redis import EMBEDDING_NAMESPACE, SEMANTIC_NAMESPACE, RedisStore
+from fasterrag.core.cache.redis import (
+    DEFAULT_REDIS_TIMEOUT_MS,
+    EMBEDDING_NAMESPACE,
+    SEMANTIC_NAMESPACE,
+    RedisStore,
+)
 from fasterrag.core.cache.semantic import CacheHit, SemanticCache, cosine_similarity
 from fasterrag.core.cache.stats import CacheStats
 from fasterrag.core.cache.store import (
@@ -80,6 +85,7 @@ def _create(
     redis_url: str,
     namespace: str,
     root: Path | None = None,
+    redis_timeout_ms: int = DEFAULT_REDIS_TIMEOUT_MS,
 ) -> CacheStore:
     """Return the store ``backend`` names, holding at most ``maximum_entries`` entries."""
     if backend == "memory":
@@ -92,6 +98,7 @@ def _create(
         namespace=namespace,
         maximum_entries=maximum_entries,
         setting=setting,
+        timeout_ms=redis_timeout_ms,
     )
 
 
@@ -104,6 +111,7 @@ def create_embedding_store(settings: Settings) -> CacheStore:
         settings.embeddings.cache.redis_url,
         EMBEDDING_NAMESPACE,
         EMBEDDING_CACHE_ROOT,
+        redis_timeout_ms=settings.reliability.timeouts.redis_ms,
     )
 
 
@@ -115,4 +123,5 @@ def create_semantic_store(settings: Settings) -> CacheStore:
         settings.cache.max_entries,
         settings.cache.redis_url,
         SEMANTIC_NAMESPACE,
+        redis_timeout_ms=settings.reliability.timeouts.redis_ms,
     )

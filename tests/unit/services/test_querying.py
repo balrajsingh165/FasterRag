@@ -478,9 +478,11 @@ async def test_a_recovered_backend_clears_the_failure_count() -> None:
     """Failing, succeeding, then failing again against a threshold of two must stay closed."""
     service, _ = build()
     service.breaker.failure_threshold = 2
-    service.breaker.record_failure(RetrievalError("blip", retryable=True))
+    service.breaker.record_failure(service.breaker.check(), RetrievalError("blip", retryable=True))
 
     await service.search("what is the notice period")
-    service.breaker.record_failure(RetrievalError("another blip", retryable=True))
+    service.breaker.record_failure(
+        service.breaker.check(), RetrievalError("another blip", retryable=True)
+    )
 
     assert service.breaker.is_open is False
