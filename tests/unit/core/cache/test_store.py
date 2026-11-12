@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -313,3 +314,218 @@ async def test_a_disk_miss_is_not_logged_as_an_unreadable_entry(
         assert await store.get_many(["never-written", "nor-this"]) == [None, None]
 
     assert [record for record in caplog.records if record.name.startswith("fasterrag")] == []
+
+
+def entries_on_disk(root: Path) -> int:
+    return len(list(root.glob("*.bin")))
+
+
+def counting_scans(store: DiskStore, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record every pass the store makes over its directory, by how many entries it saw."""
+    scans: list[int] = []
+    real = store._scan
+
+    def counted() -> list[tuple[int, str]]:
+        found = real()
+        scans.append(len(found))
+        return found
+
+    monkeypatch.setattr(store, "_scan", counted)
+    return scans
+
+
+async def test_the_disk_store_is_at_or_under_its_ceiling_after_every_write(tmp_path: Path) -> None:
+    """The bound that per-write eviction gave must survive eviction becoming occasional."""
+    store = DiskStore(tmp_path, maximum_entries=20)
+    most = 0
+
+    for index in range(300):
+        await store.set(f"k{index}", b"v")
+        most = max(most, entries_on_disk(tmp_path))
+
+    assert most == 20
+
+
+@pytest.mark.parametrize("batch", [1, 7, 20, 21, 64])
+async def test_the_disk_store_is_at_or_under_its_ceiling_after_every_batch(
+    tmp_path: Path, batch: int
+) -> None:
+    store = DiskStore(tmp_path, maximum_entries=20)
+
+    for start in range(0, 320, batch):
+        await store.set_many({f"k{index}": b"v" for index in range(start, start + batch)})
+
+        assert entries_on_disk(tmp_path) <= 20
+
+
+async def test_the_disk_store_does_not_list_its_directory_on_every_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every write listed, stat-ed and sorted the whole cache to see if it was over."""
+    store = DiskStore(tmp_path, maximum_entries=100)
+    scans = counting_scans(store, monkeypatch)
+
+    for index in range(1000):
+        await store.set(f"k{index}", b"v")
+
+    assert len(scans) <= 1000 // 10
+    assert max(scans) <= 101
+    assert entries_on_disk(tmp_path) <= 100
+
+
+async def test_writes_under_the_ceiling_list_the_directory_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One pass to learn what an earlier process left behind, and none after it."""
+    store = DiskStore(tmp_path, maximum_entries=1000)
+    scans = counting_scans(store, monkeypatch)
+
+    for index in range(200):
+        await store.set(f"k{index}", b"v")
+    await store.set_many({f"batch{index}": b"v" for index in range(200)})
+
+    assert scans == [1]
+    assert entries_on_disk(tmp_path) == 400
+
+
+async def test_replacing_entries_at_a_full_ceiling_never_lists_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rewrite adds no file, so it must not be counted as one and trigger a pass."""
+    store = DiskStore(tmp_path, maximum_entries=5)
+    await store.set_many({f"k{index}": b"old" for index in range(5)})
+    scans = counting_scans(store, monkeypatch)
+
+    for _ in range(50):
+        await store.set_many({f"k{index}": b"new" for index in range(5)})
+
+    assert scans == []
+    assert await store.get_many([f"k{index}" for index in range(5)]) == [b"new"] * 5
+
+
+async def test_an_eviction_frees_headroom_below_the_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Evicting to the ceiling itself would put the very next write over it again."""
+    store = DiskStore(tmp_path, maximum_entries=100)
+    await store.set_many({f"k{index}": b"v" for index in range(100)})
+    scans = counting_scans(store, monkeypatch)
+
+    await store.set("one-too-many", b"v")
+    after_eviction = entries_on_disk(tmp_path)
+    for index in range(10):
+        await store.set(f"room{index}", b"v")
+
+    assert after_eviction == 90
+    assert scans == [101]
+    assert entries_on_disk(tmp_path) == 100
+
+
+async def test_eviction_removes_the_least_recently_written_entries(tmp_path: Path) -> None:
+    store = DiskStore(tmp_path, maximum_entries=10)
+    for index in range(10):
+        await store.set(f"k{index}", b"v")
+        os.utime(store._path(f"k{index}"), (1_000_000 + index, 1_000_000 + index))
+
+    await store.set("newest", b"v")
+
+    survivors = await store.get_many([f"k{index}" for index in range(10)])
+    assert survivors == [None, None] + [b"v"] * 8
+    assert await store.get("newest") == b"v"
+
+
+async def test_a_new_instance_over_a_full_directory_still_honours_the_ceiling(
+    tmp_path: Path,
+) -> None:
+    """A count that started from zero in each process would let every restart add a ceiling."""
+    earlier = DiskStore(tmp_path, maximum_entries=5)
+    await earlier.set_many({f"k{index}": b"v" for index in range(5)})
+    for index in range(5):
+        os.utime(earlier._path(f"k{index}"), (1_000_000 + index, 1_000_000 + index))
+
+    restarted = DiskStore(tmp_path, maximum_entries=5)
+    await restarted.set("after-restart", b"v")
+
+    assert entries_on_disk(tmp_path) == 5
+    assert await restarted.get("after-restart") == b"v"
+
+
+async def test_a_lowered_ceiling_trims_an_existing_directory_on_the_first_write(
+    tmp_path: Path,
+) -> None:
+    await DiskStore(tmp_path).set_many({f"k{index}": b"v" for index in range(30)})
+
+    await DiskStore(tmp_path, maximum_entries=4).set("k0", b"rewritten")
+
+    assert entries_on_disk(tmp_path) == 4
+
+
+async def test_clearing_forgets_the_count_as_well_as_the_files(tmp_path: Path) -> None:
+    """A count left at the ceiling after a clear would evict from an empty directory."""
+    store = DiskStore(tmp_path, maximum_entries=5)
+    await store.set_many({f"old{index}": b"v" for index in range(5)})
+    await store.clear()
+
+    await store.set_many({f"new{index}": b"v" for index in range(5)})
+
+    assert await store.get_many([f"new{index}" for index in range(5)]) == [b"v"] * 5
+
+
+async def test_concurrent_writers_end_at_or_under_the_ceiling(tmp_path: Path) -> None:
+    """Several embedding workers write at once; the count must not lose any of them."""
+    store = DiskStore(tmp_path, maximum_entries=10)
+
+    await asyncio.gather(
+        *(store.set_many({f"w{worker}-{n}": b"v" for n in range(8)}) for worker in range(12))
+    )
+
+    assert entries_on_disk(tmp_path) <= 10
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+async def test_files_that_are_not_entries_are_neither_counted_nor_evicted(tmp_path: Path) -> None:
+    store = DiskStore(tmp_path, maximum_entries=3)
+    (tmp_path / "embedding").mkdir()
+    (tmp_path / "notes.txt").write_text("not a cache entry")
+
+    for index in range(10):
+        await store.set(f"k{index}", b"v")
+
+    assert entries_on_disk(tmp_path) == 3
+    assert (tmp_path / "notes.txt").exists()
+    assert (tmp_path / "embedding").is_dir()
+
+
+async def test_an_entry_that_cannot_be_evicted_is_reported_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Another process holding a file open must cost an entry of headroom, not the write."""
+    store = DiskStore(tmp_path, maximum_entries=3)
+    await store.set_many({f"k{index}": b"v" for index in range(3)})
+
+    def refuse(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError("the file is in use by another process")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    with caplog.at_level(logging.WARNING):
+        await store.set("one-too-many", b"v")
+
+    assert await store.get("one-too-many") == b"v"
+    assert "cache entry could not be removed" in caplog.text
+
+
+async def test_an_expired_entry_that_cannot_be_removed_is_still_a_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unlink ran unguarded, so a locked file turned a miss into a failed lookup."""
+    store = DiskStore(tmp_path)
+    await store.set("k", b"value", ttl=1)
+    time.sleep(1.05)
+
+    def refuse(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError("the file is in use by another process")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+    assert await store.get("k") is None
+    assert await store.get_many(["k"]) == [None]
