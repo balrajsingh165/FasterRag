@@ -2454,6 +2454,11 @@ Only boundary-affecting keys are included. Contextual enrichment is *not* one of
     it changes a chunk's embedded text but not where the chunk starts and ends, so
     toggling it must not renumber every chunk in the corpus.
 
+    The semantic strategy also places boundaries by `chunking.semantic_percentile` and by
+    the embedding model that measures sentence similarity (`embeddings.model`), so both
+    are hashed — for that strategy only (TASK-0431). Every other strategy hashes exactly
+    the three keys it always did, so its chunk ids did not move.
+
 ## `src/fasterrag/core/parsing/__init__.py`
 
 ### `parse_bytes`

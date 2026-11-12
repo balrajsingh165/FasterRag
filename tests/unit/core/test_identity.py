@@ -86,6 +86,44 @@ def test_the_chunker_hash_tracks_boundary_settings() -> None:
     )
 
 
+PINNED_CHUNKER_HASHES = {
+    "fixed": "b0a393bd78dc48cf224735a3221d81c39a39bb476324047ce22de01b15bb3bea",
+    "recursive": "8eecc3e9612127e8472f8afae573e63541ec9734149b7803c2115c67fed36890",
+    "layout": "b56ef0b1c9f662b06a34f319994e15b447ec791f7688d268f76b8e6ce6d03f68",
+    "late": "9db9514f1fb2fc1b9000b39fec1d6fbd7f916f46a88cdc2ab8482c7f229a1ac8",
+}
+
+
+@pytest.mark.parametrize("strategy", sorted(PINNED_CHUNKER_HASHES))
+def test_chunk_ids_of_every_other_strategy_are_unchanged(strategy: str) -> None:
+    """Hashing the semantic settings must not renumber a single chunk of another strategy."""
+    configured = Settings.model_validate(
+        {
+            "chunking": {"strategy": strategy, "semantic_percentile": 0.6},
+            "embeddings": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+        }
+    )
+
+    assert chunker_config_hash(configured) == PINNED_CHUNKER_HASHES[strategy]
+
+
+def test_the_semantic_hash_covers_the_percentile_and_the_sentence_model() -> None:
+    """Semantic boundaries moved with either setting while every chunk id stayed the same."""
+    baseline = chunker_config_hash(Settings.model_validate({"chunking": {"strategy": "semantic"}}))
+    percentile = Settings.model_validate(
+        {"chunking": {"strategy": "semantic", "semantic_percentile": 0.6}}
+    )
+    model = Settings.model_validate(
+        {
+            "chunking": {"strategy": "semantic"},
+            "embeddings": {"model": "sentence-transformers/all-MiniLM-L6-v2"},
+        }
+    )
+
+    assert chunker_config_hash(percentile) != baseline
+    assert chunker_config_hash(model) != baseline
+
+
 def test_enrichment_does_not_renumber_chunks() -> None:
     enriched = Settings.model_validate({"chunking": {"contextual_enrichment": True}})
 

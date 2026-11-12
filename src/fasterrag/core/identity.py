@@ -163,15 +163,15 @@ def _stable(payload: dict[str, Any]) -> str:
 def chunker_config_hash(settings: Settings) -> str:
     """Return a hash of the settings that change chunk boundaries."""
     chunking = settings.chunking
-    return _digest(
-        _stable(
-            {
-                "strategy": chunking.strategy,
-                "chunk_size": chunking.chunk_size,
-                "overlap": chunking.overlap,
-            }
-        )
-    )
+    covered: dict[str, Any] = {
+        "strategy": chunking.strategy,
+        "chunk_size": chunking.chunk_size,
+        "overlap": chunking.overlap,
+    }
+    if chunking.strategy == "semantic":
+        covered["semantic_percentile"] = chunking.semantic_percentile
+        covered["sentence_embedder"] = settings.embeddings.model
+    return _digest(_stable(covered))
 
 
 def retrieval_config_hash(settings: Settings) -> str:
