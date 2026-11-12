@@ -148,6 +148,7 @@ reliability:
     in_flight_lease_seconds: 900
   degradation_ladder: true
   shutdown_grace_seconds: 20
+  stale_job_seconds: 120
 
 traces:
   store: true

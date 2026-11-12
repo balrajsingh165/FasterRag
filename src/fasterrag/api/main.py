@@ -13,6 +13,7 @@ schema is still published for client generation.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -34,7 +35,8 @@ from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
 from fasterrag.config.schema import Settings
 from fasterrag.errors import FasterRagError
 from fasterrag.observability.logging import configure_logging, get_logger, use_trace_id
-from fasterrag.services.jobs import JobRegistry
+from fasterrag.services.jobs import JobRegistry, reap_at_startup
+from fasterrag.services.journal import create_journal
 from fasterrag.services.traces import create_metric_pusher
 
 __all__ = ["CONFIG_PATH_VAR", "CorrelationIdMiddleware", "create_app"]
@@ -176,6 +178,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     jobs = cast(JobRegistry, app.state.jobs)
     jobs.open()
 
+    if getattr(app.state, "journal", None) is None:
+        app.state.journal = create_journal(settings)
+    # CRITICAL: a task, not an awaited call. The pass reads every job record once, which
+    # on a journal holding years of jobs is seconds of disk; startup must not wait for it,
+    # and a job it settles is one nothing in this process is running.
+    reaper = asyncio.create_task(
+        reap_at_startup(
+            app.state.journal, jobs, stale_seconds=settings.reliability.stale_job_seconds
+        ),
+        name="reap-interrupted-jobs",
+    )
+    app.state.reaper = reaper
+
     await provision_enabled_observability(settings)
 
     app.state.metric_pusher = create_metric_pusher(settings)
@@ -185,6 +200,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        reaper.cancel()
+        await asyncio.gather(reaper, return_exceptions=True)
+
         # CRITICAL: jobs are drained before anything below is closed. Every resource this
         # block releases is one a running job is using, so closing first turns a job that
         # could have finished, or been settled cleanly, into errors against a closed client.

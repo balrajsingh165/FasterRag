@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
@@ -44,6 +45,7 @@ __all__ = [
     "JobRecord",
     "JobStatus",
     "Journal",
+    "QuietJobs",
     "create_journal",
     "envelope",
     "open_envelope",
@@ -140,6 +142,23 @@ class JobRecord:
             tenant=payload.get("tenant"),
             reason_code=payload.get("reason_code"),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class QuietJobs:
+    """The ``running`` jobs nothing has written to lately, and what the look could not judge."""
+
+    running: tuple[JobRecord, ...] = ()
+    recent: int = 0
+    unreadable: int = 0
+
+
+def _modified(path: Path, *, missing: float) -> float:
+    """Return when ``path`` was last written, or ``missing`` if it cannot be asked."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return missing
 
 
 def _write_atomically(path: Path, payload: str) -> None:
@@ -339,6 +358,58 @@ class Journal:
             if payload.get("tenant") == tenant:
                 return JobRecord.from_dict(payload)
         return None
+
+    async def quiet_running_jobs(self, quiet_seconds: float) -> QuietJobs:
+        """Return the ``running`` jobs not written to for ``quiet_seconds``, off the loop."""
+        return await asyncio.to_thread(self.quiet_running_jobs_blocking, quiet_seconds)
+
+    def quiet_running_jobs_blocking(self, quiet_seconds: float) -> QuietJobs:
+        """Find quiet ``running`` jobs; :meth:`quiet_running_jobs` is this off the loop.
+
+        A record written inside the window is counted and never opened: something is
+        still writing it, and reading it could collide with that write.
+        """
+        directory = self.root / _JOBS_DIR
+        if not directory.is_dir():
+            return QuietJobs()
+
+        cutoff = time.time() - quiet_seconds
+        running: list[JobRecord] = []
+        recent = unreadable = 0
+        for path in sorted(directory.glob("*.json")):
+            if self._last_written(path.stem) > cutoff:
+                recent += 1
+                continue
+
+            payload = self._read_quiet_record(path)
+            if payload is None:
+                unreadable += 1
+            elif payload.get("status") == "running":
+                running.append(JobRecord.from_dict(payload))
+
+        return QuietJobs(running=tuple(running), recent=recent, unreadable=unreadable)
+
+    def _last_written(self, job: str) -> float:
+        """Return when a job's record or its document log was last written.
+
+        A record that cannot be asked is being replaced at this instant, so it counts as
+        written now; a job with no document log yet simply has no second clock.
+        """
+        return max(
+            _modified(self._job_path(job), missing=time.time()),
+            _modified(self._documents_path(job), missing=0.0),
+        )
+
+    def _read_quiet_record(self, path: Path) -> dict[str, Any] | None:
+        """Return a job record's payload, or None when it is torn or cannot be opened."""
+        try:
+            return open_envelope(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            _logger.warning(
+                "a job record could not be read while looking for interrupted jobs",
+                extra={"job_id": path.stem, "detail": str(exc)},
+            )
+            return None
 
     async def checkpoint(self, record: JobRecord, document_index: int) -> JobRecord:
         """Record progress off the event loop, writing only at the configured interval.

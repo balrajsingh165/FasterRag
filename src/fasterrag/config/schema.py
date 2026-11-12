@@ -657,6 +657,7 @@ class ReliabilitySettings(Section):
     idempotency: IdempotencySettings = IdempotencySettings()
     degradation_ladder: bool = True
     shutdown_grace_seconds: Annotated[int, Field(ge=0, le=3600)] = 20
+    stale_job_seconds: Annotated[int, Field(ge=1, le=86400)] = 120
 
 
 class TracesSettings(Section):

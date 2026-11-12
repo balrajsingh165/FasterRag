@@ -36,12 +36,26 @@ when every job has finished unwinding — so whoever called it may then close th
 those jobs were using. A job offered while the door is closed is refused with
 ``NOT_READY``, which is 503 and retryable, *before* a record is written for it: accepting a
 job that will never run would leave a ``queued`` record with nothing to pick it up.
+
+**A process that is killed settles nothing, so the next one does.** :func:`reap_interrupted`
+finds every ``running`` job whose record and document log have both been quiet for
+``reliability.stale_job_seconds`` and settles it ``failed`` / ``INTERRUPTED``. Quiet for how
+long is the whole question, because the journal may be shared: a second worker on the same
+host owns jobs this process knows nothing about, and the only evidence that a job is alive
+is that something is still writing to it. A job is never resumed here — only settled. The
+caller decides whether to run it again, by replaying its idempotency key or with
+``fasterrag ingest --resume``.
+
+:func:`reap_at_startup` looks twice. A process restarted seconds after a crash finds the
+orphan's record still inside the window, and one look would leave it ``running`` until some
+later restart; so when the first look met any record too recent to judge, a second runs
+one window later, by which time an orphan is stale and a live job has written again.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Collection, Coroutine
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -50,7 +64,15 @@ from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.journal import JobRecord, Journal
 
-__all__ = ["INTERRUPTED", "DrainReport", "JobRegistry", "settle_interrupted"]
+__all__ = [
+    "INTERRUPTED",
+    "DrainReport",
+    "JobRegistry",
+    "ReapReport",
+    "reap_at_startup",
+    "reap_interrupted",
+    "settle_interrupted",
+]
 
 INTERRUPTED: Final = "INTERRUPTED"
 
@@ -106,6 +128,84 @@ class DrainReport:
     def in_flight(self) -> int:
         """Return how many jobs were running when the drain began."""
         return self.finished + self.cancelled
+
+
+@dataclass(frozen=True, slots=True)
+class ReapReport:
+    """What one look for interrupted jobs settled, and what it could not judge."""
+
+    settled: tuple[str, ...] = ()
+    recent: int = 0
+    unreadable: int = 0
+
+
+async def reap_interrupted(
+    journal: Journal, *, stale_seconds: float, skip: Collection[str] = ()
+) -> ReapReport:
+    """Settle every ``running`` job that has been quiet for ``stale_seconds``.
+
+    ``skip`` names the jobs the caller is running itself, which a slow document can make
+    look abandoned to the very process working on them.
+    """
+    quiet = await journal.quiet_running_jobs(stale_seconds)
+    settled: list[str] = []
+    for record in quiet.running:
+        if record.job_id in skip:
+            continue
+        outcome = await settle_interrupted(journal, record)
+        if outcome.reason_code == INTERRUPTED:
+            settled.append(outcome.job_id)
+
+    return ReapReport(settled=tuple(settled), recent=quiet.recent, unreadable=quiet.unreadable)
+
+
+async def reap_at_startup(journal: Journal, registry: JobRegistry, *, stale_seconds: int) -> None:
+    """Settle the jobs an earlier process left ``running``, looking twice if need be.
+
+    A failure here is logged and ends the pass: a process that cannot tidy its journal
+    must still serve, and the next start looks again.
+    """
+    try:
+        report = await reap_interrupted(journal, stale_seconds=stale_seconds, skip=registry.active)
+        _log_reap(report, stale_seconds)
+        if not report.recent:
+            return
+
+        _logger.info(
+            "some job records are too recent to tell a live job from an interrupted one; "
+            "looking again once they could be stale",
+            extra={"recent": report.recent, "in_seconds": stale_seconds},
+        )
+        await asyncio.sleep(stale_seconds)
+        _log_reap(
+            await reap_interrupted(journal, stale_seconds=stale_seconds, skip=registry.active),
+            stale_seconds,
+        )
+    except (FasterRagError, OSError) as exc:
+        _logger.warning(
+            "the look for interrupted ingest jobs failed; jobs a previous process left "
+            "running stay that way until the next start",
+            extra={"detail": str(exc), "error": type(exc).__name__},
+        )
+
+
+def _log_reap(report: ReapReport, stale_seconds: int) -> None:
+    """Say what a look for interrupted jobs settled, and what it had to step over."""
+    if report.settled:
+        _logger.warning(
+            "settled ingest jobs that a previous process left running",
+            extra={
+                "settled": len(report.settled),
+                "job_ids": list(report.settled),
+                "reason_code": INTERRUPTED,
+                "stale_job_seconds": stale_seconds,
+            },
+        )
+    if report.unreadable:
+        _logger.warning(
+            "some job records could not be read while looking for interrupted jobs",
+            extra={"unreadable": report.unreadable},
+        )
 
 
 class JobRegistry:
