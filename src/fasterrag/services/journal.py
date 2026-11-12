@@ -35,9 +35,10 @@ import errno
 import json
 import os
 import secrets
+import sys
 import time
-from collections.abc import Callable, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,6 +49,11 @@ from fasterrag.core.identity import job_id as new_job_id
 from fasterrag.core.identity import text_hash
 from fasterrag.errors import ErrorCode, IngestionError
 from fasterrag.observability.logging import get_logger
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 __all__ = [
     "DEFAULT_JOURNAL_ROOT",
@@ -74,6 +80,9 @@ _TOMBSTONE_KEY: Final = "tombstone"
 _TEMPORARY_SUFFIX: Final = ".tmp"
 _BUSY_DELAYS: Final = (0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2)
 _DISK_FULL: Final = frozenset({errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)})
+_LOCK_SUFFIX: Final = ".lock"
+_LOCK_TIMEOUT_SECONDS: Final = 30.0
+_LOCK_POLL_SECONDS: Final = 0.002
 
 DocumentStatus = str
 JobStatus = str
@@ -316,6 +325,103 @@ def _write_atomically(path: Path, payload: str, *, keep_previous: bool = True) -
             "condition clears",
             code=ErrorCode.INTERNAL,
         ) from exc
+
+
+def _try_lock(descriptor: int) -> None:
+    """Take the exclusive lock on an open lock file, raising at once if it is held."""
+    if sys.platform == "win32":
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(descriptor: int) -> None:
+    """Release the lock :func:`_try_lock` took."""
+    if sys.platform == "win32":
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _exclusive(path: Path) -> Iterator[None]:
+    """Hold the cross-process advisory lock for ``path``, kept on a ``.lock`` sidecar.
+
+    A sidecar, because a Windows byte-range lock is mandatory: locking the log itself would
+    make every reader of it fail while a writer appended.
+    """
+    lock = path.with_name(path.name + _LOCK_SUFFIX)
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+    try:
+        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                _try_lock(descriptor)
+                break
+            except (BlockingIOError, PermissionError) as exc:
+                if time.monotonic() >= deadline:
+                    raise IngestionError(
+                        f"the ingestion journal lock {lock} was held by another writer for "
+                        f"{_LOCK_TIMEOUT_SECONDS:.0f}s: {exc}. Retry once it is released",
+                        code=ErrorCode.NOT_READY,
+                    ) from exc
+                time.sleep(_LOCK_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            _unlock(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _append_line(path: Path, line: str) -> None:
+    """Append one line under the file's lock, translating any OS failure (TASK-0475).
+
+    A crash mid-append leaves a line without its newline; the next append ends it first, so
+    the fragment stays a line of its own that readers skip rather than a corrupt neighbour.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _exclusive(path), path.open("a+b") as handle:
+            prefix = b""
+            if handle.seek(0, os.SEEK_END) > 0:
+                handle.seek(-1, os.SEEK_END)
+                prefix = b"" if handle.read(1) == b"\n" else b"\n"
+            handle.write(prefix + line.encode("utf-8") + b"\n")
+    except OSError as exc:
+        raise IngestionError(
+            f"the ingestion journal could not append to {path}: {exc}. The documents after "
+            "the last checkpoint are processed again once the condition clears",
+            code=ErrorCode.INTERNAL,
+        ) from exc
+
+
+def _logged_lines(path: Path) -> list[dict[str, Any]]:
+    """Return the parsed lines of an append-only log, skipping a fragment a crash left."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    parsed: list[dict[str, Any]] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            parsed.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            _logger.warning(
+                "skipping a journal line a crash left unfinished",
+                extra={"path": str(path), "line": number, "detail": str(exc)},
+            )
+    return parsed
+
+
+def _sync_if_present(path: Path) -> None:
+    """Flush a log to the disk if it exists, so a checkpoint never outruns what it covers."""
+    if path.is_file():
+        _sync_file(path)
 
 
 def envelope(payload: dict[str, Any]) -> str:
@@ -583,8 +689,24 @@ class Journal:
             record,
             checkpoint=Checkpoint(last_document_index=document_index, written_at=_now()),
         )
+        self._sync_logs(record)
         self.save_job_blocking(updated)
         return updated
+
+    def _sync_logs(self, record: JobRecord) -> None:
+        """Flush the job's document log and its collection's dedup file before a checkpoint.
+
+        Appends are not flushed one by one; this makes everything a checkpoint covers durable
+        before the checkpoint claims it (ADR-0009).
+        """
+        try:
+            _sync_if_present(self._documents_path(record.job_id))
+            _sync_if_present(self._dedup_path(record.collection))
+        except OSError as exc:
+            raise IngestionError(
+                f"the ingestion journal could not flush job {record.job_id!r} to disk: {exc}",
+                code=ErrorCode.INTERNAL,
+            ) from exc
 
     def _checkpoint_due(self, document_index: int) -> bool:
         """Return whether this document index is one a checkpoint is written at."""
@@ -604,11 +726,8 @@ class Journal:
 
     def record_document_blocking(self, job: str, record: DocumentRecord) -> None:
         """Append a document outcome; :meth:`record_document` is this off the loop."""
-        path = self._documents_path(job)
-        path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(asdict(record), sort_keys=True, separators=(",", ":"))
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{line}\n")
+        _append_line(self._documents_path(job), line)
 
     async def record_indexed(
         self, job: str, collection: str, record: DocumentRecord, *, dedup: bool
@@ -701,15 +820,9 @@ class Journal:
         A list rather than a generator: a lazy read would do its file I/O in whichever
         thread consumed it, which is the event loop again.
         """
-        path = self._documents_path(job)
-        if not path.exists():
-            return []
-
         found: list[DocumentRecord] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            record = DocumentRecord(**json.loads(line))
+        for payload in _logged_lines(self._documents_path(job)):
+            record = DocumentRecord(**payload)
             if status is None or record.status == status:
                 found.append(record)
         return found
@@ -728,11 +841,8 @@ class Journal:
 
     def remember_content_blocking(self, collection: str, content: str, document: str) -> None:
         """Record an indexed content hash; :meth:`remember_content` is this off the loop."""
-        path = self._dedup_path(collection)
-        path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps({"content_hash": content, "document_id": document})
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{line}\n")
+        _append_line(self._dedup_path(collection), line)
 
     async def forget_document(self, collection: str, document: str) -> bool:
         """Tombstone a document in a collection's dedup index, off the event loop."""
@@ -750,8 +860,7 @@ class Journal:
         line = json.dumps(
             {"deleted_at": _now(), "document_id": document, _TOMBSTONE_KEY: True}, sort_keys=True
         )
-        with self._dedup_path(collection).open("a", encoding="utf-8") as handle:
-            handle.write(f"{line}\n")
+        _append_line(self._dedup_path(collection), line)
         return True
 
     async def known_content(self, collection: str) -> dict[str, str]:
@@ -760,23 +869,17 @@ class Journal:
 
     def known_content_blocking(self, collection: str) -> dict[str, str]:
         """Return the hash to document-id map; :meth:`known_content` is this off the loop."""
-        path = self._dedup_path(collection)
-        if not path.exists():
-            return {}
-
         known: dict[str, str] = {}
         held: dict[str, str] = {}
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                payload = json.loads(line)
-                document = payload["document_id"]
-                superseded = held.pop(document, None)
-                if superseded is not None and known.get(superseded) == document:
-                    del known[superseded]
-                if payload.get(_TOMBSTONE_KEY):
-                    continue
-                held[document] = payload["content_hash"]
-                known[held[document]] = document
+        for payload in _logged_lines(self._dedup_path(collection)):
+            document = payload["document_id"]
+            superseded = held.pop(document, None)
+            if superseded is not None and known.get(superseded) == document:
+                del known[superseded]
+            if payload.get(_TOMBSTONE_KEY):
+                continue
+            held[document] = payload["content_hash"]
+            known[held[document]] = document
         return known
 
     async def document_hashes(self, collection: str) -> dict[str, str]:

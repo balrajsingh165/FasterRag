@@ -344,7 +344,7 @@ async def test_a_full_disk_halts_cleanly_with_a_typed_error(tmp_path: Path) -> N
     blocker.write_text("this path is a file, so nothing can be written beneath it")
     journal = Journal(blocker)
 
-    with pytest.raises((IngestionError, OSError)) as failure:
+    with pytest.raises(IngestionError) as failure:
         journal.create_job_blocking("docs", [{"type": "path", "value": "corpus/"}])
 
     assert failure.value is not None

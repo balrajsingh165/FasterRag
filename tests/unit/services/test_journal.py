@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -11,6 +12,7 @@ from unittest import mock
 import pytest
 
 from fasterrag.errors import ErrorCode, IngestionError
+from fasterrag.services import journal as journal_module
 from fasterrag.services.journal import DocumentRecord, JobRecord, Journal
 
 SOURCES = [{"type": "path", "value": "/data/docs"}]
@@ -575,3 +577,115 @@ class TestTheAsyncFaceKeepsFileIoOffTheEventLoop:
 
         assert await journal.known_content("default") == {}
         assert len(await journal.documents(created.job_id)) == 1
+
+
+def refuse_appends(monkeypatch: pytest.MonkeyPatch, error: OSError) -> None:
+    """Make every append to a journal log fail with ``error``; reads still work."""
+    real_open = Path.open
+
+    def open_log(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if self.suffix == ".jsonl" and "a" in mode:
+            raise error
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_log)
+
+
+APPENDS: dict[str, Callable[[Journal], object]] = {
+    "record_document": lambda journal: journal.record_document_blocking(
+        "job_1", DocumentRecord(document_id="d_1", source="a.md", status="indexed")
+    ),
+    "remember_content": lambda journal: journal.remember_content_blocking(
+        "default", "hash-1", "d_1"
+    ),
+    "tombstone": lambda journal: journal.forget_document_blocking("default", "d_1"),
+}
+
+
+@pytest.mark.parametrize("append", sorted(APPENDS))
+def test_a_full_disk_on_an_append_is_a_typed_error_not_a_raw_oserror(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch, append: str
+) -> None:
+    """TASK-0475: the appends had no handler, so a full disk escaped as a raw OSError."""
+    journal.remember_content_blocking("default", "hash-1", "d_1")
+    refuse_appends(monkeypatch, OSError(errno.ENOSPC, "No space left on device"))
+
+    with pytest.raises(IngestionError) as caught:
+        APPENDS[append](journal)
+
+    assert caught.value.code is ErrorCode.INTERNAL
+    assert "No space left on device" in str(caught.value)
+    assert isinstance(caught.value.__cause__, OSError)
+
+
+def test_an_append_under_a_root_that_is_a_file_is_a_typed_error(tmp_path: Path) -> None:
+    blocker = tmp_path / "journal"
+    blocker.write_text("a file where the journal directory should be", encoding="utf-8")
+
+    with pytest.raises(IngestionError):
+        APPENDS["record_document"](Journal(blocker))
+
+
+def test_a_line_a_crash_left_unfinished_is_skipped_and_the_next_append_survives(
+    journal: Journal,
+) -> None:
+    """A torn last line made every later read of the log raise a JSON error."""
+    journal.remember_content_blocking("default", "hash-1", "d_1")
+    path = journal.root / "collections" / "default" / "content-hashes.jsonl"
+    with path.open("ab") as handle:
+        handle.write(b'{"content_hash": "hash-2", "docu')
+
+    journal.remember_content_blocking("default", "hash-3", "d_3")
+
+    assert journal.known_content_blocking("default") == {"hash-1": "d_1", "hash-3": "d_3"}
+
+
+def test_a_torn_document_line_is_skipped_too(journal: Journal) -> None:
+    APPENDS["record_document"](journal)
+    path = journal._documents_path("job_1")
+    with path.open("ab") as handle:
+        handle.write(b'{"document_id": "d_2", "sou')
+
+    APPENDS["record_document"](journal)
+
+    assert [entry.document_id for entry in journal.documents_blocking("job_1")] == ["d_1", "d_1"]
+
+
+def test_a_checkpoint_flushes_the_logs_it_covers_before_it_is_written(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Appends are not flushed one by one, so the checkpoint must not outrun them."""
+    record = journal.create_job_blocking("default", SOURCES)
+    journal.record_indexed_blocking(
+        record.job_id,
+        "default",
+        DocumentRecord(document_id="d_1", source="a.md", status="indexed", content_hash="h"),
+        dedup=True,
+    )
+    flushed: list[str] = []
+    real_sync = journal_module._sync_file
+
+    def sync(path: Path) -> None:
+        flushed.append(path.name)
+        real_sync(path)
+
+    monkeypatch.setattr(journal_module, "_sync_file", sync)
+
+    journal.checkpoint_blocking(record, 2)
+
+    assert flushed[:2] == ["documents.jsonl", "content-hashes.jsonl"]
+    assert any(name.endswith(".tmp") for name in flushed[2:])
+
+
+def test_an_append_waits_for_the_lock_and_gives_up_typed(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = journal._documents_path("job_1")
+    path.parent.mkdir(parents=True)
+    monkeypatch.setattr(journal_module, "_LOCK_TIMEOUT_SECONDS", 0.05)
+
+    with journal_module._exclusive(path), pytest.raises(IngestionError) as caught:
+        APPENDS["record_document"](journal)
+
+    assert caught.value.code is ErrorCode.NOT_READY
+    assert journal.documents_blocking("job_1") == []

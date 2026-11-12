@@ -5,7 +5,8 @@ one, so between those two steps there was no live record: a reader reported ``NO
 a job that existed, and a crash in that window left the job findable only by its fallback.
 These tests drive the shipped writer through every file operation it makes, crash it or read
 the journal at each one, and assert a reader only ever sees a whole record — the one before
-the write or the one it was writing.
+the write or the one it was writing. The last test runs two real processes appending to one
+job's logs at once, which took no lock before.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from __future__ import annotations
 import errno
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 from collections.abc import Callable, Iterator
@@ -31,6 +34,7 @@ from fasterrag.services import journal as journal_module
 from fasterrag.services.journal import Checkpoint, JobRecord, Journal
 
 SOURCES = [{"type": "path", "value": "/data/docs"}]
+SOURCE_ROOT = Path(__file__).resolve().parents[3] / "src"
 CRASH = "crash"
 TORN = "torn"
 FULL = "full"
@@ -317,3 +321,52 @@ def test_two_writers_and_a_reader_never_see_a_missing_record(tmp_path: Path) -> 
 
     assert failures == []
     assert list(journal.root.rglob("*.tmp")) == []
+
+
+APPENDER = """
+import sys
+from pathlib import Path
+from fasterrag.services.journal import DocumentRecord, Journal
+
+root, job, writer, count = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
+journal = Journal(root)
+detail = writer * 20_000
+for index in range(count):
+    journal.record_indexed_blocking(
+        job,
+        "default",
+        DocumentRecord(
+            document_id=f"{writer}-{index}",
+            source=f"{writer}-{index}.md",
+            status="indexed",
+            content_hash=f"hash-{writer}-{index}",
+            detail=detail,
+        ),
+        dedup=True,
+    )
+"""
+APPENDS_PER_PROCESS = 150
+
+
+@pytest.mark.must_run
+def test_two_processes_appending_to_one_job_never_interleave_a_line(tmp_path: Path) -> None:
+    """Appends took no lock, so two processes could interleave or overwrite each other's lines."""
+    root = tmp_path / "journal"
+    script = tmp_path / "append.py"
+    script.write_text(APPENDER, encoding="utf-8")
+    environment = {**os.environ, "PYTHONPATH": str(SOURCE_ROOT)}
+    writers = [
+        subprocess.Popen(
+            [sys.executable, str(script), str(root), "job_shared", name, str(APPENDS_PER_PROCESS)],
+            env=environment,
+        )
+        for name in ("a", "b")
+    ]
+    for writer in writers:
+        assert writer.wait(timeout=300) == 0
+
+    journal = Journal(root)
+    documents = journal.documents_blocking("job_shared")
+    expected = {f"{name}-{index}" for name in "ab" for index in range(APPENDS_PER_PROCESS)}
+    assert sorted(entry.document_id for entry in documents) == sorted(expected)
+    assert set(journal.known_content_blocking("default").values()) == expected
