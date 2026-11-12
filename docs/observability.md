@@ -47,7 +47,7 @@ It still has no transport security of its own — put it behind the same reverse
 | `fasterrag_queue_depth` | gauge | queue ∈ ingest, chunk | Bounded-queue occupancy. |
 | `fasterrag_dlq_depth` | gauge | collection | Dead-letter queue depth. |
 | `fasterrag_circuit_state` | gauge | provider ∈ llm, embeddings, vector_db | 0 closed / 1 half-open / 2 open. |
-| `fasterrag_degraded_responses_total` | counter | mode ∈ hybrid_only, extractive (`cache_only` is specified but never emitted — TASK-0159) | Degradation-ladder activations (D4). |
+| `fasterrag_degraded_responses_total` | counter | mode ∈ hybrid_only, extractive ([ADR-0011](adr/ADR-0011-degradation-ladder-scope.md) deferred a `cache_only` rung, so it is never emitted) | Degradation-ladder activations (D4). |
 
 ## 3. Tracing (OpenTelemetry)
 

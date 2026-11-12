@@ -127,7 +127,7 @@ The guards are unit-tested in the ordinary CI lane by `tests/load/test_load_harn
 | Injected fault | Asserted behavior |
 |---|---|
 | Kill an embedding worker mid-batch | Job resumes from the queue; **no duplicate vectors** (idempotent upserts). |
-| Stop the Qdrant container | *Specified:* circuit opens; degraded `cache_only` responses with `degraded: true`; automatic recovery when it returns. **As built:** the breaker opens and recovery is automatic, but the `cache_only` rung does not exist (TASK-0159), so the suite asserts a retryable `RETRIEVAL_FAILED` instead — see [failure-modes.md](failure-modes.md) §observed behavior. |
+| Stop the Qdrant container | Circuit opens; queries fail with a typed, retryable `RETRIEVAL_FAILED` (vector-DB loss is not a degradation rung — [ADR-0011](adr/ADR-0011-degradation-ladder-scope.md)); automatic recovery when it returns — see [failure-modes.md](failure-modes.md) §observed behavior. |
 | Feed a corrupt/malformed document | Routed to DLQ with reason code; pipeline continues. |
 | Slow LLM (latency injection) | `reliability.timeouts.llm_ms` triggers; degradation ladder serves `extractive` mode. |
 | Disk-full during ingest | Clean halt with typed error; resumable from the journal checkpoint after space is freed. |

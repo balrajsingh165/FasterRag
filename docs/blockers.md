@@ -16,24 +16,11 @@ Deliberately not real ids. The gate below reads every `TASK-` reference in this 
 checks it against todo.md, so an illustration built from live ids fails the moment one of
 them is ticked — the gate would then be reporting on the example rather than on a blocker.
 
-**Answering the root either resolves the children outright or opens the path to them.** That is the whole point of the grouping: `B3` is one conversation that unblocks three pieces of work, and it is worth more attention than three separate line items would suggest.
+**Answering the root either resolves the children outright or opens the path to them.** That is the whole point of the grouping: a root is one conversation that unblocks several pieces of work, and it is worth more attention than the same number of separate line items would suggest.
 
 A child is never *also* a root. If something is blocked by two roots it is listed under the one that must move first, with the other named inline.
 
 Rules: add nothing without a `TASK-` id; delete an entry when its blocker clears; mark a completed task cited as history with ✅ so it reads as context rather than as outstanding. `scripts/check_blockers.py` enforces the first and third in CI.
-
----
-
-## B3 — Degradation-ladder scope (TASK-0165)
-
-`docs/reliability.md` specifies a circuit breaker and a `cache_only` rung. Neither exists; only the breaker's *configuration* does.
-
-**Decide:** build both as specified, or formally narrow D4 to the two rungs that ship today.
-
-| | Task | Blocked because |
-|---|---|---|
-| **B3.1** | TASK-0159 | The `cache_only` rung — consult the semantic cache when retrieval raises, instead of returning a bare `RETRIEVAL_FAILED`. |
-| **B3.2** | — | Four documents (`reliability.md`, `api-reference.md`, `glossary.md`, `failure-modes.md`) carry *specified-not-built* annotations that stay until B3 is answered either way. |
 
 ---
 

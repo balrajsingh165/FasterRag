@@ -165,7 +165,7 @@ What retrieval returns internally and what `--show-chunks` / `include_chunks` ex
 | `usage` | `{prompt_tokens, completion_tokens, estimated_cost_usd}` | `estimated_cost_usd` is a **list-price estimate, nullable by design** (TASK-0260 ✅): a model with no recorded rate reports `null` rather than `0.0`, because a zero would read as "this query was free" and that is a fabricated bill. A local provider reports a genuine `0.0`. Also counted into `fasterrag_cost_usd_total`, but emitted per response too — a caller holding one answer cannot read a process-wide counter. |
 | `timings_ms` | object | Per stage: `embed`, `retrieve`, `fuse`, `rerank`, `assemble`, `generate`, `total` |
 | `degraded` | bool | True whenever `mode != "full"` |
-| `mode` | str | `full` \| `hybrid_only` \| `cache_only` \| `extractive` (D4) |
+| `mode` | str | `full` \| `hybrid_only` \| `extractive` (D4, [ADR-0011](adr/ADR-0011-degradation-ladder-scope.md)) |
 | `faithfulness` | float\|null | 0–1 grounding score |
 | `insufficient_evidence` | bool | True when the answer was withheld below threshold |
 | `cache` | `{semantic_hit: bool, similarity: float\|null}` | |

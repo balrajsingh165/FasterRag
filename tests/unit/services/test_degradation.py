@@ -40,12 +40,13 @@ def test_full_is_not_a_rung() -> None:
 
 
 def test_a_declared_rung_that_is_not_implemented_cannot_be_served() -> None:
-    """`cache_only` is TASK-0159. Serving it before registering it must be impossible."""
+    """`cache_only` is deferred by ADR-0011. Serving it before registering it must be impossible."""
     with pytest.raises(FasterRagError) as caught:
         serving(DegradationMode.CACHE_ONLY)
 
     assert caught.value.code is ErrorCode.INTERNAL
     assert "_BUILTIN_RUNGS" in caught.value.detail
+    assert "ADR-0011" in caught.value.detail
 
 
 def test_each_built_rung_registers_the_function_that_actually_serves_it() -> None:
