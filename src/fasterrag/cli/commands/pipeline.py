@@ -30,7 +30,7 @@ from fasterrag.cli.settings import settings_from
 from fasterrag.cli.sources import expand_sources
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache import create_semantic_store
-from fasterrag.core.cache.semantic import SemanticCache
+from fasterrag.core.cache.semantic import MISS, SemanticCache
 from fasterrag.core.rerank import CrossEncoderReranker
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
@@ -298,7 +298,11 @@ async def _streamed(
     filters: dict[str, Any] | None,
     console: Console,
 ) -> Any:
-    """Print tokens as they arrive and return the assembled answer."""
+    """Print tokens as they arrive and return the answer the events describe.
+
+    Reads each event in the shape ``services.generation._events`` builds; an ``error`` event
+    is raised as the typed failure it reports, so the command exits non-zero (TASK-0508).
+    """
     from fasterrag.core.context import Citation
     from fasterrag.services.generation import Answer
 
@@ -316,28 +320,49 @@ async def _streamed(
             pieces.append(text)
             console.stream(text)
         elif event.type == "meta":
-            meta = dict(event.data)
+            meta = {**meta, **event.data}
         elif event.type == "citations":
             citations = [Citation(**item) for item in event.data.get("citations", [])]
         elif event.type == "usage":
             usage = dict(event.data)
         elif event.type == "insufficient_evidence":
             withheld = dict(event.data)
+        elif event.type == "error":
+            if pieces:
+                console.stream("\n")
+            raise _stream_failure(event.data)
 
     if pieces:
         console.stream("\n")
 
+    counts: Mapping[str, Any] = usage.get("usage") or {}
     return Answer(
         answer="".join(pieces) or None,
         citations=citations,
-        mode=str(meta.get("mode", "full")),
-        trace_id=str(meta.get("trace_id", "")),
-        prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
-        completion_tokens=int(usage.get("completion_tokens", 0) or 0),
-        timings_ms=dict(meta.get("timings_ms") or {}),
-        faithfulness=withheld.get("faithfulness"),
+        mode=str(usage.get("mode") or meta.get("mode") or "full"),
+        trace_id=str(meta.get("trace_id") or withheld.get("trace_id") or ""),
+        prompt_tokens=int(counts.get("prompt_tokens") or 0),
+        completion_tokens=int(counts.get("completion_tokens") or 0),
+        estimated_cost_usd=counts.get("estimated_cost_usd"),
+        timings_ms=dict(usage.get("timings_ms") or {}),
+        faithfulness=usage.get("faithfulness", withheld.get("faithfulness")),
         threshold=withheld.get("threshold"),
         best_candidates=list(withheld.get("best_candidates") or []),
+        cache=dict(meta.get("cache") or MISS),
+        truncated=bool(usage.get("truncated", False)),
+        evidence_dropped=int(usage.get("evidence_dropped") or 0),
+    )
+
+
+def _stream_failure(data: Mapping[str, Any]) -> FasterRagError:
+    """Rebuild the typed failure an ``error`` event reports, keeping its code and flag."""
+    raw = str(data.get("code", ""))
+    code = next((member for member in ErrorCode if member.value == raw), ErrorCode.INTERNAL)
+    return FasterRagError(
+        str(data.get("detail") or "the answer stream ended in an error"),
+        code=code,
+        trace_id=str(data["trace_id"]) if data.get("trace_id") else None,
+        retryable=bool(data["retryable"]) if "retryable" in data else None,
     )
 
 
@@ -406,6 +431,13 @@ async def run_query(args: argparse.Namespace, console: Console) -> ExitCode:
 
     if answer.degraded:
         console.emit(f"\ndegraded: mode={answer.mode}")
+    if answer.truncated:
+        console.emit("truncated: the answer stopped at llm.max_tokens and may be incomplete")
+    if answer.evidence_dropped:
+        console.emit(
+            f"evidence dropped: {answer.evidence_dropped} retrieved chunk(s) did not fit "
+            "generation.context_budget_tokens"
+        )
     if args.show_timings:
         console.emit(
             "\ntimings: "

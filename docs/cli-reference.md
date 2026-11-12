@@ -76,6 +76,8 @@ Run a query (same path as `POST /v1/query`).
 | `--show-chunks` | Print the retrieved candidate set with ranks and scores (retrieval debugging). Implies `--no-stream`. |
 | `--show-timings` | Print per-stage latency breakdown. |
 
+After the answer the command reports what the response says about itself, streamed or not: `degraded: mode=<rung>` when a stage was skipped or substituted, `truncated: the answer stopped at llm.max_tokens and may be incomplete` when the model ran out of budget, and `evidence dropped: N retrieved chunk(s) did not fit generation.context_budget_tokens` when the answer is grounded in part of what was retrieved. A streamed answer reads token counts, cost and timings from the stream's `usage` event, as `--no-stream` reads them from the response body. A stream that ends in an `error` event — the provider failed after text was sent — prints `[CODE] detail` to stderr and exits 1, or 3 when the error is retryable, rather than exiting 0 with half an answer (TASK-0508).
+
 ## `fasterrag index <subcommand>`
 
 | Subcommand | Description |
