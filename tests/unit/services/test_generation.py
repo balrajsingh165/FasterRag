@@ -1622,6 +1622,22 @@ PARITY_CASES: dict[str, ParityCase] = {
             _body(seen)["cache"]["semantic_hit"] is True and seen.provider_calls == 1
         ),
     ),
+    "cache hit of a truncated answer": ParityCase(
+        settings={
+            "cache": {"semantic": True},
+            "llm": {"max_tokens": 4},
+            "generation": {"context_budget_tokens": 350},
+        },
+        answer="an answer [^c_a] [^c_b]",
+        chunks=(("c_a", "alpha " * 200), ("c_b", "bravo " * 200)),
+        primed=True,
+        holds=lambda seen: (
+            _body(seen)["cache"]["semantic_hit"] is True
+            and _body(seen)["truncated"] is True
+            and _body(seen)["evidence_dropped"] == 1
+            and seen.provider_calls == 1
+        ),
+    ),
     "retryable failure": ParityCase(
         error=lambda: GenerationError("provider is down", retryable=True),
         holds=lambda seen: (

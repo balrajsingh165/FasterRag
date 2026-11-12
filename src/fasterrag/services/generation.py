@@ -279,6 +279,11 @@ def _cached_answer(hit: CacheHit, trace_id: str, elapsed_ms: int) -> Answer:
         timings_ms={"cache": elapsed_ms},
         faithfulness=stored.get("faithfulness"),
         cache=hit.as_dict(),
+        # CRITICAL: replayed from the stored body (TASK-0506). Both flags describe the answer,
+        # not the request, so a hit serves the same cut-off text and must say so; dropping
+        # them reported a truncated, partly-grounded answer as complete.
+        truncated=bool(stored.get("truncated", False)),
+        evidence_dropped=int(stored.get("evidence_dropped", 0)),
     )
 
 

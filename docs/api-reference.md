@@ -272,7 +272,7 @@ event: done                   data: {}
 
 `done` is still sent: the query completed and declined, which is a finished response, not a truncated one.
 
-A semantic cache hit streams too. The whole answer is already known, so it arrives as a single `token` event after `meta`, and `meta` carries the `cache` member so a client learns it is being served from cache before the text. The event sequence is otherwise identical, so no client needs a separate code path for a cached response.
+A semantic cache hit streams too. The whole answer is already known, so it arrives as a single `token` event after `meta`, and `meta` carries the `cache` member so a client learns it is being served from cache before the text. The event sequence is otherwise identical, so no client needs a separate code path for a cached response. A hit reports the cached answer's own `truncated` and `evidence_dropped`, on both shapes: the text served is the text that was cut off or partly grounded, so the flags travel with it (TASK-0506 — before 2026-11-12 a hit always reported `false` and `0`).
 
 ### `POST /v1/retrieve`
 
