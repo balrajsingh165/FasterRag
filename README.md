@@ -29,8 +29,8 @@ through a REST API, a CLI, or a Python package, all driven by one config file.
 ---
 
 > [!IMPORTANT]
-> **Status: pre-beta, not yet on PyPI — install from source.** The code is real and tested, but
-> nothing has been released, and no performance figure in this repository is citable yet. This
+> **Status: beta (`0.1.0b1`).** Install it with `pip install --pre fasterrag`. It is a beta: the
+> interfaces may still change before 1.0, and no performance figure in this repository is citable yet. This
 > project's standing rule is that **a claim without a measurement is a bug**, so this page tells
 > you what works, what is partial, what is not built — and
 > [how to check each of those yourself](#dont-trust-us--check).
@@ -121,20 +121,22 @@ observability only and has no write endpoint
 local profile below needs neither Docker nor an API key. CI tests Python 3.12 and 3.13 on Linux and 3.12 on
 Windows; macOS is not tested.
 
-### 1. Install from source
+### 1. Install
 
 ```bash
-git clone https://github.com/balrajsingh165/FasterRag.git
-cd FasterRag
-pip install -e ".[all]"        # or pick extras: ".[server,qdrant,pdf,docx,html,openai]"
-cp .env.example .env           # then fill in the keys your config.yaml references
+pip install --pre "fasterrag[all]"   # or pick extras: "fasterrag[server,qdrant,pdf,docx,html,openai]"
+fasterrag config init               # writes config.yaml and .env.example
+cp .env.example .env                # then fill in the keys your config.yaml references
 ```
+
+`--pre` is needed while fasterRag is in beta: pip skips pre-releases otherwise. To work on the
+code instead, clone the repository and run `pip install -e ".[all]"` from the checkout.
 
 The core install is the library and CLI with Markdown, text, CSV and JSON parsing. The web
 server, the Qdrant client and the PDF, DOCX and HTML parsers are the extras `server`, `qdrant`,
 `pdf`, `docx` and `html`; a missing one is named in the error you get.
 
-**No service, no key:** `pip install -e ".[chroma,huggingface]"`, then
+**No service, no key:** `pip install --pre "fasterrag[chroma,huggingface]"`, then
 `fasterrag config init --profile local` writes a configuration with embedded Chroma, local
 embeddings and keyless Ollama, and `fasterrag ingest note.md` works straight away.
 

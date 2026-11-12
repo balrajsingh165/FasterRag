@@ -10,10 +10,10 @@ fasterRag needs Python 3.12 or newer. It is not on PyPI yet, so install from a c
 ```bash
 git clone https://github.com/balrajsingh165/fasterrag
 cd fasterrag
-pip install -e ".[all]"
+pip install --pre "fasterrag[all]"
 ```
 
-`pip install -e .` alone gives you the library and the CLI, with Markdown, text, CSV and JSON
+`pip install --pre fasterrag` alone gives you the library and the CLI, with Markdown, text, CSV and JSON
 parsing. Add only the extras you need:
 
 | Extra | Adds |
@@ -28,13 +28,13 @@ parsing. Add only the extras you need:
 | `otel` | OpenTelemetry export |
 | `all` | everything above |
 
-Example: `pip install -e ".[server,qdrant,huggingface,rerank,pdf,openai]"`. A missing extra is
+Example: `pip install --pre "fasterrag[server,qdrant,huggingface,rerank,pdf,openai]"`. A missing extra is
 reported by name when you use the feature that needs it.
 
 ## Try it with no service and no key
 
 ```bash
-pip install -e ".[chroma,huggingface]"
+pip install --pre "fasterrag[chroma,huggingface]"
 fasterrag config init --profile local
 fasterrag ingest ./notes.md
 ```
@@ -107,7 +107,7 @@ fasterrag provision qdrant
 === "REST"
 
     ```bash
-    pip install -e ".[server]"
+    pip install --pre "fasterrag[server]"
     fasterrag serve                  # http://127.0.0.1:8000
 
     curl -X POST localhost:8000/v1/ingest \

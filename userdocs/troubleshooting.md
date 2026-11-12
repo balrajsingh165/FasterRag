@@ -10,7 +10,7 @@ error and the output of `fasterrag status`.
 |---|---|
 | The process exits at start naming a config key | Fix that key, then run `fasterrag config validate`. |
 | It exits naming an environment variable | Add the variable to `.env` (copy `.env.example` if you have none). |
-| An error names a missing extra, or `fasterrag serve` exits with code 2 | Install it, for example `pip install -e ".[server]"`. |
+| An error names a missing extra, or `fasterrag serve` exits with code 2 | Install it, for example `pip install --pre "fasterrag[server]"`. |
 | A config change does nothing | The config is read at start-up. Restart the process. |
 
 ## Vector database

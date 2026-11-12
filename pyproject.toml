@@ -19,7 +19,7 @@ keywords = [
     "qdrant",
 ]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 4 - Beta",
     "Framework :: FastAPI",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",

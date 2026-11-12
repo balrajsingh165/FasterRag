@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0-beta.1] — 2026-11-13
+
+The first published release, a beta: the interfaces may change before 1.0. Install it with `pip install --pre fasterrag`. **No performance claim is made for this release.** The benchmark ledger holds no citable entry yet — every figure in it was measured on a shared machine, which its own rules forbid citing — so any speed, latency or cost figure in these notes or the documentation is a goal or an indicative observation, not a guarantee. This was the condition under which the beta release gate was set (release.md §1, 2026-11-13).
+
 ### Added
 
 - **The Python examples in the docs are run by the tests** (2026-11-12, TASK-0499). Every Python block in the README, the quickstart and the Python API page is now compiled, and every runnable one executed, on each commit — so an example that calls a method that does not exist fails the build.
