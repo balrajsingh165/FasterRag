@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import secrets
 
@@ -31,6 +32,11 @@ from fasterrag.errors import ConfigError, ErrorCode
 from tests.unit.api.conftest import StubVectorDB
 
 SECRET = "secret-key-value"
+
+
+def sha256(value: bytes) -> bytes:
+    """Return the digest a key is stored and compared as."""
+    return hashlib.sha256(value).digest()
 
 
 async def _unreached(scope: Scope, receive: Receive, send: Send) -> None:
@@ -149,7 +155,7 @@ def test_public_paths_need_no_scope() -> None:
 
 
 def test_admin_implies_every_other_scope() -> None:
-    key = ApiKey(secret="s", scopes=frozenset({"admin"}))
+    key = ApiKey.from_secret("s", frozenset({"admin"}))
 
     for scope in ALL_SCOPES:
         assert key.permits(scope)
@@ -171,7 +177,8 @@ def test_several_keys_with_distinct_scopes_load(monkeypatch: pytest.MonkeyPatch)
 
     keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
 
-    assert [key.secret for key in keys] == ["reader-key-00001", "writer-key-00001"]
+    registry = KeyRegistry(keys)
+    assert [registry.resolve(secret) for secret in ("reader-key-00001", "writer-key-00001")] == keys
     assert keys[0].scopes == frozenset({"query"})
     assert keys[1].scopes == frozenset({"ingest", "collections"})
 
@@ -295,8 +302,8 @@ def test_auth_without_any_key_refuses_to_start(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_the_registry_matches_the_right_key() -> None:
-    first = ApiKey(secret="aaa", scopes=ALL_SCOPES)
-    second = ApiKey(secret="bbb", scopes=frozenset({"query"}))
+    first = ApiKey.from_secret("aaa", ALL_SCOPES)
+    second = ApiKey.from_secret("bbb", frozenset({"query"}))
     registry = KeyRegistry([first, second])
 
     assert registry.resolve("bbb") is second
@@ -453,7 +460,7 @@ def test_a_key_cannot_be_rewritten_after_it_is_loaded() -> None:
     A mutable one would let any later code widen `scopes` for the whole process, so the
     key is frozen and slotted and neither an assignment nor a new attribute can land.
     """
-    key = ApiKey(secret="s", scopes=frozenset({"query"}))
+    key = ApiKey.from_secret("s", frozenset({"query"}))
     field = "scopes"
 
     with pytest.raises(AttributeError):
@@ -463,7 +470,7 @@ def test_a_key_cannot_be_rewritten_after_it_is_loaded() -> None:
 
 def test_a_narrow_scope_is_honoured_as_well_as_refused() -> None:
     """`permits` must not collapse to admin-only; a query key has to be able to query."""
-    key = ApiKey(secret="s", scopes=frozenset({"query"}))
+    key = ApiKey.from_secret("s", frozenset({"query"}))
 
     assert key.permits("query")
     assert not key.permits("ingest")
@@ -481,7 +488,7 @@ def test_the_scope_table_matches_both_exactly_and_by_prefix() -> None:
 
 def test_a_truncated_or_extended_key_does_not_resolve() -> None:
     """The comparison covers the whole secret, not a prefix of it."""
-    registry = KeyRegistry([ApiKey(secret="aaaa", scopes=ALL_SCOPES)])
+    registry = KeyRegistry([ApiKey.from_secret("aaaa", ALL_SCOPES)])
 
     assert registry.resolve("aaa") is None
     assert registry.resolve("aaaaa") is None
@@ -595,10 +602,10 @@ def test_the_registry_compares_keys_in_constant_time(monkeypatch: pytest.MonkeyP
     """
     counting = _CountingSecrets()
     monkeypatch.setattr("fasterrag.api.auth.secrets", counting)
-    registry = KeyRegistry([ApiKey(secret="aaa", scopes=ALL_SCOPES)])
+    registry = KeyRegistry([ApiKey.from_secret("aaa", ALL_SCOPES)])
 
     assert registry.resolve("aaa") is not None
-    assert counting.compared == [(b"aaa", b"aaa")]
+    assert counting.compared == [(sha256(b"aaa"), sha256(b"aaa"))]
 
 
 def test_every_key_is_compared_even_after_one_matches(
@@ -612,11 +619,11 @@ def test_every_key_is_compared_even_after_one_matches(
     counting = _CountingSecrets()
     monkeypatch.setattr("fasterrag.api.auth.secrets", counting)
     registry = KeyRegistry(
-        [ApiKey(secret="aaa", scopes=ALL_SCOPES), ApiKey(secret="bbb", scopes=ALL_SCOPES)]
+        [ApiKey.from_secret("aaa", ALL_SCOPES), ApiKey.from_secret("bbb", ALL_SCOPES)]
     )
 
     assert registry.resolve("aaa") is not None
-    assert [stored for stored, _ in counting.compared] == [b"aaa", b"bbb"]
+    assert [stored for stored, _ in counting.compared] == [sha256(b"aaa"), sha256(b"bbb")]
 
 
 def test_a_bearer_token_with_a_non_ascii_byte_is_refused_not_crashed_on(

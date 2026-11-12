@@ -32,6 +32,14 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 
 With `security.multi_tenancy` on, a key whose entry has no tenant field used to act for any tenant it named; since TASK-0460 (2026-11-12) it is refused on every request, and startup warns about it by its positional name (`key-2`). Either bind it — `secret:query:acme` — or, for an operator key that genuinely must act for every tenant, add the scope by name: `secret:query,cross-tenant`, or `secret:*,cross-tenant` for every scope. `*` and `admin` do not imply it.
 
+### A key stopped working with `401 AUTH_INVALID` and nothing changed
+
+Look for `an expired api key was presented` in the log: the key's entry carries an `expires=` that has passed (TASK-0492). The refusal is deliberately identical to an unknown key's. Issue a new key, or move the `expires=` and — if it lives in `security.api_key_file` — save the file; the server re-reads it within a second, or on `SIGHUP` on POSIX. A change to `FASTERRAG_API_KEY` itself needs a restart.
+
+### I edited the key file and the old keys still work
+
+The server logged `the api key file changed but could not be loaded; the keys already loaded stay in force` with the reason: a malformed entry, a key under 16 characters, or a `sha256:` value that is not 64 hex digits. Fix the file and save it again. Keys are only replaced by a file that loads in full.
+
 ### Startup refuses an API key: `is the placeholder shipped in .env.example` or `is shorter than 16 characters`
 
 With `security.auth: true`, every key in `FASTERRAG_API_KEY` is checked at startup (TASK-0460). `change-me` — the value `.env.example` ships — is refused by name, and any key under 16 characters is refused as guessable. The message names the entry by its 1-based position and never prints the key. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.

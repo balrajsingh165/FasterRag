@@ -835,7 +835,7 @@ class SecuritySettings(Section):
     """Control-plane authentication, tenancy, and request limits."""
 
     auth: bool = False
-    api_key_env: str = "FASTERRAG_API_KEY"
+    api_key_env: str | None = "FASTERRAG_API_KEY"
     multi_tenancy: bool = False
     tenant_header: str = "X-Tenant-ID"
 
@@ -865,6 +865,11 @@ class SecuritySettings(Section):
     # published on the host's loopback; defaulting it on reopens TASK-0460's finding.
     allow_unauthenticated: bool = False
 
+    # CRITICAL: a path, never key material. The file holds key entries one per line and is
+    # re-read when it changes, which is what makes a key rotatable without a restart
+    # (TASK-0492); `config.yaml` still never contains a credential.
+    api_key_file: str | None = None
+
     @field_validator("rate_limit_redis_url")
     @classmethod
     def _check_rate_limit_redis_url(cls, value: str) -> str:
@@ -873,12 +878,9 @@ class SecuritySettings(Section):
 
     @field_validator("api_key_env")
     @classmethod
-    def _check_api_key_env(cls, value: str) -> str:
-        """Require an environment-variable name, never a key value."""
-        validated = _validate_env_var_name(value)
-        if validated is None:
-            raise ValueError("security.api_key_env must name an environment variable")
-        return validated
+    def _check_api_key_env(cls, value: str | None) -> str | None:
+        """Require an environment-variable name, never a key value; ``null`` reads no variable."""
+        return _validate_env_var_name(value)
 
     @field_validator("tenant_header")
     @classmethod
@@ -896,6 +898,16 @@ class SecuritySettings(Section):
                 "security.tenant_scoped_retrieval requires security.auth and "
                 "security.multi_tenancy, because the tenant it filters on is resolved by "
                 "the authentication middleware; without them every retrieval is refused"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_auth_has_a_key_source(self) -> Self:
+        """Refuse auth with neither a key variable nor a key file to read keys from."""
+        if self.auth and self.api_key_env is None and self.api_key_file is None:
+            raise ValueError(
+                "security.auth is true but security.api_key_env and security.api_key_file "
+                "are both null, so no key could ever be loaded; set one of them"
             )
         return self
 

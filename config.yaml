@@ -200,3 +200,6 @@ security:
   # Let `serve` bind a non-loopback address with auth off. Only behind an authenticating
   # proxy or a loopback-only port mapping -- see docs/deployment.md.
   allow_unauthenticated: false
+  # A file of key entries, one per line, re-read when it changes (and on SIGHUP where the
+  # platform has it). A path only -- never key material. null reads no file.
+  api_key_file: null
