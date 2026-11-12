@@ -4,45 +4,76 @@
 # with different entry points, and shipping two images that must stay in lockstep is a
 # version-skew bug waiting to be filed.
 #
-# Built in two stages so the runtime layer carries no compiler, no build backend, and no
-# package index cache. The `.[all]` extras are deliberately NOT installed: they pull a
+# Built in stages so the runtime layer carries no compiler, no build backend, no installer,
+# and no package index cache. The `.[all]` extras are deliberately NOT installed: they pull a
 # multi-gigabyte deep-learning runtime that a hosted-provider deployment never loads. Build
 # with `--build-arg EXTRAS=huggingface` (or `all`) when local models are wanted.
 
-ARG PYTHON_VERSION=3.12
+# Both base images are pinned by digest, with the tag kept beside each for a human. A tag is a
+# moving target: `python:3.12-slim` is rebuilt for every Debian and CPython patch, so the same
+# Dockerfile produced a different base months apart. The digest is the multi-platform index,
+# so the pin holds on arm64 as well as amd64. Dependabot (.github/dependabot.yml) reads these
+# two lines and opens a pull request when the tag moves, which is what keeps a pin from
+# becoming a way of never taking a security fix.
+#
+# python:3.12-slim — 3.12.16-slim-trixie, resolved 2026-11-12
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS base
 
-# Pinned to a minor version, never `latest`, matching the rule in docs/deployment.md §1.
-# A digest would be stronger still — a tag is a moving target, so the same Dockerfile can
-# produce a different base months apart — but a digest has to be refreshed deliberately, and
-# that belongs with the supply-chain work in TASK-0158 rather than hard-coded here.
-FROM python:${PYTHON_VERSION}-slim AS builder
+# ghcr.io/astral-sh/uv:0.12.3 — resolved 2026-11-12. A stage of its own rather than a
+# `COPY --from=<image>` so the pin sits on a FROM line, the only place Dependabot looks.
+FROM ghcr.io/astral-sh/uv:0.12.3@sha256:2d890623d310b57771ce840f0da5eed5fc6d657da05ffaa45d82797b53fa3abc AS uv
+
+
+FROM base AS builder
 
 ARG EXTRAS=""
 
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1 \
+# CRITICAL: UV_PYTHON_DOWNLOADS=never. Without it uv may fetch its own interpreter into the
+# builder, and the virtual environment copied into the runtime stage would point at a Python
+# that stage does not have.
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON=/usr/local/bin/python3.12 \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
     PYTHONDONTWRITEBYTECODE=1
+
+COPY --from=uv /uv /usr/local/bin/uv
 
 WORKDIR /build
 
-# Copied before the source so a source-only change does not re-resolve dependencies.
+# The dependency layer: exactly what uv.lock names, hash-checked, nothing resolved here.
+# `--locked` fails the build when uv.lock no longer matches pyproject.toml instead of quietly
+# relocking, so the image cannot carry a dependency set no gate has seen. Until 2026-11-12
+# this was `pip install .`, which resolved pyproject.toml afresh on every build: the same
+# commit built on two days could ship two different sets of packages.
+#
+# Copied before the source so a source-only change reuses this layer. EXTRAS is a
+# comma-separated list of extras (`huggingface`, `huggingface,redis`, `all`).
+COPY pyproject.toml uv.lock ./
+RUN extras=""; \
+    for extra in $(echo "${EXTRAS}" | tr ',' ' '); do extras="${extras} --extra ${extra}"; done; \
+    uv sync --locked --no-dev --no-editable --no-install-project ${extras}
+
 # CRITICAL: .env.example is a build input, not documentation. The wheel target force-includes
 # it (pyproject.toml [tool.hatch.build.targets.wheel.force-include]), so omitting it here
-# fails the build with "Forced include not found" before a single dependency is resolved.
-COPY pyproject.toml README.md .env.example ./
+# fails the build with "Forced include not found".
+#
+# The project itself is built here by its build backend (hatchling), which uv.lock does not
+# pin: a lockfile records what is installed, not what builds it. The backend never reaches
+# the runtime stage; only the wheel it produced does.
+COPY README.md .env.example config.yaml ./
 COPY src/ ./src/
-COPY config.yaml ./
-
-RUN python -m venv /opt/venv \
-    && /opt/venv/bin/pip install --upgrade pip \
-    && if [ -n "$EXTRAS" ]; then \
-         /opt/venv/bin/pip install ".[${EXTRAS}]"; \
-       else \
-         /opt/venv/bin/pip install .; \
-       fi
+RUN extras=""; \
+    for extra in $(echo "${EXTRAS}" | tr ',' ' '); do extras="${extras} --extra ${extra}"; done; \
+    uv sync --locked --no-dev --no-editable ${extras}
 
 
-FROM python:${PYTHON_VERSION}-slim AS runtime
+FROM base AS runtime
+
+LABEL org.opencontainers.image.title="fasterrag" \
+      org.opencontainers.image.source="https://github.com/balrajsingh165/FasterRag" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \

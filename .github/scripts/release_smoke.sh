@@ -87,7 +87,8 @@ test -f .env.example
 # prints no report at all. Exit 4 is accepted: nothing is listening where the vector database
 # should be, and doctor saying so is doctor working. Any other non-zero exit is a crash, and
 # the report must still say the configuration and the interpreter are sound.
-FASTERRAG_API_KEY=smoke QDRANT_API_KEY=smoke OPENAI_API_KEY=smoke   fasterrag --set vector_db.mode=external doctor --json > doctor.json || [ $? -eq 4 ]
+FASTERRAG_API_KEY=smoke QDRANT_API_KEY=smoke OPENAI_API_KEY=smoke \
+  fasterrag --set vector_db.mode=external doctor --json > doctor.json || [ $? -eq 4 ]
 python - <<'PY'
 import json
 
