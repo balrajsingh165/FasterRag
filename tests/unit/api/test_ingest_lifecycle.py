@@ -7,14 +7,16 @@ assert on are exactly the ones in which a job is still in flight.
 
 import asyncio
 from dataclasses import replace
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from fasterrag.api import ingest as ingest_router
 from fasterrag.errors import ErrorCode
+from fasterrag.services.jobs import INTERRUPTED
 from fasterrag.services.journal import JobRecord, Journal
 
 SOURCES = {"sources": [{"type": "path", "value": "corpus/"}]}
@@ -26,6 +28,7 @@ class GatedIngestion:
     def __init__(self, journal: Journal) -> None:
         self.journal = journal
         self.gate = asyncio.Event()
+        self.waiting = asyncio.Event()
         self.started: list[str] = []
 
     async def accept(self, sources: Any, **kwargs: Any) -> JobRecord:
@@ -42,6 +45,7 @@ class GatedIngestion:
     async def run(self, record: JobRecord, **kwargs: Any) -> JobRecord:
         self.started.append(record.job_id)
         await self.journal.save_job(replace(record, status="running"))
+        self.waiting.set()
         await self.gate.wait()
         settled = replace(record, status="completed", counts={"total": 1, "indexed": 1})
         await self.journal.save_job(settled)
@@ -49,6 +53,10 @@ class GatedIngestion:
 
     async def release(self) -> None:
         self.gate.set()
+
+    async def reached_the_gate(self) -> None:
+        """Return once a job has recorded itself as running and is waiting to be released."""
+        await self.waiting.wait()
 
 
 class _StubRouter:
@@ -83,9 +91,10 @@ def test_an_accepted_job_is_held_by_the_registry_while_it_runs(
         accepted = client.post("/v1/ingest", json=SOURCES)
         job_id = accepted.json()["job_id"]
         in_flight = app.state.jobs.active
+        assert client.portal is not None
+        client.portal.call(ingestion.reached_the_gate)
         status_while_running = client.get(f"/v1/ingest/{job_id}").json()["status"]
 
-        assert client.portal is not None
         client.portal.call(ingestion.release)
         settle(client, app)
 
@@ -120,3 +129,41 @@ def test_a_dead_letter_retry_is_held_by_the_registry_too(
         settle(client, app)
 
     assert in_flight == {retry_id}
+
+
+async def test_a_job_cancelled_before_the_service_took_it_is_still_settled(
+    app: FastAPI, ingestion: GatedIngestion
+) -> None:
+    """Cancellation is a ``BaseException``; the runner's handlers caught only ``Exception``."""
+    journal: Journal = app.state.journal
+    record = await journal.create_job("default", [{"type": "path", "value": "corpus/"}])
+    request = cast(Request, SimpleNamespace(app=app))
+
+    running = asyncio.ensure_future(ingest_router._run_job(request, record, None))
+    while not ingestion.started:
+        await asyncio.sleep(0)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    settled = await journal.load_job(record.job_id)
+    assert settled.status == "failed"
+    assert settled.reason_code == INTERRUPTED
+
+
+def test_the_status_body_says_why_a_job_stopped(client: TestClient, app: FastAPI) -> None:
+    """A client could not tell an interrupted job from one whose documents all failed."""
+    journal: Journal = app.state.journal
+    record = journal.create_job_blocking("default", [{"type": "path", "value": "corpus/"}])
+    journal.save_job_blocking(replace(record, status="failed", reason_code=INTERRUPTED))
+
+    body = client.get(f"/v1/ingest/{record.job_id}").json()
+
+    assert (body["status"], body["reason_code"]) == ("failed", INTERRUPTED)
+
+
+def test_a_job_that_was_not_interrupted_reports_no_reason(client: TestClient, app: FastAPI) -> None:
+    journal: Journal = app.state.journal
+    record = journal.create_job_blocking("default", [{"type": "path", "value": "corpus/"}])
+
+    assert client.get(f"/v1/ingest/{record.job_id}").json()["reason_code"] is None

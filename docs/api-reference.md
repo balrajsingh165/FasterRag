@@ -146,7 +146,9 @@ Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `4
 
 ### `GET /v1/ingest/{job_id}`
 
-Job status: `{"job_id", "status": "queued|running|completed|failed|partial", "counts": {"total", "parsed", "chunked", "embedded", "indexed", "deduplicated", "dead_lettered"}, "started_at", "finished_at"}`. `404` if unknown.
+Job status: `{"job_id", "status": "queued|running|completed|failed|partial", "reason_code", "counts": {"total", "parsed", "chunked", "embedded", "indexed", "deduplicated", "dead_lettered"}, "started_at", "finished_at"}`. `404` if unknown.
+
+`reason_code` is `null` except on a job the process stopped working on before it finished, which is settled `failed` with `reason_code: "INTERRUPTED"` (TASK-0436). That pair means *nothing was wrong with the documents*: the job was cancelled, and its checkpoint is kept. `INTERRUPTED` is a reason on a job, not an entry in the error-code table — no request fails with it.
 
 ### `GET /v1/ingest/{job_id}/documents?status=dead_lettered`
 

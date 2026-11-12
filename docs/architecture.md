@@ -152,6 +152,7 @@ Same pattern: `embeddings.provider` and `llm.provider` select concrete adapters 
 ## 12. Fault tolerance
 
 - Stage decoupling (Section 2): failures retry at the failing stage only, and a job is always settled — an exception of any kind leaves it `failed`, never `running`.
+- **Cancellation settles a job too** (TASK-0436). `asyncio.CancelledError` is not an `Exception`, so until 2026-11-12 a cancelled job settled nothing and both halves of its pipeline kept running unawaited. A cancelled job now stops the parse side and the embedding side, waits for a checkpoint write already in its worker thread, and is then settled `failed` with `reason_code: INTERRUPTED` on top of the last checkpoint. One limit is stated plainly: leaving the CPU pool calls `executor.shutdown(wait=True)`, so the settle waits for the documents already being parsed, and a single very slow parse delays it by that long.
 - Circuit breakers are process-wide (`core/breaker.py::shared_breaker`), one per provider, because the REST API builds its services per request and a breaker owned by a per-request object can never count past one. The reranker model is cached per process for the same reason.
 - Bounded retries with exponential backoff per queue item; poisoned items park in a dead-letter state on the job record for inspection.
 - Idempotent indexing: upserts keyed by deterministic chunk IDs, so replays never duplicate.

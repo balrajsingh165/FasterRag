@@ -115,6 +115,7 @@ class JobRecord:
     finished_at: str | None = None
     idempotency_key: str | None = None
     tenant: str | None = None
+    reason_code: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable form."""
@@ -137,6 +138,7 @@ class JobRecord:
             finished_at=payload.get("finished_at"),
             idempotency_key=payload.get("idempotency_key"),
             tenant=payload.get("tenant"),
+            reason_code=payload.get("reason_code"),
         )
 
 

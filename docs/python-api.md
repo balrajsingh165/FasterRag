@@ -122,7 +122,7 @@ Every one of them is frozen except `JobRecord`, which a running job is updated i
 - `Citation` (`fasterrag.services.generation`) — `chunk_id`, `source`, `page`, `span`, `score`.
 - `QueryEvent` (`fasterrag.services.generation`) — `type`, `data`.
 - `ScoredChunk` (`fasterrag.retrieval`) — `chunk_id`, `text`, `payload`, `dense_rank`, `dense_score`, `bm25_rank`, `bm25_score`, `rrf_score`, `rerank_score`, `final_rank`, and the computed `document_id`, `source`, `found_by_both_legs`.
-- `JobRecord` (`fasterrag.services.journal`) — `job_id`, `collection`, `status`, `counts`, `sources`, `checkpoint`, `started_at`, `finished_at`, `idempotency_key`, `tenant`.
+- `JobRecord` (`fasterrag.services.journal`) — `job_id`, `collection`, `status`, `counts`, `sources`, `checkpoint`, `started_at`, `finished_at`, `idempotency_key`, `tenant`, `reason_code`.
 - `Estimate` (`fasterrag.services.estimation`) — `documents`, `unreadable`, `chunks`, `tokens`, `bytes_read`, `providers`, `parse_seconds`, `projected_seconds`, `projection_note`, `enrichment`.
 - `DoctorReport` (`fasterrag.services.doctor`) — `checks`, and the computed `passed`, `failures`.
 - `ReplayResult` (`fasterrag.services.replay`) — `trace_id`, `query`, `config_changes`, `retrieval`, `original_answer`, `replayed_answer`, `original_citations`, `replayed_citations`, and the computed `answer_changed`, `deterministic`.

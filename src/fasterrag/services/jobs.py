@@ -20,20 +20,72 @@ the broker arrives.
 Submitting a job id that is already running here starts nothing. A replayed request that
 arrives before the first copy of the job has begun would otherwise run the same corpus
 twice, concurrently, against one journal record.
+
+**A job the process stops working on is settled, not abandoned.** Cancellation is how a
+shutdown stops a job, and ``asyncio.CancelledError`` is a ``BaseException`` that no
+``except Exception`` sees, so nothing used to settle a cancelled job: its record stayed
+``running`` and a client polling it could not tell that from slow progress.
+:func:`settle_interrupted` writes ``failed`` with the reason :data:`INTERRUPTED`, on top of
+the *current* record so the checkpoint the job reached is kept and a later run resumes from
+it rather than from the start. ``INTERRUPTED`` is a reason on the job, not an error code: no
+request ever fails with it.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Coroutine
-from typing import Any
+from dataclasses import replace
+from datetime import UTC, datetime
+from typing import Any, Final
 
-from fasterrag.errors import ErrorCode
+from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
+from fasterrag.services.journal import JobRecord, Journal
 
-__all__ = ["JobRegistry"]
+__all__ = ["INTERRUPTED", "JobRegistry", "settle_interrupted"]
+
+INTERRUPTED: Final = "INTERRUPTED"
+
+_UNSETTLED: Final[frozenset[str]] = frozenset({"queued", "running"})
 
 _logger = get_logger(__name__)
+
+
+async def settle_interrupted(journal: Journal, record: JobRecord) -> JobRecord:
+    """Settle a job nothing is working on as ``failed`` / ``INTERRUPTED`` and return it.
+
+    The current record is the base, so the last checkpoint survives; a job that already
+    reached a terminal status is returned untouched.
+    """
+    try:
+        current = await journal.load_job(record.job_id)
+    except FasterRagError as exc:
+        _logger.warning(
+            "the record of an interrupted job could not be read; settling the accepted copy",
+            extra={"job_id": record.job_id, "code": exc.code.value, "trace_id": exc.trace_id},
+        )
+        current = record
+
+    if current.status not in _UNSETTLED:
+        return current
+
+    settled = replace(
+        current,
+        status="failed",
+        reason_code=INTERRUPTED,
+        finished_at=datetime.now(tz=UTC).isoformat(),
+    )
+    await journal.save_job(settled)
+    _logger.warning(
+        "ingest job interrupted",
+        extra={
+            "job_id": settled.job_id,
+            "reason_code": INTERRUPTED,
+            "resume_from": journal.resume_index(settled),
+        },
+    )
+    return settled
 
 
 class JobRegistry:

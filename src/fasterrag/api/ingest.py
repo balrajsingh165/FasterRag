@@ -24,6 +24,7 @@ accepted and then dead-lettering every document against an error about one point
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import Annotated, Any
 
@@ -41,6 +42,7 @@ from fasterrag.api.dependencies import (
 from fasterrag.api.schemas import IngestRequest
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import current_trace_id, get_logger, use_trace_id
+from fasterrag.services.jobs import settle_interrupted
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.reindex import require_keyword_leg
 
@@ -74,6 +76,7 @@ async def _job_body(record: JobRecord, journal: Journal) -> dict[str, Any]:
     return {
         "job_id": record.job_id,
         "status": record.status,
+        "reason_code": record.reason_code,
         "counts": counts,
         "started_at": record.started_at,
         "finished_at": record.finished_at,
@@ -112,6 +115,13 @@ async def _run_job(request: Request, record: JobRecord, metadata: dict[str, Any]
     with use_trace_id():
         try:
             await service.run(record, metadata=metadata)
+        except asyncio.CancelledError:
+            # CRITICAL: cancellation is how shutdown stops a job, and it is a BaseException
+            # the two handlers below never see. The service settles a job it was running;
+            # this covers the one cancelled before the service took it, which would
+            # otherwise stay `queued` with nothing left to run it.
+            await settle_interrupted(journal, record)
+            raise
         except FasterRagError as exc:
             _logger.error(
                 "ingest job failed in the background",

@@ -90,7 +90,7 @@ def test_the_job_status_body_carries_the_documented_members(client: TestClient) 
 
     body = client.get(f"/v1/ingest/{job_id}").json()
 
-    assert set(body) == {"job_id", "status", "counts", "started_at", "finished_at"}
+    assert set(body) == {"job_id", "status", "reason_code", "counts", "started_at", "finished_at"}
 
 
 def test_a_completed_job_reports_its_counts(client: TestClient) -> None:

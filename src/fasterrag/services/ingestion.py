@@ -44,6 +44,7 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger, use_trace_id
+from fasterrag.services.jobs import settle_interrupted
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.lockfile import LockStore, build_lock
 from fasterrag.services.reindex import require_keyword_leg
@@ -123,6 +124,12 @@ class IngestionService:
         with use_trace_id():
             try:
                 return await self._run(record, metadata)
+            except asyncio.CancelledError:
+                # CRITICAL: cancellation is a BaseException, so neither handler below sees
+                # it. Without this branch a job stopped by a shutdown stays `running` for
+                # good, which a client polling it cannot tell apart from slow progress.
+                await settle_interrupted(self.journal, record)
+                raise
             except FasterRagError as exc:
                 await self._settle_failed(record, exc.code.value, exc.detail)
                 raise
@@ -160,8 +167,8 @@ class IngestionService:
             )
             resume_from = self.journal.resume_index(record)
 
-            running = replace(record, status="running")
-            await self.journal.save_job(running)
+            running = replace(record, status="running", reason_code=None, finished_at=None)
+            await _uninterrupted(self.journal.save_job(running))
             progress = _Checkpointer(self.journal, running)
             ledger = IndexLedger(progress, start=resume_from)
 
@@ -234,7 +241,7 @@ class IngestionService:
             counts=counts,
             finished_at=_finished_at(),
         )
-        await self.journal.save_job(settled)
+        await _uninterrupted(self.journal.save_job(settled))
         await self._publish_metrics(settled, counts, elapsed=time.monotonic() - started)
 
         if indexer.written:
@@ -334,7 +341,22 @@ class _Checkpointer:
 
     async def __call__(self, index: int) -> None:
         """Checkpoint after the document at ``index``, off the event loop."""
-        self.record = await self.journal.checkpoint(self.record, index)
+        self.record = await _uninterrupted(self.journal.checkpoint(self.record, index))
+
+
+async def _uninterrupted[Written](write: Coroutine[Any, Any, Written]) -> Written:
+    """Finish a write to the job record even if the caller is cancelled during it."""
+    writing = asyncio.ensure_future(write)
+    try:
+        return await asyncio.shield(writing)
+    except asyncio.CancelledError:
+        # CRITICAL: a journal write runs in a worker thread, and cancelling the await does
+        # not stop the thread. Unwinding at once would let the interrupted job be settled
+        # while that thread is still writing, and whichever write landed second would win:
+        # a `running` record put back over `failed`, or a checkpoint lost. Waiting here
+        # means the cancellation leaves this frame only once the record is quiet.
+        await asyncio.wait({writing})
+        raise
 
 
 async def _pipe(
@@ -346,6 +368,26 @@ async def _pipe(
     producer = asyncio.ensure_future(producing)
     consumer = asyncio.ensure_future(pool.run(queue))
 
+    try:
+        return await _joined(producer, consumer, pool, queue)
+    except asyncio.CancelledError:
+        # CRITICAL: `asyncio.wait` does not cancel what it waits for. A job cancelled here
+        # would leave both halves running with nobody awaiting them: still embedding, still
+        # indexing, and still checkpointing `running` over the record the caller is about
+        # to settle. Both are stopped, and have finished unwinding, before this re-raises.
+        producer.cancel()
+        consumer.cancel()
+        await asyncio.gather(producer, consumer, return_exceptions=True)
+        raise
+
+
+async def _joined(
+    producer: asyncio.Task[PoolReport],
+    consumer: asyncio.Task[EmbedReport],
+    pool: EmbeddingWorkerPool,
+    queue: BoundedQueue[ChunkPayload],
+) -> tuple[PoolReport, EmbedReport]:
+    """Wait for both sides, ending the other when either one stops first."""
     await asyncio.wait({producer, consumer}, return_when=asyncio.FIRST_COMPLETED)
 
     if consumer.done() and not producer.done():
