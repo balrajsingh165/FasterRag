@@ -237,6 +237,17 @@ def test_nothing_is_uploaded_before_every_check_has_passed() -> None:
         assert "publish-pypi" in jobs[name]["needs"], name
 
 
+def test_a_rehearsal_builds_the_sbom_that_a_tagged_release_attaches() -> None:
+    """TASK-0087: an SBOM step skipped on a dry run would first execute at the irreversible tag."""
+    jobs = release()["jobs"]
+    create = next(step for step in jobs["github-release"]["steps"] if "run" in step)["run"]
+
+    assert "if" not in jobs["sbom"]
+    assert "--locked" in jobs["sbom"]["steps"][-3]["run"]
+    assert "sbom" in jobs["github-release"]["needs"]
+    assert "sbom/*" in create
+
+
 def test_pypi_is_reached_by_trusted_publishing_behind_the_protected_environment() -> None:
     """No stored token: an OIDC exchange, in the one job that may ask for it."""
     jobs = release()["jobs"]
