@@ -116,7 +116,7 @@ def test_blank_referenced_env_var_is_fatal(tmp_path: Path, env: dict[str, str]) 
 def test_env_error_never_echoes_a_secret_value(tmp_path: Path, env: dict[str, str]) -> None:
     env["QDRANT_API_KEY"] = "super-secret-qdrant-key"
     del env["FASTERRAG_API_KEY"]
-    path = write_config(tmp_path, "security:\n  api_key_env: FASTERRAG_API_KEY\n")
+    path = write_config(tmp_path, "security:\n  auth: true\n  api_key_env: FASTERRAG_API_KEY\n")
 
     with pytest.raises(ConfigError) as caught:
         load_settings(path, env_file=None)
@@ -137,6 +137,45 @@ def test_unreferenced_env_vars_are_not_required(tmp_path: Path, env: dict[str, s
     )
 
     assert load_settings(path, env_file=None).llm.provider == "ollama"
+
+
+def test_a_config_whose_auth_is_off_loads_without_the_api_key(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    """The default config demanded FASTERRAG_API_KEY even with auth off (TASK-0444)."""
+    del env["FASTERRAG_API_KEY"]
+    path = write_config(tmp_path, "security:\n  auth: false\n")
+
+    assert load_settings(path, env_file=None).security.auth is False
+
+
+def test_a_config_whose_auth_is_on_still_refuses_to_load_without_the_api_key(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    del env["FASTERRAG_API_KEY"]
+    path = write_config(tmp_path, "security:\n  auth: true\n")
+
+    with pytest.raises(ConfigError, match="FASTERRAG_API_KEY") as caught:
+        load_settings(path, env_file=None)
+    assert "security.api_key_env" in caught.value.detail
+
+
+def test_a_chroma_config_loads_without_the_qdrant_key(tmp_path: Path, env: dict[str, str]) -> None:
+    """vector_db.api_key_env defaults to QDRANT_API_KEY, which Chroma never reads."""
+    del env["QDRANT_API_KEY"]
+    path = write_config(tmp_path, "vector_db:\n  provider: chroma\n")
+
+    assert load_settings(path, env_file=None).vector_db.provider == "chroma"
+
+
+def test_a_qdrant_config_still_refuses_to_load_without_the_key_it_names(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    del env["QDRANT_API_KEY"]
+    path = write_config(tmp_path, "vector_db:\n  provider: qdrant\n  api_key_env: QDRANT_API_KEY\n")
+
+    with pytest.raises(ConfigError, match="QDRANT_API_KEY"):
+        load_settings(path, env_file=None)
 
 
 def test_dotenv_file_supplies_missing_variables(tmp_path: Path, env: dict[str, str]) -> None:

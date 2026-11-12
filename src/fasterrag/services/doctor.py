@@ -356,10 +356,10 @@ def _check_api_ports(settings: Settings) -> list[DoctorCheck]:
 
 
 def _check_secrets(settings: Settings) -> DoctorCheck:
-    """Verify every environment variable the configuration references is populated."""
+    """Verify every environment variable an enabled feature reads is populated."""
     missing = [
         f"{name} ({config_key})"
-        for name, config_key in sorted(settings.referenced_env_vars().items())
+        for name, config_key in sorted(settings.required_env_vars().items())
         if not (os.environ.get(name) or "").strip()
     ]
     return DoctorCheck(

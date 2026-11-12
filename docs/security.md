@@ -4,7 +4,7 @@
 
 - **`config.yaml` never contains secrets.** It drives all behavior; credentials live ONLY in `.env` (or the process environment). Config references secrets exclusively by env-var name: `api_key_env: OPENAI_API_KEY`.
 - `.env` is git-ignored; `.env.example` documents every variable with placeholder values.
-- Startup validation confirms every referenced env var exists — a missing one is a fatal `ConfigError` that names the variable but **never logs its value**.
+- Startup validation confirms every env var an enabled feature reads exists — a missing one is a fatal `ConfigError` that names the variable but **never logs its value**. A variable nothing reads is not demanded: `FASTERRAG_API_KEY` only with `security.auth: true`, `QDRANT_API_KEY` not for Chroma or pgvector ([config-reference.md](config-reference.md) rule 9).
 - Secret values never appear in logs, traces, problem responses, or the dashboard. Provider keys are redacted to `sk-***` in any diagnostic output.
 - Provisioner-generated secrets (Langfuse `NEXTAUTH_SECRET`/`SALT`/`ENCRYPTION_KEY`) are written once to `.env` and never regenerated on re-provision ([observability.md](observability.md)).
 
