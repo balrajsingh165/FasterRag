@@ -41,6 +41,7 @@ from fasterrag.api.schemas import IngestRequest
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import current_trace_id, get_logger, use_trace_id
 from fasterrag.services.composition import build_ingestion, create_embedding_router
+from fasterrag.services.ingestion import plan_dead_letter_retry
 from fasterrag.services.jobs import settle_interrupted
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.reindex import require_keyword_leg
@@ -238,22 +239,31 @@ async def retry_dead_letters(
 ) -> dict[str, Any]:
     """Re-ingest a job's dead-lettered documents as a new job, behind the same preflight.
 
-    A new job rather than a mutation of the old one: the original is an audit record of what
-    happened, and rewriting it would destroy the evidence of the failure being retried.
+    A new job rather than a mutation of the old one, keyed so that repeating the call returns
+    that job instead of starting another (TASK-0474).
     """
-    original = await journal.load_job(job_id, tenant=tenant)
-    failed = await journal.dead_lettered(job_id)
-    if not failed:
+    plan = await plan_dead_letter_retry(
+        journal, job_id, tenant=tenant, max_retries=settings.ingestion.dlq.max_retries
+    )
+    original = plan.original
+    if not plan.sources:
         return {"job_id": job_id, "retried": 0, "status": original.status}
 
     await require_keyword_leg(original.collection, settings, adapter)
 
     service = build_ingestion(settings, adapter, journal, None)
     retry = await service.accept(
-        [record.source for record in failed],
+        list(plan.sources),
         collection=original.collection,
         tenant=original.tenant,
+        idempotency_key=plan.idempotency_key,
     )
-    await jobs.submit(retry.job_id, _run_job(request, retry, None))
+    if retry.status == "queued":
+        await jobs.submit(retry.job_id, _run_job(request, retry, None))
 
-    return {"job_id": retry.job_id, "retried": len(failed), "status": retry.status, "of": job_id}
+    return {
+        "job_id": retry.job_id,
+        "retried": len(plan.sources),
+        "status": retry.status,
+        "of": job_id,
+    }

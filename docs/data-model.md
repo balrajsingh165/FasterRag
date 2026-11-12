@@ -101,7 +101,7 @@ Drift = any mismatch between this file and live config/corpus. Reported, never s
 | `sources` | list[Source] | `{type: path\|url\|inline, value: str}` |
 | `checkpoint` | `{last_document_index: int, written_at: str}` | Journal checkpoint — where a crash resumes from (D3) |
 | `started_at` / `finished_at` | str\|null | Timestamps |
-| `idempotency_key` | str\|null | Replay of the same key returns this job rather than creating a new one |
+| `idempotency_key` | str\|null | Replay of the same key returns this job rather than creating a new one. A job created by `retry-dlq` carries a derived key, `retry-dlq:<generation>:<source job id>:<digest of its dead letters>`, which is what makes the retry idempotent and bounded (TASK-0474) |
 | `tenant` | str\|null | |
 | `reason_code` | str\|null | Why a `failed` job failed. `INTERRUPTED`: the process stopped working on the job (cancellation, or a process exit the next start settled), and its `checkpoint` is kept — not drawn from the error-code table. Otherwise the `code` of the error that stopped the job, from the error-code table (TASK-0526). `null` on every job that is not `failed`, on a `failed` job whose every document was dead-lettered (the reasons are per document), and cleared when the job is run again |
 
@@ -113,7 +113,7 @@ Drift = any mismatch between this file and live config/corpus. Reported, never s
 | `job_id` | str | Owning job |
 | `reason_code` | str | Machine-readable, drawn from the error-code table (e.g. `PARSE_FAILED`, `EMBED_PROVIDER_ERROR`) |
 | `detail` | str | Human-readable cause (never contains secret values) |
-| `attempts` | int | Retries consumed of `ingestion.dlq.max_retries` |
+| `attempts` | int | Retries consumed of `ingestion.dlq.max_retries`. How many times a dead-lettered document has been sent back through `retry-dlq` is the retry job's generation, carried in its derived `idempotency_key` (TASK-0474) |
 | `first_failed_at` / `last_failed_at` | str | Timestamps |
 | `trace_id` | str | Correlates to logs and spans |
 
@@ -127,6 +127,8 @@ One JSON object per line in `<journal>/collections/<collection>/content-hashes.j
 | Tombstone | `tombstone: true`, `document_id: str`, `deleted_at: str` | When the document is deleted and a live record of it existed |
 
 A tombstone cancels the hash remembered for its `document_id` **earlier in the file**, and nothing after it: a document ingested again after its tombstone is known again. A later remembered hash for the same `document_id` replaces the earlier one in the same way, so a document holds one hash at a time — the version the index holds. A hash that a later line assigned to a different document is left with that document. `IndexLock.document_hashes` is derived from the same reading, so a deleted document leaves the lockfile too.
+
+**Compaction** (TASK-0474). With `ingestion.journal.retention_days` above `0`, the retention pass rewrites the file as one remembered-hash line per hash that still counts, under the same lock appends take, and only when some line no longer counts. That is lossless by construction: a line a later line superseded or a tombstone cancelled can never count again, so the compacted file answers every question — and every question after any later appends — as the full log would (`tests/unit/services/test_journal_retention.py::test_compaction_never_changes_what_the_dedup_file_means`). Lines are never dropped by age: a hash is the only thing that tells a re-ingest that a document is already in the index, and the index keeps a document until somebody deletes it, so expiring the hash with the job that wrote it would re-index that document on the next ingest of it.
 
 ## Query-side entities
 

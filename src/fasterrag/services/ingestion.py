@@ -28,12 +28,13 @@ for a mistake made once, so nothing on the per-document path repeats it.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from concurrent.futures import Executor
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.adapters.llm.factory import create_llm_adapter
@@ -41,12 +42,13 @@ from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache.semantic import SemanticCache
+from fasterrag.core.identity import text_hash
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger, use_trace_id
 from fasterrag.services.embedding_router import create_embedding_router
-from fasterrag.services.jobs import requeue, resumable, settle_interrupted
-from fasterrag.services.journal import JobRecord, Journal
+from fasterrag.services.jobs import prune_when_due, requeue, resumable, settle_interrupted
+from fasterrag.services.journal import DocumentRecord, JobRecord, Journal
 from fasterrag.services.lockfile import LockStore, build_lock
 from fasterrag.services.reindex import require_keyword_leg
 from fasterrag.services.sources import resolve_sources, typed_source
@@ -56,9 +58,11 @@ from fasterrag.workers.indexer import Indexer
 from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload
 
-__all__ = ["IngestionService"]
+__all__ = ["DeadLetterRetry", "IngestionService", "plan_dead_letter_retry", "retry_generation"]
 
 _logger = get_logger(__name__)
+
+_RETRY_KEY_PREFIX: Final = "retry-dlq"
 
 
 class IngestionService:
@@ -147,7 +151,7 @@ class IngestionService:
         """
         with use_trace_id():
             try:
-                return await self._run(record, metadata)
+                settled = await self._run(record, metadata)
             except asyncio.CancelledError:
                 # CRITICAL: cancellation is a BaseException, so neither handler below sees
                 # it. Without this branch a job stopped by a shutdown stays `running` for
@@ -165,6 +169,8 @@ class IngestionService:
                     code=ErrorCode.INTERNAL,
                     retryable=False,
                 ) from exc
+            await prune_when_due(self.journal)
+            return settled
 
     async def _settle_failed(self, record: JobRecord, code: str, detail: str) -> None:
         """Persist a terminal ``failed`` status, keeping whatever checkpoint was reached."""
@@ -439,6 +445,60 @@ async def _joined(
 
     await queue.close(consumers=pool.size)
     return parse_report, await consumer
+
+
+@dataclass(frozen=True, slots=True)
+class DeadLetterRetry:
+    """A job's dead letters to submit again, and the derived key the retry is accepted under."""
+
+    original: JobRecord
+    sources: tuple[str, ...] = ()
+    idempotency_key: str | None = None
+
+
+def retry_generation(record: JobRecord) -> int:
+    """Return how many dead-letter retries lie behind ``record``: 0 for a submitted job."""
+    prefix, _, rest = (record.idempotency_key or "").partition(":")
+    generation = rest.partition(":")[0]
+    if prefix != _RETRY_KEY_PREFIX or not generation.isdigit():
+        return 0
+    return int(generation)
+
+
+def _retry_key(original: JobRecord, failed: Sequence[DocumentRecord]) -> str:
+    """Return the key for retrying exactly ``failed``: generation, source job, dead-letter set."""
+    entries = sorted({(record.document_id, record.source) for record in failed})
+    digest = text_hash(json.dumps(entries))[:16]
+    return f"{_RETRY_KEY_PREFIX}:{retry_generation(original) + 1}:{original.job_id}:{digest}"
+
+
+async def plan_dead_letter_retry(
+    journal: Journal, job_id: str, *, tenant: str | None, max_retries: int
+) -> DeadLetterRetry:
+    """Return what retrying a job's dead letters submits, under a key a repeat finds again.
+
+    A new retry past ``ingestion.dlq.max_retries`` generations is refused; one that already
+    exists is returned whatever the limit, since repeating it starts nothing (TASK-0474).
+    """
+    original = await journal.load_job(job_id, tenant=tenant)
+    failed = await journal.dead_lettered(job_id)
+    if not failed:
+        return DeadLetterRetry(original)
+
+    key = _retry_key(original, failed)
+    generation = retry_generation(original)
+    if generation >= max_retries:
+        existing = await journal.find_by_idempotency_key(key, tenant=original.tenant)
+        if existing is None:
+            raise IngestionError(
+                f"job {job_id} is dead-letter retry {generation} of its documents, and "
+                f"ingestion.dlq.max_retries allows {max_retries}; nothing was started. Fix the "
+                "sources listed under /documents?status=dead_lettered and submit them again "
+                "as a new job, or raise ingestion.dlq.max_retries",
+                code=ErrorCode.DLQ_RETRIES_EXHAUSTED,
+                retryable=False,
+            )
+    return DeadLetterRetry(original, tuple(record.source for record in failed), key)
 
 
 def _not_resumable(record: JobRecord, stale_seconds: int) -> str:

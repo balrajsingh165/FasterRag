@@ -119,6 +119,9 @@ ingestion:
   journal:
     enabled: true
     checkpoint_every: 100
+    # Days a settled job's record and per-document log are kept. 0 = keep every
+    # job forever. Never removes a queued, running or interrupted job.
+    retention_days: 0
   dlq:
     enabled: true
     max_retries: 3
@@ -389,7 +392,8 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | `ingestion.journal.enabled` | bool | `true` | — | D3: checkpointed ingestion journal; crash mid-ingest resumes exactly where it stopped. |
 | `ingestion.journal.checkpoint_every` | int | `100` | ≥ 1 | Journal checkpoint interval in documents. |
 | `ingestion.dlq.enabled` | bool | `true` | — | Failed documents go to a dead-letter queue with machine-readable reason codes and per-document status. |
-| `ingestion.dlq.max_retries` | int | `3` | 0–10 | Retries before a document is dead-lettered. |
+| `ingestion.journal.retention_days` | int | `0` | 0–36500 | Days a settled job is kept in the ingestion journal (TASK-0474). `0` keeps every job for good, as before. Above `0`, a pass runs after an ingest job settles (at most once an hour per process) and when the API starts: it deletes each job settled `completed`, `partial` or `failed` more than this many days ago — its record, the record's previous copy, its per-document log (so its dead-letter entries) and its idempotency-key index entry, after which `GET /v1/ingest/{job_id}` answers `404` and replaying its `idempotency_key` starts a new job. A `queued`, `running` or `INTERRUPTED` job is never removed, whatever its age, because it can still be run. The same pass compacts each collection's dedup file to the lines that still count — dropping hashes a document has since replaced and lines a tombstone cancelled — and **never drops a hash a live document holds, however old**: deduplication of a re-ingest answers exactly as before. A failure is logged and tried again on the next pass. |
+| `ingestion.dlq.max_retries` | int | `3` | 0–10 | Retries before a document is dead-lettered, and how many generations of `POST /v1/ingest/{job_id}/retry-dlq` a dead-lettered document may go through: retrying the dead letters of a job that is itself the `max_retries`-th retry is refused with `409 DLQ_RETRIES_EXHAUSTED` (TASK-0474). `0` refuses every dead-letter retry. |
 | `ingestion.max_document_mb` | int | `100` | 1–1024 | Input size limit per document (security + stability). |
 | `ingestion.parse_timeout_seconds` | float | `600` | ≥ 0 (0 = no limit) | Time limit per document for loading, parsing and chunking, counted from the moment the document is handed to the worker pool. A document still being parsed when it expires is dead-lettered with reason `PARSE_TIMEOUT` and the job continues. A running process-pool task cannot be cancelled, so the pool is recycled: its workers are killed, a new pool is started, and the documents that were in flight beside the overdue one are parsed again from the start with a fresh limit (one that was itself within 50 ms of its own limit is dead-lettered with it). Set it above the slowest legitimate document — OCR of a long scan is the usual candidate — because a document that needs longer can never be ingested while the limit stands. `0` restores the unbounded wait, in which one hung parser stalls its job for ever. |
 | `ingestion.allowed_source_roots` | list[str] | `[]` | paths | Directories a `path` source may be read from. **Authorization boundary**: a `path` source names a file on the server, so an unconfined one lets any caller with the `ingest` scope read `.env` or an SSH key back out through a query. Paths are resolved before comparison, so `..` and symlinks cannot escape a root. Empty means unconfined, which is refused outright when `security.auth` is on — so forgetting it breaks a served deployment loudly instead of exposing it quietly. |

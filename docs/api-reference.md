@@ -63,6 +63,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `NOT_READY` | 503 | — | A readiness dependency check failed: returned by `/readyz`, with a `dependencies[]` extension member naming each check and its state. Also returned, retryable, by `POST /v1/ingest` and `POST /v1/ingest/{job_id}/retry-dlq` while the server is shutting down and has stopped starting jobs (see [`POST /v1/ingest`](#post-v1ingest)); that refusal carries no `dependencies[]`. Also returned, retryable, by `GET /v1/ingest/{job_id}` when the job's record stayed unopenable through a short retry (see [`GET /v1/ingest/{job_id}`](#get-v1ingestjob_id)). |
 | `INTERNAL` | 500 | `FasterRagError` | Anything unclassified. Always carries `trace_id`. Never returned without a problem body. |
 | `USAGE_ERROR` | 400 | `FasterRagError` | The Python package was called the wrong way: a facade method before `async with` / `with`, or a blocking-facade call made from the thread that runs that facade's own event loop. Raised by the library only — no REST request is answered with it. Not retryable: the calling code has to change (TASK-0461). |
+| `DLQ_RETRIES_EXHAUSTED` | 409 | `IngestionError` | `POST /v1/ingest/{job_id}/retry-dlq` on a job that is already the `ingestion.dlq.max_retries`-th dead-letter retry of its documents, when no retry of exactly these dead letters exists yet (TASK-0474). Nothing is started. Not retryable: fix the sources and submit them as a new job, or raise the setting. |
 
 ---
 
@@ -164,7 +165,11 @@ Per-document status (D3), filterable. Each entry: `{"document_id", "source", "st
 
 ### `POST /v1/ingest/{job_id}/retry-dlq`
 
-Re-enqueues dead-lettered documents of the job. `202`, or `409 CONFLICT` under the same keyword-leg preflight as `POST /v1/ingest`.
+Re-ingests the job's dead-lettered documents as a new job: `202` `{"job_id": <retry job>, "retried": n, "status", "of": <job_id>}`, or `{"job_id": <job_id>, "retried": 0, "status"}` when the job has no dead letters.
+
+**Idempotent** (TASK-0474). The retry job is created under an idempotency key derived from the job id, the retry's generation and the exact set of dead letters, so calling the route again returns the **same** retry job — with its current `status` — and starts nothing, with or without an `Idempotency-Key` header. A retry job settled `failed` / `INTERRUPTED` is queued again from its checkpoint by the repeat, as a replayed body-field key would. A job whose dead letters grew after its first retry (it was resumed and failed more documents) gets a new retry job for the larger set.
+
+**Bounded.** A retry job's own dead letters can be retried in turn, each one generation further; once a job is the `ingestion.dlq.max_retries`-th retry (default 3), retrying it is `409 DLQ_RETRIES_EXHAUSTED` and nothing is recorded. A retry that already exists is still returned after the limit is lowered. `409 CONFLICT` under the same keyword-leg preflight as `POST /v1/ingest`; `404` for an unknown job; `503 NOT_READY` during shutdown.
 
 ## Query
 

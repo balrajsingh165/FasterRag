@@ -18,6 +18,11 @@ succeed into a resumable, auditable batch system:
 * **Dead-lettering.** A document that fails its retries is recorded with a machine-readable
   reason code and stays queryable, so a bad file never silently disappears and never stops
   the pipeline.
+* **Retention.** With ``ingestion.journal.retention_days`` above zero, :meth:`Journal.prune`
+  deletes settled jobs past the window — never one that is queued, running or interrupted,
+  which can still be run — and compacts each dedup log to the lines that still count. A hash
+  a live document holds is never dropped, however old: it is all that tells a re-ingest the
+  document is already indexed (TASK-0474).
 
 Every rewrite of a record is atomic and durable — written to a uniquely named temporary
 file, flushed, renamed over the live file, and the directory flushed where the platform
@@ -35,6 +40,7 @@ import errno
 import json
 import os
 import secrets
+import shutil
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -64,6 +70,7 @@ __all__ = [
     "JobRecord",
     "JobStatus",
     "Journal",
+    "PruneReport",
     "QuietJobs",
     "create_journal",
     "envelope",
@@ -86,6 +93,10 @@ _KEY_INDEX_DIR: Final = "job-keys"
 _KEY_INDEX_BUILT: Final = "built.json"
 _LOCK_TIMEOUT_SECONDS: Final = 30.0
 _LOCK_POLL_SECONDS: Final = 0.002
+_SETTLED: Final = frozenset({"completed", "partial", "failed"})
+_INTERRUPTED: Final = "INTERRUPTED"
+_PRUNE_INTERVAL_SECONDS: Final = 3600.0
+_SECONDS_PER_DAY: Final = 86400
 
 DocumentStatus = str
 JobStatus = str
@@ -180,6 +191,15 @@ class QuietJobs:
     recent: int = 0
     unreadable: int = 0
     queued: tuple[JobRecord, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PruneReport:
+    """What one retention pass removed, and how much it had to leave for a later pass."""
+
+    jobs: tuple[str, ...] = ()
+    dedup_lines: int = 0
+    failed: int = 0
 
 
 def _modified(path: Path, *, missing: float) -> float:
@@ -417,7 +437,7 @@ def _append_line(path: Path, line: str, tails: dict[Path, int]) -> None:
 def _logged_lines(path: Path) -> list[dict[str, Any]]:
     """Return the parsed lines of an append-only log, skipping a fragment a crash left."""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = _patiently(lambda: path.read_text(encoding="utf-8", errors="replace"))
     except (FileNotFoundError, NotADirectoryError):
         return []
     parsed: list[dict[str, Any]] = []
@@ -438,6 +458,41 @@ def _sync_if_present(path: Path) -> None:
     """Flush a log to the disk if it exists, so a checkpoint never outruns what it covers."""
     if path.is_file():
         _sync_file(path)
+
+
+def _live_content(lines: Sequence[dict[str, Any]]) -> dict[str, str]:
+    """Return the hash to document-id map an ordered dedup log means (tombstones applied)."""
+    known: dict[str, str] = {}
+    held: dict[str, str] = {}
+    for payload in lines:
+        document = payload["document_id"]
+        superseded = held.pop(document, None)
+        if superseded is not None and known.get(superseded) == document:
+            del known[superseded]
+        if payload.get(_TOMBSTONE_KEY):
+            continue
+        held[document] = payload["content_hash"]
+        known[held[document]] = document
+    return known
+
+
+def _dedup_line(content: str, document: str) -> str:
+    """Return the dedup log line that remembers ``content`` for ``document``."""
+    return json.dumps({"content_hash": content, "document_id": document})
+
+
+def _finished_before(record: JobRecord, cutoff: float) -> bool:
+    """Return whether a settled job finished before ``cutoff``; an unreadable time is old."""
+    if record.finished_at is None:
+        return True
+    try:
+        return datetime.fromisoformat(record.finished_at).timestamp() < cutoff
+    except ValueError as exc:
+        _logger.warning(
+            "a job's finish time cannot be read; the age of its record decides its retention",
+            extra={"job_id": record.job_id, "detail": str(exc)},
+        )
+        return True
 
 
 def _key_entry_name(key: str, tenant: str | None) -> str:
@@ -478,12 +533,15 @@ class Journal:
         *,
         checkpoint_every: int = 100,
         enabled: bool = True,
+        retention_days: int = 0,
     ) -> None:
-        """Open a journal rooted at ``root``."""
+        """Open a journal rooted at ``root``; ``retention_days`` of 0 keeps every job."""
         self.root = Path(root)
         self.checkpoint_every = checkpoint_every
         self.enabled = enabled
+        self.retention_days = retention_days
         self._tails: dict[Path, int] = {}
+        self._last_pruned: float | None = None
 
     def _job_path(self, job: str) -> Path:
         """Return the path of a job record."""
@@ -963,8 +1021,7 @@ class Journal:
 
     def remember_content_blocking(self, collection: str, content: str, document: str) -> None:
         """Record an indexed content hash; :meth:`remember_content` is this off the loop."""
-        line = json.dumps({"content_hash": content, "document_id": document})
-        _append_line(self._dedup_path(collection), line, self._tails)
+        _append_line(self._dedup_path(collection), _dedup_line(content, document), self._tails)
 
     async def forget_document(self, collection: str, document: str) -> bool:
         """Tombstone a document in a collection's dedup index, off the event loop."""
@@ -991,18 +1048,7 @@ class Journal:
 
     def known_content_blocking(self, collection: str) -> dict[str, str]:
         """Return the hash to document-id map; :meth:`known_content` is this off the loop."""
-        known: dict[str, str] = {}
-        held: dict[str, str] = {}
-        for payload in _logged_lines(self._dedup_path(collection)):
-            document = payload["document_id"]
-            superseded = held.pop(document, None)
-            if superseded is not None and known.get(superseded) == document:
-                del known[superseded]
-            if payload.get(_TOMBSTONE_KEY):
-                continue
-            held[document] = payload["content_hash"]
-            known[held[document]] = document
-        return known
+        return _live_content(_logged_lines(self._dedup_path(collection)))
 
     async def document_hashes(self, collection: str) -> dict[str, str]:
         """Return the collection's ``document_id → content_hash`` map, off the event loop."""
@@ -1022,6 +1068,131 @@ class Journal:
         """Return whether the content is already held; :meth:`is_duplicate` is this off the loop."""
         return content in self.known_content_blocking(collection)
 
+    def prune_due(self) -> bool:
+        """Return whether retention is on and this journal has not pruned in the last hour."""
+        if self.retention_days <= 0:
+            return False
+        last = self._last_pruned
+        return last is None or time.monotonic() - last >= _PRUNE_INTERVAL_SECONDS
+
+    async def prune(self) -> PruneReport:
+        """Apply ``ingestion.journal.retention_days``, off the event loop (TASK-0474)."""
+        return await asyncio.to_thread(self.prune_blocking)
+
+    def prune_blocking(self) -> PruneReport:
+        """Remove settled jobs past retention and compact dedup logs; :meth:`prune` off the loop.
+
+        Never a queued, running or interrupted job, and never a hash a live document holds:
+        dedup lines go only when superseded or tombstoned, whatever their age.
+        """
+        if self.retention_days <= 0:
+            return PruneReport()
+        self._last_pruned = time.monotonic()
+        cutoff = time.time() - self.retention_days * _SECONDS_PER_DAY
+        pruned, failed = self._prune_jobs(cutoff)
+        dropped = 0
+        for path in sorted((self.root / _COLLECTIONS_DIR).glob(f"*/{_DEDUP_FILE}")):
+            try:
+                dropped += self._compact_dedup(path)
+            except IngestionError as exc:
+                failed += 1
+                _logger.warning(
+                    "a dedup log could not be compacted; it is left whole and tried again later",
+                    extra={"path": str(path), "code": exc.code.value, "detail": exc.detail},
+                )
+        report = PruneReport(jobs=tuple(pruned), dedup_lines=dropped, failed=failed)
+        if pruned or dropped or failed:
+            _logger.info(
+                "pruned the ingestion journal past its retention window",
+                extra={
+                    "jobs": len(pruned),
+                    "dedup_lines": dropped,
+                    "failed": failed,
+                    "retention_days": self.retention_days,
+                },
+            )
+        return report
+
+    def _prune_jobs(self, cutoff: float) -> tuple[list[str], int]:
+        """Remove every settled, uninterrupted job that finished before ``cutoff``."""
+        directory = self.root / _JOBS_DIR
+        if not directory.is_dir():
+            return [], 0
+        pruned: list[str] = []
+        failed = 0
+        for path in sorted(directory.glob("*.json")):
+            if _modified(path, missing=time.time()) >= cutoff:
+                continue
+            payload = self._read_quiet_record(path)
+            if payload is None:
+                continue
+            record = JobRecord.from_dict(payload)
+            if record.status not in _SETTLED or record.reason_code == _INTERRUPTED:
+                continue
+            if not _finished_before(record, cutoff):
+                continue
+            try:
+                self._remove_job(record)
+            except (OSError, IngestionError) as exc:
+                failed += 1
+                _logger.warning(
+                    "a job past retention could not be removed; it is tried again next pass",
+                    extra={"job_id": record.job_id, "detail": str(exc)},
+                )
+                continue
+            pruned.append(record.job_id)
+        return pruned, failed
+
+    def _remove_job(self, record: JobRecord) -> None:
+        """Delete a job's document log, then its record and its key entry under the index lock.
+
+        The previous copy goes before the live record, which a read would otherwise fall back
+        to; an entry is removed only when it names this job.
+        """
+        logs = self._documents_path(record.job_id).parent
+        if logs.is_dir():
+            _patiently(partial(shutil.rmtree, logs))
+        path = self._job_path(record.job_id)
+        with self._key_index_lock():
+            previous = path.with_suffix(path.suffix + _PREVIOUS_SUFFIX)
+            _patiently(partial(previous.unlink, missing_ok=True))
+            _patiently(partial(path.unlink, missing_ok=True))
+            if record.idempotency_key is not None:
+                self._forget_key(record, record.idempotency_key)
+
+    def _forget_key(self, record: JobRecord, key: str) -> None:
+        """Remove the index entry for ``key`` if it names ``record``, under the index lock."""
+        entry = self.root / _KEY_INDEX_DIR / _key_entry_name(key, record.tenant)
+        text = _read_text(entry)
+        named = open_envelope(text) if text is not None else None
+        if named is not None and named.get("job_id") == record.job_id:
+            _patiently(partial(entry.unlink, missing_ok=True))
+
+    def _compact_dedup(self, path: Path) -> int:
+        """Rewrite a dedup log as the lines that still count, returning how many were dropped.
+
+        Read once without the lock to skip a log with nothing to drop; rewritten under the
+        append lock, so no line appended meanwhile is lost.
+        """
+        lines = _logged_lines(path)
+        if len(lines) <= len(_live_content(lines)):
+            return 0
+        try:
+            with _exclusive(path):
+                lines = _logged_lines(path)
+                live = _live_content(lines)
+                dropped = len(lines) - len(live)
+                if dropped <= 0:
+                    return 0
+                text = "".join(_dedup_line(c, d) + "\n" for c, d in live.items())
+                _write_atomically(path, text, keep_previous=False)
+                self._tails.pop(path, None)
+        except OSError as exc:
+            raise IngestionError(
+                f"the dedup log {path} could not be compacted: {exc}", code=ErrorCode.INTERNAL
+            ) from exc
+        return dropped
+
     async def counts(self, job: str) -> dict[str, int]:
         """Return per-status document counts for a job, off the event loop."""
         return await asyncio.to_thread(self.counts_blocking, job)
@@ -1038,4 +1209,9 @@ class Journal:
 def create_journal(settings: Settings, root: str | Path = DEFAULT_JOURNAL_ROOT) -> Journal:
     """Build a journal from validated configuration."""
     journal = settings.ingestion.journal
-    return Journal(root, checkpoint_every=journal.checkpoint_every, enabled=journal.enabled)
+    return Journal(
+        root,
+        checkpoint_every=journal.checkpoint_every,
+        enabled=journal.enabled,
+        retention_days=journal.retention_days,
+    )

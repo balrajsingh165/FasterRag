@@ -76,6 +76,7 @@ __all__ = [
     "DrainReport",
     "JobRegistry",
     "ReapReport",
+    "prune_when_due",
     "reap_at_startup",
     "reap_interrupted",
     "requeue",
@@ -193,6 +194,7 @@ async def reap_at_startup(journal: Journal, registry: JobRegistry, *, stale_seco
     try:
         report = await reap_interrupted(journal, stale_seconds=stale_seconds, skip=registry.active)
         _log_reap(report, stale_seconds)
+        await prune_when_due(journal)
         if not report.recent:
             return
 
@@ -211,6 +213,22 @@ async def reap_at_startup(journal: Journal, registry: JobRegistry, *, stale_seco
             "the look for interrupted ingest jobs failed; jobs a previous process left "
             "running stay that way until the next start",
             extra={"detail": str(exc), "error": type(exc).__name__},
+        )
+
+
+async def prune_when_due(journal: Journal) -> None:
+    """Apply ``ingestion.journal.retention_days`` if a pass is due; a failure is only logged.
+
+    Called after a job settles and at startup, so a journal is pruned wherever it grows.
+    """
+    if not journal.prune_due():
+        return
+    try:
+        await journal.prune()
+    except FasterRagError as exc:
+        _logger.warning(
+            "the journal retention pass failed; nothing was lost, and it runs again later",
+            extra={"code": exc.code.value, "detail": exc.detail, "trace_id": exc.trace_id},
         )
 
 

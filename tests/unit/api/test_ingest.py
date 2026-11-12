@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from fasterrag.api import ingest as ingest_router
 from fasterrag.api.problems import PROBLEM_MEDIA_TYPE
+from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, IngestionError
 from fasterrag.services.journal import JobRecord, Journal
 
@@ -266,6 +267,51 @@ def test_retrying_a_job_with_no_dead_letters_retries_nothing(client: TestClient)
 
     assert body["retried"] == 0
     assert body["job_id"] == job_id
+
+
+def dead_lettered_job(client: TestClient, app: FastAPI) -> str:
+    """Start a job and dead-letter one of its documents, as a failed parse would."""
+    job_id: str = start(client).json()["job_id"]
+    journal: Journal = app.state.journal
+    journal.dead_letter_blocking(
+        job_id,
+        document="d_1",
+        source="corpus/bad.pdf",
+        reason_code=ErrorCode.PARSE_FAILED,
+        detail="unreadable",
+        attempts=3,
+    )
+    return job_id
+
+
+def test_a_repeated_retry_returns_the_first_retrys_job(
+    client: TestClient, app: FastAPI, ingestion: RecordingIngestion
+) -> None:
+    """The retry had no idempotency key, so every repeated call started another job."""
+    job_id = dead_lettered_job(client, app)
+
+    first = client.post(f"/v1/ingest/{job_id}/retry-dlq").json()
+    second = client.post(f"/v1/ingest/{job_id}/retry-dlq").json()
+
+    assert second["job_id"] == first["job_id"]
+    assert (second["retried"], second["of"]) == (1, job_id)
+    assert ingestion.ran.count(first["job_id"]) == 1
+    assert len(list((app.state.journal.root / "jobs").glob("*.json"))) == 2
+
+
+def test_a_retry_past_dlq_max_retries_is_refused_as_a_problem(
+    client: TestClient, app: FastAPI
+) -> None:
+    """``ingestion.dlq.max_retries`` was recorded on each entry and never enforced."""
+    app.state.settings = Settings.model_validate({"ingestion": {"dlq": {"max_retries": 0}}})
+    job_id = dead_lettered_job(client, app)
+
+    response = client.post(f"/v1/ingest/{job_id}/retry-dlq")
+
+    assert response.status_code == 409
+    assert response.headers["content-type"].startswith(PROBLEM_MEDIA_TYPE)
+    assert response.json()["code"] == ErrorCode.DLQ_RETRIES_EXHAUSTED.value
+    assert "ingestion.dlq.max_retries" in response.json()["detail"]
 
 
 def test_retrying_an_unknown_job_is_404(client: TestClient) -> None:

@@ -112,6 +112,9 @@ ingestion:
   journal:
     enabled: true
     checkpoint_every: 100
+    # Days a settled job's record and per-document log are kept. 0 = keep every
+    # job forever. Never removes a queued, running or interrupted job.
+    retention_days: 0
   dlq:
     enabled: true
     max_retries: 3
