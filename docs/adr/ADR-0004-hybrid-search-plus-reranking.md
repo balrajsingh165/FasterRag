@@ -1,6 +1,6 @@
 # ADR-0004: Hybrid Search + RRF (k=60) + Cross-Encoder Reranking as the Default Retrieval Stack
 
-- Status: accepted
+- Status: accepted; the reranking default amended by [ADR-0010](ADR-0010-reranker-off-by-default.md) (2026-11-13) — reranking stays part of the stack, but ships off
 - Date: 2026-07-29
 - Deciders: fasterRag maintainers
 

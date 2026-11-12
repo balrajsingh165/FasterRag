@@ -40,7 +40,7 @@ asyncio.run(main())
 ## Step 0 — Install
 
 ```bash
-pip install "fasterrag[qdrant,huggingface,rerank,pdf,docx,html]"   # what the canonical config.yaml uses
+pip install "fasterrag[qdrant,huggingface,pdf,docx,html]"   # what the canonical config.yaml uses
 pip install "fasterrag[server]"       # add the REST server (Path C)
 pip install "fasterrag[openai]"       # add a hosted provider
 pip install "fasterrag[all]"          # everything
@@ -135,7 +135,7 @@ curl -X POST "$API/v1/ingest/$JOB/retry-dlq"
 fasterrag query "What does the vendor agreement say about termination?"
 ```
 
-The default pipeline runs dense ANN **and** BM25 in parallel, fuses with RRF (k=60), reranks the fused candidates with a cross-encoder, assembles a token-budgeted context with citations, and streams the answer ([ADR-0004](adr/ADR-0004-hybrid-search-plus-reranking.md)).
+The default pipeline runs dense ANN **and** BM25 in parallel, fuses with RRF (k=60), assembles a token-budgeted context with citations, and streams the answer ([ADR-0004](adr/ADR-0004-hybrid-search-plus-reranking.md)). Cross-encoder reranking of the fused candidates is **off by default** and is one setting away — `retrieval.rerank: true` plus the `rerank` extra ([ADR-0010](adr/ADR-0010-reranker-off-by-default.md): the shipped model is a 2.14 GB download and BENCH-0003 — indicative, not citable — measured it at tens of seconds per query on CPU).
 
 Debugging what came back:
 

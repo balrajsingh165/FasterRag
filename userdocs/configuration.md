@@ -56,7 +56,7 @@ Per-provider details are on [Providers & deployment](providers.md).
 | `chunking.overlap` | `64` | tokens shared between neighbouring chunks |
 | `retrieval.top_k` | `10` | chunks passed to the answer (1–100) |
 | `retrieval.hybrid` | `true` | run keyword (BM25) search beside vector search |
-| `retrieval.rerank` | `true` | rerank candidates with a cross-encoder (needs the `rerank` extra) |
+| `retrieval.rerank` | `false` | rerank candidates with a cross-encoder (needs the `rerank` extra). Off by default: the default model is a 2.14 GB download and slow on CPU |
 | `retrieval.reranker_model` | `BAAI/bge-reranker-v2-m3` | the cross-encoder to use |
 | `retrieval.rerank_top_n` | `100` | how many candidates the reranker sees |
 

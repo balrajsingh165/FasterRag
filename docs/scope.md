@@ -17,7 +17,7 @@ Speed and efficiency are *targeted* through three pillars — none of them yet m
 ## Goals
 
 - Ship a beta that ingests, indexes, and serves retrieval-augmented generation over very large corpora (hundreds of GB of documents, hundreds of millions of chunks) on self-hosted hardware.
-- Retrieval quality that targets the strongest published results out of the box: hybrid dense + BM25 retrieval, Reciprocal Rank Fusion (k=60), and cross-encoder reranking enabled by default (measured by our own eval harness before any claim is made — see [benchmarks.md](benchmarks.md)).
+- Retrieval quality that targets the strongest published results out of the box: hybrid dense + BM25 retrieval, Reciprocal Rank Fusion (k=60), and cross-encoder reranking one setting away (off by default — [ADR-0010](adr/ADR-0010-reranker-off-by-default.md) — because its cost is measured and its benefit on our golden sets is not yet resolvable; any quality claim is measured by our own eval harness first — see [benchmarks.md](benchmarks.md)).
 - Release fasterRag as an importable Python package (`pip install fasterrag`) with a stable public API, standalone components, and an entry-point plugin contract ([python-api.md](python-api.md)).
 - One config file drives everything; flipping a boolean provisions entire subsystems (Langfuse, Grafana, Qdrant) with no code changes.
 - Deterministic, measurable performance: every release ships benchmark numbers per [performance.md](performance.md).

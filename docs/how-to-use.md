@@ -16,7 +16,7 @@ Requires **Python 3.12+** (Linux and Windows are both CI-tested). Pick extras fo
 | `[qdrant]` | + the Qdrant adapter — **needed by the canonical `config.yaml`**, which selects Qdrant |
 | `[pdf]` / `[docx]` / `[html]` | + that document parser (a document whose parser is missing is dead-lettered with a detail naming the extra) |
 | `pip install "fasterrag[huggingface]"` | + local embeddings (sentence-transformers; multi-GB runtime — the fully-local starting point) |
-| `[rerank]` | + cross-encoder reranking (note: the default model is large; see §8 first-run) |
+| `[rerank]` | + cross-encoder reranking, which is **off by default** — set `retrieval.rerank: true` to use it ([ADR-0010](adr/ADR-0010-reranker-off-by-default.md); the default model is large, see §8 first-run) |
 | `[openai]` / `[anthropic]` / `[cohere]` / `[ollama]` | + that hosted/local provider |
 | `[redis]` | + the shared cache backend (multi-replica deployments) |
 | `[ocr]` | + scanned-PDF OCR (also needs the `tesseract` binary on the host) |
@@ -109,4 +109,4 @@ Grab three things: the `trace_id`, the problem `code`, and `fasterrag status`. T
 
 ## 8. Known sharp edges (current release line)
 
-First run with `[rerank]`/`[huggingface]` downloads multi-GB models — the first query is minutes, not seconds, and says so rather than hanging silently. The rate limiter counts per replica (TASK-0216). One replica per deployment is the tested shape for ingestion (TASK-0130). Performance numbers: none are published yet by policy — the [ledger](benchmarks.md) is the only place they will ever appear.
+First run with `[huggingface]`, or with `retrieval.rerank: true`, downloads multi-GB models — the first query is minutes, not seconds, and says so rather than hanging silently. The rate limiter counts per replica (TASK-0216). One replica per deployment is the tested shape for ingestion (TASK-0130). Performance numbers: none are published yet by policy — the [ledger](benchmarks.md) is the only place they will ever appear.

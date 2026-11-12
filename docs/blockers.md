@@ -61,22 +61,6 @@ The nightly CI job produces numbers but its own header states they are not citab
 
 ---
 
-## B6 — The shipped reranker is 2.2 GB (TASK-0175)
-
-Default config is `retrieval.rerank: true` with `BAAI/bge-reranker-v2-m3`. **Measured (BENCH-0003, 2026-11-03, indicative only — non-isolated hardware): the 2.2 GB of weights download in 357 s, and the model then loads in 8.3–9.3 s from a populated cache** — about a second more than the 90 MB `cross-encoder/ms-marco-MiniLM-L-6-v2`. The earlier "over 400 s to load" figure conflated the download with the load. The download is paid once per machine; the recurring cost is the larger one: **17–25× the small model's per-query rerank latency**, which at the shipped `retrieval.rerank_top_n: 100` is **55.7–86.9 s per query**, CPU-only. With `rerank: false` the same query path returns in 4.3 s. A `pip install` user's first query downloads 2.2 GB and appears to hang.
-
-TASK-0174 ✅ made the wait *visible* — the loader now warns, names the cost, and names the two ways out — but it did not decide whether the wait should exist.
-
-**The tension is real:** cross-encoder reranking is expected to be the strongest retrieval-quality lever in the stack — expected, not measured (TASK-0084). Turning it off by default trades that expected quality for a faster first run, and the trade cannot be priced until the gain is a number.
-
-**Options:** a small cross-encoder by default with the large one as a documented upgrade; `rerank: false` by default; or keep it and treat the first-run cost as documented behaviour.
-
-| | Task | Blocked because |
-|---|---|---|
-| **B6.1** | — | The quickstart's credibility. Every documented first-run walkthrough currently understates how long it takes. |
-
----
-
 ## B7 — Verified against unit tests, never against the real backend (TASK-0079)
 
 **The daemon is back** (Docker Desktop 4.85.0 / engine 29.6.2, 2026-08-09), so nothing here is blocked any longer — each row is simply still unrun. Kept as a group because the reason they are all unverified is the same one, and because the first thing run against the real thing (TASK-0190 ✅ — the container image) failed on its first build, which is the argument for working through the rest of the list rather than assuming it.

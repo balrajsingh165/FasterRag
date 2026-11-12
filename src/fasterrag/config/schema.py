@@ -605,7 +605,7 @@ class RetrievalSettings(Section):
     rrf_k: Annotated[float, Field(gt=0)] = 60
     bm25_k1: Annotated[float, Field(ge=0.0, le=3.0)] = 1.2
     bm25_b: Annotated[float, Field(ge=0.0, le=1.0)] = 0.75
-    rerank: bool = True
+    rerank: bool = False
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_top_n: Annotated[int, Field(ge=10, le=1000)] = 100
     verify_lock: Literal["off", "warn", "refuse"] = "warn"

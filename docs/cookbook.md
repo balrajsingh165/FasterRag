@@ -242,7 +242,7 @@ embeddings:
   model: BAAI/bge-small-en-v1.5
 retrieval:
   hybrid: true
-  rerank: false                  # add it later and measure the delta yourself
+  rerank: false                  # the default; add it later and measure the delta yourself
 chunking:
   chunk_size: 768
 autopilot:

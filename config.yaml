@@ -85,7 +85,7 @@ retrieval:
   rrf_k: 60
   bm25_k1: 1.2
   bm25_b: 0.75
-  rerank: true
+  rerank: false
   reranker_model: BAAI/bge-reranker-v2-m3
   rerank_top_n: 100
   verify_lock: warn

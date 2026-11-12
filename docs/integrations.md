@@ -15,7 +15,7 @@ Everything is selected purely through `config.yaml`; secrets by env-var name onl
 | `milvus` | `pymilvus` | `vector_db.provider: milvus` |
 | `weaviate` | `weaviate-client` | `vector_db.provider: weaviate` |
 | `huggingface` | `sentence-transformers` | `embeddings.provider: huggingface` — the default, and the local profile |
-| `rerank` | `sentence-transformers` | `retrieval.rerank: true` (the default) |
+| `rerank` | `sentence-transformers` | `retrieval.rerank: true` (opt-in; off by default since [ADR-0010](adr/ADR-0010-reranker-off-by-default.md)) |
 | `openai` / `anthropic` / `cohere` / `ollama` | that provider's client | the matching `embeddings.provider` / `llm.provider` |
 | `pdf` | `pdfplumber` | `.pdf` documents |
 | `docx` | `python-docx` | `.docx` documents |

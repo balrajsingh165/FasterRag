@@ -4,7 +4,7 @@ The test this document exists to pass: **an engineer with this `docs/` tree and 
 
 ## 0. Prerequisites
 
-Python 3.12+ · git · Docker Desktop/Engine (integration + provisioning; the unit tier runs without it) · ~10 GB disk for models if using local embedding/rerank defaults (see the B6 note in [blockers.md](blockers.md)) · Windows or Linux (both are CI targets; two shipped defects were Windows-only, so do not develop blind to either). Tooling is pinned by `pyproject.toml` + `uv.lock`: `pip install -e ".[dev]"`, then `pre-commit install` (one command wires both hook stages).
+Python 3.12+ · git · Docker Desktop/Engine (integration + provisioning; the unit tier runs without it) · ~10 GB disk for models if using local embeddings and opting into reranking (the reranker is off by default — [ADR-0010](adr/ADR-0010-reranker-off-by-default.md)) · Windows or Linux (both are CI targets; two shipped defects were Windows-only, so do not develop blind to either). Tooling is pinned by `pyproject.toml` + `uv.lock`: `pip install -e ".[dev]"`, then `pre-commit install` (one command wires both hook stages).
 
 ## 1. Process before code (Gates A → B → C)
 
@@ -64,7 +64,7 @@ Symptoms → cause → where the fix is now encoded. If rebuilding, read this li
 | T19 | An accurate `Content-Length` is still a header the peer controls | size enforced twice: declared and while streaming |
 | T20 | Model-version drift is invisible if the lockfile records only the model name | `embedding_model_version` in lock + chunk; drift names both values |
 | T21 | Two surfaces, one shipped: CLI provisions three tools, REST one | TASK-0251; recipe rule "wire both surfaces or file the asymmetry same-day" |
-| T22 | 2.2 GB default reranker: first query looks hung for minutes | load made visible (TASK-0174); default under decision (B6) — decide *before* first release |
+| T22 | 2.2 GB default reranker: first query looks hung for minutes | load made visible (TASK-0174); decided 2026-11-13: `retrieval.rerank` defaults to `false` ([ADR-0010](adr/ADR-0010-reranker-off-by-default.md)) |
 | T23 | A self-repair that reports what it *attempted* — the T12 defect one layer up, since "created the volume" is not evidence the check passes | `doctor --fix` re-runs the whole report and classifies every attempt from that second run (`fixed` / `not fixed` / `needs human`); the mutation that scores from the attempt instead fails a named test (TASK-0197) |
 | T24 | A repair that is safe on fasterRag's own container and destructive on an identically-named one somebody else made | the management label is written at `docker run` and read back at `docker inspect`; `--fix` starts nothing without it, and an integration test pins the two strings together because the guard is worthless if they ever drift (TASK-0197) |
 

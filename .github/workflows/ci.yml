@@ -509,10 +509,11 @@ jobs:
   # Every setting below is pinned rather than inherited, and each one is a value the
   # committed baseline records field by field in tests/eval/datasets/handbook/baseline.json:
   #
-  #   retrieval.rerank=false            the shipped default reranks, and the cross-encoder
-  #                                     it names is a 2.2 GB download on every push. The
-  #                                     baseline was measured without it, so this gate
-  #                                     covers retrieval and fusion and NOT the reranker.
+  #   retrieval.rerank=false            the shipped default since ADR-0010, pinned anyway:
+  #                                     the cross-encoder it names is a 2.2 GB download on
+  #                                     every push. The baseline was measured without it,
+  #                                     so this gate covers retrieval and fusion and NOT
+  #                                     the reranker.
   #   retrieval.top_k=5                 the baseline measured recall@5.
   #   chunking.token_counter=estimate   `auto` uses the embedding model's tokenizer when it
   #                                     is cached on the machine and silently estimates
