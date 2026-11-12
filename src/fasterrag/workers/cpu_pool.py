@@ -323,6 +323,10 @@ class CpuWorkerPool:
                 except BrokenProcessPool as exc:
                     raise _unguarded_entry_point_error() from exc
                 except FasterRagError as exc:
+                    # CRITICAL: the error was built in a worker, whose context is not this
+                    # job's, so it carries a trace id the worker minted for itself. Without
+                    # this the dead-letter entry cannot be joined to the job's own log lines.
+                    exc.trace_id = current_trace_id()
                     yield task, exc
                 else:
                     yield task, outcome
