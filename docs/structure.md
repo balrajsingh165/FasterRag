@@ -91,6 +91,7 @@ fasterRag/
 │       │   └── indexer.py        # Batch upsert: dense vector + BM25 sparse vector + payload
 │       ├── config/               # Loaders + schema
 │       │   ├── schema.py         # Pydantic v2 models mirroring config-reference.md
+│       │   ├── plugins.py        # Entry-point names by group, read from metadata only
 │       │   └── loader.py         # pydantic-settings YAML source + .env; fail-fast
 │       ├── observability/        # Metrics, tracing, dashboard
 │       │   ├── logging.py        # Structured JSON logging + correlation ids
