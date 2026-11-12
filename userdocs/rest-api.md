@@ -65,7 +65,7 @@ FASTERRAG_API_KEY=my-secret-key
 Then send it on every request:
 
 ```bash
-curl -H 'Authorization: Bearer my-secret-key' ...
+curl -H "Authorization: Bearer $FASTERRAG_API_KEY" ...
 ```
 
 Several keys are separated by `;`, and a key can be limited to scopes (`ingest`, `query`,

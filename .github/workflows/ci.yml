@@ -423,7 +423,10 @@ jobs:
 
       # The action uploaded its SARIF; keeping that is the point of the step, since a
 
+      # `!cancelled()` because the licence step below runs after a failed secret scan too,
+      # and without uv it can only report "command not found" instead of its own verdict.
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        if: ${{ !cancelled() }}
         with:
           enable-cache: true
 

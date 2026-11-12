@@ -170,12 +170,19 @@ GENERATION_PRICES: Final[dict[str, TokenPrice]] = {
     **_table(
         "anthropic",
         _ANTHROPIC_SOURCE,
-        "2026-08-09",
+        "2026-11-03",
         {
+            "claude-fable-5-2": (8.00, 40.00),
+            "claude-mythos-5-2": (8.00, 40.00),
+            "claude-fable-5-1": (10.00, 50.00),
+            "claude-mythos-5-1": (10.00, 50.00),
             "claude-fable-5": (10.00, 50.00),
             "claude-mythos-5": (10.00, 50.00),
+            "claude-opus-5-5": (4.00, 20.00),
             "claude-opus-5": (5.00, 25.00),
-            "claude-sonnet-5": (3.00, 15.00),
+            "claude-sonnet-5-5": (2.00, 10.00),
+            "claude-sonnet-5": (2.00, 10.00),
+            "claude-haiku-5-5": (0.10, 0.50),
             "claude-haiku-4-5": (1.00, 5.00),
             "claude-haiku-4-5-20251001": (1.00, 5.00),
             "claude-opus-4-8": (5.00, 25.00),
@@ -188,10 +195,12 @@ GENERATION_PRICES: Final[dict[str, TokenPrice]] = {
             "claude-sonnet-4-5-20250929": (3.00, 15.00),
         },
         {
-            "claude-sonnet-5": (
-                "standard rate; introductory 2.00/10.00 applies through 2026-08-31, so this "
-                "over-estimates until then"
+            "claude-haiku-5-5": (
+                "published rate covers prompts up to 100K tokens; 0.50/2.50 applies beyond, "
+                "so this under-estimates a longer prompt"
             ),
+            "claude-mythos-5-2": "published as sharing Claude Fable 5.2's pricing",
+            "claude-mythos-5-1": "published as sharing Claude Fable 5.1's pricing",
             "claude-mythos-5": "published as sharing Claude Fable 5's pricing",
         },
     ),

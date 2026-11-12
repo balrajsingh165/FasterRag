@@ -27,6 +27,7 @@ from fasterrag.errors import ConfigError, ErrorCode, GenerationError
 
 __all__ = [
     "ADAPTER_API_VERSION",
+    "DEFAULT_TEMPERATURE",
     "Completion",
     "LLMAdapter",
     "classify_llm_failure",
@@ -36,6 +37,7 @@ __all__ = [
 ]
 
 ADAPTER_API_VERSION: Final = "1.0"
+DEFAULT_TEMPERATURE: Final = 0.1
 
 _AUTH_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
 _TIMEOUT_STATUSES: Final[frozenset[int]] = frozenset({408, 504})
@@ -208,6 +210,11 @@ class LLMAdapter(ABC):
     def model(self) -> str:
         """Return the model identifier recorded on every trace."""
         return self.config.model
+
+    @property
+    def temperature(self) -> float:
+        """Return ``llm.temperature``, or the low default that favours grounded answers."""
+        return DEFAULT_TEMPERATURE if self.config.temperature is None else self.config.temperature
 
     @abstractmethod
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:

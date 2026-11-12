@@ -55,7 +55,7 @@ class OpenAIGenerator(LLMAdapter):
         request: dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
-            "temperature": self.config.temperature,
+            "temperature": self.temperature,
             "max_tokens": self.config.max_tokens,
             "stream": stream,
         }

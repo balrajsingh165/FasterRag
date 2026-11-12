@@ -148,7 +148,7 @@ LLM_CHECKS: tuple[LiveCheck, ...] = (
         env_var="ANTHROPIC_API_KEY",
         package="anthropic",
         extra="anthropic",
-        default_model="claude-3-5-haiku-latest",
+        default_model="claude-opus-5-5",
         reports_token_usage=True,
     ),
     LiveCheck(

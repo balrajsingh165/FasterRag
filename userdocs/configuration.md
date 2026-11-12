@@ -41,7 +41,7 @@ llm:
   model: gpt-4o-mini
   api_key_env: OPENAI_API_KEY
   base_url: null                # required for openai_compatible
-  temperature: 0.1
+  temperature: null
   max_tokens: 1024
 ```
 

@@ -63,7 +63,7 @@ class OllamaGenerator(LLMAdapter):
             "messages": messages,
             "stream": stream,
             "options": {
-                "temperature": self.config.temperature,
+                "temperature": self.temperature,
                 "num_predict": self.config.max_tokens,
             },
         }

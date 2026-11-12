@@ -49,9 +49,13 @@ class AnthropicGenerator(LLMAdapter):
         request: dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": self.config.max_tokens,
-            "temperature": self.config.temperature,
             "messages": [{"role": "user", "content": prompt}],
         }
+        # CRITICAL: sampling parameters are sent only when configured. Current Claude models
+        # refuse a non-default `temperature` with a 400, and API version 2026-10-21 refuses it
+        # on every model, so sending the old 0.1 default made every request fail (TASK-0539).
+        if self.config.temperature is not None:
+            request["temperature"] = self.config.temperature
         if system:
             request["system"] = system
         return request

@@ -55,7 +55,7 @@ llm:
   model: gpt-4o-mini
   api_key_env: OPENAI_API_KEY
   base_url: null
-  temperature: 0.1
+  temperature: null
   max_tokens: 1024
   streaming: true
   fallback: null

@@ -507,7 +507,7 @@ class LlmSettings(Section):
     model: str = "gpt-4o-mini"
     api_key_env: str | None = "OPENAI_API_KEY"
     base_url: str | None = None
-    temperature: Annotated[float, Field(ge=0.0, le=2.0)] = 0.1
+    temperature: Annotated[float, Field(ge=0.0, le=2.0)] | None = None
     max_tokens: Annotated[int, Field(ge=1, le=32768)] = 1024
     streaming: bool = True
     fallback: LlmFallbackSettings | None = None

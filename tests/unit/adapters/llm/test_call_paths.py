@@ -115,6 +115,35 @@ async def test_the_configured_sampling_reaches_the_request() -> None:
     assert completions.requests[0]["model"] == "test-model"
 
 
+async def test_an_unset_temperature_still_sends_the_low_default_to_openai() -> None:
+    """``null`` keeps the grounded-answer default for providers that accept it."""
+    adapter = OpenAIGenerator(settings())
+    completions = FakeCompletions(result=Response())
+    adapter._client = type("c", (), {"chat": type("ch", (), {"completions": completions})()})()
+
+    await adapter.complete("the question")
+
+    assert completions.requests[0]["temperature"] == 0.1
+
+
+def test_an_unset_temperature_is_not_sent_to_anthropic() -> None:
+    """Current Claude models refuse a non-default temperature with a 400 (TASK-0539)."""
+    request = AnthropicGenerator(settings("anthropic", model="claude-opus-5-5"))._request(
+        "the question", None
+    )
+
+    assert "temperature" not in request
+    assert "top_p" not in request
+    assert "top_k" not in request
+
+
+def test_a_configured_temperature_is_still_sent_to_anthropic() -> None:
+    """An operator on a model that accepts sampling can still set it."""
+    request = AnthropicGenerator(settings("anthropic", temperature=0.3))._request("q", None)
+
+    assert request["temperature"] == 0.3
+
+
 async def test_the_answer_is_read_back() -> None:
     adapter, _ = openai_with(Response(content="forty-one pounds"))
 

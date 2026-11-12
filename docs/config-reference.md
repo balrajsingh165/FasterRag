@@ -62,7 +62,7 @@ llm:
   model: gpt-4o-mini
   api_key_env: OPENAI_API_KEY
   base_url: null
-  temperature: 0.1
+  temperature: null
   max_tokens: 1024
   streaming: true
   fallback: null
@@ -280,7 +280,7 @@ security:
 | `llm.model` | str | `gpt-4o-mini` | non-empty | Generation model ID understood by the selected provider (e.g. `claude-opus-5` for provider `anthropic`). |
 | `llm.api_key_env` | str\|null | `OPENAI_API_KEY` | valid env-var name or null | Env var holding the provider key. Among the built-in providers, null is allowed only for `ollama`. **For a plugin provider this key must be written** — a variable name, or `null` for a plugin that needs none — because the default names OpenAI's key and a plugin is never handed it implicitly (cross-field rule 3). |
 | `llm.base_url` | str\|null | `null` | valid URL when set | Endpoint override (required for `openai_compatible`, optional for `ollama`). When `llm.provider` is `ollama` this is also the server the `ollama` **embedding** provider uses — there is no `embeddings.base_url`. When the LLM is any other provider the Ollama embedder ignores it and uses the `OLLAMA_HOST` environment variable, else `http://127.0.0.1:11434`; before TASK-0441 it read this key whatever the LLM was, and so sent embedding requests to an `openai_compatible` gateway. |
-| `llm.temperature` | float | `0.1` | 0.0–2.0 | Sampling temperature. Low default favors grounded answers. |
+| `llm.temperature` | float\|null | `null` | 0.0–2.0, or `null` | Sampling temperature. `null` sends `0.1` to OpenAI, OpenAI-compatible, Cohere and Ollama — a low value favours grounded answers — and sends **no** temperature to Anthropic, whose current models refuse a non-default sampling parameter with a 400. Set a number only for a model that accepts one. |
 | `llm.max_tokens` | int | `1024` | 1–32768 | Max generated tokens per answer. |
 | `llm.streaming` | bool | `true` | — | Stream tokens via SSE (time-to-first-token). |
 | `llm.fallback` | object\|null | `null` | a block with `provider`, `model`, `api_key_env` and `base_url`, each held to the rule the same key under `llm` is held to | A second generation provider, tried after the first has exhausted `reliability.retries` on a *retryable* failure (rate limit, timeout, 5xx, open breaker) and before the `extractive` rung (TASK-0449). A non-retryable failure — a rejected key, an unknown model — is a misconfiguration and surfaces as it always has rather than being hidden behind the fallback. Sampling (`temperature`) and `max_tokens` are the primary's. The fallback has its own circuit breaker (`fasterrag_circuit_state{provider="llm_fallback"}`) and its own retries; a fallback answer is a full answer (`mode: full`), priced at the fallback's rate, and its trace records which provider served it (`role: fallback` on the `generation` span) and why the primary was passed over (a `generation-failed` span). Its `api_key_env` must be present at startup like any other referenced variable. Example: `fallback: {provider: ollama, model: llama3.1:8b}`. |
@@ -465,7 +465,7 @@ Costing is a lookup in the dated list-price tables in `services/estimation.py`, 
 |---|---|---|
 | `openai` (embeddings) | `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002` | 2026-08-09 |
 | `openai` (generation) | the GPT-5.x, GPT-4.1, GPT-4o, GPT-4, GPT-3.5-turbo and o-series chat models | 2026-08-09 |
-| `anthropic` | the Claude Fable/Mythos 5, Opus 5, Opus 4.5–4.8, Sonnet 4.5/4.6/5 and Haiku 4.5 ids, alias and dated forms | 2026-08-09 |
+| `anthropic` | the Claude Fable/Mythos 5–5.2, Opus 5.5, Opus 5, Opus 4.5–4.8, Sonnet 5.5, Sonnet 5, Sonnet 4.5/4.6, Haiku 5.5 and Haiku 4.5 ids, alias and dated forms | 2026-11-03 |
 | `cohere` (embeddings) | `embed-english-v3.0`, `embed-multilingual-v3.0`, `embed-english-light-v3.0` | 2026-07-30 |
 | `cohere` (generation) | `command-r-plus-08-2024` | 2026-08-09 |
 | `huggingface`, `ollama` | **every** model — locally served, so zero is the recorded price, not a missing one | — |

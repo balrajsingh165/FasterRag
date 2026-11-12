@@ -124,6 +124,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Cost estimates cover the current Claude models** (2026-11-12, TASK-0543). `fasterrag estimate` and the cost governor priced Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1/5.2 at nothing, and Sonnet 5 at its old rate. The table now carries their published prices.
+
+- **`llm.provider: anthropic` works with current Claude models** (2026-11-12, TASK-0539). The adapter always sent `temperature`, which Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and the Fable models refuse with a 400, so every answer through Anthropic failed. **`llm.temperature` now defaults to `null`**: OpenAI, Cohere and Ollama still receive 0.1, and Anthropic receives no sampling parameter unless you set one. The adversarial prompt-injection set was run against Claude Opus 5.5 and every attack was resisted.
+
 - **Chunks never share a start offset** (2026-11-12, TASK-0553). When a chunk was shorter than the configured overlap, the next chunk's overlap reached back over all of it, so two chunks started at the same offset and one contained the other. Overlap is now capped at the previous chunk's start. Only documents that produced such a short chunk get different chunk boundaries.
 
 - **Gate scripts check the tree they live in** (2026-11-12, TASK-0522). Run from a second checkout or worktree, `scripts/check_openapi_drift.py` imported the package from whichever checkout the virtualenv was installed from, and could report another tree's routes as this one's. The scripts now import their own checkout first.

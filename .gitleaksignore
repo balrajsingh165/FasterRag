@@ -25,3 +25,9 @@ ce08283cf7ec6f46dff5797320d2d332181a27a2:tests/integration/test_redis_rate_limit
 # working tree the same day, which stops it recurring and cannot touch the commit that
 # already carries it.
 41188f3d059beb77a00716e18c1639c6e05584ce:tests/integration/test_redis_rate_limit_server.py:generic-api-key:162
+
+# The entry below is a placeholder in a documentation example, raised by the curl-auth-header
+# rule on 2026-11-12: `userdocs/rest-api.md` showed `Authorization: Bearer my-secret-key` in a
+# curl command. It was never a credential. The working tree now reads the key from
+# `$FASTERRAG_API_KEY`, which stops it recurring and cannot touch the commit that carries it.
+85ad19dc6a4204e1be33257f7acea4e50af6fcd2:userdocs/rest-api.md:curl-auth-header:68
