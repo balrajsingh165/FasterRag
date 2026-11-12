@@ -28,6 +28,9 @@ from fasterrag.services.generation import EXTRACTIVE_MODE, GenerationService, Qu
 from fasterrag.services.querying import FULL_MODE, HYBRID_ONLY_MODE, Retrieval
 from fasterrag.services.traces import TraceStore
 
+FAST_RETRIES: dict[str, Any] = {"retries": {"backoff_base_ms": 1, "backoff_max_ms": 1}}
+"""The configured retry policy with its waits shrunk, so a retried failure costs no wall time."""
+
 
 class ScriptedLLM(LLMAdapter):
     """Returns scripted text, or fails on demand."""
@@ -40,11 +43,22 @@ class ScriptedLLM(LLMAdapter):
         self.error = error
         self.finish_reason: str | None = "stop"
         self.fail_after: int | None = None
+        self.failures: int | None = None
         self.prompts: list[tuple[str, str | None]] = []
+
+    def failing(self) -> bool:
+        """Return whether this call fails: every call, or only the first ``failures``."""
+        if self.error is None:
+            return False
+        if self.failures is None:
+            return True
+        self.failures -= 1
+        return self.failures >= 0
 
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         self.prompts.append((prompt, system))
-        if self.error is not None:
+        if self.failing():
+            assert self.error is not None
             raise self.error
         return Completion(
             text=self.text,
@@ -56,7 +70,8 @@ class ScriptedLLM(LLMAdapter):
 
     async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
         self.prompts.append((prompt, system))
-        if self.error is not None and self.fail_after is None:
+        if self.fail_after is None and self.failing():
+            assert self.error is not None
             raise self.error
         for sent, word in enumerate(self.text.split(" ")):
             if self.error is not None and sent == self.fail_after:
@@ -101,7 +116,8 @@ def build(
             "generation": {
                 "grounded_or_refuse": grounded_or_refuse,
                 "faithfulness_threshold": threshold,
-            }
+            },
+            "reliability": FAST_RETRIES,
         }
     )
     llm = ScriptedLLM(settings, text=answer, error=error)
@@ -602,7 +618,10 @@ def build_cached(
     embedder_error: bool = False,
 ) -> tuple[GenerationService, ScriptedLLM, SemanticCache]:
     settings = Settings.model_validate(
-        {"cache": {"semantic": True, "similarity_threshold": threshold}}
+        {
+            "cache": {"semantic": True, "similarity_threshold": threshold},
+            "reliability": FAST_RETRIES,
+        }
     )
     llm = ScriptedLLM(settings, text=answer)
     retrieval = ScriptedRetrieval([chunk("c_a", "Either party may terminate.")], mode)
@@ -936,6 +955,106 @@ async def test_a_success_clears_the_failure_count_rather_than_only_the_state() -
     assert service.breaker.is_open is False
 
 
+async def test_a_rate_limited_answer_is_retried_until_it_succeeds() -> None:
+    """A single 429 used to degrade straight to the extractive rung (TASK-0449)."""
+    service, llm = build(error=GenerationError("status 429", retryable=True))
+    llm.failures = 2
+
+    answer = await service.answer("what is the notice period?")
+
+    assert answer.mode == FULL_MODE
+    assert answer.answer == "The notice period is thirty days [^c_a]."
+    assert len(llm.prompts) == 3
+
+
+async def test_a_rate_limited_stream_is_retried_before_its_first_token() -> None:
+    service, llm = build(error=GenerationError("status 429", retryable=True))
+    llm.failures = 1
+
+    events = await collect(service)
+
+    assert [event.data["mode"] for event in events if event.type == "meta"] == [FULL_MODE]
+    assert "".join(e.data["text"] for e in events if e.type == "token").startswith("The notice")
+    assert len(llm.prompts) == 2
+
+
+async def test_a_stream_is_never_retried_after_its_first_token() -> None:
+    """A second call would splice a different answer onto text the caller already has."""
+    service, llm = build(error=GenerationError("connection reset", retryable=True))
+    llm.fail_after = 2
+
+    events = await collect(service)
+
+    assert events[-1].type == "error"
+    assert len(llm.prompts) == 1
+
+
+async def test_a_non_retryable_failure_is_called_once() -> None:
+    service, llm = build(error=GenerationError("model not found", retryable=False))
+
+    with pytest.raises(GenerationError):
+        await service.answer("q")
+
+    assert len(llm.prompts) == 1
+
+
+async def test_retries_are_bounded_by_the_configured_attempts() -> None:
+    service, llm = build(error=GenerationError("status 503", retryable=True))
+
+    answer = await service.answer("q")
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert len(llm.prompts) == 1 + service.settings.reliability.retries.max_attempts
+
+
+async def test_the_wait_is_never_shorter_than_the_provider_s_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[float] = []
+
+    async def record(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr("fasterrag.services.generation._pause", record)
+    settings = Settings.model_validate(
+        {"reliability": {"retries": {"backoff_base_ms": 1, "backoff_max_ms": 5000}}}
+    )
+    llm = ScriptedLLM(settings, text="an answer", error=GenerationError("429", retry_after=2.0))
+    llm.failures = 2
+    service = GenerationService(
+        settings,
+        ScriptedRetrieval([chunk("c_a", "Either party may terminate.")]),  # type: ignore[arg-type]
+        llm,
+    )
+
+    answer = await service.answer("q")
+
+    assert answer.mode == FULL_MODE
+    assert waits == [2.0, 2.0]
+
+
+async def test_a_retry_after_beyond_the_backoff_ceiling_is_not_waited_for() -> None:
+    """Sleeping for as long as a provider asks would let one request hold a worker for minutes."""
+    service, llm = build(error=GenerationError("status 429", retryable=True, retry_after=60.0))
+
+    answer = await service.answer("q")
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert len(llm.prompts) == 1
+
+
+async def test_retries_stop_once_the_breaker_opens() -> None:
+    """Checked before every attempt, as the embedding pool does, not once before the first."""
+    service, llm = build(error=GenerationError("status 503", retryable=True))
+    service.breaker.failure_threshold = 2
+
+    answer = await service.answer("q")
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert len(llm.prompts) == 2
+    assert service.breaker.is_open is True
+
+
 async def test_a_misconfigured_provider_never_opens_the_breaker() -> None:
     """A misconfiguration never opens the breaker.
 
@@ -1154,7 +1273,8 @@ class MeteredLLM(ScriptedLLM):
 
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         self.prompts.append((prompt, system))
-        if self.error is not None:
+        if self.failing():
+            assert self.error is not None
             raise self.error
         tokens = PARITY_COUNTER.count(self.text)
         return Completion(
@@ -1167,7 +1287,8 @@ class MeteredLLM(ScriptedLLM):
 
     async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
         self.prompts.append((prompt, system))
-        if self.error is not None:
+        if self.failing():
+            assert self.error is not None
             raise self.error
         first, *rest = self.text.split(" ")
         yield first
@@ -1201,6 +1322,7 @@ class ParityCase:
     mode: str = FULL_MODE
     primed: bool = False
     tripped: bool = False
+    failures: int | None = None
 
 
 def _body(observed: Observed) -> dict[str, Any]:
@@ -1235,7 +1357,18 @@ PARITY_CASES: dict[str, ParityCase] = {
             and "Either party may terminate." in _body(seen)["answer"]
             and [cited["chunk_id"] for cited in _body(seen)["citations"]] == ["c_a"]
             and seen.metrics["fasterrag_degraded_responses_total{mode=extractive}"] == 1
-            and seen.provider_calls == 1
+            and seen.provider_calls == 1 + Settings().reliability.retries.max_attempts
+        ),
+    ),
+    "retried, then answered": ParityCase(
+        error=lambda: GenerationError("rate limited", retryable=True),
+        failures=2,
+        holds=lambda seen: (
+            _body(seen)["mode"] == FULL_MODE
+            and seen.provider_calls == 3
+            and _span_names(seen)[-1] == "generation"
+            and seen.trace is not None
+            and seen.trace["spans"][-1][1]["attempts"] == 3
         ),
     ),
     "open breaker": ParityCase(
@@ -1295,9 +1428,14 @@ PARITY_CASES: dict[str, ParityCase] = {
 def _parity_service(case: ParityCase, root: Path) -> tuple[GenerationService, MeteredLLM]:
     """Build a fresh service for one surface, tracing into its own directory."""
     settings = Settings.model_validate(
-        {"cost": {"per_tenant_token_budget": 1_000_000}, **case.settings}
+        {
+            "cost": {"per_tenant_token_budget": 1_000_000},
+            "reliability": FAST_RETRIES,
+            **case.settings,
+        }
     )
     llm = MeteredLLM(settings, text=case.answer, error=case.error() if case.error else None)
+    llm.failures = case.failures
     cache = SemanticCache(settings, MemoryStore()) if settings.cache.semantic else None
     service = GenerationService(
         settings,

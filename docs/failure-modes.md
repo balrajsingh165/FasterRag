@@ -25,8 +25,8 @@ Every anticipated failure, its detection signal, automatic mitigation, recovery 
 | 17 | Vector DB (any) | Auth failure (bad/missing API key) | `ProviderError(retryable=False)` 401/403 from backend | No retry (non-retryable); clear problem naming env var (never the value) | Fix key in `.env`; restart | Adapter contract suite: auth-failure case — `tests/contract/vectordb.py::VectorDBContract::test_invalid_credentials_are_not_retryable`, `tests/unit/adapters/test_qdrant.py::test_authentication_failure_is_not_retryable_and_hides_the_key` |
 | 18 | Reranker | Model fails to load / OOM | `RetrievalError` carrying `RERANK_FAILED` on the first query that needs the model; never at startup, because the model is loaded lazily on first use | Degradation ladder: `hybrid_only` mode (fusion results served unreranked, flagged) | Fix model/VRAM; toggle `retrieval.rerank` off if needed | Chaos: reranker-down rung — `tests/chaos/test_reranker_down.py`; the service-level rung also in `tests/unit/services/test_querying.py::test_a_failing_reranker_degrades_instead_of_failing_the_query` |
 | 19 | Reranker | Latency blowout (> stage budget) | `fasterrag_stage_duration_seconds{stage=rerank}` p95 alarm | Per-call timeout → fall back to `hybrid_only` for that query, flagged | Reduce `rerank_top_n`; smaller cross-encoder | **no test** — and it is not the load layer's absence any more. A `load` suite now exists (TASK-0243) and cannot prove this row, because the row's own mechanism is unbuilt: there is no per-call rerank timeout and no `stage=rerank` metric label (TASK-0165). A load test against a missing fallback would assert nothing |
-| 20 | LLM provider | Hard outage / 5xx | `GenerationError`/`ProviderError`; breaker metric | Retries → breaker opens → ladder serves `extractive` answers (D4) | Provider recovers; breaker half-open probes | Chaos: LLM-down rung, reached by latency injection rather than a separate outage case — `tests/chaos/test_chaos.py::test_a_slow_llm_degrades_to_extractive_rather_than_failing` |
-| 21 | LLM provider | Slow responses (hang) | `reliability.timeouts.llm_ms` exceeded | Timeout aborts; retry once if retryable; else `extractive` mode | Investigate provider/base_url | Chaos: slow-LLM latency injection — `tests/chaos/test_chaos.py::test_a_slow_llm_degrades_to_extractive_rather_than_failing`, `tests/chaos/test_chaos.py::test_a_slow_llm_never_returns_nothing` |
+| 20 | LLM provider | Hard outage / 5xx | `GenerationError`/`ProviderError`; breaker metric | Retries (`reliability.retries.*`, honouring `Retry-After`, breaker checked before each attempt — TASK-0449) → breaker opens → ladder serves `extractive` answers (D4) | Provider recovers; breaker half-open probes | Chaos: LLM-down rung, reached by latency injection rather than a separate outage case — `tests/chaos/test_chaos.py::test_a_slow_llm_degrades_to_extractive_rather_than_failing`; a rate-limit storm retried to a full answer — `tests/chaos/test_generation_faults.py::test_a_429_storm_is_retried_and_the_query_is_answered` |
+| 21 | LLM provider | Slow responses (hang) | `reliability.timeouts.llm_ms` exceeded | Timeout aborts; retried within `reliability.retries.max_attempts`, then `extractive` mode | Investigate provider/base_url | Chaos: slow-LLM latency injection — `tests/chaos/test_chaos.py::test_a_slow_llm_degrades_to_extractive_rather_than_failing`, `tests/chaos/test_chaos.py::test_a_slow_llm_never_returns_nothing` |
 | 22 | LLM provider | Mid-stream failure during SSE, after the first `token` was sent (before it, a retryable failure takes row 20's `extractive` rung on a stream too — TASK-0438) | `event: error` emitted, stream closed without `done` | Client sees explicit incomplete-answer signal; trace records partial | Client retries; check trace by `trace_id` | Unit, not integration: `tests/unit/services/test_generation.py::test_a_mid_stream_failure_emits_error_and_never_done`, `tests/unit/adapters/llm/test_call_paths.py::test_a_mid_stream_failure_becomes_a_typed_error` |
 | 23 | Semantic cache; embedding cache | Backend down or unwritable (Redis unreachable, cache directory unwritable) | `CacheError` logged with trace id; cache metrics flatline | Degrade to cache-off: queries run the full pipeline and texts are embedded directly (correctness preserved) | Restore the backend; entries rebuild organically | Unit plus integration: `tests/unit/core/cache/test_embedding.py::test_a_downed_cache_still_embeds`, `tests/unit/core/cache/test_embedding.py::test_a_cache_that_fails_only_on_write_still_returns_the_vectors`, `tests/unit/core/cache/test_semantic.py::test_a_downed_backend_reads_as_a_miss_rather_than_an_error`, `tests/integration/test_redis_cache.py` |
 | 24 | Semantic cache | Stale answer after corpus change | Invalidation-event counter vs ingest events mismatch | Event-driven invalidation on every corpus change + TTL ceiling | Manual flush via admin if ever needed | Unit, not integration: `tests/unit/core/cache/test_semantic.py::test_a_corpus_change_drops_every_entry` |
@@ -114,6 +114,25 @@ evidence about *our* classification and degradation and not about any particular
 cross-encoder. Nothing here is timed and no figure above is a measurement. The out-of-memory
 cases inject the exception's shape rather than exhausting real VRAM, which a test cannot do
 reproducibly; the one case that uses the real library is a load *refusal*, not a load.
+
+## Observed behavior — generation faults (TASK-0449)
+
+Rows 20 and 21's retry clause, logged here for the reason the reranker section above is: they
+are failure modes of this document's numbering, not §1.9 rows. The suite is
+`tests/chaos/test_generation_faults.py` (`pytest -m chaos`). It drives the real
+`GenerationService` against a provider double that fails the way the adapter boundary really
+reports a fault — a vendor status error carrying `Retry-After`, translated by the real
+`classify_llm_failure` — and observes the waits through the one function the service pauses
+in, so nothing is slept and nothing is timed.
+
+| Fault | Observed | Date |
+|---|---|---|
+| Three `429`s in a row, each with `Retry-After: 0.25`, then an answer | `full` mode with the provider's answer; four calls; three waits of exactly the `Retry-After`, which was longer than the configured backoff; the breaker stayed closed | 2026-11-12 |
+| The same storm on a stream, before any token | One `meta` in `full` mode, the whole answer, `done`: the retries happened before the first token, so the caller never saw a failed attempt | 2026-11-12 |
+
+**What this does not prove.** No real provider is called, so this is evidence about our
+retry policy and not about any provider's rate limiter. The waits are recorded, not slept, and
+no figure here is a latency.
 
 ## Observed behavior — reindex under continuous query load
 

@@ -54,17 +54,18 @@ operator who asked for it.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
 from fasterrag.adapters.llm.base import Completion, LLMAdapter
 from fasterrag.config.schema import GenerationSettings, Settings
-from fasterrag.core.breaker import CircuitBreaker, shared_breaker
+from fasterrag.core.breaker import CircuitBreaker, CircuitOpenError, shared_breaker
 from fasterrag.core.cache.semantic import MISS, CacheHit, SemanticCache
 from fasterrag.core.chunking.models import EstimatingTokenCounter, TokenCounter
 from fasterrag.core.context import AssembledContext, Citation, Span, assemble_context
@@ -85,6 +86,7 @@ from fasterrag.services.degradation import DegradationMode, serving
 from fasterrag.services.estimation import price_generation
 from fasterrag.services.querying import FULL_MODE, RetrievalService
 from fasterrag.services.traces import TraceStore, now
+from fasterrag.workers.embed_pool import backoff_delay
 
 __all__ = [
     "DEFAULT_CONTEXT_BUDGET_TOKENS",
@@ -323,6 +325,41 @@ class _Interrupted:
 
 
 type _Stage = _Started | _Delta | _Degraded | _Completed | _Refused | _Interrupted
+
+
+@dataclass(frozen=True, slots=True)
+class _Provider:
+    """A generation provider the pipeline may call, and the breaker that guards it."""
+
+    llm: LLMAdapter
+    breaker: CircuitBreaker
+    role: str = "primary"
+
+
+async def _pause(seconds: float) -> None:
+    """Wait between two attempts; one name, so a test can observe the waits."""
+    await asyncio.sleep(seconds)
+
+
+async def _open_stream(llm: LLMAdapter, prompt: str) -> tuple[AsyncIterator[str], str | None]:
+    """Start a provider stream and wait for its first piece of text.
+
+    A stream is retried only up to here (TASK-0449): once text has arrived, a second call
+    would produce a different answer to splice onto the first one's beginning.
+    """
+    stream = llm.stream(prompt, system=P1_SYSTEM_PROMPT)
+    try:
+        first = await anext(stream, None)
+    except BaseException:
+        await _close_stream(stream)
+        raise
+    return stream, first
+
+
+async def _close_stream(stream: AsyncIterator[str]) -> None:
+    """Close a provider stream, releasing its connection whether or not it was read out."""
+    if isinstance(stream, AsyncGenerator):
+        await stream.aclose()
 
 
 def _events(stage: _Stage) -> list[QueryEvent]:
@@ -605,7 +642,9 @@ class GenerationService:
         worst_case = self.counter.count(prepared.prompt) + self.settings.llm.max_tokens
         self.governor.check(worst_case, tenant=self.tenant)
 
-    def _record_generation(self, elapsed_ms: int, prompt: int, completion: int) -> None:
+    def _record_generation(
+        self, llm: LLMAdapter, elapsed_ms: int, prompt: int, completion: int
+    ) -> None:
         """Record what one generation call cost, in time, in tokens, and in money."""
         # CRITICAL: the tenant is charged here, at the one point both the streaming
         # and non-streaming paths pass through, and with the *actual* counts rather
@@ -614,7 +653,7 @@ class GenerationService:
         # never spent.
         self.governor.record(prompt + completion, tenant=self.tenant)
 
-        provider = self.llm.provider
+        provider = llm.provider
         metrics.STAGE_DURATION.observe(elapsed_ms / 1000, stage="generate")
         if prompt:
             metrics.TOKENS.increment(float(prompt), kind="prompt", provider=provider, tenant="none")
@@ -623,14 +662,14 @@ class GenerationService:
                 float(completion), kind="completion", provider=provider, tenant="none"
             )
 
-        estimated = price_generation(provider, self.llm.model, prompt, completion)
+        estimated = price_generation(provider, llm.model, prompt, completion)
         if estimated is None:
             # CRITICAL: an unpriced model must be *visible*, not simply absent. Silently
             # contributing nothing to the cost total makes the dashboard understate spend
             # while looking healthy, which is worse than reporting no cost at all — the
             # panel cannot say "some traffic is unpriced" unless something counts it.
             metrics.UNPRICED_TOKENS.increment(
-                float(prompt + completion), provider=provider, model=self.llm.model
+                float(prompt + completion), provider=provider, model=llm.model
             )
         elif estimated:
             metrics.COST.increment(estimated, provider=provider, tenant="none")
@@ -729,7 +768,7 @@ class GenerationService:
             for event in _events(stage):
                 yield event
 
-    def _streamed_completion(self, prompt: str, text: str) -> Completion:
+    def _streamed_completion(self, llm: LLMAdapter, prompt: str, text: str) -> Completion:
         """Describe a finished stream the way ``complete`` describes a whole call.
 
         A stream carries text only, so the counts and the finish reason are this process's
@@ -738,11 +777,101 @@ class GenerationService:
         completion_tokens = self.counter.count(text)
         return Completion(
             text=text,
-            model=self.llm.model,
+            model=llm.model,
             prompt_tokens=self.counter.count(prompt),
             completion_tokens=completion_tokens,
             finish_reason="length" if completion_tokens >= self.settings.llm.max_tokens else None,
         )
+
+    def _retry_delay(
+        self, exc: FasterRagError, attempt: int, breaker: CircuitBreaker
+    ) -> float | None:
+        """Return how long to wait before calling again, or ``None`` when this provider is done.
+
+        Never sooner than the provider's ``Retry-After``; a provider that asks for longer
+        than ``reliability.retries.backoff_max_ms`` is not waited on at all.
+        """
+        retries = self.settings.reliability.retries
+        if not exc.retryable or isinstance(exc, CircuitOpenError):
+            return None
+        if attempt > retries.max_attempts or breaker.is_open:
+            return None
+
+        delay = backoff_delay(attempt, self.settings)
+        asked = exc.retry_after if isinstance(exc, GenerationError) else None
+        if asked is not None:
+            if asked * 1000 > retries.backoff_max_ms:
+                return None
+            delay = max(delay, asked)
+        return delay
+
+    async def _with_retries[T](
+        self,
+        provider: _Provider,
+        call: Callable[[LLMAdapter], Awaitable[T]],
+        spans: SpanRecorder | None,
+    ) -> tuple[T, int]:
+        """Call one provider until it answers or retrying it is pointless (TASK-0449).
+
+        Returns the result and the number of calls it took. The breaker is consulted before
+        every call, so one that opens part-way stops the attempts that remain.
+        """
+        began = spans.elapsed_ms if spans is not None else 0.0
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                provider.breaker.check()
+                return await call(provider.llm), attempt
+            except FasterRagError as exc:
+                if not isinstance(exc, CircuitOpenError):
+                    provider.breaker.record_failure(exc)
+                delay = self._retry_delay(exc, attempt, provider.breaker)
+                if delay is None:
+                    self._record_failure(spans, began, provider, attempt, exc)
+                    raise
+                _logger.warning(
+                    "generation failed, retrying",
+                    extra={
+                        "provider": provider.llm.provider,
+                        "role": provider.role,
+                        "attempt": attempt,
+                        "delay_seconds": round(delay, 3),
+                        "code": exc.code.value,
+                        "trace_id": exc.trace_id,
+                    },
+                )
+                await _pause(delay)
+
+    @staticmethod
+    def _record_failure(
+        spans: SpanRecorder | None,
+        began: float,
+        provider: _Provider,
+        attempts: int,
+        exc: FasterRagError,
+    ) -> None:
+        """Leave a provider that gave up in the trace: which one, after how many calls, why."""
+        if spans is not None:
+            spans.record(
+                "generation-failed",
+                began,
+                provider=provider.llm.provider,
+                model=provider.llm.model,
+                role=provider.role,
+                attempts=attempts,
+                code=exc.code.value,
+                detail=exc.detail,
+                retryable=exc.retryable,
+            )
+
+    async def _generate[T](
+        self, call: Callable[[LLMAdapter], Awaitable[T]], spans: SpanRecorder | None
+    ) -> tuple[_Provider, T, int]:
+        """Generate through the configured provider, retrying what is worth retrying."""
+        primary = _Provider(self.llm, self.breaker)
+        result, attempts = await self._with_retries(primary, call, spans)
+        return primary, result, attempts
 
     def _degrade(
         self, prepared: _Prepared, exc: FasterRagError, trace_id: str, timings: dict[str, int]
@@ -834,32 +963,47 @@ class GenerationService:
         sent = False
         parts: list[str] = []
         started = time.perf_counter()
+        serving: _Provider | None = None
+        attempts = 0
+        began = prepared.spans.elapsed_ms if prepared.spans is not None else 0.0
         try:
             # CRITICAL: inside the try, so an open circuit takes the same route a live
             # provider failure takes. `CircuitOpenError` is retryable by construction, which
             # makes shedding load a rung on the degradation ladder rather than a 503 — the
             # behaviour FMEA row 20 describes as "retries → breaker opens → extractive".
-            self.breaker.check()
+            # The breaker is consulted before every attempt, inside `_with_retries`.
             if streaming:
-                async for delta in self.llm.stream(prepared.prompt, system=P1_SYSTEM_PROMPT):
-                    if not parts:
-                        # CRITICAL: time to first token is measured from the request
-                        # arriving, not from the provider call. What a user perceives
-                        # includes retrieval and assembly, and a TTFT that excluded them
-                        # would flatter every change that made retrieval slower.
-                        metrics.TTFT.observe(
-                            (timings.get("retrieve", 0) + timings.get("assemble", 0)) / 1000
-                            + (time.perf_counter() - started)
-                        )
-                    parts.append(delta)
-                    if not held:
-                        sent = True
-                        yield _Delta(text=delta)
-                completion = self._streamed_completion(prepared.prompt, "".join(parts))
+                serving, (deltas, pending), attempts = await self._generate(
+                    lambda llm: _open_stream(llm, prepared.prompt), prepared.spans
+                )
+                try:
+                    while pending is not None:
+                        if not parts:
+                            # CRITICAL: time to first token is measured from the request
+                            # arriving, not from the provider call. What a user perceives
+                            # includes retrieval and assembly, and a TTFT that excluded
+                            # them would flatter every change that made retrieval slower.
+                            metrics.TTFT.observe(
+                                (timings.get("retrieve", 0) + timings.get("assemble", 0)) / 1000
+                                + (time.perf_counter() - started)
+                            )
+                        parts.append(pending)
+                        if not held:
+                            sent = True
+                            yield _Delta(text=pending)
+                        pending = await anext(deltas, None)
+                finally:
+                    await _close_stream(deltas)
+                completion = self._streamed_completion(serving.llm, prepared.prompt, "".join(parts))
             else:
-                completion = await self.llm.complete(prepared.prompt, system=P1_SYSTEM_PROMPT)
+                serving, completion, attempts = await self._generate(
+                    lambda llm: llm.complete(prepared.prompt, system=P1_SYSTEM_PROMPT),
+                    prepared.spans,
+                )
         except FasterRagError as exc:
-            self.breaker.record_failure(exc)
+            if serving is not None:
+                serving.breaker.record_failure(exc)
+                self._record_failure(prepared.spans, began, serving, attempts, exc)
             # CRITICAL: only a retryable failure is a rung on the degradation ladder. A
             # rejected key, an unknown model, or a missing provider extra will never succeed
             # on a retry, so degrading one would answer every query extractively forever
@@ -892,15 +1036,20 @@ class GenerationService:
             yield _Completed(answer=degraded)
             return
 
-        self.breaker.record_success()
+        serving.breaker.record_success()
         generate_ms = int((time.perf_counter() - started) * 1000)
         timings["generate"] = generate_ms
-        self._record_generation(generate_ms, completion.prompt_tokens, completion.completion_tokens)
+        self._record_generation(
+            serving.llm, generate_ms, completion.prompt_tokens, completion.completion_tokens
+        )
         if prepared.spans is not None:
             prepared.spans.record(
                 "generation",
                 prepared.spans.elapsed_ms - generate_ms,
                 model=completion.model,
+                provider=serving.llm.provider,
+                role=serving.role,
+                attempts=attempts,
                 prompt_tokens=completion.prompt_tokens,
                 completion_tokens=completion.completion_tokens,
             )
@@ -949,7 +1098,7 @@ class GenerationService:
             truncated=completion.truncated,
             evidence_dropped=prepared.context.dropped_budget,
             estimated_cost_usd=price_generation(
-                self.llm.provider,
+                serving.llm.provider,
                 completion.model,
                 completion.prompt_tokens,
                 completion.completion_tokens,
