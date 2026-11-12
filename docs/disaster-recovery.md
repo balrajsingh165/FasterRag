@@ -9,7 +9,7 @@
 | **Vector collections** | dense vectors, payloads/metadata, collection config | The index itself; hours-to-days of embedding compute | Backend-native snapshots via the adapter (Qdrant snapshot API in the reference implementation), per collection |
 | **Index manifest + lockfile** (`index.lock`) | config hash, embedding model+version, chunker strategy+version, per-doc content hashes, alias state | Proves what the index *is*; enables drift detection and reproducible rebuild (D1) | File copy (atomic-write source) |
 | **`config.yaml`** | all system behavior | Restores exact behavior; contains no secrets so it is safely versioned | Git (it is always committed) + backup copy |
-| **Ingestion journal** | job records, checkpoints, DLQ entries, content hashes | Resumability and exactly-once guarantees (D3) | File/DB snapshot |
+| **Ingestion journal** | job records, checkpoints, DLQ entries, content hashes; the `job-keys/` idempotency index and `*.lock` files are derived and need not be restored — a missing index is rebuilt from the job records on the next keyed lookup (TASK-0437) | Resumability and exactly-once guarantees (D3) | File/DB snapshot |
 | **Trace store** | full query traces (retrieved chunks, scores, prompts, responses) | Replay/debugging history (D8); audit trail | File/DB snapshot |
 | *(not backed up)* `.env` | secrets | Deliberately excluded from automated backups; operators store secrets in their secret manager. Langfuse's `SALT`/`ENCRYPTION_KEY`/`NEXTAUTH_SECRET` MUST be preserved by the operator — losing them invalidates Langfuse credentials ([observability.md](observability.md)) | operator-owned |
 

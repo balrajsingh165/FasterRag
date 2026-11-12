@@ -2,6 +2,7 @@ import asyncio
 import errno
 import json
 import os
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -689,3 +690,77 @@ def test_an_append_waits_for_the_lock_and_gives_up_typed(
 
     assert caught.value.code is ErrorCode.NOT_READY
     assert journal.documents_blocking("job_1") == []
+
+
+def job_reads(monkeypatch: pytest.MonkeyPatch, journal: Journal) -> list[Path]:
+    """Record every job record the journal opens from now on."""
+    real = Path.read_text
+    opened: list[Path] = []
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self.parent == journal.root / "jobs":
+            opened.append(self)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    return opened
+
+
+def test_a_keyed_lookup_opens_one_record_however_many_jobs_exist(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lookup globbed and read every job file: 633 ms at 10,000 jobs (BENCH-0004)."""
+    for index in range(30):
+        journal.create_job_blocking("default", SOURCES, idempotency_key=f"key-{index}")
+    opened = job_reads(monkeypatch, journal)
+
+    found = journal.find_by_idempotency_key_blocking("key-17")
+    missing = journal.find_by_idempotency_key_blocking("never-sent")
+
+    assert found is not None
+    assert found.idempotency_key == "key-17"
+    assert missing is None
+    assert len(opened) == 1
+
+
+def test_a_journal_written_before_the_index_is_indexed_on_first_lookup(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operators have journals on disk with no index; their keys must still replay."""
+    first = journal.create_job_blocking("default", SOURCES, idempotency_key="key-1")
+    journal.create_job_blocking("default", SOURCES, idempotency_key="key-2", tenant="acme")
+    shutil.rmtree(journal.root / "job-keys")
+
+    assert journal.find_by_idempotency_key_blocking("key-1") == first
+    assert journal.find_by_idempotency_key_blocking("key-2") is None
+    opened = job_reads(monkeypatch, journal)
+    assert journal.create_job_blocking("default", SOURCES, idempotency_key="key-1") == first
+    assert len(opened) == 1
+
+
+def test_an_entry_naming_a_job_that_is_gone_is_rebuilt_not_trusted(journal: Journal) -> None:
+    """An interruption between the entry and the record leaves an entry naming nothing."""
+    first = journal.create_job_blocking("default", SOURCES, idempotency_key="key-1")
+    journal._job_path(first.job_id).unlink()
+
+    second = journal.create_job_blocking("default", SOURCES, idempotency_key="key-1")
+
+    assert second.job_id != first.job_id
+    assert journal.find_by_idempotency_key_blocking("key-1") == second
+
+
+def test_an_entry_naming_another_tenants_job_is_never_returned(journal: Journal) -> None:
+    """TASK-0318's scoping must survive the index: a key is per tenant."""
+    theirs = journal.create_job_blocking("default", SOURCES, idempotency_key="k", tenant="a")
+    ours = journal.create_job_blocking("default", SOURCES, idempotency_key="k", tenant="b")
+    index = journal.root / "job-keys"
+    swapped = index / journal_module._key_entry_name("k", "b")
+    swapped.write_bytes((index / journal_module._key_entry_name("k", "a")).read_bytes())
+
+    assert journal.find_by_idempotency_key_blocking("k", tenant="a") == theirs
+    assert journal.find_by_idempotency_key_blocking("k", tenant="b") == ours
+
+
+def test_the_lookup_on_an_empty_journal_creates_nothing(journal: Journal) -> None:
+    assert journal.find_by_idempotency_key_blocking("key-1") is None
+    assert not journal.root.exists()

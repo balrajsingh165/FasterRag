@@ -154,7 +154,7 @@ question out, stage by stage.
 
 fasterRag is a **beta in its build phase**. What works, what is partial and what is not built is
 re-derived at each release decision in
-[release readiness](release-readiness.md). The [benchmark ledger](benchmarks.md) holds six entries
+[release readiness](release-readiness.md). The [benchmark ledger](benchmarks.md) holds seven entries
 and **marks all six non-citable**, because they were measured on non-isolated hardware: the project
 targets high throughput and does not yet claim it.
 

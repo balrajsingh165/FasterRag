@@ -14,7 +14,10 @@ the number that decides whether the pass needs to leave the request path at all.
 **TASK-0358** asks whether ``Journal.find_by_idempotency_key`` — a glob over every job
 record, on the deprecated ingest body-field path — is worth indexing before the field is
 removed at 1.0. The answer is a latency at a realistic journal size, so this script measures
-the miss (the full scan, which is what submitting a *new* key does) and the hit.
+the miss (the full scan, which is what submitting a *new* key does) and the hit. **TASK-0437**
+indexed the lookup under ``job-keys/``; the jobs here are still written without the index, as
+an operator's journal from before that change was, so the script also times the first lookup,
+which builds the index from a full scan once.
 
 **TASK-0399** asks what that scan — and every other journal write — costs the *other*
 requests on the worker, because ``IngestionService.accept`` used to make it from inside an
@@ -217,8 +220,8 @@ def claims_under_reclamation(store: FileIdempotencyStore, *, samples: int) -> li
 def populate_journal(journal: Journal, *, jobs: int) -> float:
     """Write ``jobs`` job records, each carrying its own body idempotency key.
 
-    ``save_job_blocking`` rather than ``create_job_blocking``, because the latter resolves
-    the key first and populating that way would be the quadratic cost this script sizes.
+    ``save_job_blocking`` rather than ``create_job_blocking``: the jobs are written as a
+    journal from before the idempotency index was, so the first lookup has to build it.
     """
     started = time.perf_counter()
     for index in range(jobs):
@@ -232,6 +235,17 @@ def populate_journal(journal: Journal, *, jobs: int) -> float:
             )
         )
     return time.perf_counter() - started
+
+
+def first_lookup(journal: Journal) -> list[float]:
+    """Time the first keyed lookup on a journal whose jobs were written without an index.
+
+    That is the one-time cost an operator's existing journal pays after upgrading: the
+    lookup finds no ``job-keys/`` index and builds it from a full scan (TASK-0437).
+    """
+    started = time.perf_counter()
+    journal.find_by_idempotency_key_blocking("first-lookup", tenant=_TENANT)
+    return [(time.perf_counter() - started) * 1000]
 
 
 def journal_samples(journal: Journal, *, jobs: int, samples: int, hit: bool) -> list[float]:
@@ -358,6 +372,8 @@ def measure(root: Path, args: argparse.Namespace) -> Report:
         journal = Journal(root / "journal")
         _progress(f"writing {args.jobs} job records")
         report.build_jobs_s = populate_journal(journal, jobs=args.jobs)
+        _progress("timing the first lookup, which builds the idempotency index")
+        report.journal.append(_latency("first lookup (builds index)", first_lookup(journal)))
         _progress("timing find_by_idempotency_key")
         report.journal.append(
             _latency(
