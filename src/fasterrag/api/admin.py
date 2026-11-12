@@ -21,11 +21,11 @@ from fasterrag.api.dependencies import (
     CurrentSettings,
     CurrentTenant,
     CurrentVectorDB,
-    build_embedding_router,
 )
 from fasterrag.api.schemas import EstimateRequest, ExportRequest, ImportRequest
 from fasterrag.services.archive import export_archive
 from fasterrag.services.archive_import import import_archive, open_archive
+from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.doctor import apply_fixes, run_doctor
 from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.lockfile import create_lock_store
@@ -137,7 +137,7 @@ async def import_collection(
     with open_archive(guard_archive_path(body.archive, settings)) as reader:
         target = scoped_name(body.target_collection or reader.collection, tenant)
 
-        router_ = build_embedding_router(settings) if body.reembed else None
+        router_ = create_embedding_router(settings) if body.reembed else None
         try:
             counts = await import_archive(
                 settings,

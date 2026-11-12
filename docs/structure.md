@@ -68,13 +68,15 @@ fasterRag/
 │       │   ├── doctor.py         # D10 preflight checks; gates provisioning
 │       │   ├── journal.py        # D3 checkpoints, dedup, DLQ; async over *_blocking twins
 │       │   ├── estimation.py     # D9 preflight token counts and projected cost
-│       │   ├── composition.py    # Composition root: the embedding router every entry point uses, cached when configured
+│       │   ├── composition.py    # Composition root: the service builders the API, CLI, facade and eval harness share
+│       │   ├── embedding_router.py # The embedding router every entry point uses, cached when configured
 │       │   ├── ingestion.py      # Job lifecycle: run both pools, checkpoint, settle
 │       │   ├── documents.py      # Delete one document: chunks, dedup tombstone, lockfile, cache
 │       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate
 │       │   └── collections.py    # Collection lifecycle (pending)
 │       ├── core/                 # RAG pipeline (pure domain logic)
 │       │   ├── identity.py       # Deterministic document, chunk, and config hashes
+│       │   ├── tenancy.py        # The payload field naming a chunk's owning tenant
 │       │   ├── parsing/          # PDF/HTML/MD/DOCX/OCR parsers, table extraction
 │       │   ├── chunking/         # fixed, recursive, semantic, layout, late, contextual
 │       │   ├── retrieval/        # bm25.py sparse encoding; fusion and filters
@@ -132,6 +134,16 @@ fasterRag/
 | `cli/` | Terminal control plane. Thin command layer calling the same services as the API. |
 | `docs/adr/` | MADR decision records, sequentially numbered, never deleted (superseded ADRs get a "Superseded by ADR-XXXX" status). |
 | `tests/` | Unit, integration, and eval suites per [testing-strategy.md](testing-strategy.md). |
+
+## The import rule
+
+Imports point one way. A module may import its own layer and any layer listed after it, never one listed before it:
+
+`cli/` → `api/` | the facade | the dashboard → `services/` → `workers/` → `adapters/` → `core/` → `observability/` → `config/` → `errors.py`
+
+The three in the second position are siblings and may not import each other: the facade is `__init__.py`, `facade.py`, `sync.py` and the re-export modules beside them, and the dashboard is `observability/dashboard.py`, a second web application rather than instrumentation. `cli/` sits above them because the terminal is what starts the API and the dashboard.
+
+`scripts/check_layering.py` enforces this in CI's `quality` job and in the unit tier, reading every import statement at any depth — a function-level import is how the facade used to reach into `api/` unseen. **The tree does not satisfy the rule yet** (TASK-0456): the imports that break it are listed by name in that script's `EXCEPTIONS` table, each with the step that removes it, and the gate fails on any import not in the table and on any entry the tree no longer needs. Whether `core/` may name the adapter base interfaces — which the table below says it does, and which the order above does not allow — is the open decision in that task.
 
 ## Separation-of-concerns rationale
 

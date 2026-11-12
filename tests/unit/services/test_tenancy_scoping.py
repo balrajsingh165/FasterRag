@@ -1,6 +1,8 @@
 import pytest
 
+from fasterrag.core import tenancy as core_tenancy
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.services import tenancy as service_tenancy
 from fasterrag.services.tenancy import SEPARATOR, scoped_name, unscoped_name, visible_to
 
 
@@ -56,3 +58,9 @@ def test_ordinary_tenant_ids_are_accepted() -> None:
 def test_a_name_that_looks_prefixed_is_not_stripped_for_another_tenant() -> None:
     """Removing the wrong prefix would rename a collection into someone else's namespace."""
     assert unscoped_name(f"globex{SEPARATOR}docs", "acme") == f"globex{SEPARATOR}docs"
+
+
+def test_the_payload_key_retrieval_filters_on_is_the_one_core_defines() -> None:
+    """The worker read the key from services/ (TASK-0456); both layers now share core's spelling."""
+    assert service_tenancy.TENANT_PAYLOAD_KEY is core_tenancy.TENANT_PAYLOAD_KEY
+    assert core_tenancy.TENANT_PAYLOAD_KEY == "tenant"

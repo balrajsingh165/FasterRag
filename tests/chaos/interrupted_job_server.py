@@ -89,7 +89,7 @@ async def _serve(mode: str, port_file: Path, hung_file: Path) -> None:
         )
 
     mock.patch.object(ingest_router, "build_ingestion", build_ingestion).start()
-    mock.patch.object(ingest_router, "build_embedding_router", return_value=router).start()
+    mock.patch.object(ingest_router, "create_embedding_router", return_value=router).start()
 
     app = create_app(settings)
     app.state.vector_db = KeywordLegAdapter(settings)

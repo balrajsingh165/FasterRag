@@ -420,11 +420,13 @@ class GenerationService:
         context_budget_tokens: int | None = None,
         breaker: CircuitBreaker | None = None,
         governor: CostGovernor | None = None,
+        owns_llm: bool = True,
     ) -> None:
-        """Build the service."""
+        """Build the service; ``owns_llm=False`` leaves a shared provider open on close."""
         self.settings = settings
         self.retrieval = retrieval
         self.llm = llm
+        self.owns_llm = owns_llm
         self.grader = grader or llm
         self.cache = cache
         self.embedder = embedder
@@ -973,5 +975,6 @@ class GenerationService:
         yield _Completed(answer=answer)
 
     async def close(self) -> None:
-        """Release the generation provider."""
-        await self.llm.close()
+        """Release the generation provider, unless whoever built this service lent it."""
+        if self.owns_llm:
+            await self.llm.close()

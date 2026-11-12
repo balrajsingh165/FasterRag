@@ -73,7 +73,7 @@ def ingestion(monkeypatch: pytest.MonkeyPatch, app: FastAPI) -> GatedIngestion:
         "build_ingestion",
         lambda settings, adapter, journal, cache, **kwargs: service,
     )
-    monkeypatch.setattr(ingest_router, "build_embedding_router", lambda settings: StubRouter())
+    monkeypatch.setattr(ingest_router, "create_embedding_router", lambda settings: StubRouter())
     return service
 
 
@@ -196,7 +196,7 @@ def real_acceptance(monkeypatch: pytest.MonkeyPatch) -> type[RecordingService]:
         )
 
     monkeypatch.setattr(ingest_router, "build_ingestion", build)
-    monkeypatch.setattr(ingest_router, "build_embedding_router", lambda settings: StubRouter())
+    monkeypatch.setattr(ingest_router, "create_embedding_router", lambda settings: StubRouter())
     return RecordingService
 
 

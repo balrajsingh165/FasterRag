@@ -5,10 +5,11 @@ configuration, and errors are identical whichever one an application uses
 (``docs/python-api.md``).
 
 This is a thin composition layer and nothing else. It owns no retrieval, ingestion, or
-generation logic — it builds the same services ``api/dependencies.py`` builds, from the same
-validated ``Settings``, and hands them the same arguments. Any behavior that lived here would
-be behavior the REST API does not have, which is exactly the divergence the shared service
-layer exists to prevent.
+generation logic — it builds its services with the same ``services/composition.py`` builders
+the REST API uses, from the same validated ``Settings``, and hands them the same arguments.
+It imports nothing from ``fasterrag.api``, so a library install never loads the web
+framework. Any behavior that lived here would be behavior the REST API does not have, which
+is exactly the divergence the shared service layer exists to prevent.
 
 **Resource-heavy objects are process-scoped, not per call.** The embedding router and the
 semantic cache are built once when the facade starts and reused for every query. Building
@@ -33,12 +34,18 @@ from fasterrag.adapters.vectordb.base import CollectionInfo, VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
 from fasterrag.config.schema import Settings
-from fasterrag.core.cache import create_semantic_store
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
-from fasterrag.services.composition import create_embedding_router
+from fasterrag.services.composition import (
+    build_documents,
+    build_generation,
+    build_ingestion,
+    build_retrieval,
+    create_embedding_router,
+    create_semantic_cache,
+)
 from fasterrag.services.doctor import DoctorReport
 from fasterrag.services.documents import DocumentDeletion
 from fasterrag.services.estimation import Estimate, estimate_sources, require_estimator
@@ -88,7 +95,7 @@ class FasterRag:
         """Connect the adapter and build the process-scoped resources."""
         self._vector_db = create_vector_db_adapter(self.settings)
         self._embeddings = create_embedding_router(self.settings)
-        self._cache = SemanticCache(self.settings, create_semantic_store(self.settings))
+        self._cache = create_semantic_cache(self.settings)
         self._journal = create_journal(self.settings)
         self._started = True
 
@@ -179,9 +186,7 @@ class FasterRag:
         return self._journal
 
     def _retrieval(self) -> RetrievalService:
-        """Build the retrieval service exactly as the API's dependency does."""
-        from fasterrag.api.dependencies import build_retrieval
-
+        """Build the retrieval service exactly as the API does."""
         return build_retrieval(self.settings, self.vector_db, self.embeddings)
 
     def _generation_service(self) -> GenerationService:
@@ -190,8 +195,6 @@ class FasterRag:
         Reused rather than rebuilt because it owns the LLM adapter's client, and a new one
         per query opens a connection pool per query.
         """
-        from fasterrag.api.dependencies import build_generation
-
         if self._generation is None:
             self._generation = build_generation(
                 self.settings, self.vector_db, self.embeddings, cache=self.cache
@@ -213,7 +216,6 @@ class FasterRag:
         A directory is replaced by the files inside it, as ``fasterrag ingest`` does;
         ``recursive`` descends into subdirectories.
         """
-        from fasterrag.api.dependencies import build_ingestion
         from fasterrag.cli.sources import expand_sources
 
         self._require_started()
@@ -337,8 +339,6 @@ class FasterRag:
         Idempotent: ``known`` on the result says whether the journal held the document.
         With ``tenant``, only chunks tagged for that tenant are removed.
         """
-        from fasterrag.api.dependencies import build_documents
-
         self._require_started()
         service = build_documents(self.settings, self.vector_db, self.journal, self.cache)
         return await service.delete(
@@ -349,7 +349,6 @@ class FasterRag:
 
     async def replay(self, trace_id: str, candidate: Settings | None = None) -> ReplayResult:
         """Re-execute a stored query under a candidate configuration and diff it (D8)."""
-        from fasterrag.api.dependencies import build_generation
         from fasterrag.services.replay import replay_trace
         from fasterrag.services.traces import create_trace_store
 

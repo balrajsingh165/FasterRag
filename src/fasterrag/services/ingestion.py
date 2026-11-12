@@ -44,7 +44,7 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger, use_trace_id
-from fasterrag.services.composition import create_embedding_router
+from fasterrag.services.embedding_router import create_embedding_router
 from fasterrag.services.jobs import requeue, resumable, settle_interrupted
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.lockfile import LockStore, build_lock

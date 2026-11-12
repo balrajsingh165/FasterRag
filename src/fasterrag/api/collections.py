@@ -43,11 +43,10 @@ from fasterrag.api.dependencies import (
     CurrentTenant,
     CurrentVectorDB,
     JournalDep,
-    build_documents,
-    build_embedding_router,
 )
 from fasterrag.api.schemas import CollectionRequest
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.services.composition import build_documents, create_embedding_router
 from fasterrag.services.reindex import require_keyword_leg
 from fasterrag.services.tenancy import scoped_name, unscoped_name, visible_to
 
@@ -102,7 +101,7 @@ async def create_collection(
     backend actually added and a backend that added none is a 409 rather than a 201.
     """
     configured = settings.vector_db.collection
-    embedding_router = build_embedding_router(settings)
+    embedding_router = create_embedding_router(settings)
     try:
         dimensions = await _dimensions_of(embedding_router.default)
     finally:

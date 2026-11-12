@@ -36,12 +36,11 @@ from fasterrag.api.dependencies import (
     CurrentTenant,
     CurrentVectorDB,
     JournalDep,
-    build_embedding_router,
-    build_ingestion,
 )
 from fasterrag.api.schemas import IngestRequest
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import current_trace_id, get_logger, use_trace_id
+from fasterrag.services.composition import build_ingestion, create_embedding_router
 from fasterrag.services.jobs import settle_interrupted
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.reindex import require_keyword_leg
@@ -103,7 +102,7 @@ async def _run_job(request: Request, record: JobRecord, metadata: dict[str, Any]
     settings = request.app.state.settings
     adapter = request.app.state.vector_db
     journal = request.app.state.journal
-    embedding_router = build_embedding_router(settings)
+    embedding_router = create_embedding_router(settings)
     service = build_ingestion(
         settings,
         adapter,

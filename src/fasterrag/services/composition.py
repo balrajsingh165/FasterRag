@@ -1,63 +1,133 @@
 """Composition root: where an entry point gets the pieces it runs on.
 
-The API, the CLI, the facade and the ingestion service all need the same embedding router,
-and they must all get it from one place, or a behaviour that is added to the router reaches
-some entry points and not others. That is what happened to the embedding cache: it was
-implemented, tested and constructed by nothing, so ``embeddings.cache.enabled`` validated,
-defaulted to ``true`` and changed no behaviour anywhere (TASK-0442).
+The API, the CLI, the facade and the evaluation harness all assemble the same services, and
+they must all assemble them here, or a behaviour added to one assembly reaches some entry
+points and not others. That is what happened to the embedding cache (TASK-0442), and it is
+why the builders left ``api/dependencies.py``: while they lived in the REST layer, the
+facade and ``services/evaluation.py`` reached up into it through function-level imports, so
+a library user who never starts a server still needed the web framework installed
+(TASK-0456). This module imports nothing from ``fasterrag.api``; ``api/dependencies.py``
+keeps only the FastAPI wrappers that read ``app.state``.
 
-The cache is applied here rather than inside ``adapters.embeddings.tiering`` because of the
-direction the imports run. The cache lives in ``core/`` and wraps an adapter; for the
-adapter factory to apply it, ``adapters/`` would have to import ``core/``, adding an edge to
-a cycle that TASK-0456 exists to remove. This module is one layer above both, where
-importing both is what a service is for, so the wrapping costs no new edge.
+What is built here per call is cheap: a service object over process-scoped parts. The parts
+that hold connections or models — the vector database adapter, the embedding router, the
+semantic cache and the LLM adapter — are built once by the entry point and passed in.
 
-So there are two functions named ``create_embedding_router``, on purpose. The one in
-``adapters.embeddings.tiering`` builds the bare router and is this module's raw material.
-The one here is the one to call. They share a name so that an entry point cannot hold both
-and so that swapping the import is the whole migration; a caller outside ``adapters/`` that
-imports the bare one gets a router the cache switch cannot reach, and
-``tests/unit/services/test_composition.py`` fails the build on it.
+The services themselves stay per call, deliberately. ``GenerationService`` carries the
+caller's tenant and the candidates of the query in flight, so one instance shared by
+concurrent requests would answer one tenant with another's state; the cost governor and the
+circuit breakers it uses are already process-wide. What a query rebuilt and should not have
+was the provider client, so that is what an entry point now lends (TASK-0466).
 """
 
 from __future__ import annotations
 
-from fasterrag.adapters.embeddings.base import EmbeddingAdapter
 from fasterrag.adapters.embeddings.tiering import TieringRouter
-from fasterrag.adapters.embeddings.tiering import create_embedding_router as create_bare_router
+from fasterrag.adapters.llm.base import LLMAdapter
+from fasterrag.adapters.llm.factory import create_llm_adapter
+from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.config.schema import Settings
-from fasterrag.core.cache import cache_embeddings, create_embedding_store
-from fasterrag.observability.logging import get_logger
+from fasterrag.core.cache import create_semantic_store
+from fasterrag.core.cache.semantic import SemanticCache
+from fasterrag.core.rerank import CrossEncoderReranker
+from fasterrag.services.documents import DocumentService
+from fasterrag.services.embedding_router import create_embedding_router
+from fasterrag.services.generation import GenerationService
+from fasterrag.services.ingestion import IngestionService
+from fasterrag.services.journal import Journal
+from fasterrag.services.lockfile import create_lock_store
+from fasterrag.services.querying import RetrievalService
+from fasterrag.services.traces import TraceStore
 
-__all__ = ["create_embedding_router"]
+__all__ = [
+    "build_documents",
+    "build_generation",
+    "build_ingestion",
+    "build_retrieval",
+    "create_embedding_router",
+    "create_llm_adapter",
+    "create_semantic_cache",
+]
 
-_logger = get_logger(__name__)
+
+def create_semantic_cache(settings: Settings) -> SemanticCache:
+    """Build the semantic response cache over the configured store."""
+    return SemanticCache(settings, create_semantic_store(settings))
 
 
-def create_embedding_router(settings: Settings) -> TieringRouter:
-    """Build the embedding router, behind the embedding cache when it is enabled.
+def build_retrieval(
+    settings: Settings,
+    adapter: VectorDBAdapter,
+    router: TieringRouter,
+    tenant: str | None = None,
+) -> RetrievalService:
+    """Assemble hybrid retrieval, with reranking only when configuration asks for it.
 
-    Every tier shares one store, owned by the default adapter's wrapper.
+    The tenant is passed in rather than read here, so the one middleware that decided who
+    the caller is stays the only thing that decides it (``security.tenant_scoped_retrieval``).
     """
-    cache = settings.embeddings.cache
-    if not cache.enabled:
-        return create_bare_router(settings)
+    reranker = CrossEncoderReranker(settings) if settings.retrieval.rerank else None
+    return RetrievalService(settings, adapter, router, reranker, tenant=tenant)
 
-    store = create_embedding_store(settings)
-    bare = create_bare_router(settings)
 
-    wrapped: dict[int, EmbeddingAdapter] = {
-        id(bare.default): cache_embeddings(bare.default, store, owns_store=True)
-    }
-    for _, adapter in bare.tiers:
-        if id(adapter) not in wrapped:
-            wrapped[id(adapter)] = cache_embeddings(adapter, store, owns_store=False)
+def build_generation(
+    settings: Settings,
+    adapter: VectorDBAdapter,
+    router: TieringRouter,
+    cache: SemanticCache | None = None,
+    traces: TraceStore | None = None,
+    tenant: str | None = None,
+    *,
+    llm: LLMAdapter | None = None,
+) -> GenerationService:
+    """Assemble the query path every entry point uses, so no two of them can diverge.
 
-    _logger.info(
-        "embedding cache enabled",
-        extra={"backend": cache.backend, "max_entries": cache.max_entries, "tiers": len(wrapped)},
+    A lent ``llm`` stays the lender's to close; without one the service builds and owns one.
+    """
+    return GenerationService(
+        settings,
+        build_retrieval(settings, adapter, router, tenant),
+        create_llm_adapter(settings) if llm is None else llm,
+        cache=cache,
+        traces=traces,
+        tenant=tenant,
+        embedder=router.default,
+        owns_llm=llm is None,
     )
-    return TieringRouter(
-        wrapped[id(bare.default)],
-        [(filters, wrapped[id(adapter)]) for filters, adapter in bare.tiers],
+
+
+def build_documents(
+    settings: Settings,
+    adapter: VectorDBAdapter,
+    journal: Journal,
+    cache: SemanticCache | None,
+) -> DocumentService:
+    """Assemble document deletion over the caller's adapter, journal and cache.
+
+    The cache is the caller's, not a new one: invalidating a cache built for this call
+    would clear nothing a query will ever read.
+    """
+    return DocumentService(adapter, journal, cache=cache, locks=create_lock_store(settings))
+
+
+def build_ingestion(
+    settings: Settings,
+    adapter: VectorDBAdapter,
+    journal: Journal,
+    cache: SemanticCache | None,
+    *,
+    router: TieringRouter | None = None,
+) -> IngestionService:
+    """Assemble ingestion against the caller's adapter.
+
+    The adapter is passed in rather than built, so a background job shares the connection
+    pool the request that started it was using instead of opening a second one.
+    """
+    return IngestionService(
+        settings,
+        journal=journal,
+        adapter=adapter,
+        router=router,
+        cache=cache,
+        locks=create_lock_store(settings),
     )

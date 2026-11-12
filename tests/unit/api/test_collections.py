@@ -73,7 +73,7 @@ class StubRouter:
 def embedder(monkeypatch: pytest.MonkeyPatch) -> StubEmbedder:
     built = StubEmbedder()
     monkeypatch.setattr(
-        collections_router, "build_embedding_router", lambda settings: StubRouter(built)
+        collections_router, "create_embedding_router", lambda settings: StubRouter(built)
     )
     return built
 
@@ -127,7 +127,7 @@ def test_a_model_with_no_known_size_is_probed_once(
 ) -> None:
     unknown = StubEmbedder(dimensions=None)
     monkeypatch.setattr(
-        collections_router, "build_embedding_router", lambda settings: StubRouter(unknown)
+        collections_router, "create_embedding_router", lambda settings: StubRouter(unknown)
     )
 
     client.post("/v1/collections", json={"name": "docs"})

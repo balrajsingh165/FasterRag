@@ -16,9 +16,11 @@ anything was produced — retrieval failed, the token budget would be exceeded �
 with the same problem document and status the non-streamed path returns, not with a 200
 carrying an ``error`` event.
 
-Every stream closes its services. An SSE generator that returns early — a client
-disconnecting mid-answer is routine — would otherwise leak a connection pool per abandoned
-request, and abandoned requests are the common case for a slow answer.
+Every stream closes its service, and closing it never closes the provider. The LLM adapter
+is the application's (``app.state.llm``), lent to each request's service and released by the
+lifespan alone (TASK-0466); before that, each query built a provider client and this module
+closed it, so a connection pool was opened and torn down per question. The close stays: a
+service that does own something must still release it when a client disconnects mid-answer.
 """
 
 from __future__ import annotations
@@ -33,16 +35,16 @@ from fastapi.responses import StreamingResponse
 from fasterrag.api.dependencies import (
     CurrentCache,
     CurrentEmbeddings,
+    CurrentLLM,
     CurrentSettings,
     CurrentTenant,
     CurrentVectorDB,
-    build_generation,
-    build_retrieval,
 )
 from fasterrag.api.schemas import QueryRequest
 from fasterrag.api.traces import get_trace_store
 from fasterrag.errors import FasterRagError, problem_spec
 from fasterrag.observability.logging import current_trace_id, get_logger
+from fasterrag.services.composition import build_generation, build_retrieval
 from fasterrag.services.generation import GenerationService, QueryEvent
 
 __all__ = ["router"]
@@ -117,12 +119,13 @@ async def run_query(
     adapter: CurrentVectorDB,
     embeddings: CurrentEmbeddings,
     cache: CurrentCache,
+    llm: CurrentLLM,
     request: Request,
     tenant: CurrentTenant,
 ) -> Any:
     """Answer a question, as one JSON body or as a stream of SSE events."""
     service = build_generation(
-        settings, adapter, embeddings, cache, get_trace_store(request), tenant=tenant
+        settings, adapter, embeddings, cache, get_trace_store(request), tenant=tenant, llm=llm
     )
 
     streaming = settings.llm.streaming if body.stream is None else body.stream
