@@ -304,7 +304,8 @@ jobs:
   # saved as an artifact so the job that pushes it pushes these bytes, not a rebuild, and
   # so that job needs no checkout and no build tooling beside its write permission.
   #
-  # The default build: no extras, which is the image for a hosted-provider deployment. The
+  # The default build: the Dockerfile's BASE_EXTRAS (server, qdrant, pdf, docx, html) and no
+  # others, which is the image for a hosted-provider deployment. The
   # local-model stack is `--build-arg EXTRAS=huggingface` and several gigabytes; whether to
   # publish that variant as well is a maintainer decision this file does not take.
   image:

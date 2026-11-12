@@ -33,11 +33,8 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Final, cast
 
-from grpc import RpcError, StatusCode
-from qdrant_client import AsyncQdrantClient, models
-from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
-
 from fasterrag.adapters.vectordb.base import (
+    POINT_ID_PAYLOAD_KEY,
     CollectionInfo,
     CollectionSpec,
     Distance,
@@ -54,12 +51,29 @@ from fasterrag.adapters.vectordb.base import (
     validate_filter,
 )
 from fasterrag.config.schema import Settings
-from fasterrag.errors import EmbedError, ErrorCode, FasterRagError, ProviderError, RetrievalError
+from fasterrag.errors import (
+    ConfigError,
+    EmbedError,
+    ErrorCode,
+    FasterRagError,
+    ProviderError,
+    RetrievalError,
+)
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["POINT_ID_PAYLOAD_KEY", "QdrantAdapter"]
+INSTALL_HINT: Final = 'pip install "fasterrag[qdrant]"'
 
-POINT_ID_PAYLOAD_KEY: Final = "point_id"
+try:
+    from grpc import RpcError, StatusCode
+    from qdrant_client import AsyncQdrantClient, models
+    from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
+except ModuleNotFoundError as exc:
+    raise ConfigError(
+        "vector_db.provider is 'qdrant', which needs the qdrant extra; it is not installed "
+        f"({exc.name} cannot be imported). Install it with: {INSTALL_HINT}"
+    ) from exc
+
+__all__ = ["INSTALL_HINT", "POINT_ID_PAYLOAD_KEY", "QdrantAdapter"]
 
 # CRITICAL: a collection carrying both legs must name its dense vector, because Qdrant
 # only accepts named sparse vectors and will not mix a named sparse vector with an unnamed

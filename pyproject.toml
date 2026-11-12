@@ -29,26 +29,29 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
 ]
+# The core install is the library: configuration, chunking, Markdown/text/CSV/JSON parsing,
+# BM25 and fusion, the facade and the CLI. The web server, the Qdrant client and the PDF,
+# DOCX and HTML parsers are extras (TASK-0444); each is imported only where it is used, and
+# a missing one fails with an error naming the extra to install.
 dependencies = [
-    "beautifulsoup4>=4.12",
-    "fastapi>=0.115",
     "httpx>=0.27",
-    "lxml>=5.0",
     "markdown-it-py>=3.0",
-    "pdfplumber>=0.11",
     "psutil>=6.0",
-    "python-docx>=1.1",
     "pydantic>=2.8",
     "pydantic-settings[yaml]>=2.4",
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
-    "qdrant-client>=1.9",
     "snowballstemmer>=2.2",
-    "uvicorn[standard]>=0.30",
 ]
 
 [project.optional-dependencies]
+server = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
+qdrant = ["qdrant-client>=1.9"]
+pdf = ["pdfplumber>=0.11"]
+docx = ["python-docx>=1.1"]
+html = ["beautifulsoup4>=4.12", "lxml>=5.0"]
 ocr = [
+    "pdfplumber>=0.11",
     "pillow>=10.0",
     "pytesseract>=0.3.10",
 ]
@@ -76,19 +79,26 @@ otel = [
 ]
 all = [
     "anthropic>=0.40",
+    "beautifulsoup4>=4.12",
     "chromadb>=1.5",
     "cohere>=5.8",
+    "fastapi>=0.115",
+    "lxml>=5.0",
     "ollama>=0.4",
     "openai>=1.40",
     "opentelemetry-exporter-otlp-proto-http>=1.27",
     "opentelemetry-sdk>=1.27",
+    "pdfplumber>=0.11",
     "pgvector>=0.3",
     "pillow>=10.0",
     "psycopg[binary,pool]>=3.2",
     "pymilvus>=3.0",
     "pytesseract>=0.3.10",
+    "python-docx>=1.1",
+    "qdrant-client>=1.9",
     "redis>=5.0",
     "sentence-transformers>=3.0",
+    "uvicorn[standard]>=0.30",
     "weaviate-client>=4.24,<5",
 ]
 dev = [
@@ -115,19 +125,28 @@ dev = [
     # cohere and ollama are here on the same reasoning (TASK-0441): the recorded-response
     # suites in tests/unit/adapters/*/test_real_clients.py replay through the real client
     # libraries and are marked must_run, so both must be installed where the unit tier runs.
+    # The server, qdrant, pdf, docx and html extras are here for the same reason: they were
+    # core until TASK-0444, and the API, Qdrant and parser suites gate on them in every lane.
+    "beautifulsoup4>=4.12",
     "chromadb>=1.5",
     "cohere>=5.8",
     "fakeredis>=2.26",
+    "fastapi>=0.115",
+    "lxml>=5.0",
     "ollama>=0.4",
+    "pdfplumber>=0.11",
     "pgvector>=0.3",
     "psycopg[binary,pool]>=3.2",
     "pymilvus>=3.0",
+    "python-docx>=1.1",
+    "qdrant-client>=1.9",
     "redis>=5.0",
     "reportlab>=4.0",
     "ruff>=0.6",
     "types-grpcio>=1.0",
     "types-psutil>=6.0",
     "types-pyyaml>=6.0",
+    "uvicorn[standard]>=0.30",
     "weaviate-client>=4.24,<5",
 ]
 

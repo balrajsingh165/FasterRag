@@ -40,10 +40,13 @@ Nothing has to be running: vectors live in an embedded Chroma directory (`.faste
 ## Step 0 — Install
 
 ```bash
-pip install fasterrag                 # core: local HuggingFace embeddings + Qdrant adapter
+pip install "fasterrag[qdrant,huggingface,rerank,pdf,docx,html]"   # what the canonical config.yaml uses
+pip install "fasterrag[server]"       # add the REST server (Path C)
 pip install "fasterrag[openai]"       # add a hosted provider
 pip install "fasterrag[all]"          # everything
 ```
+
+`pip install fasterrag` alone is the library and the CLI with Markdown, text, CSV and JSON parsing: the web server, the Qdrant client and the PDF, DOCX and HTML parsers are extras, and a missing one is reported by name ([integrations.md](integrations.md) §0).
 
 ## Step 1 — Create `config.yaml` and `.env`
 

@@ -36,13 +36,13 @@ from typing import Any
 
 from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.adapters.vectordb.base import (
+    POINT_ID_PAYLOAD_KEY,
     Filter,
     ScoredPoint,
     SearchQuery,
     VectorDBAdapter,
     validate_filter,
 )
-from fasterrag.adapters.vectordb.qdrant import POINT_ID_PAYLOAD_KEY
 from fasterrag.config.schema import Settings
 from fasterrag.core.breaker import CircuitBreaker, shared_breaker
 from fasterrag.core.rerank import Reranker

@@ -35,7 +35,7 @@ def load_model(name: str) -> Any:
     except ImportError as exc:
         raise ConfigError(
             "embeddings.provider is 'huggingface', which needs sentence-transformers; "
-            "install it with 'pip install sentence-transformers'"
+            "install it with 'pip install \"fasterrag[huggingface]\"'"
         ) from exc
 
     return SentenceTransformer(name)

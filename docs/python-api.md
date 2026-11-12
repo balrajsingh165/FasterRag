@@ -21,16 +21,21 @@ fasterRag is released as an installable Python package so applications can **imp
 ## Installation
 
 ```bash
-pip install fasterrag                 # core: Qdrant adapter, all document parsers, chunking
-pip install "fasterrag[all]"          # every optional adapter/provider
-pip install "fasterrag[huggingface]"  # local sentence-transformers embeddings
-pip install "fasterrag[openai]"       # extras per provider: openai, anthropic, cohere, ollama
-pip install "fasterrag[milvus]"       # extras per vector DB: milvus, weaviate, pinecone, pgvector, chroma
-pip install "fasterrag[rerank]"       # cross-encoder reranker models
-pip install "fasterrag[ocr]"          # OCR for scanned PDFs (also needs the tesseract binary)
+pip install fasterrag                         # core: the library, the CLI, chunking, BM25 + fusion,
+                                              #   Markdown/text/CSV/JSON parsing
+pip install "fasterrag[chroma,huggingface]"   # the local profile: no service, no key (see below)
+pip install "fasterrag[server]"               # `fasterrag serve`: FastAPI + uvicorn
+pip install "fasterrag[qdrant]"               # the Qdrant adapter (the default config.yaml uses it)
+pip install "fasterrag[pdf,docx,html]"        # the PDF, DOCX and HTML parsers
+pip install "fasterrag[all]"                  # every optional adapter/provider
+pip install "fasterrag[huggingface]"          # local sentence-transformers embeddings
+pip install "fasterrag[openai]"               # extras per provider: openai, anthropic, cohere, ollama
+pip install "fasterrag[milvus]"               # extras per vector DB: qdrant, milvus, weaviate, pgvector, chroma
+pip install "fasterrag[rerank]"               # cross-encoder reranker models
+pip install "fasterrag[ocr]"                  # OCR for scanned PDFs (also needs the tesseract binary)
 ```
 
-Parsers for PDF, HTML, Markdown, DOCX, text, CSV, and JSON are part of the core install, as is the chunking pipeline.
+**The core install is the library, not the web service** (TASK-0444). It holds configuration, chunking, fusion, the facade, the CLI, and the Markdown, plain-text, CSV and JSON parsers. The web server (`server`), the Qdrant client (`qdrant`) and the PDF, DOCX and HTML parsers (`pdf`, `docx`, `html`) are extras, each imported only where it is used: `fasterrag serve` without `server` exits `2` naming `pip install "fasterrag[server]"`; selecting `vector_db.provider: qdrant` without `qdrant` is a `ConfigError` naming `pip install "fasterrag[qdrant]"`; and a PDF, DOCX or HTML document without its extra is dead-lettered with `PARSE_FAILED` and a detail naming the extra, while the rest of the job is ingested. The canonical `config.yaml` selects Qdrant, so using it as written needs `fasterrag[qdrant]`; `fasterrag config init --profile local` writes a configuration that needs only `fasterrag[chroma,huggingface]`. The container image installs `server`, `qdrant`, `pdf`, `docx` and `html` ([deployment.md](deployment.md)).
 
 **Every embedding provider is an extra, including the local default.** `huggingface` is separate because sentence-transformers pulls a deep-learning runtime measured in gigabytes, and a deployment that embeds through a hosted provider should not have to install it. `fasterrag[huggingface]` is the fully-local starting point; selecting a provider whose extra is missing fails at startup with a `ConfigError` naming the exact install command, never with an import traceback.
 
