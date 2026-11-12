@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from fasterrag.config.schema import Settings
 from fasterrag.core.identity import content_hash
-from fasterrag.errors import ConfigError, IngestionError
+from fasterrag.errors import ConfigError, ErrorCode, IngestionError
 from fasterrag.services.journal import Journal
 from fasterrag.workers import cpu_pool
 from fasterrag.workers.cpu_pool import (
@@ -660,6 +660,39 @@ async def test_a_pool_that_cannot_start_a_worker_says_so_and_is_not_left_running
 
     assert pool._executor is None
     assert built[0]._shutdown
+
+
+class BreaksAfter(ThreadPoolExecutor):
+    """An executor that accepts ``healthy`` tasks and then refuses, as a broken pool does."""
+
+    def __init__(self, max_workers: int, healthy: int) -> None:
+        super().__init__(max_workers=max_workers)
+        self.healthy = healthy
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+        if self.healthy <= 0:
+            raise BrokenProcessPool("A child process terminated abruptly")
+        self.healthy -= 1
+        return super().submit(fn, *args, **kwargs)
+
+
+async def test_a_pool_that_breaks_between_documents_fails_with_the_typed_error(
+    corpus: Path,
+) -> None:
+    """TASK-0509: a pool broken before the next submit raised a raw BrokenProcessPool."""
+    configured = settings(workers={"cpu_pool_size": 1})
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(500)
+
+    def factory(workers: int) -> Executor:
+        return BreaksAfter(workers, healthy=2)
+
+    async with CpuWorkerPool(configured, executor_factory=factory) as pool:
+        with pytest.raises(IngestionError) as raised:
+            await pool.process(pool.tasks_for(sources(corpus, "a.md", "b.md")), queue)
+
+    assert raised.value.code is ErrorCode.CHUNK_FAILED
+    assert "b.md" in raised.value.detail
+    assert "__main__" not in raised.value.detail
 
 
 def test_the_parse_timeout_is_on_by_default_and_cannot_be_negative() -> None:

@@ -9,7 +9,14 @@ Failure is per-document by design. A corrupt file becomes a dead-letter entry wi
 code and the pipeline continues — including a parser that raises something untyped, which is
 converted to a ``ParseError`` inside the worker rather than aborting the job. A worker
 *process* dying is different: the standard library marks the whole pool broken, so the job
-fails rather than continuing on a pool that can no longer accept work.
+fails rather than continuing on a pool that can no longer accept work. A pool that dies
+before its first worker has run anything is reported as a script without a ``__main__``
+guard; one that dies later was killed or crashed, and is reported as that (TASK-0509).
+
+Leaving the pool with a parse still running — the job was cancelled, or failed elsewhere —
+kills the workers instead of joining them. Joining runs on the event loop and lasts as long
+as the slowest parse, which for a hung one is for ever, so a shutdown drain was bounded by
+the parser rather than by ``reliability.shutdown_grace_seconds`` (TASK-0525).
 
 Documents are parsed concurrently, up to the pool size at a time, and consumed in
 submission order. Awaiting each document before submitting the next — which this module did
@@ -23,8 +30,11 @@ task that is already running cannot be cancelled, and its worker stays occupied 
 returns, which a hung one never does. So an overdue document costs its *pool*: the workers
 are killed, a fresh pool is started, the documents that were in flight beside it are
 submitted again with a new deadline, and only the overdue one is dead-lettered, as
-``PARSE_TIMEOUT``. One worker is started before any document is submitted, at pool start
-and after every recycle, so that process start-up is not billed to a document's deadline.
+``PARSE_TIMEOUT``. One worker is started at pool start and after every recycle, and with a
+deadline set, as many as the documents will occupy are started before any is submitted, so
+that process start-up is not billed to a document's deadline. Before 2026-11-12 only the
+first was: a pool that spawns starts the others on demand, and on a loaded machine a
+healthy document could be dead-lettered while its worker was still starting.
 
 A document is journalled as indexed only when the :class:`IndexLedger` says every chunk of
 it was written downstream (``workers/ledger.py``). With no ledger passed there is no
@@ -313,6 +323,11 @@ def _ready() -> bool:
     return True
 
 
+def _process_id(_settings: Settings) -> int:
+    """Return the process this task ran in, which proves that worker has started."""
+    return os.getpid()
+
+
 def _abandon(executor: Executor) -> None:
     """Shut a pool down without waiting for it, killing any worker that is still busy."""
     workers: list[BaseProcess] = []
@@ -351,6 +366,19 @@ def _unguarded_entry_point_error() -> IngestionError:
     )
 
 
+def _worker_died_error(during: str) -> IngestionError:
+    """Return the error for a worker that died after the pool had started and run work."""
+    return IngestionError(
+        f"a parsing worker process died {during}, after the pool had started and run work, "
+        "so the script's entry point is not the cause. Something outside fasterRag ended "
+        "it: most often the operating system's out-of-memory killer, or a crash in a "
+        "parser's native code. The job was stopped; if memory is short, lower "
+        "workers.cpu_pool_size or ingestion.max_document_mb, then ingest the sources again",
+        code=ErrorCode.CHUNK_FAILED,
+        retryable=False,
+    )
+
+
 class CpuWorkerPool:
     """Parses and chunks documents in worker processes, streaming chunks downstream."""
 
@@ -373,6 +401,7 @@ class CpuWorkerPool:
             lambda workers: ProcessPoolExecutor(max_workers=workers)
         )
         self._executor: Executor | None = None
+        self._stranded = False
 
     async def __aenter__(self) -> CpuWorkerPool:
         """Start the worker processes and pay the tokenizer load up front."""
@@ -432,7 +461,9 @@ class CpuWorkerPool:
         else:
             _logger.info("loaded the sentence embedding model in every parse worker", extra=details)
 
-    async def _warmed_processes(self, expected: int) -> int:
+    async def _warmed_processes(
+        self, expected: int, target: Callable[[Settings], int] = _warm_sentence_embedder
+    ) -> int:
         """Send warm-up tasks until ``expected`` processes have answered, and return how many did.
 
         Gives up after ``_WARM_STALL_SECONDS`` in which only already-warm processes answered, so
@@ -444,7 +475,7 @@ class CpuWorkerPool:
         while len(warmed) < expected:
             replies = await asyncio.gather(
                 *(
-                    loop.run_in_executor(self._executor, _warm_sentence_embedder, self.settings)
+                    loop.run_in_executor(self._executor, target, self.settings)
                     for _ in range(expected - len(warmed))
                 )
             )
@@ -459,6 +490,31 @@ class CpuWorkerPool:
             await asyncio.sleep(_WARM_RETRY_SECONDS)
         return len(warmed)
 
+    async def _start_workers(self, documents: int) -> None:
+        """Start the workers ``documents`` will occupy before any of their deadlines runs.
+
+        A pool that spawns starts workers on demand, which billed every worker's start-up but
+        the first to a document's ``ingestion.parse_timeout_seconds``.
+        """
+        expected = min(documents, self.size)
+        if (
+            expected <= 1
+            or self.settings.ingestion.parse_timeout_seconds <= 0
+            or not isinstance(self._executor, ProcessPoolExecutor)
+        ):
+            return
+
+        try:
+            started = await self._warmed_processes(expected, _process_id)
+        except BrokenProcessPool as exc:
+            raise _worker_died_error("while the pool was starting its workers") from exc
+        if started < expected:
+            _logger.warning(
+                "not every parse worker started before the first document; one that starts "
+                "later does so inside a document's parse deadline",
+                extra={"workers": started, "expected": expected},
+            )
+
     async def _warm_token_counter(self) -> None:
         """Load the embedding tokenizer before the first document rather than during it."""
         counter = create_token_counter(self.settings)
@@ -472,10 +528,22 @@ class CpuWorkerPool:
             )
 
     async def __aexit__(self, *exc_info: object) -> None:
-        """Shut the worker processes down."""
-        if self._executor is not None:
-            self._executor.shutdown(wait=True)
-            self._executor = None
+        """Shut the worker processes down, killing them if the block left work in them.
+
+        Joining a busy worker blocks the event loop until its parse returns (TASK-0525).
+        """
+        executor, self._executor = self._executor, None
+        stranded, self._stranded = self._stranded, False
+        if executor is not None and (stranded or exc_info[0] is not None):
+            _abandon(executor)
+            if stranded:
+                _logger.warning(
+                    "the cpu worker pool was stopped with documents still being parsed; "
+                    "its workers were killed rather than waited for",
+                    extra={"trace_id": current_trace_id()},
+                )
+        elif executor is not None:
+            executor.shutdown(wait=True)
         _logger.info("cpu worker pool stopped")
 
     async def process(
@@ -595,11 +663,12 @@ class CpuWorkerPool:
                 window.append(self._submit(task))
 
         try:
+            await self._start_workers(len(tasks))
             fill()
             while window:
                 entry = window[0]
                 if not entry.timed_out and not await self._returned(entry):
-                    await self._recycle(window)
+                    await self._recycle(window, len(tasks))
                 window.popleft()
                 if entry.timed_out:
                     yield entry.task, self._timeout_error(entry.task)
@@ -608,7 +677,7 @@ class CpuWorkerPool:
                 try:
                     outcome = await entry.future
                 except BrokenProcessPool as exc:
-                    raise _unguarded_entry_point_error() from exc
+                    raise _worker_died_error(f"while {entry.task.source} was in the pool") from exc
                 except FasterRagError as exc:
                     # CRITICAL: the error was built in a worker, whose context is not this
                     # job's, so it carries a trace id the worker minted for itself. Without
@@ -620,13 +689,17 @@ class CpuWorkerPool:
                 fill()
         finally:
             for entry in window:
+                self._stranded = self._stranded or not entry.future.done()
                 entry.future.cancel()
 
     def _submit(self, task: DocumentTask) -> _InFlight:
         """Hand one document to the pool, due ``ingestion.parse_timeout_seconds`` from now."""
         loop = asyncio.get_running_loop()
         limit = self.settings.ingestion.parse_timeout_seconds
-        future = loop.run_in_executor(self._executor, parse_and_chunk, task, self.settings)
+        try:
+            future = loop.run_in_executor(self._executor, parse_and_chunk, task, self.settings)
+        except BrokenProcessPool as exc:
+            raise _worker_died_error(f"before {task.source} could be handed to the pool") from exc
         return _InFlight(task, future, loop.time() + limit if limit > 0 else None)
 
     async def _returned(self, entry: _InFlight) -> bool:
@@ -647,7 +720,7 @@ class CpuWorkerPool:
         """Return the typed failure for a document that outlived its deadline."""
         return _parse_timeout_error(task, self.settings.ingestion.parse_timeout_seconds)
 
-    async def _recycle(self, window: deque[_InFlight]) -> None:
+    async def _recycle(self, window: deque[_InFlight], documents: int) -> None:
         """Replace the pool because the document at the head of ``window`` is overdue.
 
         Every other unfinished document is submitted again to the new pool with a fresh
@@ -669,6 +742,7 @@ class CpuWorkerPool:
         if stale is not None:
             _abandon(stale)
         await self._start_worker()
+        await self._start_workers(documents)
 
         resubmitted = [entry for entry in unfinished if not entry.timed_out]
         for entry in resubmitted:

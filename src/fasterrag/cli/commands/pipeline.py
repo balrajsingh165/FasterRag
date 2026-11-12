@@ -243,6 +243,7 @@ def _report_job(record: JobRecord, console: Console, *, announce: bool) -> ExitC
     console.emit(f"status          {record.status}")
     console.emit(f"indexed         {counts.get('indexed', 0)} chunks")
     console.emit(f"dead-lettered   {counts.get('dead_lettered', 0)}")
+    console.emit(f"skipped         {counts.get('skipped', 0)}")
     console.document({"job_id": record.job_id, "status": record.status, "counts": dict(counts)})
 
     return ExitCode.SUCCESS if record.status != "failed" else ExitCode.FAILURE
