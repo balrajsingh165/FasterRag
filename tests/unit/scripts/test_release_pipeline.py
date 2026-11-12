@@ -286,3 +286,11 @@ def unpinned_actions(path: Path) -> list[str]:
 def test_every_action_the_release_runs_is_pinned_to_a_commit() -> None:
     """A tag on somebody else's repository can be moved; a SHA cannot."""
     assert unpinned_actions(RELEASE) == []
+
+
+def test_every_workflow_and_composite_action_pins_its_actions_to_a_commit() -> None:
+    """One floating tag anywhere in the chain release -> ci.yml -> composite actions runs code."""
+    files = [*WORKFLOWS.glob("*.yml"), *(ROOT / ".github" / "actions").glob("*/action.yml")]
+
+    assert len(files) >= 6
+    assert [problem for path in files for problem in unpinned_actions(path)] == []

@@ -130,9 +130,9 @@ jobs:
       QDRANT_API_KEY: ci-placeholder
       OPENAI_API_KEY: ci-placeholder
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
           cache: pip
@@ -253,7 +253,7 @@ jobs:
       - name: Download the previous night's measurements
         if: ${{ !cancelled() && steps.previous.outputs.run-id != '' }}
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: nightly-measurements
           path: previous/
@@ -413,7 +413,7 @@ jobs:
       # (TASK-0323).
       - name: Upload ledger-format artifacts
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nightly-measurements
           path: artifacts/
@@ -438,9 +438,9 @@ jobs:
     # step below is there to say which resource it was, since the log said nothing at all.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
           cache: pip
@@ -562,7 +562,7 @@ jobs:
       # job (TASK-0323).
       - name: Upload the survivor list
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mutation-survivors
           path: artifacts/
