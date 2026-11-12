@@ -217,7 +217,7 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
     data = _read(task.readable, limit)
     document = parse_bytes(
         data,
-        filename=Path(task.source).name,
+        filename=Path(task.readable).name,
         max_bytes=limit,
         options=create_parsing_options(settings),
     )
