@@ -79,6 +79,7 @@ class ErrorCode(StrEnum):
     CACHE_ERROR = "CACHE_ERROR"
     NOT_READY = "NOT_READY"
     INTERNAL = "INTERNAL"
+    DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +152,9 @@ PROBLEM_SPECS: Final[dict[ErrorCode, ProblemSpec]] = {
     ErrorCode.CACHE_ERROR: ProblemSpec(500, "cache-error", "Cache backend failure", False),
     ErrorCode.NOT_READY: ProblemSpec(503, "not-ready", "Service is not ready", True),
     ErrorCode.INTERNAL: ProblemSpec(500, "internal", "Internal error", False),
+    ErrorCode.DEADLINE_EXCEEDED: ProblemSpec(
+        504, "deadline-exceeded", "Request deadline exceeded", True
+    ),
 }
 
 

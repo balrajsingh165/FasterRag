@@ -780,6 +780,7 @@ class ReliabilitySettings(Section):
     degradation_ladder: bool = True
     shutdown_grace_seconds: Annotated[int, Field(ge=0, le=3600)] = 20
     stale_job_seconds: Annotated[int, Field(ge=1, le=86400)] = 120
+    request_deadline_ms: Annotated[int, Field(ge=100)] = 300000
 
 
 class TracesSettings(Section):

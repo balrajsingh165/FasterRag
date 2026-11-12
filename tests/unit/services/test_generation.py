@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,7 +52,12 @@ class ScriptedLLM(LLMAdapter):
         self.finish_reason: str | None = "stop"
         self.fail_after: int | None = None
         self.failures: int | None = None
+        self.hang_after: int | None = None
         self.prompts: list[tuple[str, str | None]] = []
+
+    async def hang(self) -> None:
+        """Never return, as a provider that accepted the call and went silent does."""
+        await asyncio.Event().wait()
 
     def failing(self) -> bool:
         """Return whether this call fails: every call, or only the first ``failures``."""
@@ -64,6 +70,8 @@ class ScriptedLLM(LLMAdapter):
 
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         self.prompts.append((prompt, system))
+        if self.hang_after is not None:
+            await self.hang()
         if self.failing():
             assert self.error is not None
             raise self.error
@@ -83,6 +91,8 @@ class ScriptedLLM(LLMAdapter):
         for sent, word in enumerate(self.text.split(" ")):
             if self.error is not None and sent == self.fail_after:
                 raise self.error
+            if sent == self.hang_after:
+                await self.hang()
             yield f"{word} "
 
     async def health(self) -> HealthStatus:
@@ -1178,6 +1188,111 @@ async def test_a_configured_fallback_is_built_on_first_need_and_closed_with_the_
     await service.close()
 
 
+def with_deadline(
+    milliseconds: int = 100, **overrides: Any
+) -> tuple[GenerationService, ScriptedLLM]:
+    """Return ``build()``'s service under a short ``reliability.request_deadline_ms``."""
+    service, llm = build(**overrides)
+    reliability = service.settings.reliability.model_copy(
+        update={"request_deadline_ms": milliseconds}
+    )
+    service.settings = service.settings.model_copy(update={"reliability": reliability})
+    return service, llm
+
+
+class StalledRetrieval(ScriptedRetrieval):
+    """Never returns, as a vector database that accepted the query and went silent does."""
+
+    async def search(self, text: str, **kwargs: Any) -> Retrieval:
+        await asyncio.Event().wait()
+        raise AssertionError("a stalled retrieval never returns")
+
+
+async def test_a_deadline_hit_while_retrieving_is_refused_on_both_surfaces() -> None:
+    """Nothing bounded a request end to end, so a stalled backend held it forever (TASK-0449)."""
+    service, llm = with_deadline()
+    service.retrieval = StalledRetrieval([])  # type: ignore[assignment]
+    events: list[QueryEvent] = []
+
+    with pytest.raises(FasterRagError) as whole:
+        await asyncio.wait_for(service.answer("q"), 10)
+    with pytest.raises(FasterRagError) as streamed:
+        await asyncio.wait_for(collect_into(events, service), 10)
+
+    assert whole.value.code is ErrorCode.DEADLINE_EXCEEDED
+    assert whole.value.status == 504
+    assert streamed.value.code is ErrorCode.DEADLINE_EXCEEDED
+    assert events == [], "a refused stream had already begun"
+    assert llm.prompts == []
+
+
+async def test_a_provider_that_hangs_past_the_deadline_serves_the_retrieved_passages() -> None:
+    service, llm = with_deadline()
+    llm.hang_after = 0
+
+    answer = await asyncio.wait_for(service.answer("q"), 10)
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert "Either party may terminate." in (answer.answer or "")
+    assert len(llm.prompts) == 1
+    assert service.breaker.is_open is False
+
+
+async def test_a_stream_past_its_deadline_after_a_token_ends_on_error() -> None:
+    service, llm = with_deadline()
+    llm.hang_after = 2
+
+    events = await asyncio.wait_for(collect(service), 10)
+
+    assert [event.type for event in events].count("token") == 2
+    assert events[-1].type == "error"
+    assert events[-1].data["code"] == ErrorCode.DEADLINE_EXCEEDED.value
+    assert events[-1].data["status"] == 504
+    assert "done" not in [event.type for event in events]
+
+
+async def test_a_deadline_hit_while_grading_returns_the_answer_ungraded() -> None:
+    service, _ = with_deadline(grounded_or_refuse=True, verdict='{"score": 0.1}')
+    assert isinstance(service.grader, ScriptedLLM)
+    service.grader.hang_after = 0
+
+    answer = await asyncio.wait_for(service.answer("q"), 10)
+
+    assert answer.answer == "The notice period is thirty days [^c_a]."
+    assert answer.faithfulness is None
+
+
+async def test_no_retry_is_waited_for_that_would_outlast_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[float] = []
+
+    async def record(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr("fasterrag.services.generation._pause", record)
+    settings = Settings.model_validate(
+        {
+            "reliability": {
+                "request_deadline_ms": 1000,
+                "retries": {"backoff_base_ms": 1, "backoff_max_ms": 60000},
+            }
+        }
+    )
+    llm = ScriptedLLM(settings, text="an answer", error=GenerationError("429", retry_after=30.0))
+    service = GenerationService(
+        settings,
+        ScriptedRetrieval([chunk("c_a", "Either party may terminate.")]),  # type: ignore[arg-type]
+        llm,
+    )
+
+    answer = await service.answer("q")
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert waits == []
+    assert len(llm.prompts) == 1
+
+
 async def test_a_misconfigured_provider_never_opens_the_breaker() -> None:
     """A misconfiguration never opens the breaker.
 
@@ -1396,6 +1511,8 @@ class MeteredLLM(ScriptedLLM):
 
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         self.prompts.append((prompt, system))
+        if self.hang_after is not None:
+            await self.hang()
         if self.failing():
             assert self.error is not None
             raise self.error
@@ -1410,6 +1527,8 @@ class MeteredLLM(ScriptedLLM):
 
     async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
         self.prompts.append((prompt, system))
+        if self.hang_after is not None:
+            await self.hang()
         if self.failing():
             assert self.error is not None
             raise self.error
@@ -1447,6 +1566,7 @@ class ParityCase:
     tripped: bool = False
     failures: int | None = None
     fallback: bool = False
+    hangs: bool = False
 
 
 def _body(observed: Observed) -> dict[str, Any]:
@@ -1505,6 +1625,15 @@ PARITY_CASES: dict[str, ParityCase] = {
             and seen.trace["spans"][-1] == ("generation", seen.trace["spans"][-1][1])
             and seen.trace["spans"][-1][1]["role"] == "fallback"
             and seen.spent > 0
+        ),
+    ),
+    "deadline while generating": ParityCase(
+        settings={"reliability": {"request_deadline_ms": 100}},
+        hangs=True,
+        holds=lambda seen: (
+            _body(seen)["mode"] == EXTRACTIVE_MODE
+            and seen.provider_calls == 1
+            and not seen.breaker_open
         ),
     ),
     "open breaker": ParityCase(
@@ -1572,6 +1701,7 @@ def _parity_service(case: ParityCase, root: Path) -> tuple[GenerationService, Me
     )
     llm = MeteredLLM(settings, text=case.answer, error=case.error() if case.error else None)
     llm.failures = case.failures
+    llm.hang_after = 0 if case.hangs else None
     cache = SemanticCache(settings, MemoryStore()) if settings.cache.semantic else None
     service = GenerationService(
         settings,

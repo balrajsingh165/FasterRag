@@ -40,6 +40,13 @@ missing provider extra is not down, it is misconfigured, and no retry will chang
 degrading one would answer every query extractively forever while reporting nothing more
 specific than ``degraded: true``. Those surface as the typed error they already are.
 
+Before that rung, a retryable failure is retried under ``reliability.retries`` and then
+handed to ``llm.fallback`` when one is configured (TASK-0449). A stream is retried only up
+to its first piece of text. The whole query runs under ``reliability.request_deadline_ms``,
+bounded await by await rather than across a ``yield``: a deadline hit before ``meta`` is
+``DEADLINE_EXCEEDED``, during generation it takes the extractive rung, while grading it
+returns the answer ungraded, and after a sent token it ends the stream on ``error``.
+
 Grounded-or-refuse (D5) adds a P3 grading call after generation. Below
 ``generation.faithfulness_threshold`` the answer is withheld and the caller gets the
 retrieved candidates instead of a guess. An ungraded answer — grader down, unparseable
@@ -59,6 +66,7 @@ import hashlib
 import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -360,6 +368,48 @@ class _Provider:
     llm: LLMAdapter
     breaker: CircuitBreaker
     role: str = "primary"
+
+
+@dataclass(frozen=True, slots=True)
+class _Deadline:
+    """When this request must be finished by, on the event loop's clock (TASK-0449)."""
+
+    at: float
+    limit_ms: int
+
+    @classmethod
+    def starting_now(cls, limit_ms: int) -> _Deadline:
+        """Return the deadline ``reliability.request_deadline_ms`` from now."""
+        return cls(at=asyncio.get_running_loop().time() + limit_ms / 1000, limit_ms=limit_ms)
+
+    def remaining(self) -> float:
+        """Return the seconds left, never negative."""
+        return max(self.at - asyncio.get_running_loop().time(), 0.0)
+
+    @asynccontextmanager
+    async def bounding(self, stage: str) -> AsyncIterator[None]:
+        """Bound the awaits inside by the deadline, failing as ``DEADLINE_EXCEEDED``.
+
+        Held around single awaits only, never across a ``yield``: a scope open while a
+        stream's consumer runs would cancel the consumer rather than this pipeline.
+        """
+        try:
+            async with asyncio.timeout_at(self.at) as scope:
+                yield
+        except TimeoutError as exc:
+            if not scope.expired():
+                raise
+            raise FasterRagError(
+                f"the request ran past reliability.request_deadline_ms ({self.limit_ms} ms) "
+                f"while {stage}",
+                code=ErrorCode.DEADLINE_EXCEEDED,
+                retryable=True,
+            ) from exc
+
+
+def _past_deadline(exc: FasterRagError) -> bool:
+    """Return whether a failure is this request's own deadline rather than a provider's."""
+    return exc.code is ErrorCode.DEADLINE_EXCEEDED
 
 
 async def _pause(seconds: float) -> None:
@@ -720,6 +770,31 @@ class GenerationService:
             metrics.FAITHFULNESS.observe(verdict.score)
         return verdict
 
+    async def _grade_within(
+        self,
+        deadline: _Deadline,
+        question: str,
+        answer: str,
+        prepared: _Prepared,
+        timings: dict[str, int],
+    ) -> FaithfulnessVerdict:
+        """Grade within the request deadline; past it, the answer is returned ungraded.
+
+        The rule a grader outage follows: running out of time is not evidence of a
+        hallucination, so it never withholds an answer the model did give.
+        """
+        try:
+            async with deadline.bounding("grading the answer"):
+                return await self._grade(question, answer, prepared, timings)
+        except FasterRagError as exc:
+            if not _past_deadline(exc):
+                raise
+            _logger.warning(
+                "the request deadline passed while grading; the answer is returned ungraded",
+                extra={"code": exc.code.value, "trace_id": exc.trace_id},
+            )
+            return UNGRADED
+
     def _refusal(
         self,
         prepared: _Prepared,
@@ -816,15 +891,15 @@ class GenerationService:
         )
 
     def _retry_delay(
-        self, exc: FasterRagError, attempt: int, breaker: CircuitBreaker
+        self, exc: FasterRagError, attempt: int, breaker: CircuitBreaker, deadline: _Deadline
     ) -> float | None:
         """Return how long to wait before calling again, or ``None`` when this provider is done.
 
         Never sooner than the provider's ``Retry-After``; a provider that asks for longer
-        than ``reliability.retries.backoff_max_ms`` is not waited on at all.
+        than ``reliability.retries.backoff_max_ms``, or past the deadline, is not waited on.
         """
         retries = self.settings.reliability.retries
-        if not exc.retryable or isinstance(exc, CircuitOpenError):
+        if not exc.retryable or isinstance(exc, CircuitOpenError) or _past_deadline(exc):
             return None
         if attempt > retries.max_attempts or breaker.is_open:
             return None
@@ -835,13 +910,14 @@ class GenerationService:
             if asked * 1000 > retries.backoff_max_ms:
                 return None
             delay = max(delay, asked)
-        return delay
+        return None if deadline.remaining() <= delay else delay
 
     async def _with_retries[T](
         self,
         provider: _Provider,
         call: Callable[[LLMAdapter], Awaitable[T]],
         spans: SpanRecorder | None,
+        deadline: _Deadline,
     ) -> tuple[T, int]:
         """Call one provider until it answers or retrying it is pointless (TASK-0449).
 
@@ -854,11 +930,12 @@ class GenerationService:
             attempt += 1
             try:
                 provider.breaker.check()
-                return await call(provider.llm), attempt
+                async with deadline.bounding("generating"):
+                    return await call(provider.llm), attempt
             except FasterRagError as exc:
-                if not isinstance(exc, CircuitOpenError):
+                if not isinstance(exc, CircuitOpenError) and not _past_deadline(exc):
                     provider.breaker.record_failure(exc)
-                delay = self._retry_delay(exc, attempt, provider.breaker)
+                delay = self._retry_delay(exc, attempt, provider.breaker, deadline)
                 if delay is None:
                     self._record_failure(spans, began, provider, attempt, exc)
                     raise
@@ -913,7 +990,10 @@ class GenerationService:
         return _Provider(self.fallback_llm, breaker, role="fallback")
 
     async def _generate[T](
-        self, call: Callable[[LLMAdapter], Awaitable[T]], spans: SpanRecorder | None
+        self,
+        call: Callable[[LLMAdapter], Awaitable[T]],
+        spans: SpanRecorder | None,
+        deadline: _Deadline,
     ) -> tuple[_Provider, T, int]:
         """Generate through the primary provider, then ``llm.fallback`` (TASK-0449).
 
@@ -921,9 +1001,9 @@ class GenerationService:
         """
         primary = _Provider(self.llm, self.breaker)
         try:
-            result, attempts = await self._with_retries(primary, call, spans)
+            result, attempts = await self._with_retries(primary, call, spans, deadline)
         except FasterRagError as exc:
-            fallback = self._fallback() if exc.retryable else None
+            fallback = self._fallback() if exc.retryable and not _past_deadline(exc) else None
             if fallback is None:
                 raise
             _logger.warning(
@@ -935,7 +1015,7 @@ class GenerationService:
                     "fallback": fallback.llm.provider,
                 },
             )
-            result, attempts = await self._with_retries(fallback, call, spans)
+            result, attempts = await self._with_retries(fallback, call, spans, deadline)
             return fallback, result, attempts
         return primary, result, attempts
 
@@ -985,26 +1065,32 @@ class GenerationService:
         ``stream()`` maps them to events, so the two surfaces cannot disagree.
         """
         trace_id = current_trace_id()
+        deadline = _Deadline.starting_now(self.settings.reliability.request_deadline_ms)
         started = time.perf_counter()
-        vector = await self._cache_vector(question)
-        cache_ms = int((time.perf_counter() - started) * 1000)
-
-        if vector is not None and self.cache is not None:
-            hit = await self.cache.lookup(
-                vector,
-                tenant=self.tenant,
-                scope=self._cache_scope(collection, top_k, filters),
+        async with deadline.bounding("looking up the semantic cache"):
+            vector = await self._cache_vector(question)
+            cache_ms = int((time.perf_counter() - started) * 1000)
+            hit = (
+                await self.cache.lookup(
+                    vector,
+                    tenant=self.tenant,
+                    scope=self._cache_scope(collection, top_k, filters),
+                )
+                if vector is not None and self.cache is not None
+                else None
             )
-            if hit is not None:
-                cached = _cached_answer(hit, trace_id, cache_ms)
-                yield _Started(trace_id=trace_id, mode=cached.mode, cache=cached.cache)
-                yield _Delta(text=cached.answer or "")
-                yield _Completed(answer=cached)
-                return
 
-        prepared = await self._prepare(
-            question, collection=collection, top_k=top_k, filters=filters
-        )
+        if hit is not None:
+            cached = _cached_answer(hit, trace_id, cache_ms)
+            yield _Started(trace_id=trace_id, mode=cached.mode, cache=cached.cache)
+            yield _Delta(text=cached.answer or "")
+            yield _Completed(answer=cached)
+            return
+
+        async with deadline.bounding("retrieving"):
+            prepared = await self._prepare(
+                question, collection=collection, top_k=top_k, filters=filters
+            )
         timings = prepared.timings
         if vector is not None:
             timings["cache"] = cache_ms
@@ -1040,7 +1126,7 @@ class GenerationService:
             # The breaker is consulted before every attempt, inside `_with_retries`.
             if streaming:
                 serving, (deltas, pending), attempts = await self._generate(
-                    lambda llm: _open_stream(llm, prepared.prompt), prepared.spans
+                    lambda llm: _open_stream(llm, prepared.prompt), prepared.spans, deadline
                 )
                 try:
                     while pending is not None:
@@ -1057,7 +1143,8 @@ class GenerationService:
                         if not held:
                             sent = True
                             yield _Delta(text=pending)
-                        pending = await anext(deltas, None)
+                        async with deadline.bounding("streaming the answer"):
+                            pending = await anext(deltas, None)
                 finally:
                     await _close_stream(deltas)
                 completion = self._streamed_completion(serving.llm, prepared.prompt, "".join(parts))
@@ -1065,10 +1152,12 @@ class GenerationService:
                 serving, completion, attempts = await self._generate(
                     lambda llm: llm.complete(prepared.prompt, system=P1_SYSTEM_PROMPT),
                     prepared.spans,
+                    deadline,
                 )
         except FasterRagError as exc:
             if serving is not None:
-                serving.breaker.record_failure(exc)
+                if not _past_deadline(exc):
+                    serving.breaker.record_failure(exc)
                 self._record_failure(prepared.spans, began, serving, attempts, exc)
             # CRITICAL: only a retryable failure is a rung on the degradation ladder. A
             # rejected key, an unknown model, or a missing provider extra will never succeed
@@ -1120,7 +1209,7 @@ class GenerationService:
                 completion_tokens=completion.completion_tokens,
             )
 
-        verdict = await self._grade(question, completion.text, prepared, timings)
+        verdict = await self._grade_within(deadline, question, completion.text, prepared, timings)
         if verdict.withholds(self.settings.generation.faithfulness_threshold):
             refusal = self._refusal(prepared, verdict, trace_id, timings)
             self._store_trace(question, collection, filters, prepared, completion.text, refusal)

@@ -153,6 +153,7 @@ reliability:
   degradation_ladder: true
   shutdown_grace_seconds: 20
   stale_job_seconds: 120
+  request_deadline_ms: 300000
 
 traces:
   store: true
