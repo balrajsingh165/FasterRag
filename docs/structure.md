@@ -65,6 +65,7 @@ fasterRag/
 │       │   ├── journal.py        # D3 checkpoints, dedup, DLQ; async over *_blocking twins
 │       │   ├── estimation.py     # D9 preflight token counts and projected cost
 │       │   ├── ingestion.py      # Job lifecycle: run both pools, checkpoint, settle
+│       │   ├── documents.py      # Delete one document: chunks, dedup tombstone, lockfile, cache
 │       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate
 │       │   └── collections.py    # Collection lifecycle (pending)
 │       ├── core/                 # RAG pipeline (pure domain logic)
