@@ -1,22 +1,26 @@
 """Billed-usage extraction, proved without contacting a provider.
 
-Every response below is hand-built to the vendor's *documented* shape, because the point of
-the test is that the adapter reads the right field — a fake shaped like the adapter already
-behaves would pass whatever the adapter did. Provenance for each:
+Every response below is built to the shape the vendor's client hands back, because the point
+of the test is that the adapter reads the right field — a fake shaped like the adapter
+already behaves would pass whatever the adapter did. Provenance for each:
 
-* **Cohere** — the ``/v1/embed`` reference describes an optional ``meta.billed_units`` whose
-  ``input_tokens`` counts the billable text units, alongside a separate ``meta.tokens``.
-  Every level is optional, which is why the absent-meta case is exercised too.
+* **Cohere** — built from ``COHERE_EMBED`` in ``tests/unit/adapters/recordings.py``, the
+  ``/v1/embed`` body, parsed the way ``cohere.AsyncClient.embed`` parses it: vectors on
+  ``embeddings.float_`` and the billable text units on ``meta.billed_units.input_tokens``,
+  as a float. The reference makes every level of ``meta`` optional, which is why the
+  absent-meta case is exercised too, and allows a separate ``meta.tokens``, which one test
+  adds as a decoy.
 * **OpenAI** — the embeddings response carries ``data[].embedding`` and ``usage``, whose
   ``total_tokens`` is the billed figure. The same field the adapter already read.
-* **Ollama** — the legacy ``/api/embeddings`` route that the client's ``embeddings()`` call
-  issues returns a bare ``{"embedding": [...]}``: no model, no durations, no
-  ``prompt_eval_count``. The fake omits them because the server does.
+* **Ollama** — built from ``OLLAMA_EMBED``, the ``/api/embed`` body, parsed the way
+  ``ollama.AsyncClient.embed`` parses it: an object, not a ``dict``, holding one vector per
+  input and the ``prompt_eval_count`` the server counted for the batch.
 
-Neither the ``cohere`` nor the ``ollama`` SDK is installed in this environment, so the fakes
-could not be checked against the installed package's own types; they follow the published
-API references instead. The live probes in ``tests/eval/test_live_providers.py`` are what
-check the shape against the vendor, and they are not run here.
+The Cohere and Ollama fakes are held to the real libraries by the fidelity tests in
+``test_real_clients.py`` beside this file (TASK-0441): each parses the same recorded body
+through the installed client and fails if the fake carries anything the real object does
+not. The live probes in ``tests/eval/test_live_providers.py`` are what check the recording
+itself against the vendor, and they are not run here.
 
 The last two tests are the anti-vacuity pair. The live probes only run with a credential, so
 a ``reports_token_usage`` flag left behind by an adapter change would otherwise be caught by
@@ -25,6 +29,7 @@ nothing; these run in the job that cannot skip.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -35,8 +40,7 @@ from fasterrag.adapters.embeddings.ollama import OllamaEmbedder
 from fasterrag.adapters.embeddings.openai import OpenAIEmbedder
 from fasterrag.config.schema import Settings
 from tests.eval.test_live_providers import EMBEDDING_CHECKS, LiveCheck
-
-VECTOR = [0.1, 0.2, 0.3]
+from tests.unit.adapters.recordings import COHERE_EMBED, OLLAMA_EMBED, VECTOR, parsed
 
 
 def settings_for(provider: str, **embeddings: Any) -> Settings:
@@ -52,13 +56,19 @@ def _obj(**fields: Any) -> Any:
     return type("response", (), fields)()
 
 
-def cohere_response(count: int, *, input_tokens: int | None, meta: bool = True) -> Any:
-    """Return a Cohere embed response carrying ``count`` vectors and its billed units."""
-    billed = None if input_tokens is None else _obj(input_tokens=input_tokens)
-    return _obj(
-        embeddings=_obj(float_=[list(VECTOR) for _ in range(count)]),
-        meta=_obj(billed_units=billed, tokens=_obj(input_tokens=999)) if meta else None,
-    )
+def cohere_response(
+    count: int, *, input_tokens: int | None, meta: bool = True, counted: int | None = None
+) -> Any:
+    """Return what the Cohere client hands back for ``count`` texts and their billed units."""
+    vectors = [list(VECTOR) for _ in range(count)]
+    reply = parsed({**COHERE_EMBED, "texts": ["a"] * count, "embeddings": {"float": vectors}})
+    if not meta:
+        reply.meta = None
+        return reply
+    billed = None if input_tokens is None else float(input_tokens)
+    reply.meta.billed_units = SimpleNamespace(input_tokens=billed)
+    reply.meta.tokens = None if counted is None else SimpleNamespace(input_tokens=counted)
+    return reply
 
 
 def openai_response(count: int, *, total_tokens: int | None) -> Any:
@@ -95,14 +105,20 @@ class FakeOpenAIClient:
 
 
 class FakeOllamaClient:
-    """Returns the legacy /api/embeddings body, which carries no token count."""
+    """Answers ``embed`` as the Ollama client does: one typed reply for the whole batch."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, counted: bool = True) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.counted = counted
 
-    async def embeddings(self, **request: Any) -> dict[str, Any]:
+    async def embed(self, **request: Any) -> Any:
         self.calls.append(request)
-        return {"embedding": list(VECTOR)}
+        texts = request["input"]
+        body = {**OLLAMA_EMBED, "embeddings": [list(VECTOR) for _ in texts]}
+        body["prompt_eval_count"] = 4 * len(texts)
+        if not self.counted:
+            del body["prompt_eval_count"]
+        return parsed(body)
 
 
 def cohere_with(*responses: Any, **overrides: Any) -> CohereEmbedder:
@@ -123,7 +139,7 @@ async def test_cohere_reports_the_units_it_says_it_billed() -> None:
 
 async def test_cohere_bills_from_billed_units_not_from_counted_tokens() -> None:
     """The invoice is charged on billed_units; meta.tokens is a different number."""
-    adapter = cohere_with(cohere_response(1, input_tokens=17))
+    adapter = cohere_with(cohere_response(1, input_tokens=17, counted=999))
 
     assert (await adapter.embed_documents(["a"])).total_tokens == 17
 
@@ -190,14 +206,75 @@ async def test_openai_without_a_usage_block_reports_no_receipt() -> None:
     assert (await adapter.embed_documents(["a"])).total_tokens is None
 
 
-async def test_ollama_reports_no_usage_because_the_route_states_none() -> None:
-    adapter = OllamaEmbedder(settings_for("ollama"))
-    adapter._client = FakeOllamaClient()
+def ollama_with(client: FakeOllamaClient, **overrides: Any) -> OllamaEmbedder:
+    """Return an Ollama adapter wired to a fake client."""
+    adapter = OllamaEmbedder(settings_for("ollama", **overrides))
+    adapter._client = client
+    return adapter
 
-    result = await adapter.embed_documents(["a"])
 
-    assert result.total_tokens is None
-    assert result.vectors == [VECTOR]
+async def test_ollama_reads_the_typed_reply_the_client_returns() -> None:
+    """The reply is an object, not a dict; reading it as one failed every embedding."""
+    adapter = ollama_with(FakeOllamaClient())
+
+    result = await adapter.embed_documents(["a", "b"])
+
+    assert result.vectors == [VECTOR, VECTOR]
+    assert result.total_tokens == 8
+
+
+async def test_ollama_sends_a_whole_batch_in_one_request() -> None:
+    """The superseded route took one text per request, so a batch cost a round trip each."""
+    client = FakeOllamaClient()
+
+    await ollama_with(client).embed_documents(["a", "b", "c"])
+
+    assert client.calls == [{"model": "test-model", "input": ["a", "b", "c"]}]
+
+
+async def test_ollama_sums_the_count_of_every_batch() -> None:
+    client = FakeOllamaClient()
+
+    result = await ollama_with(client, batch_size=2).embed_documents(["a", "b", "c"])
+
+    assert [call["input"] for call in client.calls] == [["a", "b"], ["c"]]
+    assert result.total_tokens == 12
+    assert len(result.vectors) == 3
+
+
+async def test_ollama_without_a_count_reports_no_receipt() -> None:
+    adapter = ollama_with(FakeOllamaClient(counted=False))
+
+    assert (await adapter.embed_documents(["a"])).total_tokens is None
+
+
+async def test_an_ollama_query_embeds_as_a_batch_of_one() -> None:
+    client = FakeOllamaClient()
+
+    vector = await ollama_with(client).embed_query("a question")
+
+    assert vector == VECTOR
+    assert client.calls[0]["input"] == ["a question"]
+
+
+@pytest.mark.parametrize(
+    ("llm_provider", "key_env", "expected"),
+    [("ollama", None, "http://llm.internal:11434"), ("openai_compatible", "GATEWAY_KEY", None)],
+)
+def test_the_ollama_embedder_borrows_only_an_ollama_llms_endpoint(
+    llm_provider: str, key_env: str | None, expected: str | None
+) -> None:
+    """``llm.base_url`` was read whatever the LLM was, sending embeddings to its gateway."""
+    llm = {
+        "provider": llm_provider,
+        "api_key_env": key_env,
+        "base_url": "http://llm.internal:11434",
+    }
+    configured = Settings.model_validate(
+        {"embeddings": {"provider": "ollama", "model": "test-model"}, "llm": llm}
+    )
+
+    assert OllamaEmbedder(configured)._host == expected
 
 
 @pytest.mark.parametrize(

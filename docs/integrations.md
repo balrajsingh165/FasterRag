@@ -30,8 +30,8 @@ Backend swap = config change + D2 zero-downtime reindex (or D11 vector copy wher
 |---|---|---|---|---|
 | HuggingFace / sentence-transformers | `huggingface` | — | ✅ | Default; runs on CPU/GPU in the embedding pool; no data leaves the host. |
 | OpenAI | `openai` | `OPENAI_API_KEY` | ❌ | Batched API calls; prompt caching honored where offered. |
-| Cohere | `cohere` | `COHERE_API_KEY` | ❌ | Batched. |
-| Ollama (local server) | `ollama` | — | ✅ | `llm.base_url`-style endpoint override supported. |
+| Cohere | `cohere` | `COHERE_API_KEY` | ❌ | Batched, through the v1 `embed` call. |
+| Ollama (local server) | `ollama` | — | ✅ | One request per batch on `/api/embed`, so the server must serve that route; the adapter does not fall back to the superseded per-text `/api/embeddings`. Needs `ollama>=0.4`. There is no `embeddings.base_url`: the server is `llm.base_url` when `llm.provider` is also `ollama`, and otherwise the client's own default — the `OLLAMA_HOST` environment variable, else `http://127.0.0.1:11434`. `embeddings.dimensions` is not sent to the server. |
 
 **Tiered embedding** (`embeddings.tiering`): route document classes to different models — cheap models for high-volume/low-priority classes, higher-cost models where retrieval precision matters:
 
@@ -58,15 +58,15 @@ All five LLM providers below are **shipped**, with streaming.
 |---|---|---|---|---|
 | OpenAI | `openai` | `OPENAI_API_KEY` | ✅ | |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | ✅ | e.g. `model: claude-opus-5`; provider prompt caching used for shared prefixes. |
-| Cohere | `cohere` | `COHERE_API_KEY` | ✅ | |
-| Ollama (local) | `ollama` | — | ✅ | Fully local generation. |
+| Cohere | `cohere` | `COHERE_API_KEY` | ✅ | The v2 chat API, through `cohere.AsyncClientV2`. Needs `cohere>=5.8`. Token counts are the billed units, falling back to the consumed tokens when the reply states no bill. |
+| Ollama (local) | `ollama` | — | ✅ | Fully local generation; `llm.base_url` names the server, else `OLLAMA_HOST`, else `http://127.0.0.1:11434`. Needs `ollama>=0.4`. |
 | Any OpenAI-compatible endpoint | `openai_compatible` | per endpoint | ✅ | `llm.base_url` required — covers vLLM, LM Studio, llama.cpp servers, TGI, and most hosted gateways. |
 
-**Cost coverage.** OpenAI, Anthropic, and part of the Cohere lineup have dated list prices recorded, so their traffic reaches `fasterrag_cost_usd_total`; Ollama is priced at zero because it is local. Embedding spend reaches the same counter as of TASK-0312 (2026-11-08), priced from the **provider's own reported token count** where the adapter surfaces one — OpenAI's `usage.total_tokens` and Cohere's `meta.billed_units.input_tokens` — and from our local count only where the provider states nothing. Where both exist and disagree, the difference is reported as `EmbedReport.token_drift` and logged at the end of the ingest rather than silently resolved in either direction. `openai_compatible` never is — a gateway sets its own prices, and charging its traffic at the upstream vendor's rate would be a fabricated bill. Unpriced traffic is counted by `fasterrag_unpriced_tokens_total` rather than silently dropped. The exact per-model coverage and its check dates are in [config-reference.md](config-reference.md#which-models-carry-a-price).
+**Cost coverage.** OpenAI, Anthropic, and part of the Cohere lineup have dated list prices recorded, so their traffic reaches `fasterrag_cost_usd_total`; Ollama is priced at zero because it is local. Embedding spend reaches the same counter as of TASK-0312 (2026-11-08), priced from the **provider's own reported token count** where the adapter surfaces one — OpenAI's `usage.total_tokens`, Cohere's `meta.billed_units.input_tokens` and, as of TASK-0441, Ollama's `prompt_eval_count` (counted, and still priced at zero) — and from our local count only where the provider states nothing. Where both exist and disagree, the difference is reported as `EmbedReport.token_drift` and logged at the end of the ingest rather than silently resolved in either direction. `openai_compatible` never is — a gateway sets its own prices, and charging its traffic at the upstream vendor's rate would be a fabricated bill. Unpriced traffic is counted by `fasterrag_unpriced_tokens_total` rather than silently dropped. The exact per-model coverage and its check dates are in [config-reference.md](config-reference.md#which-models-carry-a-price).
 
 ## 3a. Live provider verification — what `pytest -m eval` does and does not prove
 
-Every other provider test in this repository substitutes a fake client. That proves the adapter issues the request it meant to; it proves nothing about whether the vendor still accepts it, which is the drift that actually breaks a release — a renamed response field, a changed usage block, a retired model id. `tests/eval/test_live_providers.py` closes that gap with one real call per advertised provider, through the adapter and the factory rather than through the vendor SDK, so our own integration is what is under test.
+Every other provider test in this repository substitutes a fake client or, for Cohere and Ollama, replays a recorded reply through the real client library (§3b). That proves the adapter issues the request it meant to; it proves nothing about whether the vendor still accepts it, which is the drift that actually breaks a release — a renamed response field, a changed usage block, a retired model id. `tests/eval/test_live_providers.py` closes that gap with one real call per advertised provider, through the adapter and the factory rather than through the vendor SDK, so our own integration is what is under test.
 
 Each provider is gated on its own credential and skips, never fails, when it is absent. A full run with everything present is **eight requests** of a few dozen tokens each — five generations and three embeddings:
 
@@ -90,7 +90,24 @@ Each provider is gated on its own credential and skips, never fails, when it is 
 
 **Status, as of 2026-10-29.** The gating logic is verified on every commit. The live call bodies have **never been executed against a real provider**, in CI or by hand, because no credentials have been available to any run — so no row in the table above is backed by a recorded response today (TASK-0205). The HuggingFace embedder is the one advertised provider with no entry here and needs none: it is local, and `tests/eval/test_real_models.py` exercises it against real downloaded weights.
 
-[testing-strategy.md](testing-strategy.md) §1.11 holds the fuller treatment of this layer, including why `reports_token_usage` is `True` for the Cohere embedder and `False` for the Ollama one.
+[testing-strategy.md](testing-strategy.md) §1.11 holds the fuller treatment of this layer, including why `reports_token_usage` is `True` for the Cohere embedder and, since the move to `/api/embed`, for the Ollama one.
+
+## 3b. Recorded-response tests — the Cohere and Ollama adapters against the real client libraries
+
+A fake client proves the adapter and the fake agree. It says nothing about the library, and three adapters were wrong against theirs with every test green (TASK-0441, found 2026-11-12 by replaying a recorded reply through `cohere` 7.3.0 and `ollama` 0.6.3 — the versions `uv.lock` resolves — with no network and no key):
+
+| Adapter | What the real client did | What a user saw |
+|---|---|---|
+| Cohere LLM | The adapter built `cohere.AsyncClient` (the v1 client) and called `chat(messages=…)`. v1 `chat` takes `message`, so the call raised `TypeError` before any request was sent. | Every generation failed as `GENERATION_FAILED`, "cohere was unreachable during complete: TypeError", marked retryable — so it was retried and then failed over as if Cohere were down. |
+| Ollama LLM | `chat` returns a typed `ChatResponse`, not a `dict`; the adapter read text only from a `dict`. | An empty answer beside correct token counts, and a stream that yielded nothing. No error anywhere. |
+| Ollama embeddings | `embeddings` returns a typed `EmbeddingsResponse`, not a `dict`. | Every embedding failed as `EMBED_PROVIDER_ERROR`, "ollama returned an empty embedding". |
+| Cohere embeddings | `AsyncClient.embed` accepted the call and returned vectors on `embeddings.float_` with `meta.billed_units`. | Nothing wrong — it was not a bug. |
+
+The tests that would have caught each are `tests/unit/adapters/llm/test_real_clients.py` and `tests/unit/adapters/embeddings/test_real_clients.py`. The adapter builds its own genuine client; `tests/unit/adapters/recordings.py` answers it at the HTTP transport from a body in the vendor's documented wire format, so the library's request building and response parsing both run and no socket is opened. The same module holds the bodies the hand-written fakes are built from, and a fidelity test per reply fails if a fake carries anything the real client's object does not.
+
+`cohere` and `ollama` are in the `dev` extra so these run in CI rather than skip, and one test per library in each module is marked `must_run` ([testing-strategy.md](testing-strategy.md) §3.2). Without the library a test skips, naming the extra to install.
+
+**What this does not prove.** The bodies were written from each vendor's API reference, not captured from a live server, so a server that has drifted from its reference is still invisible here; only the billed probes in §3a can see that, and they have never run. The lower bounds in `pyproject.toml` come from replaying the same recordings through older releases: `cohere` 5.6.2 fails and 5.8.0 passes; `ollama` 0.3.3 fails and 0.4.0 passes.
 
 ## 4. Rerankers (`retrieval.reranker_model`)
 

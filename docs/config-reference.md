@@ -266,7 +266,7 @@ security:
 | `llm.provider` | str | `openai` | one of `openai`, `anthropic`, `cohere`, `ollama`, `openai_compatible` | LLM adapter selection. `openai_compatible` targets any endpoint speaking the OpenAI API shape (set `base_url`). |
 | `llm.model` | str | `gpt-4o-mini` | non-empty | Generation model ID understood by the selected provider (e.g. `claude-opus-5` for provider `anthropic`). |
 | `llm.api_key_env` | str\|null | `OPENAI_API_KEY` | valid env-var name or null | Env var holding the provider key. Null allowed only for `ollama`/local. |
-| `llm.base_url` | str\|null | `null` | valid URL when set | Endpoint override (required for `openai_compatible`, optional for `ollama`). |
+| `llm.base_url` | str\|null | `null` | valid URL when set | Endpoint override (required for `openai_compatible`, optional for `ollama`). When `llm.provider` is `ollama` this is also the server the `ollama` **embedding** provider uses — there is no `embeddings.base_url`. When the LLM is any other provider the Ollama embedder ignores it and uses the `OLLAMA_HOST` environment variable, else `http://127.0.0.1:11434`; before TASK-0441 it read this key whatever the LLM was, and so sent embedding requests to an `openai_compatible` gateway. |
 | `llm.temperature` | float | `0.1` | 0.0–2.0 | Sampling temperature. Low default favors grounded answers. |
 | `llm.max_tokens` | int | `1024` | 1–32768 | Max generated tokens per answer. |
 | `llm.streaming` | bool | `true` | — | Stream tokens via SSE (time-to-first-token). |

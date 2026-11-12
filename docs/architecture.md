@@ -135,7 +135,7 @@ A **factory** reads `vector_db.provider` and instantiates the concrete adapter. 
 
 ### Embedding and LLM factories
 
-Same pattern: `embeddings.provider` and `llm.provider` select concrete adapters (OpenAI, Cohere, HuggingFace/sentence-transformers, Ollama/local for embeddings; any LLM provider). **Tiered embedding** routes document classes to different models — cheap models for high-volume/low-priority classes, higher-cost models where retrieval precision matters.
+Same pattern: `embeddings.provider` and `llm.provider` select concrete adapters (OpenAI, Cohere, HuggingFace/sentence-transformers, Ollama/local for embeddings; any LLM provider). Each adapter names the exact client it was written against — the Cohere generator builds `cohere.AsyncClientV2`, the Ollama adapters read the typed responses `ollama` 0.4 introduced — and the Cohere and Ollama ones are replayed against the real client libraries in the unit tier ([integrations.md](integrations.md) §3b). A `TypeError` or `AttributeError` raised while an LLM adapter drives its client is a non-retryable `INTERNAL` error, not an outage: it means the installed library and the adapter disagree, and retrying or failing over cannot fix that. **Tiered embedding** routes document classes to different models — cheap models for high-volume/low-priority classes, higher-cost models where retrieval precision matters.
 
 ### Config-driven dynamism
 

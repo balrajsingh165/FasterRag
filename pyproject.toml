@@ -56,8 +56,12 @@ huggingface = ["sentence-transformers>=3.0"]
 rerank = ["sentence-transformers>=3.0"]
 openai = ["openai>=1.40"]
 anthropic = ["anthropic>=0.40"]
-cohere = ["cohere>=5.5"]
-ollama = ["ollama>=0.3"]
+# Both floors are measured, not guessed (TASK-0441): the recorded responses in
+# tests/unit/adapters/recordings.py were replayed through each release named here. The
+# Cohere generator needs AsyncClientV2, which 5.6.2 does not have and 5.8.0 does. The Ollama
+# adapters read the typed responses 0.4.0 introduced; 0.3.3 returns plain dicts and fails.
+cohere = ["cohere>=5.8"]
+ollama = ["ollama>=0.4"]
 redis = ["redis>=5.0"]
 pgvector = ["psycopg[binary,pool]>=3.2", "pgvector>=0.3"]
 chroma = ["chromadb>=1.5"]
@@ -73,8 +77,8 @@ otel = [
 all = [
     "anthropic>=0.40",
     "chromadb>=1.5",
-    "cohere>=5.5",
-    "ollama>=0.3",
+    "cohere>=5.8",
+    "ollama>=0.4",
     "openai>=1.40",
     "opentelemetry-exporter-otlp-proto-http>=1.27",
     "opentelemetry-sdk>=1.27",
@@ -108,8 +112,13 @@ dev = [
     # real redis-py client, so the rate-limiter integration tests run on a machine and in
     # a CI job that has no Redis. It stays dev-only and gets no extra of its own — it is a
     # test server, never something a deployment should be able to install by accident.
+    # cohere and ollama are here on the same reasoning (TASK-0441): the recorded-response
+    # suites in tests/unit/adapters/*/test_real_clients.py replay through the real client
+    # libraries and are marked must_run, so both must be installed where the unit tier runs.
     "chromadb>=1.5",
+    "cohere>=5.8",
     "fakeredis>=2.26",
+    "ollama>=0.4",
     "pgvector>=0.3",
     "psycopg[binary,pool]>=3.2",
     "pymilvus>=3.0",
