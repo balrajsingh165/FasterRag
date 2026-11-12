@@ -124,6 +124,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **`chunking.strategy: layout` makes full-size chunks** (2026-11-13, TASK-0307). A long paragraph, or a document with no structure at all, was cut into one chunk per sentence or word — 101 chunks where the recursive strategy made 3, and 3,000 chunks for 3,000 words of single-line text. Long blocks are now packed back up to `chunking.chunk_size`, matching the recursive strategy on those documents. **A collection already chunked with `strategy: layout` gets new chunk ids** for documents with an oversized block or no structure; re-ingest them with `--force`.
+
 - **Qdrant refuses a hybrid collection it cannot serve, up front** (2026-11-13, TASK-0305). Creating a collection with `retrieval.hybrid: true` over an existing Qdrant collection that had no keyword index was accepted, and the ingest then failed at its first write with a misleading embedding error. It is now refused at creation with 409 `CONFLICT` saying what is missing and how to fix it, as every other adapter does.
 
 - **Two different files can no longer share a document id** (2026-11-13, TASK-0304). A path such as `É:/Docs/a.pdf` was mistaken for a Windows drive and lower-cased, so it collided with `é:/docs/a.pdf` and deduplication silently dropped one of them. Only `A`–`Z` now count as drive letters. Every other document id is unchanged.
@@ -223,6 +225,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **`Journal.find_by_idempotency_key` was not tenant-scoped** (2026-11-08, TASK-0318). It globbed every job record on the host and matched on the key alone, so under `security.multi_tenancy` a tenant replaying a key another tenant had used was handed **that tenant's job id** and had its own ingest silently dropped — an id disclosure and a lost corpus from one collision on a client-chosen string. The lookup now matches tenant as well as key, so an untenanted deployment behaves exactly as before and two tenants cannot collide.
 
 ### Changed
+
+- **The release SBOM is tested** (2026-11-13, TASK-0087). A test now pins that every release rehearsal builds the CycloneDX SBOM from the committed lockfile and that the published release attaches it; the document validates against the CycloneDX 1.5 schema.
+
+- **The branch-protection settings for `main` are written down** (2026-11-13, TASK-0313). `docs/release.md` now lists the exact GitHub ruleset and required checks for `main`, and why the `branch-verdict` job is a visible check rather than a required one.
 
 - **Every error code has a documented remedy** (2026-11-12, TASK-0500). The error table in the API reference now has one row per code — HTTP status, meaning, and what to do about it — and a test parses it, so a code added without a row, or documented with the wrong status, fails the build.
 
