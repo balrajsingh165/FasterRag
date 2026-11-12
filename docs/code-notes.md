@@ -183,6 +183,8 @@ Retryability comes from what the provider actually reported: rate limits and ser
     faults are worth retrying, a rejected credential never is. Getting this wrong means
     hammering a provider that has already refused you.
 
+A TypeError or AttributeError that carries no status was raised while the adapter was driving the client library or reading what it returned — cohere 7.0.0 raises AttributeError inside its own batch merge when a reply carries `meta` without `billed_units`. It used to fall through to "unreachable, retryable", so the worker pool retried a programming error as an outage; it is INTERNAL and non-retryable (TASK-0510, mirroring TASK-0441 on the generation side). A status still wins, and the detail names the exception type only, never its text.
+
 ### `EmbeddingAdapter`
 
 > Vendor-neutral embedding contract.
