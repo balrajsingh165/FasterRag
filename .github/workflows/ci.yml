@@ -344,6 +344,19 @@ jobs:
       - name: Dependency audit
         uses: ./.github/actions/dependency-audit
 
+      # Every release the lockfile names for the core install and every extra a user can ask
+      # for, against the allow-list in the script (TASK-0496). A licence nobody here has looked
+      # at, and a package that declares none, both fail; the accepted exceptions are listed
+      # in the script with their reasons and printed on every run, and the full table goes to
+      # the step summary. `!cancelled()` so an advisory published overnight does not hide
+      # this verdict behind the audit's.
+      - name: Dependency licences are on the allow-list
+        if: ${{ !cancelled() }}
+        run: |
+          uv export --format requirements-txt --locked --all-extras --no-extra dev \
+            --no-emit-project --no-hashes -o licences.txt
+          python .github/scripts/check_licences.py licences.txt --summary "${GITHUB_STEP_SUMMARY}"
+
   integration:
     runs-on: ubuntu-latest
     steps:
