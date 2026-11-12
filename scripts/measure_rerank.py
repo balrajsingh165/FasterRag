@@ -58,6 +58,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
+# CRITICAL: imported for its side effect, before any fasterrag import: it puts this
+# checkout's src first on sys.path, so a worktree measures its own code (TASK-0522).
+import _checkout  # noqa: F401
+
 from fasterrag.adapters.embeddings.tiering import TieringRouter, create_embedding_router, matches
 from fasterrag.adapters.vectordb.base import (
     CollectionInfo,

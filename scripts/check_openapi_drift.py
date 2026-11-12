@@ -21,7 +21,10 @@ import sys
 from pathlib import Path
 from typing import Any, Final
 
-REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
+# CRITICAL: importing _checkout puts this checkout's src ahead of the virtualenv's editable
+# install, so the routes compared are this tree's, not another worktree's (TASK-0522).
+from _checkout import REPOSITORY_ROOT
+
 API_REFERENCE: Final = REPOSITORY_ROOT / "docs" / "api-reference.md"
 
 METHODS: Final = ("GET", "POST", "PUT", "PATCH", "DELETE")

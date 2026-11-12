@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from fasterrag.cli.sources import expand_sources
-from tests.unit.workers.test_hostile_documents import link
+from fasterrag.services.journal import Journal
+from tests.unit.workers.test_hostile_documents import GOOD, link, run_directory, settings
 
 
 def corpus(root: Path) -> Path:
@@ -121,3 +122,58 @@ def test_a_link_loop_ends_the_walk_and_a_looping_file_is_kept_for_the_report(
         "loop.md",
         "sub/b.md",
     ]
+
+
+@pytest.mark.must_run
+async def test_with_no_allowed_roots_a_visible_link_to_a_hidden_file_is_not_indexed(
+    tmp_path: Path,
+) -> None:
+    """The hidden-file rule read the link's own name, so notes.md -> ../.env was indexed."""
+    root = tmp_path / "corpus"
+    root.mkdir()
+    (root / "good.md").write_text(GOOD, encoding="utf-8")
+    (tmp_path / ".env").write_text("TOKEN=hunter2", encoding="utf-8")
+    link(tmp_path / ".env", root / "notes.md")
+
+    parsed, dead, _, indexed = await run_directory(root, Journal(tmp_path / "journal"), settings())
+
+    assert (parsed, dead) == (1, 0)
+    assert "hunter2" not in indexed
+
+
+@pytest.mark.must_run
+def test_a_link_into_a_hidden_directory_is_skipped(tmp_path: Path) -> None:
+    """A target such as ~/.ssh/id_rsa has a visible name inside a hidden directory."""
+    root = tmp_path / "corpus"
+    root.mkdir()
+    (root / "a.md").write_text("a", encoding="utf-8")
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "id_rsa").write_text("PRIVATE", encoding="utf-8")
+    link(tmp_path / ".ssh" / "id_rsa", root / "key.md")
+
+    assert names(expand_sources([str(root)])) == ["a.md"]
+
+
+@pytest.mark.must_run
+def test_a_link_to_a_hidden_file_inside_the_corpus_is_skipped(tmp_path: Path) -> None:
+    """The .env beside the corpus files is skipped by name; a link to it must be as well."""
+    root = corpus(tmp_path)
+    (root / ".env").write_text("KEY=value", encoding="utf-8")
+    link(root / ".env", root / "nested" / "settings.md")
+
+    assert names(expand_sources([str(root)], recursive=True)) == ["a.md", "b.md", "c.md"]
+
+
+@pytest.mark.must_run
+def test_a_corpus_inside_a_hidden_directory_keeps_its_links_to_visible_files(
+    tmp_path: Path,
+) -> None:
+    """Only the part of the target past where it leaves the walked root is judged."""
+    hidden = tmp_path / ".local" / "share"
+    root = hidden / "corpus"
+    root.mkdir(parents=True)
+    (root / "a.md").write_text("a", encoding="utf-8")
+    (hidden / "shared.md").write_text("shared", encoding="utf-8")
+    link(hidden / "shared.md", root / "linked.md")
+
+    assert names(expand_sources([str(root)])) == ["a.md", "linked.md"]
