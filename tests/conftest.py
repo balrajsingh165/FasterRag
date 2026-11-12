@@ -25,6 +25,7 @@ from fasterrag.core import cache as cache_package
 from fasterrag.core.breaker import reset_shared_breakers
 from fasterrag.core.rerank.cross_encoder import reset_shared_cross_encoders
 from fasterrag.services.budget import reset_shared_governors
+from fasterrag.workers import cpu_pool
 
 REPO_ROOT: Final = Path(__file__).resolve().parent.parent
 
@@ -153,15 +154,18 @@ def _unspent_governors() -> Iterator[None]:
 # CRITICAL: the shared circuit breakers and the shared cross-encoder cache are the same kind
 # of process-wide state for the same reason, and leak across tests the same way: a test that
 # opens a circuit would hand `CIRCUIT_OPEN` to whatever runs next, and a test that installs a
-# fake model would hand it to every later reranker of that name.
+# fake model would hand it to every later reranker of that name. The parse workers' sentence
+# embedders are the same: a fake factory would chunk every later semantic test.
 @pytest.fixture(autouse=True)
 def _closed_circuits_and_no_loaded_models() -> Iterator[None]:
-    """Give every test closed shared breakers and an empty reranker cache."""
+    """Give every test closed shared breakers and empty reranker and sentence-embedder caches."""
     reset_shared_breakers()
     reset_shared_cross_encoders()
+    cpu_pool.reset_shared_sentence_embedders()
     yield
     reset_shared_breakers()
     reset_shared_cross_encoders()
+    cpu_pool.reset_shared_sentence_embedders()
 
 
 _cache_roots = itertools.count()

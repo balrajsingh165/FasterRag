@@ -21,6 +21,9 @@ them is usually running other suites too.
 import asyncio
 import logging
 import multiprocessing
+import os
+from collections.abc import Callable
+from concurrent.futures import Executor, ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +35,8 @@ from fasterrag.errors import ErrorCode, IngestionError
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import Journal
 from fasterrag.workers import cpu_pool
+from fasterrag.workers.cpu_pool import CpuWorkerPool
+from fasterrag.workers.queues import BoundedQueue, ChunkPayload
 from tests.unit.services.test_ingestion import KeywordLegAdapter, StubEmbedder
 from tests.unit.workers import process_targets
 
@@ -233,3 +238,78 @@ async def test_documents_in_flight_beside_a_hung_one_are_parsed_again_not_lost(
     assert settled.counts["parsed"] == 4
     assert len({point.point_id for point in adapter.points}) == len(adapter.points)
     assert await surviving_workers(before) == set()
+
+
+def semantic(**overrides: Any) -> Settings:
+    """Return settings for the semantic strategy over the default local model."""
+    chunking = {"strategy": "semantic", "token_counter": "estimate", "chunk_size": 64, "overlap": 8}
+    return settings(chunking=chunking, **overrides)
+
+
+def recording_executor(log_dir: Path, load_seconds: float) -> Callable[[int], Executor]:
+    """Return a real process pool whose workers build a recording stand-in embedder."""
+
+    def factory(workers: int) -> Executor:
+        return ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=process_targets.record_sentence_embedders,
+            initargs=(str(log_dir), load_seconds),
+        )
+
+    return factory
+
+
+def builds(log_dir: Path) -> dict[int, list[str]]:
+    """Return, per process id, the model names that process built an embedder for."""
+    return {int(log.stem): log.read_text(encoding="utf-8").split() for log in log_dir.glob("*.log")}
+
+
+async def test_each_parse_worker_builds_its_own_sentence_embedder_once(
+    tmp_path: Path, corpus: Path
+) -> None:
+    """The parse worker had no embedder, so a semantic job could not run in the pipeline."""
+    log_dir = tmp_path / "builds"
+    log_dir.mkdir()
+    configured = semantic()
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(1000)
+
+    async with CpuWorkerPool(configured, executor_factory=recording_executor(log_dir, 0)) as pool:
+        report = await pool.process(pool.tasks_for([str(corpus / name) for name in NAMES]), queue)
+
+    chunks = await queue.drain()
+    built = builds(log_dir)
+    assert report.parsed == 3
+    assert report.dead_lettered == 0
+    assert {payload.chunk.strategy for payload in chunks} == {"semantic"}
+    assert len(built) == configured.workers.cpu_pool_size
+    assert os.getpid() not in built
+    assert all(models == [configured.embeddings.model] for models in built.values())
+    assert cpu_pool._sentence_embedders == {}
+
+
+async def test_a_model_load_is_never_billed_to_a_documents_parse_deadline(
+    tmp_path: Path, corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker loading its model inside a parse would be killed as a hung parser.
+
+    Loading takes three seconds against a two-second deadline, in the first worker and again
+    in the one that replaces it after the hung document, and no healthy document times out.
+    """
+    monkeypatch.setattr(cpu_pool, "parse_and_chunk", process_targets.parse_after_a_delay)
+    log_dir = tmp_path / "builds"
+    log_dir.mkdir()
+    configured = semantic(
+        workers={"cpu_pool_size": 1, "embedding_pool_size": 1, "queue_depth": 200},
+        ingestion={"parse_timeout_seconds": 2},
+    )
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(1000)
+    order = (NAMES[0], HUNG, NAMES[1])
+
+    async with CpuWorkerPool(configured, executor_factory=recording_executor(log_dir, 3)) as pool:
+        report = await pool.process(pool.tasks_for([str(corpus / name) for name in order]), queue)
+
+    chunks = await queue.drain()
+    assert report.dead_lettered == 1
+    assert report.parsed == 2
+    assert {Path(payload.source).name for payload in chunks} == {NAMES[0], NAMES[1]}
+    assert len(builds(log_dir)) == 2

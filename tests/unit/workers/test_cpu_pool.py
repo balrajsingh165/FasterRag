@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from fasterrag.config.schema import Settings
 from fasterrag.core.identity import content_hash
-from fasterrag.errors import IngestionError
+from fasterrag.errors import ConfigError, IngestionError
 from fasterrag.services.journal import Journal
 from fasterrag.workers import cpu_pool
 from fasterrag.workers.cpu_pool import (
@@ -668,3 +668,19 @@ def test_the_parse_timeout_is_on_by_default_and_cannot_be_negative() -> None:
 
     with pytest.raises(ValidationError):
         Settings.model_validate({"ingestion": {"parse_timeout_seconds": -1}})
+
+
+async def test_a_semantic_pool_refuses_a_hosted_embedding_provider() -> None:
+    """A hosted provider's client cannot run in a parse worker, so none may try to build one."""
+    configured = settings(
+        chunking={"strategy": "semantic", "chunk_size": 64, "overlap": 8},
+        embeddings={"provider": "openai", "model": "text-embedding-3-small", "api_key_env": "K"},
+    )
+
+    with pytest.raises(ConfigError) as refused:
+        async with CpuWorkerPool(configured, executor_factory=threads):
+            pass
+
+    assert "needs a local embedding model" in refused.value.detail
+    assert "embeddings.provider" in refused.value.detail
+    assert cpu_pool._sentence_embedders == {}
