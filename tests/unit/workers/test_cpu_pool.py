@@ -8,9 +8,15 @@ from typing import Any
 import pytest
 
 from fasterrag.config.schema import Settings
+from fasterrag.core.identity import content_hash
 from fasterrag.services.journal import Journal
 from fasterrag.workers import cpu_pool
-from fasterrag.workers.cpu_pool import CpuWorkerPool, parse_and_chunk, resolve_pool_size
+from fasterrag.workers.cpu_pool import (
+    EMPTY_DOCUMENT,
+    CpuWorkerPool,
+    parse_and_chunk,
+    resolve_pool_size,
+)
 from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload
 
@@ -391,3 +397,64 @@ async def test_with_a_ledger_nothing_is_journalled_until_the_index_side_reports(
 
     assert len(journal.documents_blocking(job.job_id, status="indexed")) == 1
     assert len(journal.known_content_blocking("default")) == 1
+
+
+async def test_a_document_with_nothing_to_index_is_skipped_with_a_reason(
+    corpus: Path, journal: Journal
+) -> None:
+    """A document that produced no chunks was journalled as indexed and kept for dedup."""
+    (corpus / "blank.md").write_bytes(b"")
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(500)
+
+    async with CpuWorkerPool(settings(), journal=journal, executor_factory=threads) as pool:
+        job = journal.create_job_blocking("default", [])
+        tasks = pool.tasks_for(sources(corpus, "blank.md", "a.md"))
+        report = await pool.process(tasks, queue, job=job.job_id)
+
+    skipped = journal.documents_blocking(job.job_id, status="skipped")
+    assert report.empty == 1
+    assert report.parsed == 1
+    assert [(entry.document_id, entry.reason_code) for entry in skipped] == [
+        (tasks[0].document_id, EMPTY_DOCUMENT)
+    ]
+    assert "blank.md" in (skipped[0].detail or "")
+    assert list(journal.known_content_blocking("default").values()) == [tasks[1].document_id]
+    assert {payload.document_id for payload in await queue.drain()} == {tasks[1].document_id}
+
+
+async def test_an_empty_document_is_skipped_even_where_an_older_run_remembered_its_hash(
+    corpus: Path, journal: Journal
+) -> None:
+    """A dedup file written before the fix holds the hash of nothing; it must not match."""
+    (corpus / "blank.md").write_bytes(b"")
+    journal.remember_content_blocking("default", content_hash(b""), "d_from_an_older_run")
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(500)
+
+    async with CpuWorkerPool(settings(), journal=journal, executor_factory=threads) as pool:
+        job = journal.create_job_blocking("default", [])
+        report = await pool.process(
+            pool.tasks_for(sources(corpus, "blank.md")), queue, job=job.job_id
+        )
+
+    assert report.empty == 1
+    assert report.deduplicated == 0
+    assert journal.documents_blocking(job.job_id, status="deduplicated") == []
+
+
+async def test_a_skipped_document_lets_the_checkpoint_pass_it(corpus: Path) -> None:
+    """A skipped document that never settled would pin the resume point behind it for ever."""
+    (corpus / "blank.md").write_bytes(b"")
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(500)
+    reached: list[int] = []
+
+    async def on_progress(index: int) -> None:
+        reached.append(index)
+
+    async with CpuWorkerPool(settings(), executor_factory=threads) as pool:
+        await pool.process(
+            pool.tasks_for(sources(corpus, "a.md", "blank.md", "b.md")),
+            queue,
+            on_progress=on_progress,
+        )
+
+    assert reached == [0, 1, 2]

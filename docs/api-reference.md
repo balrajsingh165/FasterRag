@@ -146,11 +146,11 @@ Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `4
 
 ### `GET /v1/ingest/{job_id}`
 
-Job status: `{"job_id", "status": "queued|running|completed|failed|partial", "counts": {"total", "parsed", "chunked", "embedded", "indexed", "deduplicated", "dead_lettered"}, "started_at", "finished_at"}`. `404` if unknown.
+Job status: `{"job_id", "status": "queued|running|completed|failed|partial", "counts": {"total", "parsed", "chunked", "embedded", "indexed", "deduplicated", "skipped", "dead_lettered"}, "started_at", "finished_at"}`. `404` if unknown. `skipped` counts documents that parsed without error and held nothing to index; they are not failures, so a job whose only non-indexed documents are skipped is `completed`, not `partial`.
 
 ### `GET /v1/ingest/{job_id}/documents?status=dead_lettered`
 
-Per-document status (D3), filterable. Each entry: `{"document_id", "source", "status", "reason_code", "attempts", "content_hash"}`. Reason codes reuse the error `code` table (e.g. `PARSE_FAILED`).
+Per-document status (D3), filterable. Each entry: `{"document_id", "source", "status", "reason_code", "attempts", "content_hash"}`. Reason codes reuse the error `code` table (e.g. `PARSE_FAILED`). `status` is one of `indexed`, `deduplicated`, `skipped` or `dead_lettered`. A `skipped` entry carries the one reason code that is not an error code, `EMPTY_DOCUMENT`: a zero-byte or whitespace-only file, or any document whose parse produced no chunk. It is never written to the vector database, never remembered for deduplication, and `retry-dlq` does not pick it up — `?status=skipped` lists them.
 
 ### `POST /v1/ingest/{job_id}/retry-dlq`
 

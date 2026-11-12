@@ -18,6 +18,11 @@ until 2026-11-11 — keeps exactly one worker busy however many the pool holds.
 A document is journalled as indexed only when the :class:`IndexLedger` says every chunk of
 it was written downstream (``workers/ledger.py``). With no ledger passed there is no
 downstream to wait for, and the chunks are acknowledged as they are enqueued.
+
+A document that parses without error and yields no chunk — zero bytes, whitespace only —
+is a third outcome, neither indexed nor dead-lettered: it is recorded ``skipped`` with the
+reason ``EMPTY_DOCUMENT``, counted in :attr:`PoolReport.empty`, and never reaches the dedup
+file, where the hash of nothing would match every empty file that came after (TASK-0470).
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import perf_counter
+from typing import Final
 
 from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.config.schema import Settings
@@ -43,7 +49,16 @@ from fasterrag.services.journal import DocumentRecord, Journal
 from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload, DocumentTask, ParseOutcome
 
-__all__ = ["CpuWorkerPool", "PoolReport", "parse_and_chunk", "resolve_pool_size"]
+__all__ = [
+    "EMPTY_DOCUMENT",
+    "CpuWorkerPool",
+    "PoolReport",
+    "parse_and_chunk",
+    "resolve_pool_size",
+]
+
+EMPTY_DOCUMENT: Final = "EMPTY_DOCUMENT"
+"""The reason a document is ``skipped``: it parsed, and there was nothing in it to index."""
 
 _MEGABYTE = 1024 * 1024
 
@@ -68,6 +83,7 @@ class PoolReport:
     deduplicated: int = 0
     dead_lettered: int = 0
     skipped: int = 0
+    empty: int = 0
     flags: dict[str, int] = field(default_factory=dict)
 
 
@@ -235,7 +251,7 @@ class CpuWorkerPool:
             known = await self.journal.known_content(collection)
         standalone = ledger is None
         tracker = ledger or IndexLedger(on_progress, start=resume_from)
-        parsed = chunked = deduplicated = dead_lettered = 0
+        parsed = chunked = deduplicated = dead_lettered = empty = 0
         flags: dict[str, int] = {}
 
         ordered = list(tasks)
@@ -253,6 +269,16 @@ class CpuWorkerPool:
                     continue
 
                 outcome = result
+                if not outcome.chunks:
+                    # CRITICAL: before the dedup check, and never through the ledger's
+                    # commit. "indexed" is a statement about the vector database, and the
+                    # hash of nothing would match every later empty file (TASK-0470).
+                    empty += 1
+                    async with tracker.journal_lock:
+                        await self._skip_empty(job, task, outcome)
+                    await tracker.settle(task.index)
+                    continue
+
                 if outcome.content_hash in known:
                     deduplicated += 1
                     async with tracker.journal_lock:
@@ -290,6 +316,7 @@ class CpuWorkerPool:
             deduplicated=deduplicated,
             dead_lettered=dead_lettered,
             skipped=skipped,
+            empty=empty,
             flags=flags,
         )
 
@@ -383,6 +410,22 @@ class CpuWorkerPool:
             return
 
         await self.journal.record_document(job, self._outcome(task, status, digest))
+
+    async def _skip_empty(self, job: str | None, task: DocumentTask, outcome: ParseOutcome) -> None:
+        """Record a document that parsed to nothing as skipped, with the reason."""
+        _logger.info(
+            "document skipped: nothing to index",
+            extra={"document_id": task.document_id, "reason_code": EMPTY_DOCUMENT},
+        )
+        if self.journal is None or job is None:
+            return
+
+        record = replace(
+            self._outcome(task, "skipped", outcome.content_hash),
+            reason_code=EMPTY_DOCUMENT,
+            detail=f"{task.source} parsed without error and produced no text to index",
+        )
+        await self.journal.record_document(job, record)
 
     async def _index_document(
         self, job: str | None, collection: str, task: DocumentTask, outcome: ParseOutcome

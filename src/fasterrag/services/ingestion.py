@@ -226,6 +226,7 @@ class IngestionService:
             "embedded": embed_report.embedded,
             "indexed": indexer.written,
             "deduplicated": parse_report.deduplicated,
+            "skipped": parse_report.empty,
             "dead_lettered": parse_report.dead_lettered + len(failed),
         }
         settled = replace(
@@ -262,10 +263,11 @@ class IngestionService:
         """Publish the ingestion half of the metrics catalogue for a settled job."""
         indexed = counts["indexed"]
         failed = counts["dead_lettered"]
-        succeeded = counts["total"] - failed - counts["deduplicated"]
+        succeeded = counts["total"] - failed - counts["deduplicated"] - counts["skipped"]
 
         metrics.INGEST_DOCUMENTS.increment(float(max(succeeded, 0)), status="succeeded")
         metrics.INGEST_DOCUMENTS.increment(float(counts["deduplicated"]), status="deduplicated")
+        metrics.INGEST_DOCUMENTS.increment(float(counts["skipped"]), status="skipped")
         metrics.INGEST_DOCUMENTS.increment(float(failed), status="dead_lettered")
 
         if elapsed > 0:
