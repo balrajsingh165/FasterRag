@@ -83,7 +83,7 @@ from fasterrag.observability.logging import current_trace_id, get_logger
 from fasterrag.services.budget import CostGovernor, shared_governor
 from fasterrag.services.degradation import DegradationMode, serving
 from fasterrag.services.estimation import price_generation
-from fasterrag.services.querying import FULL_MODE, RetrievalService
+from fasterrag.services.querying import FULL_MODE, RetrievalService, require_query_text
 from fasterrag.services.traces import TraceStore, now
 
 __all__ = [
@@ -789,6 +789,7 @@ class GenerationService:
         The only place a query is executed. ``answer()`` collects these stages and
         ``stream()`` maps them to events, so the two surfaces cannot disagree.
         """
+        require_query_text(question)
         trace_id = current_trace_id()
         started = time.perf_counter()
         vector = await self._cache_vector(question)

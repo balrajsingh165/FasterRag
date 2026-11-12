@@ -440,6 +440,32 @@ class VectorDBContract:
                 SearchQuery(collection="collection-that-does-not-exist", vector=VECTORS["a"])
             )
 
+    async def test_searching_an_unknown_collection_is_not_found(
+        self, adapter: VectorDBAdapter
+    ) -> None:
+        """Any typed error passed; a query edge with one defined code needs this one (TASK-0468)."""
+        with pytest.raises(FasterRagError) as caught:
+            await adapter.search(
+                SearchQuery(collection="collection-that-does-not-exist", vector=VECTORS["a"])
+            )
+
+        assert caught.value.code is ErrorCode.NOT_FOUND
+        assert caught.value.retryable is False
+
+    async def test_a_keyword_search_of_an_unknown_collection_is_not_found(
+        self, adapter: VectorDBAdapter
+    ) -> None:
+        """The keyword leg reaches the backend by its own path and must say the same."""
+        with pytest.raises(FasterRagError) as caught:
+            await adapter.search(
+                SearchQuery(
+                    collection="collection-that-does-not-exist",
+                    sparse=encode_query("termination clause"),
+                )
+            )
+
+        assert caught.value.code is ErrorCode.NOT_FOUND
+
     async def test_a_keyword_search_finds_the_document_containing_the_term(
         self, adapter: VectorDBAdapter, hybrid_collection: str
     ) -> None:

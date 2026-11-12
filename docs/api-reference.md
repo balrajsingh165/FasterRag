@@ -183,8 +183,8 @@ Re-enqueues dead-lettered documents of the job. `202`, or `409 CONFLICT` under t
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `query` | str | yes | 1–8192 chars. |
-| `collection` | str | no | Defaults to configured default. |
+| `query` | str | yes | 1–8192 chars, and not whitespace only: a blank query is `422 VALIDATION_FAILED`, refused in the service layer before anything is embedded, so the CLI and the Python facades refuse it the same way (TASK-0468). |
+| `collection` | str | no | Defaults to configured default. A collection the vector database does not hold is `404 NOT_FOUND` with a `detail` naming it, on the CLI and facades too (TASK-0468). The vector contract suite requires every adapter to report a missing collection as `NOT_FOUND` on both legs, and the service names the collection whatever the vendor's wording. |
 | `top_k` | int | no | Overrides `retrieval.top_k`; same bounds. |
 | `filters` | object | no | Metadata filter expression, pushed down to both retrieval legs. With `security.tenant_scoped_retrieval` on, a `tenant` key here is refused with `403 TENANT_FORBIDDEN`: the tenant a retrieval runs as comes from the credential and is injected below this expression ([security.md](security.md) §3). |
 | `stream` | bool | no (default per `llm.streaming`) | `true` → SSE response. |
@@ -241,7 +241,7 @@ event: done       data: {}
 
 **A stream reports everything the JSON body reports.** Both shapes are produced by one pipeline (TASK-0438), so `usage` closes the stream with the same `mode`, `degraded`, `truncated` and `evidence_dropped` the non-streamed body carries, `meta` always carries the `cache` member, a streamed query increments the same metrics (plus `fasterrag_ttft_seconds`, which only a stream can have), and it stores the same trace — including the trace of a withheld answer, which a streamed refusal did not store before 2026-11-12. Two members are **estimates on a stream and provider-reported otherwise**, because a provider stream carries text only: `prompt_tokens` / `completion_tokens` are counted locally (and `estimated_cost_usd` is priced from those), and `truncated` is inferred from the local completion count reaching `llm.max_tokens` rather than read from the provider's finish reason. An answer that ended on its own just under the ceiling can therefore be flagged, and one the provider cut can be missed when the local count runs low.
 
-**A query refused before its first event is an ordinary problem response, not a stream.** Everything that can refuse a query outright — retrieval failing (`503 RETRIEVAL_FAILED`), the token budget (`402 BUDGET_EXCEEDED`) — happens before `meta` is produced, and the server produces `meta` before it sends the status line. Such a request gets the same status and `application/problem+json` body as `stream: false`, with no SSE frame at all. Before 2026-11-12 the budget check ran after `meta`, so a streamed request over its budget received `200` and then an `error` event (TASK-0438).
+**A query refused before its first event is an ordinary problem response, not a stream.** Everything that can refuse a query outright — a blank query (`422 VALIDATION_FAILED`), a missing collection (`404 NOT_FOUND`), retrieval failing (`503 RETRIEVAL_FAILED`), the token budget (`402 BUDGET_EXCEEDED`) — happens before `meta` is produced, and the server produces `meta` before it sends the status line. Such a request gets the same status and `application/problem+json` body as `stream: false`, with no SSE frame at all. Before 2026-11-12 the budget check ran after `meta`, so a streamed request over its budget received `200` and then an `error` event (TASK-0438).
 
 **A provider that is down degrades a stream the way it degrades a JSON body** (D4, TASK-0438). When generation fails with a *retryable* error — timeout, rate limit, 5xx, an open circuit breaker — **before the first `token` has been sent**, the stream serves the `extractive` rung instead of failing: a second `meta` announcing the mode, the retrieved passages as one `token`, then `citations`, `usage` and `done`.
 
@@ -278,7 +278,7 @@ Retrieval without generation, for callers bringing their own LLM step. Same requ
 {"query": "...", "collection": "docs", "top_k": 10, "filters": {"source": "handbook"}}
 ```
 
-Responds `200` with `{"chunks": [...], "trace_id": "..."}`. No generation happens, so no LLM cost is incurred and `INSUFFICIENT_EVIDENCE` cannot apply.
+Responds `200` with `{"chunks": [...], "trace_id": "..."}`. No generation happens, so no LLM cost is incurred and `INSUFFICIENT_EVIDENCE` cannot apply. A blank query is `422 VALIDATION_FAILED` and a collection that does not exist is `404 NOT_FOUND` naming it, exactly as on `/v1/query`.
 
 **Tenancy.** Both `/v1/query` and `/v1/retrieve` address the collection the body names, unprefixed — neither applies the `<tenant>__` scoping `/v1/collections` uses. Retrieval is filtered by tenant only when `security.tenant_scoped_retrieval` is on, and `403 TENANT_FORBIDDEN` is then also possible on both endpoints. See [security.md](security.md) §3 for what is enforced today and what the flag changes (TASK-0339). The pre-enable `tenant` backfill is **CLI-only** (`fasterrag index tenants`, `fasterrag index backfill-tenant`) and has no endpoint: it rewrites every point in a collection and chooses the tenant from an operator's argument rather than from a credential, which is not a decision a request-scoped surface should be able to make (TASK-0377).
 
