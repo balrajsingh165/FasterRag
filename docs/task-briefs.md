@@ -110,7 +110,7 @@ Process-wide singletons (`shared_breaker`, the cross-encoder model cache, `share
 
 ## 1. P0 — blocks a credible public alpha
 
-Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs), then TASK-0436, TASK-0437, TASK-0431, TASK-0440, TASK-0444, TASK-0445.
+Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs), then TASK-0437, TASK-0431, TASK-0440, TASK-0444, TASK-0445.
 
 ### TASK-0431 — Semantic chunking in the ingestion pipeline
 
@@ -132,27 +132,6 @@ Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs
 **Traps.** Under `spawn`, each worker process loads its own copy of the model: memory is `cpu_pool_size ×` model size. Say so in the config reference and consider capping the pool for this strategy.
 
 **Done when.** The job-level test passes, the property test includes the semantic chunker, and the refusal is gone for local models. **Moves:** ingestion.
-
-### TASK-0436 — Resume an interrupted job; drain on shutdown
-
-**Goal.** After any process exit, a restart leaves no job in `running`, and no document both absent from the collection and present in the dedup file.
-
-**Where.** `Journal.resume_index` (`services/journal.py:369`) is read only at `services/ingestion.py:161`, inside `_run`; the status becomes `running` at `:163-164`. `api/ingest.py:175` schedules a run only when `record.status in {"queued"}`, so replaying the idempotency key of a stuck job returns the stuck record. Background work is `BackgroundTasks.add_task(_run_job, ...)` at `api/ingest.py:179` and `:245`: no registry and no task handle exists. `_ensure_settled` (`:80`) and `IngestionService.run` (`:112`) settle `failed` on `Exception`, not on cancellation. `api/main.py:137` `lifespan` closes the metric pusher, embeddings, cache, idempotency store and adapter (`:167-193`) and waits for nothing. The journal is created lazily in `api/dependencies.py:60-65`, not in the lifespan. The `ingest` parser (`cli/parser.py:97-112`) has no `--resume`.
-
-**Steps.**
-1. **Track the work.** Replace `BackgroundTasks` for ingestion with tasks created through a small registry on `app.state` (a set of `asyncio.Task`, discarded on completion). Everything below depends on being able to enumerate in-flight jobs.
-2. **Settle on cancellation.** In `IngestionService.run` and `_run_job`, catch `asyncio.CancelledError`, settle the job `failed` with reason `INTERRUPTED` from the last checkpoint, and re-raise.
-3. **Drain.** Add `reliability.shutdown_grace_seconds`. In the lifespan shutdown: stop accepting jobs (a flag `POST /v1/ingest` checks, answering 503 with a retryable problem), wait up to the grace period for the registry to empty, then cancel what remains and await it. Only then close the adapters.
-4. **Reap at startup.** Create the journal in the lifespan. Find jobs whose status is `running` and whose last checkpoint is older than `reliability.stale_job_seconds`; settle each `failed`/`INTERRUPTED`. Do not auto-resume in this change — resuming needs the original sources, which for inline payloads no longer exist.
-5. **Resume on request.** `fasterrag ingest --resume <job_id>` and, over REST, replaying the idempotency key of an `INTERRUPTED` job re-runs it from `resume_index`.
-
-**Tests.** Unit: cancel a running job and assert `failed`/`INTERRUPTED`; a lifespan test that starts a slow job, begins shutdown and asserts it settles inside the grace period; a startup-reaper test over a journal directory prepared with a `running` record. Existing tests to keep green: `test_resuming_skips_what_a_checkpoint_already_covered` (`tests/unit/services/test_ingestion.py:313`), `test_the_watermark_starts_where_a_resumed_job_does` (`tests/unit/workers/test_ledger.py:169`), `test_the_journal_resumes_from_its_checkpoint` (`tests/chaos/test_chaos.py:367`). Chaos: a subprocess test that kills the process mid-job and restarts; on Windows use `Popen.kill()`, there is no `SIGKILL`.
-
-**Documents.** [failure-modes.md](failure-modes.md) row 31, [reliability.md](reliability.md) §3, [differentiators.md](differentiators.md) §D3, [api-reference.md](api-reference.md) `GET /v1/ingest/{job_id}`, [cli-reference.md](cli-reference.md) `fasterrag ingest`, [architecture.md](architecture.md) §12, [config-reference.md](config-reference.md).
-
-**Traps.** Two new config keys and one CLI flag: see §0.4. A new chaos scenario must be added to the hard-coded list. `ReliabilitySettings` (`schema.py:651-658`) has no journal-root key either — `DEFAULT_JOURNAL_ROOT` is a constant at `journal.py:52`. TASK-0130 (the queue backend) is open; do not design this so that it must be rewritten when that lands — the registry is the seam.
-
-**Done when.** The kill-and-restart test passes in the Ubuntu and Windows lanes. **Moves:** reliability, ingestion, architecture.
 
 ### TASK-0437 — A journal that survives a crash and two processes
 
@@ -800,13 +779,13 @@ Use this to choose work by the category you want to move. The bar each category 
 |---|---|
 | Architecture and design | TASK-0456, TASK-0466, TASK-0440, TASK-0130, TASK-0457, TASK-0437 |
 | Core RAG functionality | TASK-0449, TASK-0458, TASK-0467, TASK-0468, TASK-0469, TASK-0485 |
-| Document ingestion and processing | TASK-0431, TASK-0436, TASK-0459, TASK-0471, TASK-0472, TASK-0462, TASK-0504 |
+| Document ingestion and processing | TASK-0431, TASK-0459, TASK-0471, TASK-0472, TASK-0462, TASK-0504 |
 | Retrieval and search quality | TASK-0454, TASK-0447, TASK-0448, TASK-0481, TASK-0463, TASK-0480 |
 | Embedding and vector infrastructure | TASK-0451, TASK-0452, TASK-0412, TASK-0352, TASK-0477, TASK-0478, TASK-0464, TASK-0479, TASK-0049 |
 | Advanced RAG capabilities | TASK-0465, TASK-0448, TASK-0482, TASK-0483, TASK-0484, TASK-0463 |
 | Extensibility and modularity | TASK-0486 |
 | Performance and scalability | TASK-0454, TASK-0130, TASK-0437, TASK-0466, TASK-0487, TASK-0488, TASK-0407 to TASK-0410 |
-| Reliability and error handling | TASK-0436, TASK-0437, TASK-0449, TASK-0450, TASK-0453, TASK-0474, TASK-0475, TASK-0476 |
+| Reliability and error handling | TASK-0437, TASK-0449, TASK-0450, TASK-0453, TASK-0474, TASK-0475, TASK-0476 |
 | Testing and quality assurance | TASK-0412, TASK-0454, TASK-0481, TASK-0489, TASK-0490, TASK-0300 |
 | Security | TASK-0339, TASK-0381, TASK-0446, TASK-0460, TASK-0326, TASK-0491, TASK-0492, TASK-0493, TASK-0494, TASK-0495, TASK-0496 |
 | Developer experience and APIs | TASK-0444, TASK-0461, TASK-0497, TASK-0498, TASK-0500 |

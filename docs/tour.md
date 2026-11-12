@@ -24,13 +24,14 @@ stage goes wrong.
 
 <ol class="fr-track fr-track--in fr-track--8"><li style="--i:0"><span class="fr-step">01</span><strong>Accept</strong><code>services/ingestion.py</code><p>A job is recorded in the journal and its id returned at once. An idempotency key replayed returns the same job.</p><p class="fr-guard">A bad source is refused here, before any work.</p></li><li style="--i:1"><span class="fr-step">02</span><strong>Resolve</strong><code>services/sources.py</code><p>Paths, URLs and inline payloads become readable bytes. Paths can be confined to allowed roots; URLs are fetched through an SSRF guard.</p><p class="fr-guard">A source that cannot be read fails the request, not the corpus.</p></li><li style="--i:2"><span class="fr-step">03</span><strong>Parse</strong><code>core/parsing/</code><p>A worker process turns the file into structured blocks: headings, paragraphs, tables, code.</p><p class="fr-guard">A corrupt file costs one document. It goes to the dead-letter queue with a reason code.</p></li><li style="--i:3"><span class="fr-step">04</span><strong>Chunk</strong><code>core/chunking/</code><p>Blocks are packed into chunks inside a token budget. Each chunk gets a deterministic id.</p><p class="fr-guard">Re-ingesting the same content produces the same ids, so a retry overwrites.</p></li><li style="--i:4"><span class="fr-step">05</span><strong>Queue</strong><code>workers/queues.py</code><p>Chunks cross a bounded queue. When embedding is slower than parsing, the parser waits.</p><p class="fr-guard">Memory stays bounded however large the corpus.</p></li><li style="--i:5"><span class="fr-step">06</span><strong>Embed</strong><code>workers/embed_pool.py</code><p>Workers batch chunks and call the embedding adapter behind a circuit breaker.</p><p class="fr-guard">Retryable provider errors are retried with backoff; the rest fail only their own document.</p></li><li style="--i:6"><span class="fr-step">07</span><strong>Index</strong><code>workers/indexer.py</code><p>Dense vectors and BM25 sparse vectors are written together through the vector-database adapter.</p><p class="fr-guard">A refused write is retried, then recorded against the document.</p></li><li style="--i:7"><span class="fr-step">08</span><strong>Commit</strong><code>workers/ledger.py</code><p>When the last chunk of a document is written, the journal records it as indexed and the checkpoint advances.</p><p class="fr-guard">A document with any failed chunk is never recorded as indexed.</p></li></ol>
 
-A job always ends: an error settles it in a terminal status and never leaves it `running`. And the
+A job always ends: an error, a cancellation or a shutdown settles it in a terminal status. And the
 journal never lies about the index: a document's dedup hash and its `indexed` record are written
 after its chunks, not before.
 
 !!! note "What is not built yet"
-    A job interrupted by the process exiting is not resumed automatically (TASK-0436), and
-    ingestion runs inside the API process — the separate `worker` process does no work yet
+    Nothing resumes an interrupted job on its own: it is settled as interrupted when the server
+    next starts, and runs again from its checkpoint when you ask (`fasterrag ingest --resume`).
+    Ingestion runs inside the API process — the separate `worker` process does no work yet
     (TASK-0440).
 
 ## A question comes out
@@ -141,6 +142,7 @@ module's own docstring, as of the commit this page was generated from.
     | `services/grafana.py` | Grafana auto-provisioning as code (`observability.grafana: true`). |
     | `services/idempotency.py` | Durable `Idempotency-Key` records for the mutating REST surface (TASK-0318). |
     | `services/ingestion.py` | Ingestion: accept a job, run the pipeline, own its lifecycle. |
+    | `services/jobs.py` | The handle on every ingestion job this process is running (TASK-0436). |
     | `services/journal.py` | Checkpointed, idempotent ingestion state (D3). |
     | `services/langfuse.py` | Langfuse v3 auto-provisioning (`observability.langfuse: true`). |
     | `services/lockfile.py` | The index lockfile and drift detection (D1). |

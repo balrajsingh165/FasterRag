@@ -43,27 +43,29 @@ Scoring rules, applied without exception:
 
 ## 3. Where the system stands
 
-Two columns: the audit as first derived on commit `03a11f2`, and the re-score after the fixes that landed the same day (TASK-0427 to TASK-0435). The second column moved only where a defect was closed *and* a test now proves it.
+Three columns: the audit as first derived on commit `03a11f2`; the re-score after the fixes that landed the same day (TASK-0427 to TASK-0435); and the re-score after the first batch of P0 tasks closed on 2026-11-12. A column moved only where a defect was closed *and* a test now proves it.
 
-| Category | Weight | Audit | After same-day fixes | What holds it down now |
-|---|---|---|---|---|
-| Architecture and design | 10% | 52 | 58 | Import cycles; services built per request; three process surfaces that do nothing; two-thirds of `services/` is peripheral |
-| Core RAG functionality | 12% | 58 | 62 | Two diverged copies of the query pipeline; single-turn only; no delete or update; no LLM retry |
-| Document ingestion and processing | 8% | 52 | 60 | Semantic chunking refused in the pipeline; HTML, URL and inline-source parsing defects; seven formats |
-| Retrieval and search quality | 10% | 45 | 45 | English-only sparse leg; no threshold, diversity or query transformation; quality unmeasured |
-| Embedding and vector infrastructure | 7% | 58 | 60 | Embedding cache unwired; two adapters unproven in CI; heavy adapter duplication with real drift |
-| Advanced RAG capabilities | 7% | 15 | 15 | Nothing beyond a refuse-gate, replay and a regression gate |
-| Extensibility and modularity | 8% | 50 | 51 | Plugins blocked by the config schema; chunkers, parsers and rerankers are not pluggable |
-| Performance and scalability | 8% | 18 | 24 | No queue, one process, O(N) file scans, and no citable number of any kind |
-| Reliability and error handling | 7% | 42 | 58 | No resume, no shutdown drain, no `fsync`; half-open breaker admits a stampede |
-| Testing and quality assurance | 7% | 66 | 68 | The real process pool is never run; fakes stand in for two adapters and two providers; toy eval sets |
-| Security | 5% | 55 | 64 | Tenant scoping of ingest and query is opt-in and incomplete; prompt injection unmitigated |
-| Developer experience and APIs | 5% | 58 | 62 | No zero-infrastructure start; heavy first run; facade cannot act as a tenant |
-| Documentation | 3% | 55 | 62 | Vast and candid, but several documents still describe surfaces that do not exist |
-| Packaging and release readiness | 3% | 35 | 35 | No tag, no release, no publish pipeline, heavy mandatory dependencies |
-| **Weighted total** | 100% | **47** | **52** | |
+| Category | Weight | Audit | After same-day fixes | After the first P0 batch | What holds it down now |
+|---|---|---|---|---|---|
+| Architecture and design | 10% | 52 | 58 | 60 | Import cycles; query services and the LLM client still built per request; the idle `worker` command and `app.workers` still present; two-thirds of `services/` is peripheral |
+| Core RAG functionality | 12% | 58 | 62 | 71 | Single-turn only; no LLM retry or fallback; no document listing; a degraded answer's trace id resolves to nothing |
+| Document ingestion and processing | 8% | 52 | 60 | 68 | Semantic chunking refused in the pipeline; HTML, URL and inline-source parsing defects; seven formats; stale chunks survive when dedup is off |
+| Retrieval and search quality | 10% | 45 | 45 | 45 | English-only sparse leg; no threshold, diversity or query transformation; quality unmeasured |
+| Embedding and vector infrastructure | 7% | 58 | 60 | 67 | Two adapters unproven in CI; heavy adapter duplication with real drift; the new disk cache write on the embedding path is unmeasured |
+| Advanced RAG capabilities | 7% | 15 | 15 | 15 | Nothing beyond a refuse-gate, replay and a regression gate |
+| Extensibility and modularity | 8% | 50 | 51 | 66 | Provider plugins are selectable; chunkers, parsers and rerankers still have no plugin point; no sample plugin or author's guide |
+| Performance and scalability | 8% | 18 | 24 | 27 | No queue, one process, O(N) journal scans, and no citable number of any kind |
+| Reliability and error handling | 7% | 42 | 58 | 59 | Capped at 59 by scoring rule 5 while the journal can lose acknowledged state: its writes are not `fsync`ed and have a window with no live record (TASK-0437). Also: half-open breaker admits a stampede; no LLM retry or request deadline; Redis clients without timeouts |
+| Testing and quality assurance | 7% | 66 | 68 | 74 | Two vector adapters skip their contract suite in CI; eval sets cannot discriminate and nothing evaluates the answer; one Python version in CI |
+| Security | 5% | 55 | 64 | 65 | Tenant scoping of ingest and query is opt-in and incomplete; prompt injection unmitigated; keys plaintext and unrotatable |
+| Developer experience and APIs | 5% | 58 | 62 | 66 | No zero-infrastructure start; heavy first run; facade cannot query as a tenant; the CLI may misread streamed answers |
+| Documentation | 3% | 55 | 62 | 65 | Some documents still describe process surfaces that do nothing; no code block is executed by a test |
+| Packaging and release readiness | 3% | 35 | 35 | 35 | No tag, no release, no publish pipeline, heavy mandatory dependencies |
+| **Weighted total** | 100% | **47** | **52** | **56** | |
 
 The arithmetic for the second column, so it can be re-done by hand: 5.80 + 7.44 + 4.80 + 4.50 + 4.20 + 1.05 + 4.08 + 1.92 + 4.06 + 4.76 + 3.20 + 3.10 + 1.86 + 1.05 = 51.82.
+
+The arithmetic for the third column: 6.00 + 8.52 + 5.44 + 4.50 + 4.69 + 1.05 + 5.28 + 2.16 + 4.13 + 5.18 + 3.25 + 3.30 + 1.95 + 1.05 = 56.50. It was derived on 2026-11-12, after nine P0 tasks closed (TASK-0436, TASK-0438, TASK-0439, TASK-0441, TASK-0442, TASK-0443, TASK-0455, TASK-0470, TASK-0473), each with a test that failed before the fix and CI green on the merged tree. **It was scored by the same auditor who coordinated the changes**, which is the weakest form of re-scoring: treat it as an estimate until someone who did not write the changes re-derives it. Retrieval, advanced RAG and packaging did not move, because nothing that closed touches them; performance moved only for the wired embedding cache, and still has no citable number.
 
 **Read this honestly.** Five points in a day came from fixing defects that were each a few dozen lines once understood. The remaining thirty-eight are not like that. Roughly: closing every P0 task in [todo.md](todo.md) reaches the low 60s; P1 reaches the mid 70s; the last fifteen points are measurement, breadth and time.
 
