@@ -59,7 +59,7 @@ These are the checks that have failed real changes. Find the row for what you ar
 | A CLI flag or command | [cli-reference.md](cli-reference.md) (`tests/unit/docs/test_cli_flag_parity.py`). |
 | A REST route | [api-reference.md](api-reference.md) (`scripts/check_openapi_drift.py`). `DELETE` and other mutating verbs are picked up by the idempotency middleware (`api/idempotency.py:52`). |
 | A request-model field | A handler must read it (`tests/unit/api/test_schema_fields_are_wired.py`). |
-| An `ErrorCode` | `PROBLEM_SPECS` in `src/fasterrag/errors.py` (`tests/unit/test_errors.py:69` asserts the two sets are equal), the hard-coded `DOCUMENTED_STATUSES` dict at `tests/unit/test_errors.py:22`, and the error table in [api-reference.md](api-reference.md). `scripts/check_error_taxonomy.py` gates how codes are raised. |
+| An `ErrorCode` | `PROBLEM_SPECS` in `src/fasterrag/errors.py` (`tests/unit/test_errors.py` asserts every member has a spec), and one row appended to the error code table in `docs/api-reference.md` — code, HTTP status, taxonomy class, meaning, remedy — which `tests/unit/docs/test_error_table_parity.py` parses (since TASK-0500 the documented statuses are read from that table, not from a dict in a test) |
 | A facade method or parameter | Both `src/fasterrag/facade.py` and `src/fasterrag/sync.py`, and the member table in [python-api.md](python-api.md) (`tests/unit/docs/test_python_api_parity.py` compares against `inspect.signature`; `tests/unit/test_sync_facade.py::test_it_mirrors_the_async_surface`). |
 | A `Journal` method | Keep the two-faced shape: an `async` method plus a `*_blocking` twin. `tests/unit/test_no_blocking_journal_in_async.py` enumerates them with `vars(Journal)`. |
 | An adapter or factory | `_BUILTIN_ADAPTERS` must stay an annotated dict *literal* in `adapters/<kind>/factory.py` — `scripts/check_unbuilt_claims.py` reads it with `ast`. `tests/unit/docs/test_python_api_parity.py` requires every `ENTRY_POINT_GROUP` and abstract member to appear in [python-api.md](python-api.md). |
@@ -75,7 +75,7 @@ These are the checks that have failed real changes. Find the row for what you ar
 | A comment | Only `# CRITICAL:`, `# TODO:` and `# BLOCKED:` (plus continuation lines) are allowed in `src/` and `scripts/`. A `# TODO:` may only cite an open task. |
 | A built-in adapter | Its name in `config/plugins.py` as well as in the factory's `_BUILTIN_ADAPTERS` — `test_the_names_configuration_accepts_are_the_ones_the_factory_builds` holds the two together. Shipping a planned adapter means removing it from the factory's `_PLANNED_ADAPTERS` **and** from the planned list in `config/plugins.py`. |
 | A few hundred lines of tests | `CLAUDE.md` states the line counts of `src/` and `tests/`, and `test_the_stated_loc_figures_still_describe_the_tree` allows 10% drift. When it fires, re-measure and update the sentence; do not trim tests to fit. |
-| Anything, from a worktree | Run the gate scripts as `PYTHONPATH=src python scripts/check_….py`: without it they import `fasterrag` from the main checkout's editable install and report on the wrong tree (TASK-0522). pytest is unaffected. |
+| Anything, from a worktree | Nothing extra since TASK-0522: `scripts/_checkout.py` puts the script's own checkout's `src` first, so `python scripts/check_….py` reports on the tree it lives in. pytest was always immune (`pythonpath` in `pyproject.toml`) |
 | A test that must run somewhere | Mark it `must_run`; `scripts/check_must_run.py` fails the build if it skipped in both the Ubuntu and Windows lanes. |
 
 ### 0.5 Platform traps
@@ -168,22 +168,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 **Traps.** Three new `retrieval.*` keys: the comparability and baseline rows of §0.4, three times. Scores are not comparable across adapters until TASK-0451 fixes the convention — document `min_score` as applying to the reranker score, which is adapter-independent.
 
 **Done when.** Each is measured on the TASK-0454 set and recorded, whichever way the number goes. **Moves:** retrieval quality, advanced RAG.
-
-### TASK-0449 — Retry, fallback and a deadline for generation
-
-**Goal.** A 429 is retried; a provider outage falls back to a second provider before the extractive rung; a hung reranker degrades; no request outlives its deadline.
-
-**Where.** `max_retries=0` in `adapters/llm/openai.py:44`, `adapters/llm/anthropic.py:43` and `adapters/embeddings/openai.py:69`; the Cohere and Ollama LLM adapters leave the SDK default, so retry behaviour differs by provider. `GenerationService` never retries. `classify_llm_failure` (`adapters/llm/base.py:79`) reads only `status_code` — no `Retry-After`. The retry policy to reuse is `backoff_delay` (`workers/embed_pool.py:104`). `TimeoutSettings` (`schema.py:587-592`) has `vector_db_ms`, `embeddings_ms`, `llm_ms` and nothing for the reranker; `CrossEncoderReranker` runs through `to_thread` with no timeout (`core/rerank/cross_encoder.py:162`).
-
-**Steps.** (1) Set `max_retries=0` on all four LLM clients so the policy lives in one place. (2) Carry `retry_after` on the typed error. (3) Wrap the non-streamed call, and the streamed call up to its first token, in the shared retry policy. (4) `llm.fallback`: a second provider block with its own breaker key (the shared breaker is keyed by the provider string). (5) `reliability.timeouts.rerank_ms`, degrading to `hybrid_only` (`services/querying.py:199-218` already degrades on `FasterRagError`). (6) `reliability.request_deadline_ms` with `asyncio.timeout` around the pipeline in the service, so every surface gets it.
-
-**Tests.** Chaos scenarios — a 429 storm, an outage with fallback, a hung reranker — added to the hard-coded list. Existing: `tests/chaos/test_chaos.py:308`, `:327`, `tests/chaos/test_reranker_down.py`, `tests/unit/services/test_generation.py:818`.
-
-**Documents.** [reliability.md](reliability.md) §2, [failure-modes.md](failure-modes.md), [config-reference.md](config-reference.md).
-
-**Traps.** `to_thread` cannot be cancelled: a timed-out rerank keeps its thread until the model returns. Bound the damage with a semaphore on concurrent reranks.
-
-**Done when.** The three chaos scenarios pass. **Moves:** reliability, core RAG.
 
 ### TASK-0451 — One scaffold, one score convention, one error code for vector adapters
 
@@ -315,30 +299,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 
 **Moves:** ingestion, reliability.
 
-### TASK-0474 — Dead letters: idempotent retry, bounded growth
-
-**Where.** `POST /v1/ingest/{job_id}/retry-dlq` (`api/ingest.py:217-247`) accepts a new job with no idempotency key, so a repeated call starts repeated jobs. `dlq.max_retries` (`schema.py:551`) is only recorded as `attempts` (`cpu_pool.py:370`). Neither `documents.jsonl` nor the dedup file is ever pruned.
-
-**Steps.** Derive the retry job's idempotency key from the source job and its dead-letter set. Enforce `max_retries`. Add `ingestion.journal.retention_days` with a prune pass, alongside the existing trace retention (`services/traces.py:216-220`).
-
-**Moves:** reliability.
-
-### TASK-0477 — Detect a query against the wrong index
-
-**Where.** `services/lockfile.py`: `detect_drift` (`:200`), used by `index list` and `index lock verify` only. `services/querying.py` never consults the lock. A changed embedding model with the same dimension returns confident, wrong results.
-
-**Steps.** At service construction (not per query), compare the collection's lock with the live configuration; on embedding-model or chunker drift refuse with a typed error naming `fasterrag index reembed`, behind `retrieval.verify_lock` (default on for new installs after one release as a warning).
-
-**Moves:** embedding infrastructure, reliability.
-
-### TASK-0478 — Embedding batches that adapt
-
-**Where.** Batching is a fixed slice (`adapters/embeddings/base.py:189-197`); retries use `backoff_delay` (`workers/embed_pool.py:104`, `:251-284`). No truncation of an over-long input, no split on a payload-too-large or token-limit error, no `Retry-After`. The only guard is a warning when `chunk_size > 1024` (`config/loader.py:274-283`).
-
-**Steps.** On a size error, halve the batch and retry; an input that fails alone is one failed chunk (reported through `ledger.failed`), not a failed batch. Honour `Retry-After` (shared with TASK-0449).
-
-**Moves:** embedding infrastructure, reliability.
-
 ### TASK-0481 — Evaluate the answer, not only the retrieval
 
 **Where.** `services/evaluation.py:166` `score_faithfulness` has no production caller. Metrics are recall, reciprocal rank and nDCG; there is no precision and no answer-relevance measure. The `eval-gate` job gates retrieval only, so a prompt change is gated by nothing.
@@ -346,14 +306,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 **Steps.** Add `precision_at_k`. Wire `score_faithfulness` into `fasterrag benchmark --suite eval` behind a flag (it costs model calls). Record a generation baseline beside the retrieval one; gate it in the nightly, not on every push.
 
 **Moves:** testing, retrieval, core RAG. Prerequisite for TASK-0446's "gated".
-
-### TASK-0486 — A plugin author's kit
-
-**Where.** No sample plugin, no author guide beyond [python-api.md](python-api.md) "Extending" and [internals.md](internals.md) §5, no adapter-interface version, and `fasterrag.__all__` (`__init__.py:17`) is membership-tested but not snapshotted.
-
-**Steps.** After TASK-0439: `examples/plugin-vectordb/` — a tiny installable package registering an in-memory store — installed and exercised in CI against the contract suite; an `ADAPTER_API_VERSION` constant per base interface, checked at registration with a clear message; a snapshot test of the public surface; a "Writing a plugin" guide.
-
-**Moves:** extensibility, documentation.
 
 ### TASK-0487 — Timings that localise a slow request
 
@@ -371,22 +323,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 
 **Moves:** performance, testing.
 
-### TASK-0490 — Test what is claimed to be supported
-
-**Where.** Every CI job runs Python 3.12; the classifiers (`pyproject.toml:21-31`) claim 3.13; the unit tier runs on Ubuntu and Windows, nothing on macOS. No per-test timeout, so a hung test hangs a lane. Random ordering is an open decision in TASK-0354.
-
-**Steps.** Add a 3.13 unit lane, or remove the classifier. Add `pytest-timeout` with a generous default. Add a macOS unit lane or state in [deployment.md](deployment.md) that it is untested.
-
-**Moves:** testing, packaging.
-
-### TASK-0492 — API keys: hashed, rotatable, expirable
-
-**Where.** `load_keys` (`api/auth.py:146`) reads `secret[:scopes[:tenant]]` entries from one environment variable; `ApiKey` holds the plaintext (`:89-104`); a restart is the only way to change keys.
-
-**Steps.** Accept a hashed form (`sha256:<hex>`) and compare digests; reload keys on `SIGHUP` or a file-watch of a key file; optional `expires=` per key. Keep the plaintext form working.
-
-**Moves:** security.
-
 ### TASK-0493 — An audit trail for administrative actions
 
 **Where.** Nothing in `src/` records who dropped a collection, ran a restore, provisioned a tool or imported an archive.
@@ -394,38 +330,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 **Steps.** A structured audit logger (`fasterrag.audit`) emitting key name, tenant, action, target and outcome for every route requiring the `admin` or `collections` scope and the destructive CLI commands; documented in [security.md](security.md) and [observability.md](observability.md).
 
 **Moves:** security.
-
-### TASK-0494 — CORS and response headers
-
-**Where.** No CORS middleware and no security headers in `src/`; `vercel.json` sets them for the documentation site only.
-
-**Steps.** `security.cors_allowed_origins` (default empty: no cross-origin access), and `X-Content-Type-Options`, `Referrer-Policy` and `Cache-Control: no-store` on API responses.
-
-**Moves:** security.
-
-### TASK-0498 — Runnable examples
-
-**Where.** There is no `examples/` directory.
-
-**Steps.** `examples/` with a handful of small scripts — ingest a folder and ask, retrieve only, stream an answer, swap a provider by configuration, replay a trace — each executed by a CI job against the local profile (after TASK-0444).
-
-**Moves:** developer experience, documentation.
-
-### TASK-0499 — Execute the documents' code
-
-**Where.** `tests/unit/docs/test_cli_flag_parity.py` parses fenced blocks for flags only. Nothing runs a snippet from `README.md`, [quickstart.md](quickstart.md) or [python-api.md](python-api.md) — which is how two examples came to call a method that never existed (TASK-0435).
-
-**Steps.** A test that extracts fenced `python` blocks marked runnable, executes them against in-memory doubles, and fails on an exception; a marker for blocks that are illustrative; the same for `bash` blocks limited to `fasterrag ... --help`-safe commands.
-
-**Moves:** documentation, testing.
-
-### TASK-0500 — Every error code, documented with a fix
-
-**Where.** `tests/unit/test_errors.py:69` ties `PROBLEM_SPECS` to `ErrorCode`, and `:73` compares statuses to a hard-coded dict, not to the documents. [troubleshooting.md](troubleshooting.md) is organised by symptom and does not cover every code.
-
-**Steps.** A table in [api-reference.md](api-reference.md) with code, status, meaning and remedy for all members, and a parity test that parses it.
-
-**Moves:** documentation, developer experience.
 
 ### TASK-0502 — Configuration that can be upgraded
 
@@ -551,16 +455,16 @@ Use this to choose work by the category you want to move. The bar each category 
 | Category | Tasks |
 |---|---|
 | Architecture and design | TASK-0456, TASK-0130, TASK-0457 |
-| Core RAG functionality | TASK-0449, TASK-0458, TASK-0467, TASK-0485 |
+| Core RAG functionality | TASK-0458, TASK-0467, TASK-0485 |
 | Document ingestion and processing | TASK-0459, TASK-0471, TASK-0462 |
 | Retrieval and search quality | TASK-0454, TASK-0447, TASK-0448, TASK-0481, TASK-0463, TASK-0480 |
-| Embedding and vector infrastructure | TASK-0451, TASK-0452, TASK-0412, TASK-0352, TASK-0477, TASK-0478, TASK-0464, TASK-0479, TASK-0049 |
+| Embedding and vector infrastructure | TASK-0451, TASK-0452, TASK-0412, TASK-0352, TASK-0464, TASK-0479, TASK-0049 |
 | Advanced RAG capabilities | TASK-0465, TASK-0448, TASK-0482, TASK-0483, TASK-0484, TASK-0463 |
 | Extensibility and modularity | TASK-0486 |
 | Performance and scalability | TASK-0454, TASK-0130, TASK-0487, TASK-0488, TASK-0407 to TASK-0410 |
-| Reliability and error handling | TASK-0449, TASK-0474 |
-| Testing and quality assurance | TASK-0412, TASK-0454, TASK-0481, TASK-0490, TASK-0300 |
-| Security | TASK-0339, TASK-0381, TASK-0460, TASK-0326, TASK-0492, TASK-0493, TASK-0494, TASK-0495 |
-| Developer experience and APIs | TASK-0498, TASK-0500 |
-| Documentation | TASK-0499, TASK-0500, TASK-0501, TASK-0486 |
+| Reliability and error handling | TASK-0474 |
+| Testing and quality assurance | TASK-0412, TASK-0454, TASK-0481, TASK-0300 |
+| Security | TASK-0339, TASK-0381, TASK-0460, TASK-0326, TASK-0493, TASK-0495 |
+| Developer experience and APIs | TASK-0500 |
+| Documentation | TASK-0501 |
 | Packaging and release readiness | TASK-0445, TASK-0087, TASK-0502, TASK-0503 |

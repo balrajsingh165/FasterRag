@@ -130,6 +130,11 @@ def assemble(
         reach_back = (
             0 if index == 0 else _reach_back(text, start, overlap_chars, overlap_tokens, counter)
         )
+        # CRITICAL: overlap never reaches back to or past the previous chunk's start. A
+        # predecessor shorter than the overlap would otherwise be swallowed whole, giving two
+        # chunks the same start and breaking the monotonic-offset invariant (TASK-0553).
+        if chunks:
+            reach_back = min(reach_back, start - chunks[-1].start - 1)
         chunk_start = start - reach_back
         chunk_text = text[chunk_start:end]
 

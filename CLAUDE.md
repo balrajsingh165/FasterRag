@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Always-loaded instructions for Claude Code working in the fasterRag repository. Keep this file dense; detail lives in the linked docs. **All documentation lives in `docs/` — this file is the only instruction/doc file kept at repository root (plus README.md).**
+Always-loaded instructions for Claude Code working in the fasterRag repository. Keep this file dense; detail lives in the linked docs. **All documentation lives in `docs/` — this file is the only instruction/doc file kept at repository root (plus README.md).** The one exception is `userdocs/`, the short user guide the documentation site is built from (maintainer instruction, 2026-11-12: "keep only meaningful docs to user"). It summarises and links to `docs/`; add detail to `docs/`, and touch `userdocs/` only when a user-facing behaviour changes.
 
 ## Project overview
 

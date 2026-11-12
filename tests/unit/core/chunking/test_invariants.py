@@ -11,7 +11,7 @@ from itertools import pairwise
 from typing import Final, Literal
 
 import pytest
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 from fasterrag.core.chunking import (
@@ -103,6 +103,7 @@ def test_invariant_2_no_chunk_is_empty(chunker: Chunker, body: str) -> None:
 
 @ALL_CHUNKERS
 @given(body=TEXT)
+@example(body="000000000000000 " + "0" * 81)
 @settings(max_examples=40, suppress_health_check=[HealthCheck.function_scoped_fixture])
 def test_invariant_3_offsets_are_monotonic_and_in_bounds(chunker: Chunker, body: str) -> None:
     document = parse_plaintext(body.encode())
