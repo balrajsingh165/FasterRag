@@ -17,7 +17,11 @@ fasterRag/
 ├── scripts/
 │   └── check_commit_message.py   # Enforces the single-line, no-trailer commit rule
 ├── .github/                      # PR template (rule enforcement), issue templates, SECURITY.md
-│   └── workflows/ci.yml          # Blocking gates: ruff, ruff format, mypy --strict, pytest
+│   ├── dependabot.yml            # Weekly grouped update PRs: uv.lock, Actions SHA pins, Docker base digests
+│   ├── scripts/                  # Release decisions, release smoke test, dependency licence check
+│   └── workflows/
+│       ├── ci.yml                # Blocking gates: ruff, ruff format, mypy --strict, pytest
+│       └── release.yml           # v* tag: gates, build, SBOM, PyPI (trusted publishing), GHCR, GitHub release
 ├── docs/                         # ALL documentation lives here (rule: only CLAUDE.md stays at root)
 │   ├── quickstart.md  scope.md  structure.md  flow.md  architecture.md
 │   ├── config-reference.md  api-reference.md  cli-reference.md  python-api.md
