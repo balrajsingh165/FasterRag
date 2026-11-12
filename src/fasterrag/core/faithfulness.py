@@ -26,7 +26,7 @@ from typing import Any, Final
 
 from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.core.context import AssembledContext
-from fasterrag.core.generation import build_context_block
+from fasterrag.core.generation import build_context_block, enclose, new_boundary
 from fasterrag.errors import FasterRagError
 from fasterrag.observability.logging import get_logger
 
@@ -40,7 +40,7 @@ __all__ = [
     "parse_verdict",
 ]
 
-P3_TEMPLATE_VERSION: Final = "1.0.0"
+P3_TEMPLATE_VERSION: Final = "1.1.0"
 
 P3_SYSTEM_PROMPT: Final = """\
 You grade whether an answer is supported by its context. You are not the author of
@@ -89,8 +89,10 @@ def build_grading_prompt(
 ) -> str:
     """Build the P3 user turn: context, question, and the answer under judgement."""
     block = build_context_block(context, texts)
+    boundary = new_boundary(block, question, answer)
     return (
-        f"<context>\n{block}\n</context>\n\nQuestion: {question}\n\n<answer>\n{answer}\n</answer>"
+        f"{enclose('context', block, boundary)}\n\nQuestion: {question}\n\n"
+        f"{enclose('answer', answer, boundary)}"
     )
 
 
