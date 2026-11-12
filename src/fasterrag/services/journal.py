@@ -11,6 +11,10 @@ succeed into a resumable, auditable batch system:
   deleted document is a **tombstone** appended to it rather than a line removed: every hash
   remembered for that document *before* the tombstone stops counting, and one remembered
   after it counts again, so removed content can be ingested a second time (TASK-0443).
+  A document remembered again under a new hash is the same reading: the hash it held
+  before stops counting, because the index no longer holds that version — otherwise a
+  document edited and then restored would be skipped as a duplicate of a version that is
+  gone.
 * **Dead-lettering.** A document that fails its retries is recorded with a machine-readable
   reason code and stays queryable, so a bad file never silently disappears and never stops
   the pipeline.
@@ -543,18 +547,18 @@ class Journal:
             return {}
 
         known: dict[str, str] = {}
-        held: dict[str, list[str]] = {}
+        held: dict[str, str] = {}
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 payload = json.loads(line)
                 document = payload["document_id"]
+                superseded = held.pop(document, None)
+                if superseded is not None and known.get(superseded) == document:
+                    del known[superseded]
                 if payload.get(_TOMBSTONE_KEY):
-                    for digest in held.pop(document, ()):
-                        if known.get(digest) == document:
-                            del known[digest]
                     continue
-                known[payload["content_hash"]] = document
-                held.setdefault(document, []).append(payload["content_hash"])
+                held[document] = payload["content_hash"]
+                known[held[document]] = document
         return known
 
     async def document_hashes(self, collection: str) -> dict[str, str]:

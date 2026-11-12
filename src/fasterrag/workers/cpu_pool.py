@@ -174,11 +174,13 @@ class CpuWorkerPool:
         journal: Journal | None = None,
         executor_factory: Callable[[int], Executor] | None = None,
         llm: LLMAdapter | None = None,
+        trim: Callable[[str, int], Awaitable[None]] | None = None,
     ) -> None:
         """Build the pool without starting any worker."""
         self.settings = settings
         self.journal = journal
         self.llm = llm
+        self._trim = trim
         self.size = resolve_pool_size(settings.workers.cpu_pool_size)
         self._executor_factory = executor_factory or (
             lambda workers: ProcessPoolExecutor(max_workers=workers)
@@ -233,6 +235,7 @@ class CpuWorkerPool:
         known: dict[str, str] = {}
         if self.journal is not None and self.settings.ingestion.dedup:
             known = await self.journal.known_content(collection)
+        indexed_before = frozenset(known.values())
         standalone = ledger is None
         tracker = ledger or IndexLedger(on_progress, start=resume_from)
         parsed = chunked = deduplicated = dead_lettered = 0
@@ -271,7 +274,9 @@ class CpuWorkerPool:
                     index=task.index,
                     source=task.source,
                     chunks=len(payloads),
-                    commit=self._commit(job, collection, task, outcome),
+                    commit=self._commit(
+                        job, collection, task, outcome, update=task.document_id in indexed_before
+                    ),
                 )
                 for payload in payloads:
                     await sink.put(payload)
@@ -332,11 +337,23 @@ class CpuWorkerPool:
                 future.cancel()
 
     def _commit(
-        self, job: str | None, collection: str, task: DocumentTask, outcome: ParseOutcome
+        self,
+        job: str | None,
+        collection: str,
+        task: DocumentTask,
+        outcome: ParseOutcome,
+        *,
+        update: bool = False,
     ) -> Callable[[], Awaitable[None]]:
-        """Return the callback that journals this document once it is fully indexed."""
+        """Return the callback that journals this document once it is fully indexed.
+
+        For an ``update`` — a document the journal already held — the chunks past the new
+        length are trimmed first, so a failed trim leaves the document unrecorded (TASK-0443).
+        """
 
         async def commit() -> None:
+            if update and self._trim is not None:
+                await self._trim(task.document_id, len(outcome.chunks))
             await self._index_document(job, collection, task, outcome)
 
         return commit

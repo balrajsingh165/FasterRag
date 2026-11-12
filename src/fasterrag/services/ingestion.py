@@ -190,6 +190,7 @@ class IngestionService:
                 journal=self.journal,
                 executor_factory=self._executor_factory,
                 llm=enricher,
+                trim=indexer.trim,
             ) as cpu:
                 parse_report, embed_report = await _pipe(
                     cpu.process(
@@ -237,10 +238,10 @@ class IngestionService:
         await self.journal.save_job(settled)
         await self._publish_metrics(settled, counts, elapsed=time.monotonic() - started)
 
-        if indexer.written:
+        if indexer.written or indexer.trimmed:
             await self._write_lockfile(record.collection)
 
-        if self.cache is not None and indexer.written:
+        if self.cache is not None and (indexer.written or indexer.trimmed):
             await self.cache.invalidate(f"ingest job {record.job_id} indexed {indexer.written}")
 
         _logger.info("ingest finished", extra={"job_id": record.job_id, **counts})

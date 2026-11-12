@@ -236,6 +236,26 @@ def test_forgetting_takes_every_hash_the_document_was_indexed_under(journal: Jou
     assert journal.known_content_blocking("default") == {}
 
 
+def test_a_document_remembered_under_a_new_hash_drops_its_old_one(journal: Journal) -> None:
+    """A superseded hash stayed a duplicate, so restoring an edited document was skipped."""
+    journal.remember_content_blocking("default", "hash-old", "d_1")
+    journal.remember_content_blocking("default", "hash-new", "d_1")
+
+    assert journal.known_content_blocking("default") == {"hash-new": "d_1"}
+    assert journal.document_hashes_blocking("default") == {"d_1": "hash-new"}
+
+
+def test_a_hash_another_document_took_over_is_not_dropped_with_the_first(
+    journal: Journal,
+) -> None:
+    journal.remember_content_blocking("default", "hash-1", "d_1")
+    journal.remember_content_blocking("default", "hash-1", "d_2")
+
+    journal.forget_document_blocking("default", "d_1")
+
+    assert journal.known_content_blocking("default") == {"hash-1": "d_2"}
+
+
 def test_forgetting_one_document_keeps_another_holding_other_content(journal: Journal) -> None:
     journal.remember_content_blocking("default", "hash-1", "d_1")
     journal.remember_content_blocking("default", "hash-2", "d_2")
