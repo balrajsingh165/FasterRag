@@ -1,5 +1,6 @@
 import hashlib
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 import pytest
 
@@ -9,12 +10,16 @@ from fasterrag.config.schema import Settings
 from fasterrag.core.cache.embedding import (
     CachingEmbeddingAdapter,
     InputType,
+    PoolingCachingEmbeddingAdapter,
+    cache_embeddings,
     decode_vector,
     embedding_key,
     encode_vector,
 )
 from fasterrag.core.cache.store import CacheStore, MemoryStore
 from fasterrag.errors import CacheError, EmbedError
+from fasterrag.services.estimation import price_for
+from fasterrag.workers.embed_pool import PoolingAdapter
 
 
 class CountingEmbedder(EmbeddingAdapter):
@@ -120,6 +125,16 @@ def build(store: CacheStore | None = None) -> tuple[CachingEmbeddingAdapter, Cou
     return CachingEmbeddingAdapter(inner, store or MemoryStore()), inner
 
 
+def identity(inner: EmbeddingAdapter) -> dict[str, Any]:
+    """Return the key fields an adapter's own identity supplies."""
+    return {
+        "provider": inner.provider,
+        "model": inner.model,
+        "model_version": inner.model_version,
+        "dimensions": inner.config.dimensions,
+    }
+
+
 def key(
     text: str = "text",
     *,
@@ -186,6 +201,15 @@ def test_the_key_cannot_be_forged_by_moving_a_separator_between_fields() -> None
 
 def test_the_key_never_contains_the_text_itself() -> None:
     assert "secret passage" not in key("secret passage")
+
+
+def test_text_that_is_not_valid_unicode_still_gets_a_key_of_its_own() -> None:
+    """A lone surrogate made the key raise, which ended the pool instead of failing a batch."""
+    lone = "half a pair \ud83d"
+
+    assert key(lone) == key(lone)
+    assert key(lone) != key("half a pair ")
+    assert key(lone) != key("half a pair \ud83e")
 
 
 def test_the_key_is_stable_across_calls() -> None:
@@ -456,3 +480,105 @@ async def test_a_store_that_answers_a_batch_with_too_few_values_is_stepped_past(
     assert result.vectors == [inner._vector("a"), inner._vector("b")]
     assert inner.embedded == ["a", "b", "a", "b"]
     assert adapter.stats.errors == 2
+
+
+class PoolingEmbedder(CountingEmbedder):
+    """A provider that can late-chunk, as the local sentence-transformers adapter can."""
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(settings)
+        self.pooled: list[tuple[str, list[tuple[int, int]]]] = []
+
+    async def embed_pooled(
+        self, document: str, spans: Sequence[tuple[int, int]]
+    ) -> EmbeddingResult:
+        self.pooled.append((document, list(spans)))
+        return EmbeddingResult(
+            vectors=[[float(start), float(end), 0.0] for start, end in spans],
+            model=self.model,
+            model_version=self.model_version,
+        )
+
+
+def test_a_cached_adapter_answers_to_its_provider_s_name() -> None:
+    """Named "cached", it had no price, so the pool counted all its spend as unpriced."""
+    adapter, inner = build()
+
+    assert adapter.provider == inner.provider == "counting"
+    assert CachingEmbeddingAdapter(OtherProviderEmbedder(Settings()), MemoryStore()).provider == (
+        "other"
+    )
+
+
+def test_a_cached_hosted_adapter_is_priced_as_its_provider() -> None:
+    class HostedEmbedder(CountingEmbedder):
+        provider = "openai"
+
+        @property
+        def model(self) -> str:
+            return "text-embedding-3-small"
+
+    adapter = cache_embeddings(HostedEmbedder(Settings()), MemoryStore())
+
+    cost, _ = price_for(adapter.provider, adapter.model, 1_000_000)
+
+    assert cost is not None
+    assert cost > 0
+
+
+def test_wrapping_a_late_chunking_provider_keeps_it_late_chunking() -> None:
+    """The pool asks whether an adapter can pool; a plain wrapper answered no for all of them."""
+    wrapped = cache_embeddings(PoolingEmbedder(Settings()), MemoryStore())
+
+    assert isinstance(wrapped, PoolingCachingEmbeddingAdapter)
+    assert isinstance(wrapped, PoolingAdapter)
+
+
+def test_wrapping_a_provider_that_cannot_pool_does_not_claim_it_can() -> None:
+    wrapped = cache_embeddings(CountingEmbedder(Settings()), MemoryStore())
+
+    assert type(wrapped) is CachingEmbeddingAdapter
+    assert not isinstance(wrapped, PoolingAdapter)
+
+
+async def test_pooled_vectors_bypass_the_cache_in_both_directions() -> None:
+    """A late-chunked vector depends on the whole document, so the chunk text cannot key it."""
+    store = RecordingStore()
+    inner = PoolingEmbedder(Settings())
+    wrapped = cache_embeddings(inner, store)
+    assert isinstance(wrapped, PoolingCachingEmbeddingAdapter)
+    await wrapped.embed_documents(["chunk"])
+    store.calls.clear()
+
+    first = await wrapped.embed_pooled("a chunk in context", [(2, 7)])
+    second = await wrapped.embed_pooled("a chunk in context", [(2, 7)])
+
+    assert first.vectors == second.vectors == [[2.0, 7.0, 0.0]]
+    assert inner.pooled == [("a chunk in context", [(2, 7)])] * 2
+    assert store.calls == []
+    assert await store.items() == [
+        (key("chunk", **identity(inner)), encode_vector(inner._vector("chunk")))
+    ]
+
+
+class ClosingStore(MemoryStore):
+    """Counts how many times it was released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closes = 0
+
+    async def close(self) -> None:
+        self.closes += 1
+
+
+async def test_only_the_wrapper_that_owns_a_shared_store_closes_it() -> None:
+    store = ClosingStore()
+    owner = cache_embeddings(CountingEmbedder(Settings()), store)
+    borrower = cache_embeddings(OtherProviderEmbedder(Settings()), store, owns_store=False)
+
+    await borrower.close()
+    assert store.closes == 0
+    await owner.close()
+
+    assert store.closes == 1

@@ -15,7 +15,6 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request
 
-from fasterrag.adapters.embeddings.tiering import create_embedding_router
 from fasterrag.api.dependencies import (
     CurrentSettings,
     CurrentTenant,
@@ -25,6 +24,7 @@ from fasterrag.api.dependencies import (
 from fasterrag.api.schemas import ReplayRequest
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.replay import replay_trace
 from fasterrag.services.traces import TraceStore, create_trace_store
 

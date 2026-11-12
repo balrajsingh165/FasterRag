@@ -28,7 +28,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Self, cast
 
-from fasterrag.adapters.embeddings.tiering import TieringRouter, create_embedding_router
+from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.adapters.vectordb.base import CollectionInfo, VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
@@ -38,6 +38,7 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
+from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.doctor import DoctorReport
 from fasterrag.services.estimation import Estimate, estimate_sources, require_estimator
 from fasterrag.services.generation import Answer, GenerationService, QueryEvent

@@ -35,7 +35,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
-from fasterrag.adapters.embeddings.tiering import TieringRouter, create_embedding_router
+from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.adapters.llm.factory import create_llm_adapter
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
@@ -44,6 +44,7 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger, use_trace_id
+from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.lockfile import LockStore, build_lock
 from fasterrag.services.reindex import require_keyword_leg

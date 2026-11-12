@@ -8,6 +8,7 @@ rolling spend window cannot leak between them, and the ``must_run`` execution re
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import subprocess
@@ -20,6 +21,7 @@ import pytest
 from hypothesis import HealthCheck, settings
 
 import fasterrag
+from fasterrag.core import cache as cache_package
 from fasterrag.core.breaker import reset_shared_breakers
 from fasterrag.core.rerank.cross_encoder import reset_shared_cross_encoders
 from fasterrag.services.budget import reset_shared_governors
@@ -160,6 +162,29 @@ def _closed_circuits_and_no_loaded_models() -> Iterator[None]:
     yield
     reset_shared_breakers()
     reset_shared_cross_encoders()
+
+
+_cache_roots = itertools.count()
+
+
+# CRITICAL: the embedding cache defaults to a directory under the working directory, which
+# for a test run is the checkout. A test that builds its router the way an entry point does
+# would write vectors there, and a later test — or a later run — embedding the same text
+# under a fake provider of the same name would be served them: a stale hit by construction,
+# because between tests the "provider" is exactly what changes. So every test gets a root
+# nothing has written to. It is only a path until something writes, so a test that never
+# embeds costs no directory. Patched by hand, not through `monkeypatch`, for the reason
+# given in tests/unit/conftest.py.
+@pytest.fixture(autouse=True)
+def _an_embedding_cache_of_its_own(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Point the default disk embedding cache at an empty directory for this test alone."""
+    original = cache_package.EMBEDDING_CACHE_ROOT
+    root = tmp_path_factory.getbasetemp() / "embedding-cache" / str(next(_cache_roots))
+    setattr(cache_package, "EMBEDDING_CACHE_ROOT", root)  # noqa: B010
+    try:
+        yield
+    finally:
+        setattr(cache_package, "EMBEDDING_CACHE_ROOT", original)  # noqa: B010
 
 
 MUST_RUN_MARKER: Final = "must_run"

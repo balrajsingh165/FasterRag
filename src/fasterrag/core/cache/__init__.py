@@ -11,8 +11,15 @@ being reachable — only speed does.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Final
+
 from fasterrag.config.schema import Settings
-from fasterrag.core.cache.embedding import CachingEmbeddingAdapter
+from fasterrag.core.cache.embedding import (
+    CachingEmbeddingAdapter,
+    PoolingCachingEmbeddingAdapter,
+    cache_embeddings,
+)
 from fasterrag.core.cache.redis import EMBEDDING_NAMESPACE, SEMANTIC_NAMESPACE, RedisStore
 from fasterrag.core.cache.semantic import CacheHit, SemanticCache, cosine_similarity
 from fasterrag.core.cache.stats import CacheStats
@@ -26,6 +33,7 @@ from fasterrag.core.cache.store import (
 
 __all__ = [
     "DEFAULT_CACHE_ROOT",
+    "EMBEDDING_CACHE_ROOT",
     "EMBEDDING_NAMESPACE",
     "MAXIMUM_ENTRIES",
     "SEMANTIC_NAMESPACE",
@@ -35,12 +43,22 @@ __all__ = [
     "CachingEmbeddingAdapter",
     "DiskStore",
     "MemoryStore",
+    "PoolingCachingEmbeddingAdapter",
     "RedisStore",
     "SemanticCache",
+    "cache_embeddings",
     "cosine_similarity",
     "create_embedding_store",
     "create_semantic_store",
 ]
+
+
+# CRITICAL: the embedding cache gets a directory of its own. A disk store owns every entry
+# file in its directory — it counts them against its ceiling, and `clear` deletes them all —
+# and every ingest clears the semantic cache. Sharing one directory would empty the
+# embedding cache on each ingest, which is exactly when it is about to be useful. The
+# semantic cache keeps the parent directory, where its entries already are.
+EMBEDDING_CACHE_ROOT: Final = DEFAULT_CACHE_ROOT / "embedding"
 
 
 def _create(
@@ -49,12 +67,13 @@ def _create(
     maximum_entries: int,
     redis_url: str,
     namespace: str,
+    root: Path | None = None,
 ) -> CacheStore:
     """Return the store ``backend`` names, holding at most ``maximum_entries`` entries."""
     if backend == "memory":
         return MemoryStore(maximum_entries)
     if backend == "disk":
-        return DiskStore(maximum_entries=maximum_entries)
+        return DiskStore(root, maximum_entries=maximum_entries)
 
     return RedisStore(
         redis_url,
@@ -72,6 +91,7 @@ def create_embedding_store(settings: Settings) -> CacheStore:
         settings.embeddings.cache.max_entries,
         settings.embeddings.cache.redis_url,
         EMBEDDING_NAMESPACE,
+        EMBEDDING_CACHE_ROOT,
     )
 
 

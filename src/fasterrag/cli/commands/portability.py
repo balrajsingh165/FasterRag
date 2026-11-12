@@ -14,13 +14,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from fasterrag.adapters.embeddings.tiering import create_embedding_router
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import settings_from
 from fasterrag.errors import ConfigError, FasterRagError
 from fasterrag.services.archive import export_archive
 from fasterrag.services.archive_import import import_archive, open_archive
+from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.lockfile import create_lock_store
 
 __all__ = ["run_export", "run_import"]

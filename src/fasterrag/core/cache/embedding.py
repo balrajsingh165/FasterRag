@@ -26,6 +26,20 @@ Implemented as a wrapper around any ``EmbeddingAdapter`` rather than as a branch
 one, so a third-party adapter registered through the entry point gets caching without
 knowing the cache exists.
 
+**The wrapper must be indistinguishable from what it wraps**, because the pipeline asks an
+adapter more than the two embedding calls. The embedding pool prices and labels usage by
+``adapter.provider``, so the wrapper reports the wrapped provider's name; reporting its own
+would send every cached deployment's spend to the unpriced counter. The pool also decides
+whether to late-chunk by asking whether the adapter has ``embed_pooled``, so
+:func:`cache_embeddings` returns a wrapper that has it exactly when the wrapped adapter
+does. Pooled vectors pass straight through and are never cached: a late-chunked vector is a
+function of the whole document around the chunk, not of the chunk's text, so no key built
+from the text could be right for it — and for the same reason a pooled vector is never
+stored where a plain document lookup of the same text would find it.
+
+Several wrappers may share one store, one per embedding tier. Only the wrapper that owns the
+store closes it, so a router that closes each of its adapters releases a Redis pool once.
+
 Batches are resolved per text, not per batch: a batch that is nine-tenths cached sends only
 the missing tenth to the provider. Vectors are returned in the caller's original order, since
 retrieval matches vectors to chunks positionally and a reordered batch would silently attach
@@ -42,7 +56,7 @@ from __future__ import annotations
 import hashlib
 import struct
 from collections.abc import Mapping, Sequence
-from typing import ClassVar, Final, Literal
+from typing import Final, Literal, Protocol, cast
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.vectordb.base import HealthStatus
@@ -54,6 +68,8 @@ from fasterrag.observability.logging import get_logger
 __all__ = [
     "CachingEmbeddingAdapter",
     "InputType",
+    "PoolingCachingEmbeddingAdapter",
+    "cache_embeddings",
     "decode_vector",
     "embedding_key",
     "encode_vector",
@@ -66,6 +82,16 @@ _NATIVE_SIZE: Final = "native"
 _LENGTH_BYTES: Final = 8
 
 _logger = get_logger(__name__)
+
+
+class _Pooling(Protocol):
+    """What the embedding pool looks for on an adapter before it late-chunks a document."""
+
+    async def embed_pooled(
+        self, document: str, spans: Sequence[tuple[int, int]]
+    ) -> EmbeddingResult:
+        """Return one vector per span, pooled from a pass over the whole document."""
+        ...
 
 
 def embedding_key(
@@ -85,7 +111,11 @@ def embedding_key(
     identity = (provider, model, model_version, size, input_type)
     digest = hashlib.sha256()
     for part in (*identity, text):
-        encoded = part.encode("utf-8")
+        # CRITICAL: `surrogatepass`, not strict. A lone surrogate reaches here from a JSON
+        # escape in an API request, and a strict encode raises ValueError — which is not a
+        # typed error, so it would end the whole embedding pool where the provider's own
+        # refusal of the same text fails one batch.
+        encoded = part.encode("utf-8", "surrogatepass")
         digest.update(len(encoded).to_bytes(_LENGTH_BYTES, "big"))
         digest.update(encoded)
     return f"emb:{':'.join(identity)}:{digest.hexdigest()}"
@@ -106,14 +136,21 @@ def decode_vector(raw: bytes) -> list[float] | None:
 class CachingEmbeddingAdapter(EmbeddingAdapter):
     """An embedding adapter that consults a cache before its provider."""
 
-    provider: ClassVar[str] = "cached"
-
-    def __init__(self, inner: EmbeddingAdapter, store: CacheStore) -> None:
+    def __init__(
+        self, inner: EmbeddingAdapter, store: CacheStore, *, owns_store: bool = True
+    ) -> None:
         """Wrap ``inner``, resolving what it can from ``store`` first."""
         super().__init__(inner.settings)
         self.inner = inner
         self.store = store
+        self.owns_store = owns_store
         self.stats = CacheStats(name="embedding")
+        # CRITICAL: the wrapped provider's name, not a name for the cache. The embedding
+        # pool prices and labels every batch by `adapter.provider`; a wrapper calling
+        # itself "cached" has no price, so all embedding spend would move to the unpriced
+        # counter the moment the cache was switched on. The base declares `provider` on
+        # the class, so the instance shadows it rather than assigning through it.
+        vars(self)["provider"] = inner.provider
 
     @property
     def model(self) -> str:
@@ -246,6 +283,26 @@ class CachingEmbeddingAdapter(EmbeddingAdapter):
         return await self.inner.health()
 
     async def close(self) -> None:
-        """Release the wrapped provider and the cache backend."""
+        """Release the wrapped provider, and the cache backend if this wrapper owns it."""
         await self.inner.close()
-        await self.store.close()
+        if self.owns_store:
+            await self.store.close()
+
+
+class PoolingCachingEmbeddingAdapter(CachingEmbeddingAdapter):
+    """A caching adapter over a provider that can also late-chunk a document."""
+
+    async def embed_pooled(
+        self, document: str, spans: Sequence[tuple[int, int]]
+    ) -> EmbeddingResult:
+        """Late-chunk ``document`` through the wrapped adapter, bypassing the cache."""
+        return await cast(_Pooling, self.inner).embed_pooled(document, spans)
+
+
+def cache_embeddings(
+    inner: EmbeddingAdapter, store: CacheStore, *, owns_store: bool = True
+) -> CachingEmbeddingAdapter:
+    """Wrap ``inner`` behind ``store``, keeping late chunking if ``inner`` offers it."""
+    if callable(getattr(inner, "embed_pooled", None)):
+        return PoolingCachingEmbeddingAdapter(inner, store, owns_store=owns_store)
+    return CachingEmbeddingAdapter(inner, store, owns_store=owns_store)

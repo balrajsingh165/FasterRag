@@ -64,6 +64,7 @@ fasterRag/
 │       │   ├── doctor.py         # D10 preflight checks; gates provisioning
 │       │   ├── journal.py        # D3 checkpoints, dedup, DLQ; async over *_blocking twins
 │       │   ├── estimation.py     # D9 preflight token counts and projected cost
+│       │   ├── composition.py    # Composition root: the embedding router every entry point uses, cached when configured
 │       │   ├── ingestion.py      # Job lifecycle: run both pools, checkpoint, settle
 │       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate
 │       │   └── collections.py    # Collection lifecycle (pending)

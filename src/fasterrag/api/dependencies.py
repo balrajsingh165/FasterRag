@@ -15,13 +15,14 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
-from fasterrag.adapters.embeddings.tiering import TieringRouter, create_embedding_router
+from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.adapters.llm.factory import create_llm_adapter
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache import create_semantic_store
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.rerank import CrossEncoderReranker
+from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.generation import GenerationService
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import Journal, create_journal
