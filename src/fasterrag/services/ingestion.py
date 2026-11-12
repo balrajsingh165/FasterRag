@@ -117,14 +117,14 @@ class IngestionService:
     async def accept_resume(self, job_id: str, *, tenant: str | None = None) -> JobRecord:
         """Return an interrupted job queued to run again from its checkpoint.
 
-        A ``running`` job that has gone quiet is settled first; any job that was not
-        interrupted is refused, so a finished corpus is never re-run by mistake.
+        A ``running`` or ``queued`` job that has gone quiet is settled first; any job that
+        was not interrupted is refused, so a finished corpus is never re-run by mistake.
         """
         record = await self.journal.load_job(job_id, tenant=tenant)
         stale_seconds = self.settings.reliability.stale_job_seconds
-        if record.status == "running":
+        if record.status in {"running", "queued"}:
             quiet = await self.journal.quiet_running_jobs(stale_seconds)
-            if any(job.job_id == job_id for job in quiet.running):
+            if any(job.job_id == job_id for job in (*quiet.running, *quiet.queued)):
                 record = await settle_interrupted(self.journal, record)
 
         if not resumable(record):
@@ -172,7 +172,9 @@ class IngestionService:
             current = await self.journal.load_job(record.job_id)
         except FasterRagError:
             current = record
-        await self.journal.save_job(replace(current, status="failed", finished_at=_finished_at()))
+        await self.journal.save_job(
+            replace(current, status="failed", reason_code=code, finished_at=_finished_at())
+        )
         _logger.error(
             "ingest job failed",
             extra={"job_id": record.job_id, "code": code, "detail": detail},
@@ -441,11 +443,11 @@ async def _joined(
 
 def _not_resumable(record: JobRecord, stale_seconds: int) -> str:
     """Say why a job cannot be resumed, and what to do about that job instead."""
-    if record.status == "running":
+    if record.status in {"running", "queued"}:
         return (
-            f"job {record.job_id} is running and was written to in the last {stale_seconds} "
-            "seconds, so a process may still be working on it. If none is, it can be resumed "
-            "once it has been quiet for reliability.stale_job_seconds"
+            f"job {record.job_id} is {record.status} and was written to in the last "
+            f"{stale_seconds} seconds, so a process may still be working on it. If none is, it "
+            "can be resumed once it has been quiet for reliability.stale_job_seconds"
         )
     return (
         f"job {record.job_id} is {record.status}, not interrupted, so there is nothing to "

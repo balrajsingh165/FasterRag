@@ -174,11 +174,12 @@ class JobRecord:
 
 @dataclass(frozen=True, slots=True)
 class QuietJobs:
-    """The ``running`` jobs nothing has written to lately, and what the look could not judge."""
+    """The unsettled jobs nothing has written to lately, and what the look could not judge."""
 
     running: tuple[JobRecord, ...] = ()
     recent: int = 0
     unreadable: int = 0
+    queued: tuple[JobRecord, ...] = ()
 
 
 def _modified(path: Path, *, missing: float) -> float:
@@ -734,14 +735,14 @@ class Journal:
             return None
 
     async def quiet_running_jobs(self, quiet_seconds: float) -> QuietJobs:
-        """Return the ``running`` jobs not written to for ``quiet_seconds``, off the loop."""
+        """Return the unsettled jobs not written to for ``quiet_seconds``, off the loop."""
         return await asyncio.to_thread(self.quiet_running_jobs_blocking, quiet_seconds)
 
     def quiet_running_jobs_blocking(self, quiet_seconds: float) -> QuietJobs:
-        """Find quiet ``running`` jobs; :meth:`quiet_running_jobs` is this off the loop.
+        """Find quiet ``running`` and ``queued`` jobs; :meth:`quiet_running_jobs` off the loop.
 
         A record written inside the window is counted and never opened: something is
-        still writing it, and reading it could collide with that write.
+        still writing it, and reading it could collide with that write (TASK-0526).
         """
         directory = self.root / _JOBS_DIR
         if not directory.is_dir():
@@ -749,6 +750,7 @@ class Journal:
 
         cutoff = time.time() - quiet_seconds
         running: list[JobRecord] = []
+        queued: list[JobRecord] = []
         recent = unreadable = 0
         for path in sorted(directory.glob("*.json")):
             if self._last_written(path.stem) > cutoff:
@@ -760,8 +762,12 @@ class Journal:
                 unreadable += 1
             elif payload.get("status") == "running":
                 running.append(JobRecord.from_dict(payload))
+            elif payload.get("status") == "queued":
+                queued.append(JobRecord.from_dict(payload))
 
-        return QuietJobs(running=tuple(running), recent=recent, unreadable=unreadable)
+        return QuietJobs(
+            running=tuple(running), recent=recent, unreadable=unreadable, queued=tuple(queued)
+        )
 
     def _last_written(self, job: str) -> float:
         """Return when a job's record or its document log was last written.

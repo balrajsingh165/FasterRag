@@ -6,8 +6,10 @@ config file cannot express — the opposite of what a fail-fast loader is for.
 
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 from fasterrag.cli.main import main
 from fasterrag.cli.output import ExitCode
@@ -213,6 +215,53 @@ def test_every_override_a_shipped_compose_file_sets_loads(
             load_settings(config, require_env=False)
         except ConfigError as exc:
             pytest.fail(f"{name} sets FASTERRAG_SET={value}, which does not load: {exc.detail}")
+
+
+STOP_MARGIN_SECONDS = 10
+SERVING_SERVICES = ("api", "dashboard")
+
+
+COMPOSE_TAG = re.compile(r"!(reset|override)\s")
+
+
+def _compose(path: Path) -> dict[str, Any]:
+    """Return a Compose file as data, reading a Compose-only tag such as ``!reset`` as absent."""
+    text = COMPOSE_TAG.sub("", path.read_text(encoding="utf-8"))
+    loaded: dict[str, Any] = yaml.safe_load(text)
+    return loaded
+
+
+def _seconds(period: object, where: str) -> int:
+    """Return a Compose ``stop_grace_period`` written as whole seconds, such as ``30s``."""
+    matched = re.fullmatch(r"(\d+)s", str(period))
+    assert matched, f"{where}: stop_grace_period {period!r} is not written as whole seconds"
+    return int(matched.group(1))
+
+
+def test_every_compose_file_gives_the_api_longer_to_stop_than_its_drain_takes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No stop period was set, so Docker's 10 s default cut the 20 s drain short."""
+    base = _compose(REPO_ROOT / "docker-compose.yml")
+    for path in COMPOSE_FILES:
+        layer = _compose(path)
+        for service in SERVING_SERVICES:
+            merged = {**base["services"].get(service, {}), **layer["services"].get(service, {})}
+            if not merged:
+                continue
+            override = (merged.get("environment") or {}).get("FASTERRAG_SET", "")
+            monkeypatch.setenv("FASTERRAG_SET", override)
+            drain = load_settings(
+                REPO_ROOT / "config.yaml", require_env=False
+            ).reliability.shutdown_grace_seconds
+            where = f"{path.name} service {service}"
+            assert "stop_grace_period" in merged, f"{where} sets no stop_grace_period"
+            stop = _seconds(merged["stop_grace_period"], where)
+            assert stop >= drain + STOP_MARGIN_SECONDS, (
+                f"{where} is stopped after {stop}s, but reliability.shutdown_grace_seconds is "
+                f"{drain}s and cancelling and settling what remains needs a margin of "
+                f"{STOP_MARGIN_SECONDS}s"
+            )
 
 
 def test_trailing_separators_are_tolerated(config: Path, monkeypatch: pytest.MonkeyPatch) -> None:

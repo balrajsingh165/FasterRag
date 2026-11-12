@@ -82,8 +82,8 @@ async def _job_body(record: JobRecord, journal: Journal) -> dict[str, Any]:
     }
 
 
-async def _ensure_settled(journal: Journal, record: JobRecord) -> None:
-    """Mark a job ``failed`` unless the service already gave it a terminal status.
+async def _ensure_settled(journal: Journal, record: JobRecord, code: ErrorCode) -> None:
+    """Mark a job ``failed`` with ``code`` unless the service already settled it.
 
     The current record is loaded rather than the one this request accepted, so a
     checkpoint the run reached is kept instead of overwritten with a stale copy.
@@ -94,7 +94,7 @@ async def _ensure_settled(journal: Journal, record: JobRecord) -> None:
         current = record
 
     if current.status in {"queued", "running"}:
-        await journal.save_job(replace(current, status="failed"))
+        await journal.save_job(replace(current, status="failed", reason_code=code.value))
 
 
 async def _run_job(request: Request, record: JobRecord, metadata: dict[str, Any] | None) -> None:
@@ -131,7 +131,7 @@ async def _run_job(request: Request, record: JobRecord, metadata: dict[str, Any]
                     "trace_id": exc.trace_id,
                 },
             )
-            await _ensure_settled(journal, record)
+            await _ensure_settled(journal, record, exc.code)
         except Exception as exc:
             # CRITICAL: a background task has no caller to raise to. Without this branch an
             # untyped failure is logged by the server and the job stays `running` forever,
@@ -145,7 +145,7 @@ async def _run_job(request: Request, record: JobRecord, metadata: dict[str, Any]
                     "trace_id": current_trace_id(),
                 },
             )
-            await _ensure_settled(journal, record)
+            await _ensure_settled(journal, record, ErrorCode.INTERNAL)
         finally:
             await embedding_router.close()
 

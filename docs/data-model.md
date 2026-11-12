@@ -103,7 +103,7 @@ Drift = any mismatch between this file and live config/corpus. Reported, never s
 | `started_at` / `finished_at` | str\|null | Timestamps |
 | `idempotency_key` | str\|null | Replay of the same key returns this job rather than creating a new one |
 | `tenant` | str\|null | |
-| `reason_code` | str\|null | Why a job stopped without finishing. The one value is `INTERRUPTED`: the process stopped working on the job (cancellation), and it was settled `failed` with its `checkpoint` kept. `null` on every other job, and cleared when the job is run again. Not drawn from the error-code table |
+| `reason_code` | str\|null | Why a `failed` job failed. `INTERRUPTED`: the process stopped working on the job (cancellation, or a process exit the next start settled), and its `checkpoint` is kept — not drawn from the error-code table. Otherwise the `code` of the error that stopped the job, from the error-code table (TASK-0526). `null` on every job that is not `failed`, on a `failed` job whose every document was dead-lettered (the reasons are per document), and cleared when the job is run again |
 
 ### DLQEntry
 

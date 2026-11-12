@@ -52,6 +52,11 @@ x-fasterrag-common: &fasterrag-common
     - ./config.yaml:/app/config.yaml:ro
     - fasterrag_state:/app/.fasterrag
   restart: unless-stopped
+  # CRITICAL: a stop waits `reliability.shutdown_grace_seconds` (default 20) for running
+  # ingestion jobs, then cancels and settles the rest, before it closes anything. Docker's
+  # default of 10 s killed the process halfway through that drain. Keep this at least ten
+  # seconds above the setting; tests/unit/config/test_overrides.py holds the two together.
+  stop_grace_period: 30s
 
 services:
   api:
