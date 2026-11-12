@@ -90,13 +90,14 @@ async def run_serve(args: argparse.Namespace, console: Console) -> ExitCode:
     if settings.observability.dashboard:
         from fasterrag.observability.dashboard import create_dashboard
 
+        dashboard_host = settings.observability.dashboard_host
         dashboard_port = settings.observability.dashboard_port
-        console.emit(f"dashboard on http://{host}:{dashboard_port} (read-only)")
+        console.emit(f"dashboard on http://{dashboard_host}:{dashboard_port} (read-only)")
         servers.append(
             uvicorn.Server(
                 uvicorn.Config(
                     create_dashboard(settings),
-                    host=host,
+                    host=dashboard_host,
                     port=dashboard_port,
                     log_level=settings.app.log_level,
                 )

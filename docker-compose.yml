@@ -105,7 +105,7 @@ services:
     # dashboard's name. Leaving the API on its own port also keeps the image's HEALTHCHECK
     # meaningful: it probes 8000, which this container does bind.
     environment:
-      FASTERRAG_SET: vector_db.host=qdrant,observability.dashboard=true
+      FASTERRAG_SET: vector_db.host=qdrant,observability.dashboard=true,observability.dashboard_host=0.0.0.0
     ports:
       # CRITICAL: loopback, and not negotiable. The dashboard is read-only but renders
       # prompts and responses verbatim, so exposing it publicly publishes the corpus.

@@ -48,7 +48,7 @@ It is built from the lockfile: `uv sync --locked` installs exactly what `uv.lock
 | Port | Component | Exposure guidance |
 |---|---|---|
 | 8000 | fasterRag API | Behind a reverse proxy with TLS; auth on (`security.auth: true`). |
-| 8080 | Dashboard | Internal network only; it is read-only but still shows prompts/responses. |
+| 8080 | Dashboard | Internal network only; it is read-only but still shows prompts/responses. Bound by `observability.dashboard_host` (default `127.0.0.1`), not by `app.host`. |
 | 6333 + 6334 | Qdrant REST + gRPC | Private network only; API-key auth. Both ports required. |
 | 3000 | Langfuse web | The only publicly-exposed Langfuse component (by Langfuse's design); protect with its auth. |
 | 3030, 5432, 6379, 8123/9000, 9090/9091 | Langfuse worker, Postgres, Redis, ClickHouse, MinIO | Never exposed publicly; compose-internal network. |

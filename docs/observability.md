@@ -13,7 +13,7 @@ A read-only web GUI that lets the user inspect:
 - **Complete LLM inputs/outputs history** — every prompt and response persisted by the trace store (D8), browsable and searchable for later review.
 - Queue depth, DLQ depth, circuit-breaker states, degraded-mode counts, drift warnings.
 
-Hard rules: toggleable via `observability.dashboard` (default `false`); binds `observability.dashboard_port` (default 8080); **observability-only and never controls the RAG** — it contains no button, form, or endpoint that mutates system state.
+Hard rules: toggleable via `observability.dashboard` (default `false`); binds `observability.dashboard_host` (default `127.0.0.1`, independent of `app.host` since TASK-0460) on `observability.dashboard_port` (default 8080); **observability-only and never controls the RAG** — it contains no button, form, or endpoint that mutates system state.
 
 **Shipped** (TASK-0045). Three properties are enforced rather than promised:
 

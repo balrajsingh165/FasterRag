@@ -178,6 +178,8 @@ observability:
   otel_endpoint: null
   langfuse: false
   grafana: false
+  # Loopback by default and separate from app.host: the dashboard shows prompts and corpus text.
+  dashboard_host: 127.0.0.1
 
 security:
   auth: false

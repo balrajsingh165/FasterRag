@@ -185,6 +185,7 @@ observability:
   otel_endpoint: null
   langfuse: false
   grafana: false
+  dashboard_host: 127.0.0.1
 
 security:
   auth: false
@@ -210,7 +211,7 @@ security:
 
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
-| `app.host` | str | `127.0.0.1` | valid IPv4/IPv6 address or hostname | Bind address for the API server and the dashboard. Loopback by default, because `security.auth` defaults to `false`: an unauthenticated API must not be reachable from other machines unless an operator says so. The container image passes `--host 0.0.0.0` explicitly and publishes on `127.0.0.1`; set this to a routable address only together with `security.auth: true`. `fasterrag serve` logs a warning when it binds a non-loopback address with auth off. |
+| `app.host` | str | `127.0.0.1` | valid IPv4/IPv6 address or hostname | Bind address for the API server (the dashboard has its own, `observability.dashboard_host`). Loopback by default, because `security.auth` defaults to `false`: an unauthenticated API must not be reachable from other machines unless an operator says so. The container image passes `--host 0.0.0.0` explicitly and publishes on `127.0.0.1`; set this to a routable address only together with `security.auth: true`. `fasterrag serve` logs a warning when it binds a non-loopback address with auth off. |
 | `app.port` | int | `8000` | 1–65535 | API server port. |
 | `app.log_level` | str | `info` | one of `debug`, `info`, `warning`, `error` | Structured-log verbosity. |
 
@@ -481,6 +482,7 @@ All integration toggles default `false`.
 | `observability.otel_endpoint` | str\|null | `null` | valid URL when `otel: true` | The collector's OTLP/HTTP endpoint, taken as a **base URL**: `/v1/traces` and `/v1/metrics` are derived from it, exactly as the OpenTelemetry specification treats `OTEL_EXPORTER_OTLP_ENDPOINT`. Set it to `http://collector:4318`, not to a signal path — one setting feeds both exporters and no single signal path can serve both. A value that already ends in `/v1/traces`, `/v1/metrics`, or `/v1/logs` has that path replaced rather than appended to, so configurations written against earlier docs keep working. |
 | `observability.langfuse` | bool | `false` | — | Flipping to `true` auto-provisions self-hosted Langfuse v3 (Docker Compose stack), performs all configuration incl. headless bootstrap, and returns the running URL `http://<host>:3000`. **No application-code changes at toggle time.** Gated by `fasterrag doctor`. See [observability.md](observability.md). |
 | `observability.grafana` | bool | `false` | — | Flipping to `true` auto-provisions Grafana via provisioning-as-code (datasources + dashboards read at startup; UI read-only for provisioned resources). No manual clicks; no code changes. Gated by `fasterrag doctor`. |
+| `observability.dashboard_host` | str | `127.0.0.1` | valid IPv4/IPv6 address or hostname | Dashboard bind address, **independent of `app.host`** (TASK-0460). Until 2026-11-12 the dashboard bound whatever the API bound, so `serve --host 0.0.0.0` exposed the corpus view as well, despite the dashboard being documented as separately bindable. It renders prompts, responses and corpus text verbatim, so it stays on loopback unless an operator widens it here; the compose `dashboard` service sets `0.0.0.0` inside its container and publishes on the host's loopback. |
 
 ## `security`
 

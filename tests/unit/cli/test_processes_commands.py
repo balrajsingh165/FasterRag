@@ -128,6 +128,33 @@ def test_the_dashboard_runs_beside_the_api_on_its_own_port(
     assert "dashboard on http://127.0.0.1:8123 (read-only)" in capsys.readouterr().out
 
 
+def test_the_dashboard_keeps_its_own_loopback_bind_when_the_api_widens(
+    tmp_path: Path, uvicorn_stub: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It reused the API's host, so `--host 0.0.0.0` exposed the corpus view too (TASK-0460)."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "test-key-long-enough")
+    config = write_config(tmp_path, "security:\n  auth: true\nobservability:\n  dashboard: true\n")
+
+    main(["serve", "--config", config, "--host", "10.0.0.5"])
+
+    hosts = [built["host"] for built in FakeConfig.built]
+    assert hosts == ["10.0.0.5", "127.0.0.1"]
+
+
+def test_the_dashboard_binds_the_host_configured_for_it(
+    tmp_path: Path, uvicorn_stub: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FASTERRAG_API_KEY", "test-key-long-enough")
+    config = write_config(
+        tmp_path,
+        "security:\n  auth: true\nobservability:\n  dashboard: true\n  dashboard_host: 10.0.0.9\n",
+    )
+
+    main(["serve", "--config", config])
+
+    assert [built["host"] for built in FakeConfig.built] == ["127.0.0.1", "10.0.0.9"]
+
+
 def test_the_dashboard_is_off_unless_configured_on(
     config: str, uvicorn_stub: types.ModuleType
 ) -> None:

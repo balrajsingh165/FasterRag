@@ -796,6 +796,21 @@ class ObservabilitySettings(Section):
     langfuse: bool = False
     grafana: bool = False
 
+    # CRITICAL: loopback by default and independent of `app.host`. The dashboard renders
+    # prompts, responses and corpus text verbatim, so widening the API's bind for callers
+    # must not widen the dashboard's with it (TASK-0460).
+    dashboard_host: str = "127.0.0.1"
+
+    @field_validator("dashboard_host")
+    @classmethod
+    def _check_dashboard_host(cls, value: str) -> str:
+        """Require a valid IP address or hostname, by the rule ``app.host`` follows."""
+        if not value.strip():
+            raise ValueError("must not be empty")
+        if _is_ip_address(value) or _HOSTNAME_RE.match(value):
+            return value
+        raise ValueError(f"{value!r} is not a valid IP address or hostname")
+
     @field_validator("otel_endpoint")
     @classmethod
     def _check_endpoint(cls, value: str | None) -> str | None:
