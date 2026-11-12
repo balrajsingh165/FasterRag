@@ -138,3 +138,37 @@ def test_build_problem_omits_absent_members() -> None:
 
     assert document.instance is None
     assert "instance" not in document.model_dump(mode="json", exclude_none=True)
+
+
+def test_instance_is_the_callers_own_path_without_its_query_string(client: TestClient) -> None:
+    """Pins the TASK-0460 decision: `instance` echoes only what this caller already sent.
+
+    The query string is where a token pasted into a URL would sit, so it is not echoed.
+    """
+    response = client.get("/v1/collections/absent-name?token=should-not-echo")
+
+    body = response.json()
+    assert body["instance"] == "/v1/collections/absent-name"
+    assert "should-not-echo" not in response.text
+
+
+def test_a_tenant_never_sees_the_backend_name_in_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scoped `<tenant>__<name>` is resolved below the router and never reaches `instance`."""
+    from tests.unit.api.conftest import StubVectorDB
+
+    secret = "instance-tenant-key-0001"
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{secret}:collections:acme")
+    app = create_app(Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}}))
+    app.state.vector_db = StubVectorDB()
+
+    with TestClient(app) as tenant:
+        response = tenant.get(
+            "/v1/collections/missing",
+            headers={"Authorization": f"Bearer {secret}", "X-Tenant-ID": "acme"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["instance"] == "/v1/collections/missing"
+    assert "acme__" not in response.text
