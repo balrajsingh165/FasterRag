@@ -12,11 +12,18 @@ keeps only the FastAPI wrappers that read ``app.state``.
 What is built here per call is cheap: a service object over process-scoped parts. The parts
 that hold connections or models — the vector database adapter, the embedding router, the
 semantic cache and the LLM adapter — are built once by the entry point and passed in.
+
+The services themselves stay per call, deliberately. ``GenerationService`` carries the
+caller's tenant and the candidates of the query in flight, so one instance shared by
+concurrent requests would answer one tenant with another's state; the cost governor and the
+circuit breakers it uses are already process-wide. What a query rebuilt and should not have
+was the provider client, so that is what an entry point now lends (TASK-0466).
 """
 
 from __future__ import annotations
 
 from fasterrag.adapters.embeddings.tiering import TieringRouter
+from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.adapters.llm.factory import create_llm_adapter
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.config.schema import Settings
@@ -70,16 +77,22 @@ def build_generation(
     cache: SemanticCache | None = None,
     traces: TraceStore | None = None,
     tenant: str | None = None,
+    *,
+    llm: LLMAdapter | None = None,
 ) -> GenerationService:
-    """Assemble the query path every entry point uses, so no two of them can diverge."""
+    """Assemble the query path every entry point uses, so no two of them can diverge.
+
+    A lent ``llm`` stays the lender's to close; without one the service builds and owns one.
+    """
     return GenerationService(
         settings,
         build_retrieval(settings, adapter, router, tenant),
-        create_llm_adapter(settings),
+        create_llm_adapter(settings) if llm is None else llm,
         cache=cache,
         traces=traces,
         tenant=tenant,
         embedder=router.default,
+        owns_llm=llm is None,
     )
 
 

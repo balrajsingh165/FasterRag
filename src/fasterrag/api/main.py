@@ -215,10 +215,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await pusher.close()
             app.state.metric_pusher = None
 
-        # CRITICAL: the embedding router and the semantic cache are process-scoped, built
-        # lazily on first use and released only here. Closing either from a request handler
-        # would unload a model or drop a backend connection that concurrent requests are
-        # still using.
+        # CRITICAL: the embedding router, the semantic cache and the LLM adapter are
+        # process-scoped, built lazily on first use and released only here. Closing any of
+        # them from a request handler would unload a model or drop a backend connection
+        # that concurrent requests are still using.
+        llm = getattr(app.state, "llm", None)
+        if llm is not None:
+            await llm.close()
+            app.state.llm = None
+
         embeddings = getattr(app.state, "embeddings", None)
         if embeddings is not None:
             await embeddings.close()

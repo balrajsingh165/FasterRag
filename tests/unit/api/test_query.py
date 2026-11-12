@@ -96,7 +96,7 @@ def generation(monkeypatch: pytest.MonkeyPatch, app: FastAPI) -> StubGeneration:
     monkeypatch.setattr(
         query_router,
         "build_generation",
-        lambda settings, adapter, router, cache=None, traces=None, tenant=None: service,
+        lambda settings, adapter, router, cache=None, traces=None, tenant=None, llm=None: service,
     )
     return service
 
@@ -108,7 +108,7 @@ def install_generation(
     monkeypatch.setattr(
         query_router,
         "build_generation",
-        lambda settings, adapter, router, cache=None, traces=None, tenant=None: service,
+        lambda settings, adapter, router, cache=None, traces=None, tenant=None, llm=None: service,
     )
     return service
 
@@ -291,7 +291,7 @@ def test_a_streamed_query_over_the_budget_is_a_402_problem_not_an_event_stream(
     monkeypatch.setattr(
         query_router,
         "build_generation",
-        lambda settings, adapter, router, cache=None, traces=None, tenant=None: service,
+        lambda settings, adapter, router, cache=None, traces=None, tenant=None, llm=None: service,
     )
 
     response = client.post("/v1/query", json={"query": "notice period?", "stream": True})
@@ -326,7 +326,7 @@ def test_a_streamed_query_whose_provider_is_down_still_ends_with_done(
     monkeypatch.setattr(
         query_router,
         "build_generation",
-        lambda settings, adapter, router, cache=None, traces=None, tenant=None: service,
+        lambda settings, adapter, router, cache=None, traces=None, tenant=None, llm=None: service,
     )
 
     response = client.post("/v1/query", json={"query": "notice period?", "stream": True})

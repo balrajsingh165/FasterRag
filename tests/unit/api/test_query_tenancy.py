@@ -13,7 +13,7 @@ import hashlib
 import re
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import pytest
 from fastapi import FastAPI
@@ -388,6 +388,31 @@ def test_scoped_query_answers_from_one_tenants_chunks(scoped_client: TestClient)
     assert ACME_TEXT in body["answer"]
     assert GLOBEX_TEXT not in body["answer"]
     assert [citation["chunk_id"] for citation in body["citations"]] == ["c_acme"]
+
+
+def test_two_tenants_answered_through_one_shared_llm_each_see_only_their_own(
+    scoped_client: TestClient,
+) -> None:
+    """The provider is the application's since TASK-0466; the tenant still travels per request."""
+    state = cast(FastAPI, scoped_client.app).state
+    answers: dict[str, str] = {}
+    providers: list[object] = []
+    for key, tenant in ((ACME_KEY, "acme"), (GLOBEX_KEY, "globex")):
+        response = scoped_client.post(
+            "/v1/query",
+            json={"query": "thirty days", "stream": False},
+            headers=_headers(key, tenant),
+        )
+        assert response.status_code == 200
+        answers[tenant] = _body(response)["answer"]
+        providers.append(state.llm)
+
+    assert isinstance(providers[0], EchoLLM)
+    assert providers[0] is providers[1]
+    assert ACME_TEXT in answers["acme"]
+    assert GLOBEX_TEXT not in answers["acme"]
+    assert GLOBEX_TEXT in answers["globex"]
+    assert ACME_TEXT not in answers["globex"]
 
 
 def test_each_tenant_sees_only_its_own(scoped_client: TestClient) -> None:

@@ -3,9 +3,10 @@
 Only wrappers live here. The services themselves are assembled by
 :mod:`fasterrag.services.composition`, which the CLI and the facade call too; this module
 hands that code the process-scoped parts the application holds — the vector database
-adapter, the journal, the embedding router, the semantic cache — and the tenant the auth
-middleware resolved. Routers hold zero business logic (``docs/structure.md``), which in
-practice means they receive a ready service and return whatever it produced.
+adapter, the journal, the embedding router, the semantic cache, the LLM adapter — and the
+tenant the auth middleware resolved. Routers hold zero business logic
+(``docs/structure.md``), which in practice means they receive a ready service and return
+whatever it produced.
 """
 
 from __future__ import annotations
@@ -15,9 +16,11 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from fasterrag.adapters.embeddings.tiering import TieringRouter
+from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache.semantic import SemanticCache
+from fasterrag.services import composition
 from fasterrag.services.composition import create_embedding_router, create_semantic_cache
 from fasterrag.services.jobs import JobRegistry
 from fasterrag.services.journal import Journal, create_journal
@@ -27,6 +30,7 @@ __all__ = [
     "CurrentCache",
     "CurrentEmbeddings",
     "CurrentJobs",
+    "CurrentLLM",
     "CurrentSettings",
     "CurrentTenant",
     "CurrentVectorDB",
@@ -39,6 +43,7 @@ __all__ = [
     "get_vector_db",
     "shared_cache",
     "shared_embedding_router",
+    "shared_llm",
 ]
 
 
@@ -94,6 +99,15 @@ def shared_cache(request: Request) -> SemanticCache:
     return cache
 
 
+def shared_llm(request: Request) -> LLMAdapter:
+    """Return the application's long-lived LLM adapter, closed only by the lifespan."""
+    llm: LLMAdapter | None = getattr(request.app.state, "llm", None)
+    if llm is None:
+        llm = composition.create_llm_adapter(request.app.state.settings)
+        request.app.state.llm = llm
+    return llm
+
+
 def current_tenant(request: Request) -> str | None:
     """Return the tenant the auth middleware resolved for this request.
 
@@ -109,6 +123,7 @@ CurrentSettings = Annotated[Settings, Depends(get_settings)]
 CurrentVectorDB = Annotated[VectorDBAdapter, Depends(get_vector_db)]
 CurrentEmbeddings = Annotated[TieringRouter, Depends(shared_embedding_router)]
 CurrentCache = Annotated[SemanticCache, Depends(shared_cache)]
+CurrentLLM = Annotated[LLMAdapter, Depends(shared_llm)]
 JournalDep = Annotated[Journal, Depends(get_journal)]
 CurrentJobs = Annotated[JobRegistry, Depends(get_jobs)]
 AcceptingJobs = Annotated[JobRegistry, Depends(accepting_jobs)]
