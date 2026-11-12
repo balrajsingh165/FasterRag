@@ -4,6 +4,12 @@ One narrow interface — get, set, delete, clear, items, close — over the back
 ``embeddings.cache.backend`` and ``cache.backend`` name. Values are opaque bytes so a
 backend never has to know whether it is holding a vector or an answer.
 
+``get_many`` and ``set_many`` exist because the embedding cache is consulted a batch at a
+time: sixty-four texts resolved one ``get`` each are sixty-four thread hops on disk and
+sixty-four round trips to Redis before the provider is even asked. Both have a default that
+loops over ``get`` and ``set``, so a backend that only implements the single-key calls is
+still correct, merely not fast; every backend in this package overrides them.
+
 Expiry is stored *inside* the value rather than delegated to the backend, because the three
 backends disagree about it: memory has none, disk has none, and Redis has its own. Reading
 the deadline back from the payload means an entry that outlived its TTL is a miss on every
@@ -22,6 +28,7 @@ import struct
 import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Final
@@ -100,6 +107,15 @@ class CacheStore(ABC):
     async def set(self, key: str, value: bytes, *, ttl: int | None = None) -> None:
         """Store ``value`` under ``key`` for ``ttl`` seconds, or forever if ``None``."""
 
+    async def get_many(self, keys: Sequence[str]) -> list[bytes | None]:
+        """Return the value for each of ``keys`` in order, ``None`` where absent or expired."""
+        return [await self.get(key) for key in keys]
+
+    async def set_many(self, entries: Mapping[str, bytes], *, ttl: int | None = None) -> None:
+        """Store every entry in ``entries`` for ``ttl`` seconds, or forever if ``None``."""
+        for key, value in entries.items():
+            await self.set(key, value, ttl=ttl)
+
     @abstractmethod
     async def delete(self, key: str) -> None:
         """Remove ``key``, whether or not it was present."""
@@ -130,23 +146,38 @@ class MemoryStore(CacheStore):
         self._maximum = maximum_entries
         self._lock = asyncio.Lock()
 
+    def _live(self, key: str) -> bytes | None:
+        """Return the live value for ``key`` and refresh its recency; the lock is held."""
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        if entry.expired:
+            del self._entries[key]
+            return None
+        self._entries.move_to_end(key)
+        return entry.value
+
     async def get(self, key: str) -> bytes | None:
         """Return the value for ``key``, refreshing its recency."""
         async with self._lock:
-            entry = self._entries.get(key)
-            if entry is None:
-                return None
-            if entry.expired:
-                del self._entries[key]
-                return None
-            self._entries.move_to_end(key)
-            return entry.value
+            return self._live(key)
+
+    async def get_many(self, keys: Sequence[str]) -> list[bytes | None]:
+        """Return the value for each of ``keys`` under one acquisition of the lock."""
+        async with self._lock:
+            return [self._live(key) for key in keys]
 
     async def set(self, key: str, value: bytes, *, ttl: int | None = None) -> None:
         """Store ``value``, evicting the least recently used entry if full."""
+        await self.set_many({key: value}, ttl=ttl)
+
+    async def set_many(self, entries: Mapping[str, bytes], *, ttl: int | None = None) -> None:
+        """Store every entry under one acquisition of the lock, then evict down to the ceiling."""
+        deadline = deadline_for(ttl)
         async with self._lock:
-            self._entries[key] = Entry(value, deadline_for(ttl))
-            self._entries.move_to_end(key)
+            for key, value in entries.items():
+                self._entries[key] = Entry(value, deadline)
+                self._entries.move_to_end(key)
             while len(self._entries) > self._maximum:
                 self._entries.popitem(last=False)
 
@@ -185,6 +216,11 @@ class DiskStore(CacheStore):
         """Return the live entry in ``path``, deleting it if expired or corrupt."""
         try:
             entry = Entry.decode(path.read_bytes())
+        except FileNotFoundError:
+            # CRITICAL: an absent file is the ordinary miss, not a fault. Logging it at
+            # warning made every first-time chunk of an ingest write a line saying the
+            # cache was unreadable, which buried the one warning that would have meant it.
+            return None
         except OSError as exc:
             _logger.warning("cache entry unreadable", extra={"path": str(path), "error": str(exc)})
             return None
@@ -199,8 +235,30 @@ class DiskStore(CacheStore):
         entry = await asyncio.to_thread(self._read, self._path(key))
         return entry.value if entry else None
 
+    def _read_many(self, paths: Sequence[Path]) -> list[bytes | None]:
+        """Return the live value in each of ``paths``, in order."""
+        entries = [self._read(path) for path in paths]
+        return [entry.value if entry else None for entry in entries]
+
+    async def get_many(self, keys: Sequence[str]) -> list[bytes | None]:
+        """Return the value for each of ``keys``, reading them all in one worker thread."""
+        if not keys:
+            return []
+        return await asyncio.to_thread(self._read_many, [self._path(key) for key in keys])
+
     def _write(self, key: str, payload: bytes) -> None:
         """Write ``payload`` for ``key`` atomically, then evict down to the ceiling."""
+        self._store(key, payload)
+        self._evict()
+
+    def _write_many(self, payloads: Mapping[str, bytes]) -> None:
+        """Write every payload atomically, then evict once for the whole batch."""
+        for key, payload in payloads.items():
+            self._store(key, payload)
+        self._evict()
+
+    def _store(self, key: str, payload: bytes) -> None:
+        """Write ``payload`` for ``key`` through a temporary file and an atomic rename."""
         path = self._path(key)
         temporary = path.with_suffix(".tmp")
         try:
@@ -217,8 +275,6 @@ class DiskStore(CacheStore):
                 temporary.unlink(missing_ok=True)
             raise CacheError(f"could not write the cache entry at {path}: {exc}") from exc
 
-        self._evict()
-
     def _evict(self) -> None:
         """Delete the oldest files once the directory exceeds the entry ceiling."""
         files = sorted(self.root.glob("*.bin"), key=lambda path: path.stat().st_mtime)
@@ -228,6 +284,14 @@ class DiskStore(CacheStore):
     async def set(self, key: str, value: bytes, *, ttl: int | None = None) -> None:
         """Store ``value`` under ``key``, replacing any existing entry atomically."""
         await asyncio.to_thread(self._write, key, Entry(value, deadline_for(ttl)).encode())
+
+    async def set_many(self, entries: Mapping[str, bytes], *, ttl: int | None = None) -> None:
+        """Store every entry in one worker thread, evicting once at the end."""
+        if not entries:
+            return
+        deadline = deadline_for(ttl)
+        payloads = {key: Entry(value, deadline).encode() for key, value in entries.items()}
+        await asyncio.to_thread(self._write_many, payloads)
 
     async def delete(self, key: str) -> None:
         """Remove ``key``'s file if it exists."""

@@ -18,26 +18,38 @@ NAMESPACE = "test:cache"
 
 
 class FakeRedis:
-    """The subset of the redis-py async client RedisStore actually uses."""
+    """The subset of the redis-py async client RedisStore actually uses.
+
+    ``round_trips`` counts what a network would: one per command sent on its own, and one
+    per executed pipeline however many commands it carried.
+    """
 
     def __init__(self) -> None:
         self.values: dict[str, bytes] = {}
         self.scores: dict[str, dict[str, float]] = {}
         self.counters: dict[str, int] = {}
         self.expiries: dict[str, int | None] = {}
+        self.round_trips = 0
         self.closed = False
 
+    def pipeline(self, transaction: bool = True) -> "FakePipeline":
+        return FakePipeline(self, transaction)
+
     async def get(self, key: str) -> bytes | None:
+        self.round_trips += 1
         return self.values.get(key)
 
     async def mget(self, keys: list[str]) -> list[bytes | None]:
+        self.round_trips += 1
         return [self.values.get(key) for key in keys]
 
     async def set(self, key: str, value: bytes, ex: int | None = None) -> None:
+        self.round_trips += 1
         self.values[key] = value
         self.expiries[key] = ex
 
     async def delete(self, *keys: str) -> int:
+        self.round_trips += 1
         removed = 0
         for key in keys:
             self.expiries.pop(key, None)
@@ -48,27 +60,79 @@ class FakeRedis:
         return removed
 
     async def incr(self, key: str) -> int:
-        self.counters[key] = self.counters.get(key, 0) + 1
+        return await self.incrby(key, 1)
+
+    async def incrby(self, key: str, amount: int) -> int:
+        self.round_trips += 1
+        self.counters[key] = self.counters.get(key, 0) + amount
         return self.counters[key]
 
     async def zadd(self, index: str, mapping: dict[str, float]) -> int:
+        self.round_trips += 1
         self.scores.setdefault(index, {}).update(mapping)
         return len(mapping)
 
     async def zrem(self, index: str, *members: str) -> int:
+        self.round_trips += 1
         held = self.scores.get(index, {})
         return sum(1 for member in members if held.pop(member, None) is not None)
 
     async def zcard(self, index: str) -> int:
+        self.round_trips += 1
         return len(self.scores.get(index, {}))
 
     async def zrange(self, index: str, start: int, stop: int) -> list[bytes]:
+        self.round_trips += 1
         ordered = sorted(self.scores.get(index, {}).items(), key=lambda item: item[1])
         members = [member.encode("utf-8") for member, _ in ordered]
         return members[start:] if stop == -1 else members[start : stop + 1]
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class FakePipeline:
+    """Buffers commands and sends them as one round trip, in the order they were queued."""
+
+    def __init__(self, server: FakeRedis, transaction: bool) -> None:
+        self.server = server
+        self.transaction = transaction
+        self.queued: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    def _queue(self, name: str, *args: Any, **kwargs: Any) -> "FakePipeline":
+        self.queued.append((name, args, kwargs))
+        return self
+
+    def mget(self, keys: list[str]) -> "FakePipeline":
+        return self._queue("mget", keys)
+
+    def incrby(self, key: str, amount: int) -> "FakePipeline":
+        return self._queue("incrby", key, amount)
+
+    def zadd(self, index: str, mapping: dict[str, float]) -> "FakePipeline":
+        return self._queue("zadd", index, mapping)
+
+    def zrem(self, index: str, *members: str) -> "FakePipeline":
+        return self._queue("zrem", index, *members)
+
+    def zcard(self, index: str) -> "FakePipeline":
+        return self._queue("zcard", index)
+
+    def set(self, key: str, value: bytes, ex: int | None = None) -> "FakePipeline":
+        return self._queue("set", key, value, ex=ex)
+
+    def delete(self, *keys: str) -> "FakePipeline":
+        return self._queue("delete", *keys)
+
+    async def execute(self) -> list[Any]:
+        before = self.server.round_trips
+        try:
+            return [
+                await getattr(self.server, name)(*args, **kwargs)
+                for name, args, kwargs in self.queued
+            ]
+        finally:
+            self.server.round_trips = before + 1
 
 
 class BrokenRedis(FakeRedis):
@@ -81,6 +145,9 @@ class BrokenRedis(FakeRedis):
         raise ConnectionError("redis is down")
 
     async def incr(self, key: str) -> int:
+        raise ConnectionError("redis is down")
+
+    async def incrby(self, key: str, amount: int) -> int:
         raise ConnectionError("redis is down")
 
     async def zadd(self, index: str, mapping: dict[str, float]) -> int:
@@ -306,13 +373,17 @@ async def test_closing_a_downed_backend_does_not_raise() -> None:
     await store.close()
 
 
-@pytest.mark.parametrize("operation", ["get", "set", "delete", "clear", "items"])
+@pytest.mark.parametrize(
+    "operation", ["get", "get_many", "set", "set_many", "delete", "clear", "items"]
+)
 async def test_a_downed_backend_raises_a_typed_cache_error(operation: str) -> None:
     """Callers degrade to cache-off on CacheError alone; anything else fails the query."""
     store = RedisStore("redis://localhost", namespace=NAMESPACE, client=BrokenRedis())
     calls: dict[str, Callable[[], Awaitable[object]]] = {
         "get": lambda: store.get("k"),
+        "get_many": lambda: store.get_many(["k", "j"]),
         "set": lambda: store.set("k", b"v"),
+        "set_many": lambda: store.set_many({"k": b"v", "j": b"w"}),
         "delete": lambda: store.delete("k"),
         "clear": lambda: store.clear(),
         "items": lambda: store.items(),
@@ -400,3 +471,140 @@ async def test_eviction_is_least_recently_used_even_on_a_clock_that_never_ticks(
     assert await store.get("b") is None, "the least recently used entry survived"
     assert await store.get("a") == b"1", "a recently used entry was evicted"
     assert await store.get("c") == b"3"
+
+
+async def test_a_batch_reads_back_in_the_order_it_was_asked_for(store: RedisStore) -> None:
+    await store.set_many({"a": b"1", "b": b"2", "c": b"3"})
+
+    assert await store.get_many(["c", "absent", "a", "b"]) == [b"3", None, b"1", b"2"]
+
+
+async def test_a_batch_write_is_readable_one_key_at_a_time(store: RedisStore) -> None:
+    await store.set_many({"a": b"1", "b": b"2"})
+
+    assert await store.get("a") == b"1"
+    assert sorted(key for key, _ in await store.items()) == ["a", "b"]
+
+
+async def test_an_empty_batch_sends_nothing(store: RedisStore, client: FakeRedis) -> None:
+    await store.set_many({})
+
+    assert await store.get_many([]) == []
+    assert client.round_trips == 0
+
+
+@pytest.mark.parametrize("size", [1, 64, 500])
+async def test_a_batch_read_costs_two_round_trips_whatever_its_size(
+    store: RedisStore, client: FakeRedis, size: int
+) -> None:
+    """One key at a time, a batch of sixty-four was over a hundred round trips."""
+    keys = [f"k{index}" for index in range(size)]
+    await store.set_many(dict.fromkeys(keys[::2], b"v"))
+    client.round_trips = 0
+
+    values = await store.get_many(keys)
+
+    assert values == [b"v" if index % 2 == 0 else None for index in range(size)]
+    assert client.round_trips == 2
+
+
+@pytest.mark.parametrize("size", [1, 64, 500])
+async def test_a_batch_write_costs_two_round_trips_whatever_its_size(
+    store: RedisStore, client: FakeRedis, size: int
+) -> None:
+    await store.set_many({f"k{index}": b"v" for index in range(size)})
+
+    assert client.round_trips == 2
+    assert len(await store.items()) == size
+
+
+async def test_a_batch_write_hands_each_ttl_to_redis(store: RedisStore, client: FakeRedis) -> None:
+    await store.set_many({"a": b"1", "b": b"2"}, ttl=60)
+
+    assert client.expiries[f"{NAMESPACE}:entry:a"] == 60
+    assert client.expiries[f"{NAMESPACE}:entry:b"] == 60
+
+
+async def test_a_batch_read_treats_an_expired_entry_as_a_miss_and_prunes_it(
+    store: RedisStore, client: FakeRedis
+) -> None:
+    await store.set_many({"dead": b"1"}, ttl=1)
+    await store.set_many({"live": b"2"}, ttl=60)
+    time.sleep(1.05)
+
+    assert await store.get_many(["dead", "live"]) == [None, b"2"]
+    assert f"{NAMESPACE}:entry:dead" not in client.values
+    assert list(client.scores[f"{NAMESPACE}:index"]) == ["live"]
+
+
+async def test_a_batch_read_prunes_the_index_of_entries_redis_dropped(
+    store: RedisStore, client: FakeRedis
+) -> None:
+    """A natively expired key leaves its member behind; a batch read must clean it up too."""
+    await store.set_many({"k": b"value"}, ttl=60)
+    del client.values[f"{NAMESPACE}:entry:k"]
+
+    assert await store.get_many(["k"]) == [None]
+    assert client.scores[f"{NAMESPACE}:index"] == {}
+
+
+async def test_a_batch_write_never_exceeds_the_ceiling(client: FakeRedis) -> None:
+    store = RedisStore("redis://localhost", namespace=NAMESPACE, maximum_entries=3, client=client)
+
+    await store.set_many({f"k{index}": b"v" for index in range(20)})
+
+    assert sorted(key for key, _ in await store.items()) == ["k17", "k18", "k19"]
+    assert len(client.values) == 3
+
+
+async def test_a_batch_read_restacks_its_hits_as_recently_used(client: FakeRedis) -> None:
+    """Eviction after a batch read must spare what the batch just used."""
+    store = RedisStore("redis://localhost", namespace=NAMESPACE, maximum_entries=3, client=client)
+    await store.set_many({"a": b"1", "b": b"2", "c": b"3"})
+    await store.get_many(["a", "b"])
+
+    await store.set_many({"d": b"4"})
+
+    assert await store.get_many(["a", "b", "c", "d"]) == [b"1", b"2", None, b"4"]
+
+
+async def test_a_batch_is_piped_without_a_transaction(
+    store: RedisStore, client: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Index-first ordering is the safety argument; MULTI would only add a failure mode."""
+    opened: list[bool] = []
+    real = client.pipeline
+
+    def recording(transaction: bool = True) -> FakePipeline:
+        opened.append(transaction)
+        return real(transaction)
+
+    monkeypatch.setattr(client, "pipeline", recording)
+
+    await store.set_many({"a": b"1"})
+    await store.get_many(["a"])
+
+    assert opened == [False, False, False]
+
+
+async def test_a_batch_write_indexes_each_key_before_writing_its_value(
+    store: RedisStore, client: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A value with no index member is invisible to the ceiling, to items and to clear."""
+    order: list[str] = []
+    real_zadd, real_set = client.zadd, client.set
+
+    async def zadd(index: str, mapping: dict[str, float]) -> int:
+        order.append("index")
+        return await real_zadd(index, mapping)
+
+    async def set_value(key: str, value: bytes, ex: int | None = None) -> None:
+        order.append("value")
+        await real_set(key, value, ex=ex)
+
+    monkeypatch.setattr(client, "zadd", zadd)
+    monkeypatch.setattr(client, "set", set_value)
+
+    await store.set_many({"a": b"1", "b": b"2"})
+
+    assert order == ["index", "value", "value"]

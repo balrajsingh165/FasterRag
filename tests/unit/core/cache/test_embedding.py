@@ -1,5 +1,5 @@
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import pytest
 
@@ -73,6 +73,36 @@ class BrokenStore(MemoryStore):
 
     async def set(self, key: str, value: bytes, *, ttl: int | None = None) -> None:
         raise CacheError("backend is unreachable")
+
+    async def get_many(self, keys: Sequence[str]) -> list[bytes | None]:
+        raise CacheError("backend is unreachable")
+
+    async def set_many(self, entries: Mapping[str, bytes], *, ttl: int | None = None) -> None:
+        raise CacheError("backend is unreachable")
+
+
+class RecordingStore(MemoryStore):
+    """Counts the calls the adapter makes, by name."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    async def get(self, key: str) -> bytes | None:
+        self.calls.append("get")
+        return await super().get(key)
+
+    async def set(self, key: str, value: bytes, *, ttl: int | None = None) -> None:
+        self.calls.append("set")
+        await super().set(key, value, ttl=ttl)
+
+    async def get_many(self, keys: Sequence[str]) -> list[bytes | None]:
+        self.calls.append("get_many")
+        return await super().get_many(keys)
+
+    async def set_many(self, entries: Mapping[str, bytes], *, ttl: int | None = None) -> None:
+        self.calls.append("set_many")
+        await super().set_many(entries, ttl=ttl)
 
 
 class OtherProviderEmbedder(CountingEmbedder):
@@ -345,3 +375,84 @@ async def test_an_empty_batch_never_calls_the_provider() -> None:
 
     assert result.vectors == []
     assert inner.calls == 0
+
+
+async def test_a_batch_costs_one_store_read_and_one_store_write() -> None:
+    """Each text was its own get and its own set, awaited one after another."""
+    store = RecordingStore()
+    adapter, _ = build(store)
+
+    await adapter.embed_documents([f"text {index}" for index in range(64)])
+
+    assert store.calls == ["get_many", "set_many"]
+
+
+async def test_a_fully_cached_batch_costs_one_store_read_and_no_write() -> None:
+    store = RecordingStore()
+    adapter, _ = build(store)
+    texts = [f"text {index}" for index in range(64)]
+    await adapter.embed_documents(texts)
+    store.calls.clear()
+
+    await adapter.embed_documents(texts)
+
+    assert store.calls == ["get_many"]
+
+
+async def test_a_text_repeated_inside_a_batch_reaches_the_provider_once() -> None:
+    adapter, inner = build()
+
+    result = await adapter.embed_documents(["a", "b", "a", "a"])
+
+    assert inner.embedded == ["a", "b"]
+    assert result.vectors[0] == result.vectors[2] == result.vectors[3]
+    assert result.vectors[1] == pytest.approx(inner._vector("b"))
+
+
+async def test_a_provider_returning_the_wrong_number_of_vectors_is_a_typed_error() -> None:
+    """A short reply surfaced as a bare ValueError, which the embedding pool does not catch."""
+
+    class ShortEmbedder(CountingEmbedder):
+        async def embed_documents(self, texts: Sequence[str]) -> EmbeddingResult:
+            result = await super().embed_documents(texts)
+            return EmbeddingResult(
+                vectors=result.vectors[:-1], model=result.model, model_version=result.model_version
+            )
+
+    store = MemoryStore()
+    adapter = CachingEmbeddingAdapter(ShortEmbedder(Settings()), store)
+
+    with pytest.raises(EmbedError, match="returned 1 vectors for 2 texts"):
+        await adapter.embed_documents(["a", "b"])
+
+    assert await store.items() == []
+
+
+async def test_a_cache_that_fails_only_on_write_still_returns_the_vectors() -> None:
+    class ReadOnlyStore(MemoryStore):
+        async def set_many(self, entries: Mapping[str, bytes], *, ttl: int | None = None) -> None:
+            raise CacheError("the disk is full")
+
+    adapter, inner = build(ReadOnlyStore())
+
+    result = await adapter.embed_documents(["a", "b"])
+
+    assert result.vectors == [inner._vector("a"), inner._vector("b")]
+    assert adapter.stats.errors == 1
+
+
+async def test_a_store_that_answers_a_batch_with_too_few_values_is_stepped_past() -> None:
+    """A misbehaving backend must cost a provider call, never a mismatched batch."""
+
+    class ShortStore(MemoryStore):
+        async def get_many(self, keys: Sequence[str]) -> list[bytes | None]:
+            return (await super().get_many(keys))[:-1]
+
+    adapter, inner = build(ShortStore())
+    await adapter.embed_documents(["a", "b"])
+
+    result = await adapter.embed_documents(["a", "b"])
+
+    assert result.vectors == [inner._vector("a"), inner._vector("b")]
+    assert inner.embedded == ["a", "b", "a", "b"]
+    assert adapter.stats.errors == 2
