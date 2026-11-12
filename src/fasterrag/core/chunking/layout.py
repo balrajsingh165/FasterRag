@@ -5,8 +5,9 @@ whole whenever it fits. A chunk that begins at a heading carries its own context
 table split down the middle loses the header row that gave its cells meaning — those two
 properties are what layout awareness buys.
 
-Blocks too large to fit are split recursively, so a giant table degrades to row groups
-rather than to arbitrary character windows.
+Blocks too large to fit are split recursively and the pieces packed back up to the chunk
+size, so a giant table degrades to row groups rather than to arbitrary character windows,
+and a long paragraph to full chunks rather than to one chunk per sentence.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from fasterrag.core.chunking.models import (
     assemble,
     within_budget,
 )
-from fasterrag.core.chunking.recursive import split_span
+from fasterrag.core.chunking.recursive import pack, split_span
 from fasterrag.core.parsing.models import ParsedDocument
 
 __all__ = ["LayoutChunker"]
@@ -54,7 +55,7 @@ class LayoutChunker:
                 text,
                 within_budget(
                     text,
-                    split_span(text, 0, len(text), self._limit),
+                    pack(split_span(text, 0, len(text), self._limit), self._limit),
                     counter=self._counter,
                     budget=self._budget,
                     limit=self._limit,
@@ -105,7 +106,10 @@ class LayoutChunker:
             oversized = end - start > self._limit
 
             if oversized:
-                segments.extend(split_span(text, start, end, self._limit))
+                pieces = split_span(text, start, end, self._limit)
+                if segments and not starts_section:
+                    pieces.insert(0, segments.pop())
+                segments.extend(pack(pieces, self._limit))
                 continue
 
             if segments and not starts_section and end - segments[-1][0] <= self._limit:
