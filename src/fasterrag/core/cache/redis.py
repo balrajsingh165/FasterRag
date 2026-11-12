@@ -30,6 +30,15 @@ transactions — the index-first order above is what keeps an interrupted batch 
 ``MULTI`` would only add a failure mode. Sequence numbers for a batch are reserved with one
 ``INCRBY``, so recency within it follows the order the caller gave.
 
+**Every call is bounded by ``reliability.timeouts.redis_ms``** (TASK-0453). The client is
+built with that budget as its socket and connect timeout, so a server that accepts the
+connection and never answers costs one bounded wait and a ``CacheError`` — the same miss a
+stopped server produces — rather than whatever the installed redis-py defaults to: no
+timeout at all in the 5.x releases ``pyproject.toml`` still admits, five seconds in the
+release ``uv.lock`` pins. A single ``get`` or ``set`` goes through the same pipelines as a
+batch: a hit is two round trips, not the three a ``GET``, ``INCR`` and ``ZADD`` sent one at a
+time used to cost, and a write is two where it was four.
+
 TTL is written twice: into the payload, where ``Entry`` holds the deadline that makes an
 expired entry a miss on every backend, and as the key's native expiry, so Redis reclaims the
 memory instead of holding a dead payload until something happens to read it.
@@ -45,14 +54,22 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Final
 
+from fasterrag.config.schema import TimeoutSettings
 from fasterrag.core.cache.store import MAXIMUM_ENTRIES, CacheStore, Entry, deadline_for
 from fasterrag.errors import CacheError, ConfigError
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["EMBEDDING_NAMESPACE", "SEMANTIC_NAMESPACE", "RedisStore"]
+__all__ = [
+    "DEFAULT_REDIS_TIMEOUT_MS",
+    "EMBEDDING_NAMESPACE",
+    "SEMANTIC_NAMESPACE",
+    "RedisStore",
+    "bounded_client_options",
+]
 
 EMBEDDING_NAMESPACE: Final = "fasterrag:embedding"
 SEMANTIC_NAMESPACE: Final = "fasterrag:semantic"
+DEFAULT_REDIS_TIMEOUT_MS: Final = TimeoutSettings().redis_ms
 
 _logger = get_logger(__name__)
 
@@ -63,6 +80,12 @@ def _install_hint(setting: str) -> str:
         f"{setting} is 'redis', which needs the redis client; "
         "install it with 'pip install fasterrag[redis]'"
     )
+
+
+def bounded_client_options(timeout_ms: int) -> dict[str, Any]:
+    """Return the redis-py client options that bound one call to ``timeout_ms``."""
+    seconds = timeout_ms / 1000.0
+    return {"socket_timeout": seconds, "socket_connect_timeout": seconds}
 
 
 def _member(raw: object) -> str:
@@ -81,6 +104,7 @@ class RedisStore(CacheStore):
         maximum_entries: int = MAXIMUM_ENTRIES,
         setting: str = "cache.backend",
         client: Any | None = None,
+        timeout_ms: int = DEFAULT_REDIS_TIMEOUT_MS,
     ) -> None:
         """Build a store over ``url``, keeping its keys under ``namespace``."""
         self._namespace = namespace
@@ -109,7 +133,9 @@ class RedisStore(CacheStore):
             # replies to str mangles every one of them into an unparseable entry, which
             # reads as a permanent cache miss rather than as an error. A URL may ask for
             # decoding via its query string, so it is overridden here rather than trusted.
-            self._client = Redis.from_url(url, decode_responses=False)
+            self._client = Redis.from_url(
+                url, decode_responses=False, **bounded_client_options(timeout_ms)
+            )
         except ValueError as exc:
             raise ConfigError(
                 f"{setting} is 'redis' but the configured redis_url could not be parsed: {exc}"
@@ -131,17 +157,7 @@ class RedisStore(CacheStore):
 
     async def get(self, key: str) -> bytes | None:
         """Return the value for ``key``, refreshing its recency, or ``None`` on a miss."""
-        async with self._guard("read an entry"):
-            raw = await self._client.get(self._key(key))
-            entry = Entry.decode(raw) if isinstance(raw, bytes) else None
-            if entry is None or entry.expired:
-                if raw is not None:
-                    await self._client.delete(self._key(key))
-                await self._client.zrem(self._index, key)
-                return None
-
-            await self._touch(key)
-            return entry.value
+        return (await self.get_many([key]))[0]
 
     async def get_many(self, keys: Sequence[str]) -> list[bytes | None]:
         """Return the value for each of ``keys`` in two round trips, restacking every hit."""
@@ -182,11 +198,7 @@ class RedisStore(CacheStore):
 
     async def set(self, key: str, value: bytes, *, ttl: int | None = None) -> None:
         """Store ``value`` under ``key``, then evict down to the entry ceiling."""
-        payload = Entry(value, deadline_for(ttl)).encode()
-        async with self._guard("write an entry"):
-            await self._touch(key)
-            await self._client.set(self._key(key), payload, ex=ttl or None)
-            await self._evict()
+        await self.set_many({key: value}, ttl=ttl)
 
     async def set_many(self, entries: Mapping[str, bytes], *, ttl: int | None = None) -> None:
         """Store every entry in two round trips, then evict down to the entry ceiling."""
@@ -206,10 +218,6 @@ class RedisStore(CacheStore):
             results = await writing.execute()
 
             await self._evict(int(results[-1]))
-
-    async def _touch(self, key: str) -> None:
-        """Restack ``key`` as the most recently used entry."""
-        await self._client.zadd(self._index, {key: await self._client.incr(self._sequence)})
 
     async def _evict(self, held: int | None = None) -> None:
         """Drop the least recently used entries once the index exceeds the ceiling."""

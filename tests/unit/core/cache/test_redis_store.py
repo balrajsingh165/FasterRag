@@ -608,3 +608,26 @@ async def test_a_batch_write_indexes_each_key_before_writing_its_value(
     await store.set_many({"a": b"1", "b": b"2"})
 
     assert order == ["index", "value", "value"]
+
+
+async def test_a_single_hit_costs_two_round_trips(store: RedisStore, client: FakeRedis) -> None:
+    """A hit was GET, INCR and ZADD sent one at a time: three round trips (TASK-0453)."""
+    await store.set("k", b"value")
+    client.round_trips = 0
+
+    assert await store.get("k") == b"value"
+    assert client.round_trips == 2
+
+
+async def test_a_single_miss_costs_two_round_trips(store: RedisStore, client: FakeRedis) -> None:
+    await store.get("never-written")
+
+    assert client.round_trips == 2
+
+
+async def test_a_single_write_costs_two_round_trips(store: RedisStore, client: FakeRedis) -> None:
+    """A write was INCR, ZADD, SET and ZCARD sent one at a time: four round trips."""
+    await store.set("k", b"value", ttl=60)
+
+    assert client.round_trips == 2
+    assert client.expiries[f"{NAMESPACE}:entry:k"] == 60

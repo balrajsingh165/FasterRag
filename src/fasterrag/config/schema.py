@@ -685,6 +685,7 @@ class TimeoutSettings(Section):
     vector_db_ms: Annotated[int, Field(ge=100)] = 5000
     embeddings_ms: Annotated[int, Field(ge=100)] = 30000
     llm_ms: Annotated[int, Field(ge=1000)] = 120000
+    redis_ms: Annotated[int, Field(ge=10)] = 1000
 
 
 class RetrySettings(Section):
