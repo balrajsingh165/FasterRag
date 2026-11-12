@@ -2687,8 +2687,8 @@ Args:
 
 > Return the retrieval-affecting configuration a trace executed under.
 
-The same subset the index lockfile anchors on, plus the generation settings that change
-    an answer without changing what was retrieved. Replay compares these two snapshots to
+The same subset the index lockfile anchors on, plus the generation settings and the P1/P3
+    prompt template versions, which change an answer without changing what was retrieved. Replay compares these two snapshots to
     explain a difference, so anything omitted here is a difference replay cannot account for.
 
 ### `SpanRecorder`

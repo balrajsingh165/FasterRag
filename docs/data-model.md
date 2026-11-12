@@ -178,7 +178,7 @@ Persisted for every query when `traces.store: true`; the substrate for replay (D
 | `trace_id` | str | bare 32-hex lowercase OTel trace id; identical to the value in logs, spans, and problem responses |
 | `query` | str | Original query text |
 | `filters` | object\|null | Metadata filters applied |
-| `config_snapshot` | object | The retrieval-affecting config subset at execution time — what makes replay meaningful |
+| `config_snapshot` | object | The retrieval-affecting config subset at execution time, plus the P1/P3 prompt template versions under `prompts` — what makes replay meaningful |
 | `retrieved` | list[ScoredChunk] | Full candidate set with all leg scores, pre- and post-rerank ranks |
 | `prompt` | str | Exact assembled prompt sent to the LLM |
 | `response` | str | Exact response received |
