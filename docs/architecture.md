@@ -88,7 +88,7 @@ Design rationale (**not measurements** — no ledger entry isolates either stage
 
 | Cache | Keyed by | Notes |
 |---|---|---|
-| **Embedding cache** | content hash of text + model + version | Skips re-embedding identical chunks/queries; enabled by default. **Status (2026-11-11): implemented, not wired** — nothing constructs it, so no embedding call is served from cache today (TASK-0442). |
+| **Embedding cache** | provider + model + model version + configured dimensions + input type (document or query) + content hash of the text | Skips re-embedding identical chunks/queries; enabled by default. **Status (2026-11-11): implemented, not wired** — nothing constructs it, so no embedding call is served from cache today (TASK-0442). |
 | **Semantic response cache** | embedding similarity of the query (cosine threshold, typically **~0.92–0.97**) | A sufficiently similar previous query returns its cached answer without touching the pipeline. |
 | **Provider prompt caching** | provider-side | Used for contextual-enrichment (parent doc) and long shared prompts. |
 

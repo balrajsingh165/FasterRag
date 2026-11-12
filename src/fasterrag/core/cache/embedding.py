@@ -1,10 +1,26 @@
 """Embedding cache: never pay twice for the same text under the same model.
 
-Keyed by content hash plus model plus model version (``docs/architecture.md`` §7). All three
-belong in the key: the hash alone would serve a vector from the wrong model, and the model
-name alone would serve a stale vector after a provider silently upgraded the weights behind
-a stable name. Because the key pins the model version, a stale hit is not merely unlikely —
-it is unrepresentable.
+Keyed by everything that decides what vector a text gets (``docs/architecture.md`` §7): the
+provider, the model, the model version, the configured ``embeddings.dimensions``, whether
+the text is embedded as a document or as a query, and the text itself. Each one belongs in
+the key. Without the model version a provider that upgraded the weights behind a stable
+name would be served stale vectors. Without the provider two providers serving a model of
+the same name would share entries. Without the dimensions a vector shortened to 256 would
+be served after the setting changed to 512. Without the input type a query would be served
+a passage's vector, and several providers embed the two differently on purpose (Cohere's
+``search_query`` and ``search_document``). Because the key pins all of them, a stale hit is
+not merely unlikely — it is unrepresentable.
+
+The dimensions in the key are the *configured* ones, never ``adapter.dimensions``: a local
+model reports ``None`` until it has loaded, so the reported size changes during the first
+call and a key built from it would miss everything the previous process stored.
+
+The key names its fields in clear so an operator can read a Redis keyspace, and ends in a
+digest taken over every field with its length. Model ids contain colons
+(``nomic-embed-text:latest``), so the readable part alone cannot tell ``a:b`` + ``c`` from
+``a`` + ``b:c``; the digest can. Entries written under the earlier
+``emb:{model}:{version}:{sha256(text)}`` scheme can never match a key of this one, so they
+are simply never read again and age out through eviction.
 
 Implemented as a wrapper around any ``EmbeddingAdapter`` rather than as a branch inside each
 one, so a third-party adapter registered through the entry point gets caching without
@@ -21,7 +37,7 @@ from __future__ import annotations
 import hashlib
 import struct
 from collections.abc import Sequence
-from typing import ClassVar, Final
+from typing import ClassVar, Final, Literal
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.vectordb.base import HealthStatus
@@ -30,21 +46,44 @@ from fasterrag.core.cache.store import CacheStore
 from fasterrag.errors import CacheError
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["CachingEmbeddingAdapter", "decode_vector", "embedding_key", "encode_vector"]
+__all__ = [
+    "CachingEmbeddingAdapter",
+    "InputType",
+    "decode_vector",
+    "embedding_key",
+    "encode_vector",
+]
+
+InputType = Literal["document", "query"]
 
 _ELEMENT: Final = struct.Struct("<f")
+_NATIVE_SIZE: Final = "native"
+_LENGTH_BYTES: Final = 8
 
 _logger = get_logger(__name__)
 
 
-def embedding_key(text: str, model: str, model_version: str) -> str:
-    """Return the cache key for one text under one model.
+def embedding_key(
+    text: str,
+    *,
+    provider: str,
+    model: str,
+    model_version: str,
+    dimensions: int | None,
+    input_type: InputType,
+) -> str:
+    """Return the cache key for ``text`` embedded one way by one provider's model.
 
-    The text is hashed rather than embedded in the key: keys reach a Redis keyspace and a
-    filename, and a document chunk is neither short enough nor safe enough to put in either.
+    The text is hashed, never placed in the key: keys reach a Redis keyspace and a filename.
     """
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return f"emb:{model}:{model_version}:{digest}"
+    size = _NATIVE_SIZE if dimensions is None else str(dimensions)
+    identity = (provider, model, model_version, size, input_type)
+    digest = hashlib.sha256()
+    for part in (*identity, text):
+        encoded = part.encode("utf-8")
+        digest.update(len(encoded).to_bytes(_LENGTH_BYTES, "big"))
+        digest.update(encoded)
+    return f"emb:{':'.join(identity)}:{digest.hexdigest()}"
 
 
 def encode_vector(vector: Sequence[float]) -> bytes:
@@ -86,9 +125,20 @@ class CachingEmbeddingAdapter(EmbeddingAdapter):
         """Return the wrapped adapter's vector size."""
         return self.inner.dimensions
 
-    async def _lookup(self, text: str) -> list[float] | None:
+    def _key(self, text: str, input_type: InputType) -> str:
+        """Return the key for ``text`` under the wrapped adapter's identity, read now."""
+        return embedding_key(
+            text,
+            provider=self.inner.provider,
+            model=self.model,
+            model_version=self.model_version,
+            dimensions=self.inner.config.dimensions,
+            input_type=input_type,
+        )
+
+    async def _lookup(self, text: str, input_type: InputType) -> list[float] | None:
         """Return the cached vector for ``text``, or ``None`` on a miss or a cache failure."""
-        key = embedding_key(text, self.model, self.model_version)
+        key = self._key(text, input_type)
         try:
             raw = await self.store.get(key)
         except CacheError as exc:
@@ -101,9 +151,9 @@ class CachingEmbeddingAdapter(EmbeddingAdapter):
 
         return decode_vector(raw) if raw is not None else None
 
-    async def _remember(self, text: str, vector: Sequence[float]) -> None:
+    async def _remember(self, text: str, vector: Sequence[float], input_type: InputType) -> None:
         """Store ``vector`` for ``text``, treating a cache failure as nothing worth failing for."""
-        key = embedding_key(text, self.model, self.model_version)
+        key = self._key(text, input_type)
         try:
             await self.store.set(key, encode_vector(vector))
         except CacheError as exc:
@@ -117,7 +167,7 @@ class CachingEmbeddingAdapter(EmbeddingAdapter):
         """Embed ``texts``, sending only the ones the cache could not supply."""
         resolved: list[list[float] | None] = []
         for text in texts:
-            vector = await self._lookup(text)
+            vector = await self._lookup(text, "document")
             if vector is None:
                 self.stats.record_miss()
             else:
@@ -136,7 +186,7 @@ class CachingEmbeddingAdapter(EmbeddingAdapter):
         fetched = await self.inner.embed_documents([texts[index] for index in missing])
         for index, vector in zip(missing, fetched.vectors, strict=True):
             resolved[index] = vector
-            await self._remember(texts[index], vector)
+            await self._remember(texts[index], vector, "document")
 
         return EmbeddingResult(
             vectors=[vector for vector in resolved if vector is not None],
@@ -148,17 +198,17 @@ class CachingEmbeddingAdapter(EmbeddingAdapter):
     async def embed_query(self, text: str) -> list[float]:
         """Embed one query, consulting the cache first.
 
-        Query vectors are cached alongside document vectors under the same key scheme: a
-        repeated question is common, and the model does not care which side asked.
+        A repeated question is common, so queries are cached too — under their own input
+        type, never under the entry a passage of the same text would use.
         """
-        vector = await self._lookup(text)
+        vector = await self._lookup(text, "query")
         if vector is not None:
             self.stats.record_hit()
             return vector
 
         self.stats.record_miss()
         vector = await self.inner.embed_query(text)
-        await self._remember(text, vector)
+        await self._remember(text, vector, "query")
         return vector
 
     async def health(self) -> HealthStatus:

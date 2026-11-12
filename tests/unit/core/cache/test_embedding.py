@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import Sequence
 
 import pytest
@@ -7,6 +8,7 @@ from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache.embedding import (
     CachingEmbeddingAdapter,
+    InputType,
     decode_vector,
     embedding_key,
     encode_vector,
@@ -73,10 +75,38 @@ class BrokenStore(MemoryStore):
         raise CacheError("backend is unreachable")
 
 
+class OtherProviderEmbedder(CountingEmbedder):
+    """The same model name served by a different provider, with different vectors."""
+
+    provider = "other"
+
+    def _vector(self, text: str) -> list[float]:
+        return [-1.0, -1.0, -1.0]
+
+
 def build(store: CacheStore | None = None) -> tuple[CachingEmbeddingAdapter, CountingEmbedder]:
     settings = Settings()
     inner = CountingEmbedder(settings)
     return CachingEmbeddingAdapter(inner, store or MemoryStore()), inner
+
+
+def key(
+    text: str = "text",
+    *,
+    provider: str = "provider",
+    model: str = "model",
+    model_version: str = "1.0",
+    dimensions: int | None = None,
+    input_type: InputType = "document",
+) -> str:
+    return embedding_key(
+        text,
+        provider=provider,
+        model=model,
+        model_version=model_version,
+        dimensions=dimensions,
+        input_type=input_type,
+    )
 
 
 def test_a_vector_round_trips_through_its_packing() -> None:
@@ -91,19 +121,47 @@ def test_a_truncated_vector_decodes_to_nothing() -> None:
 
 
 def test_the_key_separates_models() -> None:
-    assert embedding_key("text", "model-a", "1.0") != embedding_key("text", "model-b", "1.0")
+    assert key(model="model-a") != key(model="model-b")
 
 
 def test_the_key_separates_model_versions() -> None:
-    assert embedding_key("text", "model", "1.0") != embedding_key("text", "model", "2.0")
+    assert key(model_version="1.0") != key(model_version="2.0")
 
 
 def test_the_key_separates_texts() -> None:
-    assert embedding_key("a", "model", "1.0") != embedding_key("b", "model", "1.0")
+    assert key("a") != key("b")
+
+
+def test_the_key_separates_input_types() -> None:
+    """The key ignored the input type, so a query was served a document's vector."""
+    assert key(input_type="query") != key(input_type="document")
+
+
+def test_the_key_separates_providers() -> None:
+    """The key ignored the provider, so two providers' same-named models shared vectors."""
+    assert key(provider="openai") != key(provider="ollama")
+
+
+def test_the_key_separates_dimension_settings() -> None:
+    """The key ignored embeddings.dimensions, so a shortened vector outlived the setting."""
+    assert key(dimensions=None) != key(dimensions=256)
+    assert key(dimensions=256) != key(dimensions=512)
+
+
+def test_the_key_cannot_be_forged_by_moving_a_separator_between_fields() -> None:
+    """Model ids contain colons, so joining fields with one is not enough to tell them apart."""
+    assert key(model="a:b", model_version="c") != key(model="a", model_version="b:c")
+    assert key(provider="a:b", model="c") != key(provider="a", model="b:c")
 
 
 def test_the_key_never_contains_the_text_itself() -> None:
-    assert "secret passage" not in embedding_key("secret passage", "model", "1.0")
+    assert "secret passage" not in key("secret passage")
+
+
+def test_the_key_is_stable_across_calls() -> None:
+    assert key("text", dimensions=256, input_type="query") == key(
+        "text", dimensions=256, input_type="query"
+    )
 
 
 async def test_a_repeated_text_is_embedded_once() -> None:
@@ -162,13 +220,59 @@ async def test_a_repeated_query_is_embedded_once() -> None:
     assert inner.embedded == ["what is the notice period?"]
 
 
-async def test_a_query_and_a_document_share_one_cached_vector() -> None:
+async def test_a_query_and_a_document_of_the_same_text_are_separate_entries() -> None:
+    """One entry served both, though a provider may embed a query and a passage differently."""
     adapter, inner = build()
 
     await adapter.embed_documents(["shared text"])
     await adapter.embed_query("shared text")
+    await adapter.embed_documents(["shared text"])
+    await adapter.embed_query("shared text")
 
-    assert inner.embedded == ["shared text"]
+    assert inner.embedded == ["shared text", "shared text"]
+    assert inner.calls == 2
+
+
+async def test_two_providers_sharing_a_store_never_share_a_vector() -> None:
+    """A second provider serving a model of the same name was handed the first one's vector."""
+    settings = Settings()
+    store = MemoryStore()
+    await CachingEmbeddingAdapter(CountingEmbedder(settings), store).embed_documents(["text"])
+
+    other = OtherProviderEmbedder(settings)
+    result = await CachingEmbeddingAdapter(other, store).embed_documents(["text"])
+
+    assert other.embedded == ["text"]
+    assert result.vectors == [[-1.0, -1.0, -1.0]]
+
+
+async def test_a_changed_dimension_setting_never_serves_the_old_vector() -> None:
+    """A vector cached at one embeddings.dimensions was served after the setting changed."""
+    store = MemoryStore()
+    native = CountingEmbedder(Settings())
+    await CachingEmbeddingAdapter(native, store).embed_documents(["text"])
+
+    shortened = CountingEmbedder(Settings.model_validate({"embeddings": {"dimensions": 256}}))
+    await CachingEmbeddingAdapter(shortened, store).embed_documents(["text"])
+    await CachingEmbeddingAdapter(shortened, store).embed_query("text")
+
+    assert shortened.embedded == ["text", "text"]
+
+
+async def test_an_entry_written_under_the_old_key_format_is_never_served() -> None:
+    """Entries keyed without provider, dimensions and input type must not survive the fix."""
+    adapter, inner = build()
+    digest = hashlib.sha256(b"text").hexdigest()
+    await adapter.store.set(
+        f"emb:{inner.model}:{inner.model_version}:{digest}", encode_vector([9.0, 9.0, 9.0])
+    )
+
+    result = await adapter.embed_documents(["text"])
+    vector = await adapter.embed_query("text")
+
+    assert inner.embedded == ["text", "text"]
+    assert result.vectors[0] == pytest.approx(inner._vector("text"))
+    assert vector == pytest.approx(inner._vector("text"))
 
 
 async def test_hits_and_misses_are_counted() -> None:
