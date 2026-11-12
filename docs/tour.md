@@ -190,7 +190,7 @@ module's own docstring, as of the commit this page was generated from.
     | `core/chunking/models.py` | Chunk structures, token counting, and the shared assembler that enforces invariants. |
     | `core/chunking/pooling.py` | The pooling half of late chunking (D-late, `chunking.strategy: late`). |
     | `core/chunking/recursive.py` | Recursive chunker — the default strategy. |
-    | `core/chunking/semantic.py` | Semantic chunker. Usable from the library; the ingestion pipeline refuses it for now (TASK-0431). |
+    | `core/chunking/semantic.py` | Semantic chunker. |
     | `core/chunking/tokenizer.py` | The embedding model's own tokenizer, used to make `chunking.chunk_size` mean tokens. |
     | `core/context.py` | Context assembly: pack retrieved chunks into a prompt, with citations. |
     | `core/evals/generator.py` | P4 golden-set generation from a real corpus. |

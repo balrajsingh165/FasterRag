@@ -110,28 +110,7 @@ Process-wide singletons (`shared_breaker`, the cross-encoder model cache, `share
 
 ## 1. P0 — blocks a credible public alpha
 
-Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs), then TASK-0437, TASK-0431, TASK-0444, TASK-0445.
-
-### TASK-0431 — Semantic chunking in the ingestion pipeline
-
-**Goal.** A job with `chunking.strategy: semantic` and a local embedding model completes, with every chunk inside the token budget.
-
-**Where.** `workers/cpu_pool.py:98` `_parse_and_chunk(task, settings)` calls `create_chunker(settings)` with no embedder. `core/chunking/__init__.py:55` `create_chunker(settings, *, counter=None, embedder=None)` raises `ConfigError` at `:76-80` for the semantic strategy without one. `services/ingestion.py:373` `_require_pipeline_chunker`, called from `IngestionService.accept` at `:99`, refuses the job up front. `core/chunking/semantic.py:110` `SemanticChunker`; its `split` at `:132` never calls `within_budget` (`core/chunking/models.py:209`) and falls back to `hard_split` with a character limit at `:146-147`. The `SentenceEmbedder` protocol is at `semantic.py:49`. A bridge already exists and is called by nothing in the pipeline: `adapters/embeddings/sync.py:25` `SentenceEmbedderBridge`.
-
-**Steps.**
-1. Fix the budget first, independently: make `SemanticChunker.split` enforce `within_budget` the way `recursive.py:108` does. This is a self-contained commit.
-2. Give the worker process an embedder. The pool task receives only `(task, settings)` through `run_in_executor`, so a model object cannot be passed in: build it lazily inside the child, once per process, in a module-level cache keyed by model name. Support `embeddings.provider: huggingface` only.
-3. For hosted providers, keep a refusal at `accept` — narrowed to "semantic chunking needs a local embedding model" — or move boundary detection to the async side the way contextual enrichment (`core/chunking/enrichment.py`) already is. Pick one and record why in the changelog.
-4. Add `semantic_percentile` and the sentence-embedder model to `chunker_config_hash` (`core/identity.py:163`): today it covers only strategy, size and overlap, so boundaries can move under unchanged chunk ids. This changes ids for semantic collections only; see the tripwire for `chunking.*`.
-5. Delete `_require_pipeline_chunker` or reduce it to the hosted-provider case.
-
-**Tests.** `tests/unit/services/test_ingestion.py::test_semantic_chunking_is_refused_before_a_job_is_recorded` (`:502`) pins the refusal and must be inverted. Add a job-level test in the same file using a deterministic embedder. In `tests/unit/core/chunking/test_invariants.py`, `dense_chunkers()` (`:195-202`) excludes the semantic chunker from the token-budget property — include it (the `RotatingEmbedder` at `:34` is the double to use).
-
-**Documents.** [troubleshooting.md](troubleshooting.md) (the "refused with `chunking.strategy is 'semantic'`" entry at `:48`), [config-reference.md](config-reference.md) `## chunking`, [architecture.md](architecture.md) §5, [code-notes.md](code-notes.md) `### _require_pipeline_chunker`.
-
-**Traps.** Under `spawn`, each worker process loads its own copy of the model: memory is `cpu_pool_size ×` model size. Say so in the config reference and consider capping the pool for this strategy.
-
-**Done when.** The job-level test passes, the property test includes the semantic chunker, and the refusal is gone for local models. **Moves:** ingestion.
+Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs), then TASK-0437, TASK-0444, TASK-0445.
 
 ### TASK-0437 — A journal that survives a crash and two processes
 
@@ -417,16 +396,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 **Traps.** Three §0.4 rows: facade parameter, `ErrorCode`, documents.
 
 **Done when.** `tests/unit/docs/test_python_api_parity.py` passes with the new signatures. **Moves:** developer experience, security.
-
-### TASK-0466 — Build long-lived things once
-
-**Where.** Per call: `build_retrieval` (`api/dependencies.py:115`), `build_generation` (`:130`, which calls `create_llm_adapter` at `:142` — a new provider client per query, closed at `api/query.py:88` and `:122`), `build_ingestion` (`:150`, a new lock store at `:169`). Already process-scoped on `app.state`: the vector-database adapter, the journal, the embedding router and the semantic cache.
-
-**Steps.** After TASK-0456's `services/composition.py` exists, build the LLM adapter and the stateless services in the lifespan, store them on `app.state`, and close them at shutdown. Keep the tenant a per-call argument, not constructor state.
-
-**Tests.** Two queries through the test client observe one LLM adapter instance; shutdown closes it once.
-
-**Moves:** architecture, performance.
 
 ### TASK-0467 — A disconnected client stops paying for tokens
 
@@ -749,14 +718,14 @@ Use this to choose work by the category you want to move. The bar each category 
 
 | Category | Tasks |
 |---|---|
-| Architecture and design | TASK-0456, TASK-0466, TASK-0130, TASK-0457, TASK-0437 |
+| Architecture and design | TASK-0456, TASK-0130, TASK-0457, TASK-0437 |
 | Core RAG functionality | TASK-0449, TASK-0458, TASK-0467, TASK-0468, TASK-0469, TASK-0485 |
-| Document ingestion and processing | TASK-0431, TASK-0459, TASK-0471, TASK-0472, TASK-0462, TASK-0504 |
+| Document ingestion and processing | TASK-0459, TASK-0471, TASK-0472, TASK-0462, TASK-0504 |
 | Retrieval and search quality | TASK-0454, TASK-0447, TASK-0448, TASK-0481, TASK-0463, TASK-0480 |
 | Embedding and vector infrastructure | TASK-0451, TASK-0452, TASK-0412, TASK-0352, TASK-0477, TASK-0478, TASK-0464, TASK-0479, TASK-0049 |
 | Advanced RAG capabilities | TASK-0465, TASK-0448, TASK-0482, TASK-0483, TASK-0484, TASK-0463 |
 | Extensibility and modularity | TASK-0486 |
-| Performance and scalability | TASK-0454, TASK-0130, TASK-0437, TASK-0466, TASK-0487, TASK-0488, TASK-0407 to TASK-0410 |
+| Performance and scalability | TASK-0454, TASK-0130, TASK-0437, TASK-0487, TASK-0488, TASK-0407 to TASK-0410 |
 | Reliability and error handling | TASK-0437, TASK-0449, TASK-0450, TASK-0453, TASK-0474, TASK-0475, TASK-0476 |
 | Testing and quality assurance | TASK-0412, TASK-0454, TASK-0481, TASK-0489, TASK-0490, TASK-0300 |
 | Security | TASK-0339, TASK-0381, TASK-0446, TASK-0460, TASK-0326, TASK-0491, TASK-0492, TASK-0493, TASK-0494, TASK-0495 |
