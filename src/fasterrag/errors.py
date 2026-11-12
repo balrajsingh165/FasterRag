@@ -81,6 +81,7 @@ class ErrorCode(StrEnum):
     INTERNAL = "INTERNAL"
     ENCODING_UNREADABLE = "ENCODING_UNREADABLE"
     PDF_ENCRYPTED = "PDF_ENCRYPTED"
+    NESTING_TOO_DEEP = "NESTING_TOO_DEEP"
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +159,9 @@ PROBLEM_SPECS: Final[dict[ErrorCode, ProblemSpec]] = {
     ),
     ErrorCode.PDF_ENCRYPTED: ProblemSpec(
         422, "pdf-encrypted", "PDF is encrypted with a password", False
+    ),
+    ErrorCode.NESTING_TOO_DEEP: ProblemSpec(
+        422, "nesting-too-deep", "Document nests deeper than the parser allows", False
     ),
 }
 

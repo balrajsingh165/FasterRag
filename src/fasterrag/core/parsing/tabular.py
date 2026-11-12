@@ -4,6 +4,12 @@ Rows are serialized as ``column: value`` pairs rather than bare cells, because a
 retrieved chunk has to be self-describing: a naked row of values carries no meaning once
 it is separated from its header. Wide files are chunked by row groups so no single block
 becomes unretrievable.
+
+JSON is walked with an explicit stack and refused past :data:`MAX_NESTING_DEPTH` with
+``NESTING_TOO_DEEP``. The recursive walk raised ``RecursionError`` on a few thousand levels,
+and how deep ``json.loads`` itself will go differs between interpreters — 3.12 refuses a
+10,000-deep array that 3.14 accepts — so the limit is this module's, not the runtime's
+(TASK-0489).
 """
 
 from __future__ import annotations
@@ -11,12 +17,12 @@ from __future__ import annotations
 import csv
 import io
 import json
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from fasterrag.core.parsing.models import DocumentBuilder, ParsedDocument, ParseFlag
 from fasterrag.core.parsing.options import DEFAULT_PARSING_OPTIONS, ParsingOptions
 from fasterrag.core.parsing.plaintext import decode
-from fasterrag.errors import ParseError
+from fasterrag.errors import ErrorCode, ParseError
 
 __all__ = ["parse_csv", "parse_json"]
 
@@ -25,6 +31,14 @@ _SNIFF_BYTES: Final = 8192
 CR: Final = "\r"
 CRLF: Final = "\r\n"
 NEWLINE: Final = "\n"
+
+MAX_NESTING_DEPTH: Final = 512
+"""The deepest a JSON document may nest; deeper is refused with ``NESTING_TOO_DEEP``."""
+
+_Node = tuple[Literal["node"], Any, str, int, int]
+_Heading = tuple[Literal["heading"], str, int]
+_Leaf = tuple[Literal["leaf"], str]
+_Step = _Node | _Heading | _Leaf
 
 
 def _describe(row: dict[str, Any]) -> str:
@@ -107,34 +121,61 @@ def _leaf(path: str, value: Any) -> str:
     return f"{path}: {value}" if path else str(value)
 
 
-def _walk(node: Any, path: str, builder: DocumentBuilder, depth: int = 0) -> None:
-    """Emit blocks for a JSON tree, using object keys as the heading path."""
+def _too_deep() -> ParseError:
+    """Return the refusal for a document nested past :data:`MAX_NESTING_DEPTH`."""
+    return ParseError(
+        f"the JSON document nests deeper than {MAX_NESTING_DEPTH} levels",
+        code=ErrorCode.NESTING_TOO_DEEP,
+        retryable=False,
+    )
+
+
+def _children(node: Any, path: str, depth: int, nesting: int) -> list[_Step]:
+    """Return the steps a container expands to, in document order."""
+    steps: list[_Step] = []
     if isinstance(node, dict):
-        scalars = {key: value for key, value in node.items() if not isinstance(value, dict | list)}
-        if scalars:
-            builder.add("paragraph", _describe(scalars))
         for key, value in node.items():
             if isinstance(value, dict | list):
-                builder.heading(f"{path}.{key}" if path else str(key), min(depth + 1, 6))
-                _walk(value, f"{path}.{key}" if path else str(key), builder, depth + 1)
-        return
-
-    if isinstance(node, list):
+                child = f"{path}.{key}" if path else str(key)
+                steps.append(("heading", child, min(depth + 1, 6)))
+                steps.append(("node", value, child, depth + 1, nesting + 1))
+    else:
         for index, item in enumerate(node):
             if isinstance(item, dict | list):
-                _walk(item, f"{path}[{index}]", builder, depth)
+                steps.append(("node", item, f"{path}[{index}]", depth, nesting + 1))
             else:
-                builder.add("paragraph", _leaf(f"{path}[{index}]", item))
-        return
+                steps.append(("leaf", _leaf(f"{path}[{index}]", item)))
+    return steps
 
-    builder.add("paragraph", _leaf(path, node))
+
+def _walk(document: Any, builder: DocumentBuilder) -> None:
+    """Emit blocks for a JSON tree, keys as the heading path, with a stack instead of recursion."""
+    stack: list[_Step] = [("node", document, "", 0, 1)]
+    while stack:
+        step = stack.pop()
+        if step[0] == "heading":
+            builder.heading(step[1], step[2])
+        elif step[0] == "leaf":
+            builder.add("paragraph", step[1])
+        else:
+            _, node, path, depth, nesting = step
+            if nesting > MAX_NESTING_DEPTH:
+                raise _too_deep()
+            if not isinstance(node, dict | list):
+                builder.add("paragraph", _leaf(path, node))
+                continue
+            if isinstance(node, dict):
+                scalars = {k: v for k, v in node.items() if not isinstance(v, dict | list)}
+                if scalars:
+                    builder.add("paragraph", _describe(scalars))
+            stack.extend(reversed(_children(node, path, depth, nesting)))
 
 
 def parse_json(data: bytes, *, mime_type: str = "application/json") -> ParsedDocument:
     """Parse JSON into blocks that keep each value's key path.
 
     Raises:
-        ParseError: If the document is not valid JSON.
+        ParseError: If the document is not valid JSON, or ``NESTING_TOO_DEEP`` past the limit.
     """
     builder = DocumentBuilder(mime_type=mime_type, parser="json")
     text = decode(data, builder)
@@ -143,6 +184,8 @@ def parse_json(data: bytes, *, mime_type: str = "application/json") -> ParsedDoc
         document = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ParseError(f"invalid JSON at line {exc.lineno} column {exc.colno}") from exc
+    except RecursionError as exc:
+        raise _too_deep() from exc
 
-    _walk(document, "", builder)
+    _walk(document, builder)
     return builder.build()

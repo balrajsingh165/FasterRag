@@ -20,11 +20,13 @@ from reportlab.pdfgen import canvas
 from fasterrag.core.parsing import (
     DEFAULT_PARSING_OPTIONS,
     parse_csv,
+    parse_json,
     parse_markdown,
     parse_pdf,
     parse_plaintext,
 )
 from fasterrag.core.parsing.models import ParseFlag
+from fasterrag.core.parsing.tabular import MAX_NESTING_DEPTH
 from fasterrag.errors import ErrorCode, ParseError
 from tests.unit.core.parsing.conftest import encrypted_pdf_bytes, scanned_pdf_bytes
 
@@ -189,3 +191,32 @@ def test_a_page_with_no_text_beside_one_with_text_is_flagged_low_text_yield(
     assert document.metadata["page_count"] == 2
     assert ParseFlag.LOW_TEXT_YIELD.value in document.flags
     assert {block.page for block in document.blocks} == {1}
+
+
+def test_a_ten_thousand_deep_json_document_is_refused_with_a_reason_code() -> None:
+    """The recursive walk raised ``RecursionError``: untyped, and only a PARSE_FAILED by luck."""
+    depth = 10_000
+
+    with pytest.raises(ParseError) as caught:
+        parse_json(b"[" * depth + b"1" + b"]" * depth)
+
+    assert caught.value.code is ErrorCode.NESTING_TOO_DEEP
+    assert caught.value.retryable is False
+
+
+def test_json_just_inside_the_depth_limit_still_parses() -> None:
+    """The limit refuses abuse, not structure: the deepest allowed document keeps its value."""
+    depth = MAX_NESTING_DEPTH
+    document = parse_json(b'{"k": ' * depth + b'"leaf"' + b"}" * depth)
+
+    assert document.blocks[-1].text.endswith("k: leaf")
+
+
+def test_json_one_level_past_the_limit_is_refused() -> None:
+    """The same refusal whichever interpreter's ``json.loads`` would have coped."""
+    depth = MAX_NESTING_DEPTH + 1
+
+    with pytest.raises(ParseError) as caught:
+        parse_json(b"[" * depth + b"1" + b"]" * depth)
+
+    assert caught.value.code is ErrorCode.NESTING_TOO_DEEP

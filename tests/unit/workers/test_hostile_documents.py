@@ -91,3 +91,19 @@ async def test_a_latin_1_file_is_indexed_and_flagged(tmp_path: Path, journal: Jo
     parsed, dead, _ = await ingest([str(tmp_path / "legacy.txt")], journal)
 
     assert (parsed, dead) == (1, 0)
+
+
+async def test_a_ten_thousand_deep_json_document_is_dead_lettered_as_nesting_too_deep(
+    tmp_path: Path, journal: Journal
+) -> None:
+    """The TASK-0489 acceptance case: one reason code, and the document beside it indexed."""
+    depth = 10_000
+    (tmp_path / "deep.json").write_bytes(b"[" * depth + b"1" + b"]" * depth)
+    (tmp_path / "good.md").write_text(GOOD, encoding="utf-8")
+
+    parsed, dead, reasons = await ingest(
+        [str(tmp_path / "deep.json"), str(tmp_path / "good.md")], journal
+    )
+
+    assert (parsed, dead) == (1, 1)
+    assert reasons == {"deep.json": "NESTING_TOO_DEEP"}

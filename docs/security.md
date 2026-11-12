@@ -316,6 +316,8 @@ An independent audit found the service **open by default twice over**: `security
 A document is attacker-controlled input whenever the corpus is, so each of these is refused as one dead-lettered document with a reason code while the rest of the job is indexed.
 
 - **Decompression bombs (TASK-0459).** A DOCX is a zip archive and `python-docx` inflated every member it was handed, so a few hundred kilobytes could unpack to gigabytes inside a worker. The members' declared uncompressed sizes are now summed before anything is inflated, and a DOCX declaring more than 256 MiB (`MAX_UNZIPPED_BYTES` in `core/parsing/docx.py`, a constant, not a setting) is refused with `PAYLOAD_TOO_LARGE`. The declared size is a real bound: `zipfile` stops inflating a member at its declared size and fails the CRC check on one that lies, which surfaces as `PARSE_FAILED`. Both cases are tested with a real 300 KB archive that unpacks to 300 MiB.
+- **Deep nesting (TASK-0489).** A 10,000-deep JSON array raised `RecursionError` in a recursive walk. The walk now keeps its own stack, and JSON nested past 512 levels is refused with `NESTING_TOO_DEEP` — a limit of the parser's, because how deep `json.loads` will go differs between interpreters. HTML is walked the same way with no limit, so a 10,000-deep page parses.
+- **Damaged binaries (TASK-0489).** A truncated or bit-flipped DOCX raised whatever `zipfile`, `zlib`, `lxml` or `python-docx` met first; every such failure is now a `ParseError`, as it already was for PDF. Hypothesis generates both kinds of damage against both formats.
 
 ## 6. Supply chain
 

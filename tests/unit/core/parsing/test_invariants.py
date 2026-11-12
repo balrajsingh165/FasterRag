@@ -82,6 +82,7 @@ from fasterrag.core.parsing.models import (
     normalise_text,
 )
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
+from tests.unit.core.parsing.conftest import docx_bytes, pdf_bytes
 
 BOM = "﻿"
 MAX_HEADING_LEVEL = 6
@@ -513,8 +514,20 @@ def test_json_without_content_yields_no_blocks(empty: bytes) -> None:
 # than in the parser. Everything XML does permit and this parser might mishandle is here:
 # BOM, tab, newline, CJK, RTL, combining marks, zero-width, and an astral pair.
 _DOCX_FRAGMENTS = ["a", "Z", "0", " ", "\t", "\n", BOM, "é", "é", "日本語", "العربية", "🙂"]
+# Everything else XML 1.0 can carry, generated rather than picked (TASK-0489): no surrogate,
+# no control code, and neither of the two non-characters the XML grammar excludes.
+_XML_CHARACTER = st.characters(
+    blacklist_categories=("Cs", "Cc"), blacklist_characters=[chr(0xFFFE), chr(0xFFFF)]
+)
 DOCX_TEXT = (
-    st.lists(st.sampled_from(_DOCX_FRAGMENTS), min_size=1, max_size=8)
+    st.lists(
+        st.one_of(
+            st.sampled_from(_DOCX_FRAGMENTS),
+            st.text(alphabet=_XML_CHARACTER, min_size=1, max_size=6),
+        ),
+        min_size=1,
+        max_size=8,
+    )
     .map("".join)
     .map(str.strip)
     .filter(bool)
@@ -604,9 +617,11 @@ def test_a_heading_zero_style_does_not_outrank_every_real_heading() -> None:
     assert parsed.blocks[-1].section == "Chapter One"
 
 
+# Full Unicode since TASK-0489. A standard PDF font cannot draw most of it, so extraction
+# returns whatever it returns; the invariants below are about offsets, never content.
 PDF_LINE = st.tuples(
     st.text(
-        alphabet=st.characters(min_codepoint=32, max_codepoint=126),
+        alphabet=_ANY_CHARACTER,
         min_size=1,
         max_size=40,
     ).filter(lambda line: line.strip() != ""),
@@ -748,3 +763,52 @@ def test_a_file_within_the_limit_is_read_normally(tmp_path: Path, size: int) -> 
     document = parse_document(path, max_bytes=size)
 
     assert document.text == "x" * size
+
+
+def _parses_or_fails_typed(parse: Parser, data: bytes) -> None:
+    """A damaged file may parse to anything, or fail, but only inside the taxonomy."""
+    try:
+        parse(data)
+    except FasterRagError:
+        return
+
+
+_DOCX_SAMPLE: Final = docx_bytes()
+_PDF_SAMPLE: Final = pdf_bytes(pages=2)
+_BINARY_PARSERS: Final[dict[str, tuple[Parser, bytes]]] = {
+    "docx": (parse_docx, _DOCX_SAMPLE),
+    "pdf": (parse_pdf, _PDF_SAMPLE),
+}
+EVERY_BINARY_PARSER = pytest.mark.parametrize("format_name", sorted(_BINARY_PARSERS))
+BIT_FLIPS = st.lists(
+    st.tuples(st.integers(min_value=0), st.integers(min_value=0, max_value=7)),
+    min_size=1,
+    max_size=8,
+)
+
+
+@EVERY_BINARY_PARSER
+@given(fraction=st.floats(min_value=0.0, max_value=1.0, exclude_max=True))
+@settings(max_examples=40, deadline=None)
+def test_a_truncated_binary_document_fails_inside_the_taxonomy(
+    format_name: str, fraction: float
+) -> None:
+    """A download cut short. ``parse_docx`` let ``BadZipFile`` and friends escape untyped."""
+    parse, sample = _BINARY_PARSERS[format_name]
+
+    _parses_or_fails_typed(parse, sample[: int(len(sample) * fraction)])
+
+
+@EVERY_BINARY_PARSER
+@given(flips=BIT_FLIPS)
+@settings(max_examples=40, deadline=None)
+def test_a_bit_flipped_binary_document_fails_inside_the_taxonomy(
+    format_name: str, flips: Sequence[tuple[int, int]]
+) -> None:
+    """Storage or transfer corruption. A CRC, zlib or XML error must still be a ParseError."""
+    parse, sample = _BINARY_PARSERS[format_name]
+    damaged = bytearray(sample)
+    for position, bit in flips:
+        damaged[position % len(damaged)] ^= 1 << bit
+
+    _parses_or_fails_typed(parse, bytes(damaged))

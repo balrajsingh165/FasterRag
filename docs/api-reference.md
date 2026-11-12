@@ -64,6 +64,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `INTERNAL` | 500 | `FasterRagError` | Anything unclassified. Always carries `trace_id`. Never returned without a problem body. |
 | `ENCODING_UNREADABLE` | 422 | `ParseError` | A DLQ reason code only (TASK-0472): no byte-order mark, UTF-8 or Windows-1252 decode read the document, and more than half of the leniently decoded text was replacement characters or control codes — a binary file, or text in an encoding the parser does not know. Refused rather than indexed as noise. Non-retryable: convert the file to UTF-8 and ingest it again. |
 | `PDF_ENCRYPTED` | 422 | `ParseError` | A DLQ reason code only (TASK-0472): the PDF needs a password to open. Before it had its own code it was reported as `PARSE_FAILED`, as though the file were damaged. A PDF encrypted only against editing or printing — an empty user password — is not refused: it opens without one and is parsed. Non-retryable: remove the password and ingest the file again. |
+| `NESTING_TOO_DEEP` | 422 | `ParseError` | A DLQ reason code only (TASK-0489): a JSON document nests deeper than 512 levels. It used to raise `RecursionError` — untyped, and dead-lettered as `PARSE_FAILED` only because the worker converts anything untyped — and how deep `json.loads` would go differed between interpreters. HTML has no such limit: its walk keeps its own stack, and a 10,000-deep page parses. Non-retryable: flatten the document. |
 
 ---
 
