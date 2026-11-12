@@ -54,7 +54,7 @@ from fasterrag.services.composition import (
     create_semantic_cache,
 )
 from fasterrag.services.doctor import DoctorReport
-from fasterrag.services.documents import DocumentDeletion
+from fasterrag.services.documents import DEFAULT_PAGE_SIZE, DocumentDeletion, DocumentListing
 from fasterrag.services.estimation import Estimate, estimate_sources, require_estimator
 from fasterrag.services.generation import Answer, GenerationService, QueryEvent
 from fasterrag.services.journal import JobRecord, Journal, create_journal
@@ -374,6 +374,25 @@ class FasterRag:
             collection or self.settings.vector_db.collection.default_name,
             document_id,
             tenant=tenant,
+        )
+
+    async def documents(
+        self,
+        collection: str | None = None,
+        *,
+        offset: int = 0,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> DocumentListing:
+        """Return one page of the documents the journal records in a collection.
+
+        Ordered by ``document_id``; a deleted document is not listed (TASK-0469).
+        """
+        self._require_started()
+        service = build_documents(self.settings, self.vector_db, self.journal, self.cache)
+        return await service.list_documents(
+            collection or self.settings.vector_db.collection.default_name,
+            offset=offset,
+            limit=limit,
         )
 
     async def replay(self, trace_id: str, candidate: Settings | None = None) -> ReplayResult:

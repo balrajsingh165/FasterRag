@@ -27,6 +27,8 @@ introducing a third way to spell one (TASK-0443). The chunk filter additionally 
 caller's tenant tag, so the route is correct under either tenancy model TASK-0339 may choose.
 Until TASK-0381 makes ingest apply the same scoping, a tenant's documents ingested through
 ``POST /v1/ingest`` live under the unprefixed name, which this route does not address.
+``GET /v1/collections/{name}/documents`` resolves the collection the same way, and so has the
+same reach (TASK-0469).
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ from fasterrag.api.dependencies import (
 from fasterrag.api.schemas import CollectionRequest
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.composition import build_documents, create_embedding_router
+from fasterrag.services.documents import DEFAULT_PAGE_SIZE, MAXIMUM_PAGE_SIZE
 from fasterrag.services.reindex import require_keyword_leg
 from fasterrag.services.tenancy import scoped_name, unscoped_name, visible_to
 
@@ -166,6 +169,28 @@ async def delete_collection(
         )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{name}/documents")
+async def list_documents(
+    name: str,
+    settings: CurrentSettings,
+    adapter: CurrentVectorDB,
+    journal: JournalDep,
+    cache: CurrentCache,
+    tenant: CurrentTenant,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=MAXIMUM_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+) -> dict[str, Any]:
+    """List one page of a collection's documents, in ``document_id`` order.
+
+    Resolved like the delete beside it, so a deleted document is gone from the next page.
+    """
+    service = build_documents(settings, adapter, journal, cache)
+    listing = await service.list_documents(
+        scoped_name(name, tenant), offset=offset, limit=limit, display=name
+    )
+    return listing.as_dict()
 
 
 @router.delete("/{name}/documents/{document_id}")

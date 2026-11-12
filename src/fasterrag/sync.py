@@ -38,7 +38,7 @@ from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.facade import FasterRag as AsyncFasterRag
 from fasterrag.services.doctor import DoctorReport
-from fasterrag.services.documents import DocumentDeletion
+from fasterrag.services.documents import DEFAULT_PAGE_SIZE, DocumentDeletion, DocumentListing
 from fasterrag.services.estimation import Estimate
 from fasterrag.services.generation import Answer, QueryEvent
 from fasterrag.services.journal import JobRecord
@@ -294,6 +294,16 @@ class FasterRag:
         return self._run(
             self._inner.delete_document(document_id, collection=collection, tenant=tenant)
         )
+
+    def documents(
+        self,
+        collection: str | None = None,
+        *,
+        offset: int = 0,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> DocumentListing:
+        """Return one page of the documents the journal records in a collection, blocking."""
+        return self._run(self._inner.documents(collection, offset=offset, limit=limit))
 
     def replay(self, trace_id: str, candidate: Settings | None = None) -> ReplayResult:
         """Re-execute a stored query under a candidate configuration and diff it (D8)."""

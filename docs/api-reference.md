@@ -291,13 +291,36 @@ Responds `200` with `{"chunks": [...], "trace_id": "..."}`. No generation happen
 | `GET /v1/collections/{name}` | Detail incl. `index.lock` summary and drift status (D1). | 200 | 404 |
 | `PATCH /v1/collections/{name}` | **Not yet implemented.** Mutable settings only (metadata schema, description). | 200 | 404, 422 |
 | `DELETE /v1/collections/{name}` | Drop collection (requires `admin` scope; refuses while it is an active alias target unless `?force=true`). | 204 | 404, 409 |
+| `GET /v1/collections/{name}/documents` | List the documents indexed in a collection, a page at a time (`?offset=0&limit=100`). See [Listing documents](#listing-documents). | 200 | 404, 422 |
 | `DELETE /v1/collections/{name}/documents/{document_id}` | Delete one document: every chunk carrying that `document_id`, its dedup record, its lockfile entry, and the semantic cache. See [Deleting a document](#deleting-a-document). | 200 | 404, 422 |
 | `POST /v1/collections/{name}/reindex` | **Not yet implemented over REST** — shipped on the CLI as `fasterrag index reindex`. D2 zero-downtime reindex: blue/green build → eval gate → alias swap. Returns a job id. | 202 | 404, 409 |
 | `POST /v1/collections/{name}/rollback` | **Not yet implemented over REST** — shipped on the CLI as `fasterrag index rollback`. Alias flip back to the retained previous collection (within retention window). | 200 | 404, 409 |
 
+### Listing documents
+
+`GET /v1/collections/{name}/documents?offset=0&limit=100` — `collections` scope (TASK-0469). `offset` is 0 or more and `limit` is 1 to 1000 (default 100); anything else is `422 VALIDATION_FAILED`. Documents are ordered by `document_id`, so pages do not overlap while the collection is unchanged; follow `next_offset` until it is `null`.
+
+```json
+{
+  "collection": "docs",
+  "documents": [
+    {"document_id": "d_0d06505c1a084fbc", "content_hash": "9f86d081884c7d65…"},
+    {"document_id": "d_2c26b46b68ffc68f", "content_hash": "fcde2b2edba56bf4…"}
+  ],
+  "total": 2,
+  "offset": 0,
+  "limit": 100,
+  "next_offset": null
+}
+```
+
+**The listing is the ingestion journal's record of what was indexed, not a scan of the vector database.** It reads the same per-collection record that deduplication and `DELETE …/documents/{document_id}` use, so a deleted document disappears from it at once, and a document re-ingested with new content is listed with its new `content_hash`. The cost of not scanning is the same caveat a delete's `known` carries: with `ingestion.dedup: false`, or for documents brought in by an archive import, the journal records nothing per collection, and those documents are indexed but not listed. A collection the vector database does not hold is `404 NOT_FOUND`, even when the journal still holds a record for that name. `POST /v1/ingest` does not record a document's source path in this record, so the listing carries ids and hashes only; `GET /v1/ingest/{job_id}/documents` maps an id to its source.
+
+**Tenancy.** Resolved exactly as the delete below: `<tenant>__<name>` when `security.multi_tenancy` is on, and the prefix never appears in the response. The journal record carries no tenant tag, so, unlike the delete, the listing cannot also filter by tenant inside a collection; with ingest not applying the prefix (TASK-0381), it lists what was ingested under the prefixed name only. Which tenancy model is correct is the open decision in TASK-0339.
+
 ### Deleting a document
 
-`DELETE /v1/collections/{name}/documents/{document_id}` — `collections` scope. The `document_id` is the `d_…` id `GET /v1/ingest/{job_id}/documents` reports for each source.
+`DELETE /v1/collections/{name}/documents/{document_id}` — `collections` scope. The `document_id` is the `d_…` id `GET /v1/collections/{name}/documents` lists, or that `GET /v1/ingest/{job_id}/documents` reports for each source of a job.
 
 ```json
 {

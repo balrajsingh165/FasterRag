@@ -21,6 +21,7 @@ from fasterrag.config.loader import DEFAULT_CONFIG_PATH
 from fasterrag.services.backfill import DEFAULT_BATCH_SIZE
 from fasterrag.services.backup import DEFAULT_RETAIN
 from fasterrag.services.ci_status import DEFAULT_BRANCH
+from fasterrag.services.documents import DEFAULT_PAGE_SIZE, MAXIMUM_PAGE_SIZE
 from fasterrag.services.provision_registry import PROVISIONABLE_TOOLS
 
 __all__ = ["PENDING_COMMANDS", "REMOVED_COMMANDS", "build_parser", "removed_command"]
@@ -217,10 +218,22 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
 
 
 def _add_documents(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register ``documents delete``."""
+    """Register ``documents list`` and ``documents delete``."""
     parser = subparsers.add_parser("documents", help="manage the documents in a collection")
     _add_global_flags(parser)
     actions = parser.add_subparsers(dest="action", required=True)
+
+    listing = actions.add_parser("list", help="list the documents indexed in a collection")
+    _add_global_flags(listing)
+    listing.add_argument(
+        "--offset", type=int, default=0, help="skip this many documents, in document-id order"
+    )
+    listing.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_PAGE_SIZE,
+        help=f"documents per page, 1 to {MAXIMUM_PAGE_SIZE}",
+    )
 
     delete = actions.add_parser("delete", help="delete one document from a collection")
     _add_global_flags(delete)

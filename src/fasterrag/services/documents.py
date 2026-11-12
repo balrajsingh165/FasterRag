@@ -40,6 +40,14 @@ collection they are in and whichever of the two tenancy models TASK-0339 settles
 tombstone is *not* tenant-checked, because the dedup record carries no tenant to check
 against; under collection-name scoping the journal is already per tenant, and the worst a
 foreign tombstone does is make its owner's next ingest re-embed one document.
+
+**Listing reads the same record** (TASK-0469). A collection's documents are listed from the
+journal's dedup index, the record a delete tombstones, so a deleted document disappears from
+the listing in the same step that lets it be ingested again. The cost of that choice is the
+same caveat ``known`` carries: the listing is what the journal remembers, not a scan of the
+index, so with ``ingestion.dedup`` off, or after an archive import, it is empty for documents
+that are indexed. A scan would be honest about those and would read every point of a
+collection per page, which is the wrong price for a listing on a very large corpus.
 """
 
 from __future__ import annotations
@@ -56,9 +64,20 @@ from fasterrag.services.journal import Journal
 from fasterrag.services.lockfile import LockStore
 from fasterrag.services.tenancy import TENANT_PAYLOAD_KEY
 
-__all__ = ["DOCUMENT_ID_KEY", "DocumentDeletion", "DocumentService", "document_filter"]
+__all__ = [
+    "DEFAULT_PAGE_SIZE",
+    "DOCUMENT_ID_KEY",
+    "MAXIMUM_PAGE_SIZE",
+    "DocumentDeletion",
+    "DocumentListing",
+    "DocumentService",
+    "ListedDocument",
+    "document_filter",
+]
 
 DOCUMENT_ID_KEY = "document_id"
+DEFAULT_PAGE_SIZE = 100
+MAXIMUM_PAGE_SIZE = 1000
 
 _logger = get_logger(__name__)
 
@@ -90,6 +109,49 @@ class DocumentDeletion:
             "document_id": self.document_id,
             "known": self.known,
             "deleted_at": self.deleted_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ListedDocument:
+    """One document the journal records as indexed in a collection."""
+
+    document_id: str
+    content_hash: str
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the form every surface reports."""
+        return {"document_id": self.document_id, "content_hash": self.content_hash}
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentListing:
+    """One page of a collection's documents, ordered by ``document_id``.
+
+    ``total`` counts every document on every page; ``next_offset`` is ``None`` on the last.
+    """
+
+    collection: str
+    documents: list[ListedDocument]
+    total: int
+    offset: int
+    limit: int
+
+    @property
+    def next_offset(self) -> int | None:
+        """Return the offset of the next page, or ``None`` when this page is the last."""
+        following = self.offset + len(self.documents)
+        return following if following < self.total else None
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the form every surface reports."""
+        return {
+            "collection": self.collection,
+            "documents": [document.as_dict() for document in self.documents],
+            "total": self.total,
+            "offset": self.offset,
+            "limit": self.limit,
+            "next_offset": self.next_offset,
         }
 
 
@@ -170,6 +232,52 @@ class DocumentService:
             known=known,
             deleted_at=datetime.now(tz=UTC).isoformat(),
         )
+
+    async def list_documents(
+        self,
+        collection: str,
+        *,
+        offset: int = 0,
+        limit: int = DEFAULT_PAGE_SIZE,
+        display: str | None = None,
+    ) -> DocumentListing:
+        """Return one page of the documents the journal records in ``collection``.
+
+        Read from the dedup record, so a deleted document's tombstone hides it (TASK-0469).
+        A collection the backend does not hold is ``NOT_FOUND``, as on every sibling route.
+        """
+        if offset < 0 or not 1 <= limit <= MAXIMUM_PAGE_SIZE:
+            raise FasterRagError(
+                f"offset must be 0 or more and limit between 1 and {MAXIMUM_PAGE_SIZE}; "
+                f"got offset={offset}, limit={limit}",
+                code=ErrorCode.VALIDATION_FAILED,
+                retryable=False,
+            )
+
+        shown = display or collection
+        if not await self._exists(collection):
+            raise FasterRagError(
+                f"no collection named {shown!r}", code=ErrorCode.NOT_FOUND, retryable=False
+            )
+
+        held = await self.journal.document_hashes(collection)
+        ordered = sorted(held)
+        return DocumentListing(
+            collection=shown,
+            documents=[
+                ListedDocument(document_id=document, content_hash=held[document])
+                for document in ordered[offset : offset + limit]
+            ],
+            total=len(ordered),
+            offset=offset,
+            limit=limit,
+        )
+
+    async def _exists(self, collection: str) -> bool:
+        """Return whether the backend holds ``collection``, as a collection or an alias."""
+        if any(info.name == collection for info in await self.adapter.list_collections()):
+            return True
+        return await self.adapter.alias_target(collection) is not None
 
     async def _drop_from_lock(self, collection: str, document_id: str) -> None:
         """Remove the document from the collection's lockfile, off the event loop."""
