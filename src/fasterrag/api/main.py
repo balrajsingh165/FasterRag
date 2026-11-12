@@ -34,6 +34,7 @@ from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
 from fasterrag.config.schema import Settings
 from fasterrag.errors import FasterRagError
 from fasterrag.observability.logging import configure_logging, get_logger, use_trace_id
+from fasterrag.services.jobs import JobRegistry
 from fasterrag.services.traces import create_metric_pusher
 
 __all__ = ["CONFIG_PATH_VAR", "CorrelationIdMiddleware", "create_app"]
@@ -212,6 +213,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.settings = resolved
     app.state.vector_db = None
+    app.state.jobs = JobRegistry()
     registry = health.ReadinessRegistry()
     registry.register(_config_check)
     registry.register(_vector_db_check(app))

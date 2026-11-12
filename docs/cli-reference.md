@@ -53,7 +53,7 @@ Run the API server (`app.host`/`app.port` from config).
 
 Run the pipeline worker pools (CPU pool + embedding pool + indexer) for the configured queues.
 
-> **Status (2026-11-11): this process does no pipeline work.** `fasterrag worker` checks that the vector database answers, prints `worker ready`, and waits. Ingestion runs inside the process that accepted the job — the API's background task, or inline in the CLI and the Python facade — because there is no queue backend for a separate process to consume (TASK-0130). Running it is harmless and gains nothing; whether to build the queue-backed worker or remove the command is TASK-0440.
+> **Status (2026-11-11): this process does no pipeline work.** `fasterrag worker` checks that the vector database answers, prints `worker ready`, and waits. Ingestion runs inside the process that accepted the job — a task held by the API's job registry (`services/jobs.py`), or inline in the CLI and the Python facade — because there is no queue backend for a separate process to consume (TASK-0130). Running it is harmless and gains nothing; whether to build the queue-backed worker or remove the command is TASK-0440.
 
 | Flag | Description |
 |---|---|

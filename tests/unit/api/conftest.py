@@ -1,6 +1,8 @@
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, cast
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -101,8 +103,24 @@ def app(vector_db: StubVectorDB, tmp_path: Path) -> FastAPI:
     return application
 
 
+class SettlingClient(TestClient):
+    """A client whose every request returns only once the jobs it started have finished.
+
+    Ingestion continues after the ``202`` as a task the application's job registry holds, so
+    a test that posts a job and then reads its record would otherwise race the job. Waiting
+    here keeps each test a sequence of settled steps while still running the real registry.
+    """
+
+    def request(self, *args: Any, **kwargs: Any) -> httpx.Response:
+        response: httpx.Response = super().request(*args, **kwargs)
+        portal = self.portal
+        assert portal is not None, "use the client as a context manager, so one loop is shared"
+        portal.call(cast(FastAPI, self.app).state.jobs.idle)
+        return response
+
+
 @pytest.fixture
 def client(app: FastAPI) -> Iterator[TestClient]:
-    """Return a client that runs the application's lifespan."""
-    with TestClient(app) as test_client:
+    """Return a client that runs the application's lifespan and lets each job settle."""
+    with SettlingClient(app) as test_client:
         yield test_client

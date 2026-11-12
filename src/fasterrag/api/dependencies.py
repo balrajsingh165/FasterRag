@@ -24,6 +24,7 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.rerank import CrossEncoderReranker
 from fasterrag.services.generation import GenerationService
 from fasterrag.services.ingestion import IngestionService
+from fasterrag.services.jobs import JobRegistry
 from fasterrag.services.journal import Journal, create_journal
 from fasterrag.services.lockfile import create_lock_store
 from fasterrag.services.querying import RetrievalService
@@ -32,11 +33,13 @@ from fasterrag.services.traces import TraceStore
 __all__ = [
     "CurrentCache",
     "CurrentEmbeddings",
+    "CurrentJobs",
     "CurrentSettings",
     "CurrentTenant",
     "CurrentVectorDB",
     "JournalDep",
     "current_tenant",
+    "get_jobs",
     "get_journal",
     "get_settings",
     "get_vector_db",
@@ -64,6 +67,12 @@ def get_journal(request: Request) -> Journal:
         journal = create_journal(request.app.state.settings)
         request.app.state.journal = journal
     return journal
+
+
+def get_jobs(request: Request) -> JobRegistry:
+    """Return the registry holding every job this process is running."""
+    jobs: JobRegistry = request.app.state.jobs
+    return jobs
 
 
 def build_embedding_router(settings: Settings) -> TieringRouter:
@@ -110,6 +119,7 @@ CurrentVectorDB = Annotated[VectorDBAdapter, Depends(get_vector_db)]
 CurrentEmbeddings = Annotated[TieringRouter, Depends(shared_embedding_router)]
 CurrentCache = Annotated[SemanticCache, Depends(shared_cache)]
 JournalDep = Annotated[Journal, Depends(get_journal)]
+CurrentJobs = Annotated[JobRegistry, Depends(get_jobs)]
 
 
 def build_retrieval(

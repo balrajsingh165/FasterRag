@@ -6,9 +6,11 @@ proxy between the caller and the server. The job is journalled first and *then* 
 the id in the ``202`` response is queryable the instant the caller receives it — starting the
 work first would create a window where the job is running but its id 404s.
 
-The work runs as a background task in this process. That is a deployment choice, not a
-contract: the documented surface is "``202`` with a job id, poll ``GET /v1/ingest/{job_id}``",
-which a distributed queue satisfies identically. Moving to one later changes no response.
+The work runs as a task in this process, held by the application's
+:class:`~fasterrag.services.jobs.JobRegistry` so shutdown can find it (TASK-0436). That is
+a deployment choice, not a contract: the documented surface is "``202`` with a job id, poll
+``GET /v1/ingest/{job_id}``", which a distributed queue satisfies identically. Moving to one
+later changes no response, and the registry is where it plugs in (TASK-0130).
 
 Per-document status (D3) is served from the journal, so a dead-lettered document stays
 answerable long after the job that produced it finished.
@@ -25,9 +27,10 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, Query, Request, Response, status
+from fastapi import APIRouter, Query, Request, Response, status
 
 from fasterrag.api.dependencies import (
+    CurrentJobs,
     CurrentSettings,
     CurrentTenant,
     CurrentVectorDB,
@@ -143,7 +146,7 @@ async def start_ingest(
     body: IngestRequest,
     request: Request,
     response: Response,
-    background: BackgroundTasks,
+    jobs: CurrentJobs,
     settings: CurrentSettings,
     journal: JournalDep,
     adapter: CurrentVectorDB,
@@ -176,7 +179,7 @@ async def start_ingest(
         metadata = dict(body.metadata or {})
         if body.priority_class:
             metadata["priority_class"] = body.priority_class
-        background.add_task(_run_job, request, record, metadata or None)
+        await jobs.submit(record.job_id, _run_job(request, record, metadata or None))
 
     return {"job_id": record.job_id, "status": record.status}
 
@@ -218,7 +221,7 @@ async def job_documents(
 async def retry_dead_letters(
     job_id: str,
     request: Request,
-    background: BackgroundTasks,
+    jobs: CurrentJobs,
     settings: CurrentSettings,
     journal: JournalDep,
     adapter: CurrentVectorDB,
@@ -242,6 +245,6 @@ async def retry_dead_letters(
         collection=original.collection,
         tenant=original.tenant,
     )
-    background.add_task(_run_job, request, retry, None)
+    await jobs.submit(retry.job_id, _run_job(request, retry, None))
 
     return {"job_id": retry.job_id, "retried": len(failed), "status": retry.status, "of": job_id}
