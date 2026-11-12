@@ -1293,6 +1293,22 @@ async def test_no_retry_is_waited_for_that_would_outlast_the_deadline(
     assert len(llm.prompts) == 1
 
 
+async def test_a_degraded_answer_s_trace_id_points_at_a_stored_trace(tmp_path: Path) -> None:
+    """The extractive rung stored no trace, so its trace id resolved to nothing (TASK-0505)."""
+    service, _ = build(error=GenerationError("status 503", retryable=True))
+    service.traces = TraceStore(tmp_path)
+
+    answer = await service.answer("what is the notice period?")
+    stored = service.traces.load(answer.trace_id)
+
+    assert stored is not None
+    assert stored.result["mode"] == EXTRACTIVE_MODE
+    assert stored.result["degraded"] is True
+    failed = [span for span in stored.spans if span.name == "generation-failed"]
+    assert failed[-1].attributes["code"] == ErrorCode.GENERATION_FAILED.value
+    assert failed[-1].attributes["detail"] == "status 503"
+
+
 async def test_a_misconfigured_provider_never_opens_the_breaker() -> None:
     """A misconfiguration never opens the breaker.
 
@@ -1579,6 +1595,18 @@ def _span_names(observed: Observed) -> list[str]:
     return [name for name, _ in observed.trace["spans"]]
 
 
+def _degraded_trace_names(seen: Observed, code: ErrorCode) -> bool:
+    """Return whether an extractive answer left a trace naming the failure that caused it."""
+    assert seen.trace is not None, "a degraded answer stored no trace (TASK-0505)"
+    failed = [attributes for name, attributes in seen.trace["spans"] if name == "generation-failed"]
+    return (
+        seen.trace["result"]["mode"] == EXTRACTIVE_MODE
+        and seen.trace["response"] == ""
+        and bool(failed)
+        and failed[-1]["code"] == code.value
+    )
+
+
 PARITY_CASES: dict[str, ParityCase] = {
     "success": ParityCase(
         holds=lambda seen: (
@@ -1602,6 +1630,7 @@ PARITY_CASES: dict[str, ParityCase] = {
             and [cited["chunk_id"] for cited in _body(seen)["citations"]] == ["c_a"]
             and seen.metrics["fasterrag_degraded_responses_total{mode=extractive}"] == 1
             and seen.provider_calls == 1 + Settings().reliability.retries.max_attempts
+            and _degraded_trace_names(seen, ErrorCode.GENERATION_FAILED)
         ),
     ),
     "retried, then answered": ParityCase(
@@ -1634,6 +1663,7 @@ PARITY_CASES: dict[str, ParityCase] = {
             _body(seen)["mode"] == EXTRACTIVE_MODE
             and seen.provider_calls == 1
             and not seen.breaker_open
+            and _degraded_trace_names(seen, ErrorCode.DEADLINE_EXCEEDED)
         ),
     ),
     "open breaker": ParityCase(
@@ -1643,6 +1673,7 @@ PARITY_CASES: dict[str, ParityCase] = {
             and seen.metrics["fasterrag_degraded_responses_total{mode=extractive}"] == 1
             and seen.provider_calls == 0
             and seen.breaker_open
+            and _degraded_trace_names(seen, ErrorCode.CIRCUIT_OPEN)
         ),
     ),
     "non-retryable failure": ParityCase(

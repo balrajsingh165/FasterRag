@@ -1186,6 +1186,11 @@ class GenerationService:
                 yield _Interrupted(error=exc)
                 return
             degraded = self._degrade(prepared, exc, trace_id, timings)
+            # CRITICAL: stored before the rung's first stage, for the reason the full answer's
+            # trace is (a consumer may stop at `done`), and stored at all because a degraded
+            # answer is the one an operator most wants to look up (TASK-0505). The response is
+            # empty because the model gave none; the `generation-failed` span says why.
+            self._store_trace(question, collection, filters, prepared, "", degraded)
             yield _Degraded(trace_id=trace_id, mode=degraded.mode)
             yield _Delta(text=degraded.answer or "")
             yield _Completed(answer=degraded)
