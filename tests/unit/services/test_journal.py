@@ -2,8 +2,10 @@ import asyncio
 import errno
 import json
 import os
+import shutil
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -11,6 +13,7 @@ from unittest import mock
 import pytest
 
 from fasterrag.errors import ErrorCode, IngestionError
+from fasterrag.services import journal as journal_module
 from fasterrag.services.journal import DocumentRecord, JobRecord, Journal
 
 SOURCES = [{"type": "path", "value": "/data/docs"}]
@@ -112,6 +115,113 @@ def test_a_truncated_record_falls_back_too(journal: Journal) -> None:
     journal._job_path(record.job_id).write_text('{"checksum": "abc", "bo', encoding="utf-8")
 
     assert journal.load_job_blocking(record.job_id).job_id == record.job_id
+
+
+def test_a_missing_live_record_falls_back_to_the_previous_good_record(journal: Journal) -> None:
+    """A reader between a rewrite's two renames got NOT_FOUND for a job that existed."""
+    record = journal.create_job_blocking("default", SOURCES)
+    record = journal.checkpoint_blocking(record, 2)
+    path = journal._job_path(record.job_id)
+    path.replace(path.with_suffix(path.suffix + ".prev"))
+
+    recovered = journal.load_job_blocking(record.job_id)
+
+    assert recovered.job_id == record.job_id
+    assert recovered.checkpoint is not None
+    assert recovered.checkpoint.last_document_index == 2
+
+
+def test_a_missing_live_record_with_a_torn_previous_copy_is_corrupt_not_unknown(
+    journal: Journal,
+) -> None:
+    """A job that left a trace on disk is damaged, which is not the same as never created."""
+    record = journal.create_job_blocking("default", SOURCES)
+    path = journal._job_path(record.job_id)
+    path.unlink()
+    path.with_suffix(path.suffix + ".prev").write_text("garbage", encoding="utf-8")
+
+    with pytest.raises(IngestionError, match="corrupt") as caught:
+        journal.load_job_blocking(record.job_id)
+
+    assert caught.value.code is ErrorCode.CHUNK_FAILED
+
+
+def test_a_record_that_is_not_text_falls_back_like_any_other_torn_write(journal: Journal) -> None:
+    """Bytes that are not UTF-8 raised a decode error instead of reaching the checksum."""
+    record = journal.create_job_blocking("default", SOURCES)
+    record = journal.checkpoint_blocking(record, 2)
+    journal.save_job_blocking(record)
+    journal._job_path(record.job_id).write_bytes(b"\xff\xfe\x00torn")
+
+    assert journal.load_job_blocking(record.job_id).job_id == record.job_id
+
+
+def busy_for(monkeypatch: pytest.MonkeyPatch, path: Path, reads: float) -> list[Path]:
+    """Make the first ``reads`` reads of ``path`` fail as Windows does mid-``os.replace``."""
+    real = Path.read_text
+    seen: list[Path] = []
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == path:
+            seen.append(self)
+            if len(seen) <= reads:
+                raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    return seen
+
+
+def test_a_record_busy_for_the_first_reads_is_read_once_it_settles(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read racing a rewrite on Windows raised a raw PermissionError, which became a 500."""
+    record = journal.create_job_blocking("default", SOURCES)
+    record = journal.checkpoint_blocking(record, 2)
+    seen = busy_for(monkeypatch, journal._job_path(record.job_id), reads=3)
+
+    loaded = journal.load_job_blocking(record.job_id)
+
+    assert loaded.checkpoint == record.checkpoint
+    assert len(seen) == 4
+
+
+def test_a_record_that_stays_busy_is_read_from_its_previous_copy(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = journal.create_job_blocking("default", SOURCES)
+    record = journal.checkpoint_blocking(record, 2)
+    busy_for(monkeypatch, journal._job_path(record.job_id), reads=float("inf"))
+
+    loaded = journal.load_job_blocking(record.job_id)
+
+    assert loaded.job_id == record.job_id
+    assert loaded.checkpoint is None
+
+
+def test_a_record_that_stays_busy_with_no_previous_copy_is_a_retryable_typed_error(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never a raw OSError: the caller gets a typed error that says to try again."""
+    record = journal.create_job_blocking("default", SOURCES)
+    busy_for(monkeypatch, journal._job_path(record.job_id), reads=float("inf"))
+
+    with pytest.raises(IngestionError, match="being rewritten") as caught:
+        journal.load_job_blocking(record.job_id)
+
+    assert caught.value.code is ErrorCode.NOT_READY
+    assert caught.value.retryable is True
+    assert isinstance(caught.value.__cause__, PermissionError)
+
+
+def test_a_job_looked_up_under_a_root_that_is_a_file_is_unknown(tmp_path: Path) -> None:
+    blocker = tmp_path / "journal"
+    blocker.write_text("a file where the journal directory should be", encoding="utf-8")
+
+    with pytest.raises(IngestionError) as caught:
+        Journal(blocker).load_job_blocking("job_missing")
+
+    assert caught.value.code is ErrorCode.NOT_FOUND
 
 
 def test_an_unrecoverable_record_is_a_typed_error(journal: Journal) -> None:
@@ -468,3 +578,189 @@ class TestTheAsyncFaceKeepsFileIoOffTheEventLoop:
 
         assert await journal.known_content("default") == {}
         assert len(await journal.documents(created.job_id)) == 1
+
+
+def refuse_appends(monkeypatch: pytest.MonkeyPatch, error: OSError) -> None:
+    """Make every append to a journal log fail with ``error``; reads still work."""
+    real_open = Path.open
+
+    def open_log(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if self.suffix == ".jsonl" and "a" in mode:
+            raise error
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_log)
+
+
+APPENDS: dict[str, Callable[[Journal], object]] = {
+    "record_document": lambda journal: journal.record_document_blocking(
+        "job_1", DocumentRecord(document_id="d_1", source="a.md", status="indexed")
+    ),
+    "remember_content": lambda journal: journal.remember_content_blocking(
+        "default", "hash-1", "d_1"
+    ),
+    "tombstone": lambda journal: journal.forget_document_blocking("default", "d_1"),
+}
+
+
+@pytest.mark.parametrize("append", sorted(APPENDS))
+def test_a_full_disk_on_an_append_is_a_typed_error_not_a_raw_oserror(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch, append: str
+) -> None:
+    """TASK-0475: the appends had no handler, so a full disk escaped as a raw OSError."""
+    journal.remember_content_blocking("default", "hash-1", "d_1")
+    refuse_appends(monkeypatch, OSError(errno.ENOSPC, "No space left on device"))
+
+    with pytest.raises(IngestionError) as caught:
+        APPENDS[append](journal)
+
+    assert caught.value.code is ErrorCode.INTERNAL
+    assert "No space left on device" in str(caught.value)
+    assert isinstance(caught.value.__cause__, OSError)
+
+
+def test_an_append_under_a_root_that_is_a_file_is_a_typed_error(tmp_path: Path) -> None:
+    blocker = tmp_path / "journal"
+    blocker.write_text("a file where the journal directory should be", encoding="utf-8")
+
+    with pytest.raises(IngestionError):
+        APPENDS["record_document"](Journal(blocker))
+
+
+def test_a_line_a_crash_left_unfinished_is_skipped_and_the_next_append_survives(
+    journal: Journal,
+) -> None:
+    """A torn last line made every later read of the log raise a JSON error."""
+    journal.remember_content_blocking("default", "hash-1", "d_1")
+    path = journal.root / "collections" / "default" / "content-hashes.jsonl"
+    with path.open("ab") as handle:
+        handle.write(b'{"content_hash": "hash-2", "docu')
+
+    journal.remember_content_blocking("default", "hash-3", "d_3")
+
+    assert journal.known_content_blocking("default") == {"hash-1": "d_1", "hash-3": "d_3"}
+
+
+def test_a_torn_document_line_is_skipped_too(journal: Journal) -> None:
+    APPENDS["record_document"](journal)
+    path = journal._documents_path("job_1")
+    with path.open("ab") as handle:
+        handle.write(b'{"document_id": "d_2", "sou')
+
+    APPENDS["record_document"](journal)
+
+    assert [entry.document_id for entry in journal.documents_blocking("job_1")] == ["d_1", "d_1"]
+
+
+def test_a_checkpoint_flushes_the_logs_it_covers_before_it_is_written(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Appends are not flushed one by one, so the checkpoint must not outrun them."""
+    record = journal.create_job_blocking("default", SOURCES)
+    journal.record_indexed_blocking(
+        record.job_id,
+        "default",
+        DocumentRecord(document_id="d_1", source="a.md", status="indexed", content_hash="h"),
+        dedup=True,
+    )
+    flushed: list[str] = []
+    real_sync = journal_module._sync_file
+
+    def sync(path: Path) -> None:
+        flushed.append(path.name)
+        real_sync(path)
+
+    monkeypatch.setattr(journal_module, "_sync_file", sync)
+
+    journal.checkpoint_blocking(record, 2)
+
+    assert flushed[:2] == ["documents.jsonl", "content-hashes.jsonl"]
+    assert any(name.endswith(".tmp") for name in flushed[2:])
+
+
+def test_an_append_waits_for_the_lock_and_gives_up_typed(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = journal._documents_path("job_1")
+    path.parent.mkdir(parents=True)
+    monkeypatch.setattr(journal_module, "_LOCK_TIMEOUT_SECONDS", 0.05)
+
+    with journal_module._exclusive(path), pytest.raises(IngestionError) as caught:
+        APPENDS["record_document"](journal)
+
+    assert caught.value.code is ErrorCode.NOT_READY
+    assert journal.documents_blocking("job_1") == []
+
+
+def job_reads(monkeypatch: pytest.MonkeyPatch, journal: Journal) -> list[Path]:
+    """Record every job record the journal opens from now on."""
+    real = Path.read_text
+    opened: list[Path] = []
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self.parent == journal.root / "jobs":
+            opened.append(self)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    return opened
+
+
+def test_a_keyed_lookup_opens_one_record_however_many_jobs_exist(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lookup globbed and read every job file: 633 ms at 10,000 jobs (BENCH-0004)."""
+    for index in range(30):
+        journal.create_job_blocking("default", SOURCES, idempotency_key=f"key-{index}")
+    opened = job_reads(monkeypatch, journal)
+
+    found = journal.find_by_idempotency_key_blocking("key-17")
+    missing = journal.find_by_idempotency_key_blocking("never-sent")
+
+    assert found is not None
+    assert found.idempotency_key == "key-17"
+    assert missing is None
+    assert len(opened) == 1
+
+
+def test_a_journal_written_before_the_index_is_indexed_on_first_lookup(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operators have journals on disk with no index; their keys must still replay."""
+    first = journal.create_job_blocking("default", SOURCES, idempotency_key="key-1")
+    journal.create_job_blocking("default", SOURCES, idempotency_key="key-2", tenant="acme")
+    shutil.rmtree(journal.root / "job-keys")
+
+    assert journal.find_by_idempotency_key_blocking("key-1") == first
+    assert journal.find_by_idempotency_key_blocking("key-2") is None
+    opened = job_reads(monkeypatch, journal)
+    assert journal.create_job_blocking("default", SOURCES, idempotency_key="key-1") == first
+    assert len(opened) == 1
+
+
+def test_an_entry_naming_a_job_that_is_gone_is_rebuilt_not_trusted(journal: Journal) -> None:
+    """An interruption between the entry and the record leaves an entry naming nothing."""
+    first = journal.create_job_blocking("default", SOURCES, idempotency_key="key-1")
+    journal._job_path(first.job_id).unlink()
+
+    second = journal.create_job_blocking("default", SOURCES, idempotency_key="key-1")
+
+    assert second.job_id != first.job_id
+    assert journal.find_by_idempotency_key_blocking("key-1") == second
+
+
+def test_an_entry_naming_another_tenants_job_is_never_returned(journal: Journal) -> None:
+    """TASK-0318's scoping must survive the index: a key is per tenant."""
+    theirs = journal.create_job_blocking("default", SOURCES, idempotency_key="k", tenant="a")
+    ours = journal.create_job_blocking("default", SOURCES, idempotency_key="k", tenant="b")
+    index = journal.root / "job-keys"
+    swapped = index / journal_module._key_entry_name("k", "b")
+    swapped.write_bytes((index / journal_module._key_entry_name("k", "a")).read_bytes())
+
+    assert journal.find_by_idempotency_key_blocking("k", tenant="a") == theirs
+    assert journal.find_by_idempotency_key_blocking("k", tenant="b") == ours
+
+
+def test_the_lookup_on_an_empty_journal_creates_nothing(journal: Journal) -> None:
+    assert journal.find_by_idempotency_key_blocking("key-1") is None
+    assert not journal.root.exists()

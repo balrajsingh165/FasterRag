@@ -19,22 +19,29 @@ succeed into a resumable, auditable batch system:
   reason code and stays queryable, so a bad file never silently disappears and never stops
   the pipeline.
 
-Every write is atomic — written to a temporary file and renamed — and every job record
-carries a checksum. A torn write is therefore detectable, and the previous good record is
-kept so a damaged one degrades to resuming slightly earlier rather than to losing the job
-(``docs/reliability.md`` §3, ``docs/failure-modes.md`` rows 31 and 32).
+Every rewrite of a record is atomic and durable — written to a uniquely named temporary
+file, flushed, renamed over the live file, and the directory flushed where the platform
+allows — and every job record carries a checksum. The live record is replaced, never moved
+away, so a reader or a crash at any step finds a whole record; a torn one is detectable, and
+the previous good copy is kept so a damaged record degrades to resuming slightly earlier
+rather than to losing the job (``docs/reliability.md`` §3, ``docs/failure-modes.md`` rows 32
+and 33, ``docs/adr/ADR-0009-journal-stays-on-files.md``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
+import secrets
+import sys
 import time
-from collections.abc import Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, Final
 
@@ -43,6 +50,11 @@ from fasterrag.core.identity import job_id as new_job_id
 from fasterrag.core.identity import text_hash
 from fasterrag.errors import ErrorCode, IngestionError
 from fasterrag.observability.logging import get_logger
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 __all__ = [
     "DEFAULT_JOURNAL_ROOT",
@@ -66,6 +78,14 @@ _DOCUMENTS_FILE: Final = "documents.jsonl"
 _DEDUP_FILE: Final = "content-hashes.jsonl"
 _PREVIOUS_SUFFIX: Final = ".prev"
 _TOMBSTONE_KEY: Final = "tombstone"
+_TEMPORARY_SUFFIX: Final = ".tmp"
+_BUSY_DELAYS: Final = (0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2)
+_DISK_FULL: Final = frozenset({errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)})
+_LOCK_SUFFIX: Final = ".lock"
+_KEY_INDEX_DIR: Final = "job-keys"
+_KEY_INDEX_BUILT: Final = "built.json"
+_LOCK_TIMEOUT_SECONDS: Final = 30.0
+_LOCK_POLL_SECONDS: Final = 0.002
 
 DocumentStatus = str
 JobStatus = str
@@ -169,29 +189,259 @@ def _modified(path: Path, *, missing: float) -> float:
         return missing
 
 
-def _write_atomically(path: Path, payload: str) -> None:
-    """Write a file atomically, keeping the previous version as a fallback."""
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            os.replace(path, path.with_suffix(path.suffix + _PREVIOUS_SUFFIX))
+def _patiently[T](operation: Callable[[], T]) -> T:
+    """Run a file operation, retrying it briefly while the file is reported busy.
 
-        temporary.write_text(payload, encoding="utf-8")
-        os.replace(temporary, path)
+    Windows raises ``PermissionError`` for a file another handle is replacing at that
+    instant; elsewhere it is a real refusal, which the last attempt raises (TASK-0437).
+    """
+    for delay in _BUSY_DELAYS:
+        try:
+            return operation()
+        except PermissionError:
+            time.sleep(delay)
+    return operation()
+
+
+def _read_text(path: Path) -> str | None:
+    """Return a file's text, or None when no such file is on disk.
+
+    Bytes that are not UTF-8 are replaced, so a damaged record fails its checksum like any
+    torn write; a file still busy after the retries raises ``PermissionError``.
+    """
+    try:
+        return _patiently(lambda: path.read_text(encoding="utf-8", errors="replace"))
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
+def _busy(job: str, exc: PermissionError) -> IngestionError:
+    """Return the retryable error for a job record no read could open."""
+    return IngestionError(
+        f"the journal record for job {job!r} is being rewritten and could not be read: "
+        f"{exc}. Retry the request",
+        code=ErrorCode.NOT_READY,
+    )
+
+
+def _sync_file(path: Path) -> None:
+    """Flush a file's contents to the disk; Windows needs a writable handle to do it."""
+    descriptor = os.open(path, os.O_RDWR | getattr(os, "O_BINARY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _sync_directory(directory: Path) -> None:
+    """Make a rename in ``directory`` survive power loss, where the platform allows it.
+
+    Windows cannot open a directory to ``fsync`` it — NTFS journals the rename itself — and
+    a POSIX filesystem that refuses (``EINVAL``) is logged, since the rename already happened.
+    """
+    if os.name == "nt":
+        return
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
     except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.ENOTSUP):
+            raise
+        _logger.warning(
+            "this filesystem cannot flush a directory; a rename may not survive power loss",
+            extra={"directory": str(directory), "detail": str(exc)},
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _stage(path: Path, payload: str, staged: list[Path], *, durable: bool = True) -> Path:
+    """Write ``payload`` to a uniquely named temporary file beside ``path``, flushed if durable."""
+    temporary = path.with_name(f"{path.name}.{secrets.token_hex(8)}{_TEMPORARY_SUFFIX}")
+    staged.append(temporary)
+    temporary.write_text(payload, encoding="utf-8")
+    if durable:
+        _sync_file(temporary)
+    return temporary
+
+
+def _keep_previous(path: Path, staged: list[Path]) -> None:
+    """Copy the live record to its previous-good slot, when it is whole.
+
+    A copy rather than a rename, so the live record never leaves; a torn one is not copied.
+    Not flushed: the copy is a fallback for a damaged live record, which is flushed itself.
+    """
+    current = _read_text(path)
+    if current is None or open_envelope(current) is None:
+        return
+    previous = path.with_suffix(path.suffix + _PREVIOUS_SUFFIX)
+    copy = _stage(previous, current, staged, durable=False)
+    _patiently(lambda: os.replace(copy, previous))
+
+
+def _make_room(path: Path, staged: list[Path], exc: OSError) -> None:
+    """Free what a rewrite on a full disk can spare: its staged files and the previous copy."""
+    _discard(staged)
+    previous = path.with_suffix(path.suffix + _PREVIOUS_SUFFIX)
+    previous.unlink(missing_ok=True)
+    _logger.warning(
+        "the disk is full; the previous copy of a journal record was dropped to make room",
+        extra={"path": str(path), "detail": str(exc)},
+    )
+
+
+def _discard(staged: list[Path]) -> None:
+    """Remove temporary files a failed write left behind."""
+    for temporary in staged:
         # CRITICAL: the cleanup is itself suppressed, for the reason recorded in
         # TraceStore.save and IndexLockStore.write — on Linux a parent that is a file rather
         # than a directory makes `unlink` raise from inside this handler, replacing the error
         # being reported with a second one that escapes.
         with suppress(OSError):
             temporary.unlink(missing_ok=True)
+    staged.clear()
+
+
+def _write_atomically(
+    path: Path, payload: str, *, keep_previous: bool = True, durable: bool = True
+) -> None:
+    """Replace ``path`` so a reader, or a crash at any step, finds a whole record.
+
+    Stage a flushed, uniquely named file, ``os.replace`` it over the live one and flush the
+    directory: the live record is never renamed away, so it is never missing (TASK-0437).
+    """
+    staged: list[Path] = []
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if keep_previous:
+            try:
+                _keep_previous(path, staged)
+            except OSError as exc:
+                if exc.errno not in _DISK_FULL:
+                    raise
+                _make_room(path, staged, exc)
+        fresh = _stage(path, payload, staged, durable=durable)
+        _patiently(lambda: os.replace(fresh, path))
+        if durable:
+            _sync_directory(path.parent)
+    except OSError as exc:
+        _discard(staged)
         raise IngestionError(
             f"the ingestion journal could not be written to {path}: {exc}. "
             "The last checkpoint is still readable, so the job can be resumed once the "
             "condition clears",
             code=ErrorCode.INTERNAL,
         ) from exc
+
+
+def _try_lock(descriptor: int) -> None:
+    """Take the exclusive lock on an open lock file, raising at once if it is held."""
+    if sys.platform == "win32":
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(descriptor: int) -> None:
+    """Release the lock :func:`_try_lock` took."""
+    if sys.platform == "win32":
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _exclusive(path: Path) -> Iterator[None]:
+    """Hold the cross-process advisory lock for ``path``, kept on a ``.lock`` sidecar.
+
+    A sidecar, because a Windows byte-range lock is mandatory: locking the log itself would
+    make every reader of it fail while a writer appended.
+    """
+    lock = path.with_name(path.name + _LOCK_SUFFIX)
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+    try:
+        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                _try_lock(descriptor)
+                break
+            except (BlockingIOError, PermissionError) as exc:
+                if time.monotonic() >= deadline:
+                    raise IngestionError(
+                        f"the ingestion journal lock {lock} was held by another writer for "
+                        f"{_LOCK_TIMEOUT_SECONDS:.0f}s: {exc}. Retry once it is released",
+                        code=ErrorCode.NOT_READY,
+                    ) from exc
+                time.sleep(_LOCK_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            _unlock(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _ends_a_line(path: Path) -> bool:
+    """Return whether a non-empty log's last byte is a newline."""
+    with path.open("rb") as handle:
+        handle.seek(-1, os.SEEK_END)
+        return handle.read(1) == b"\n"
+
+
+def _append_line(path: Path, line: str, tails: dict[Path, int]) -> None:
+    """Append one line under the file's lock, translating any OS failure (TASK-0475).
+
+    A fragment a crash left is ended before the line is written; ``tails`` remembers where
+    this process's last append ended, so the tail is read only when someone else wrote it.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _exclusive(path), path.open("ab") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            whole = size == 0 or tails.get(path) == size or _ends_a_line(path)
+            data = (b"" if whole else b"\n") + line.encode("utf-8") + b"\n"
+            handle.write(data)
+            handle.flush()
+            tails[path] = size + len(data)
+    except OSError as exc:
+        raise IngestionError(
+            f"the ingestion journal could not append to {path}: {exc}. The documents after "
+            "the last checkpoint are processed again once the condition clears",
+            code=ErrorCode.INTERNAL,
+        ) from exc
+
+
+def _logged_lines(path: Path) -> list[dict[str, Any]]:
+    """Return the parsed lines of an append-only log, skipping a fragment a crash left."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    parsed: list[dict[str, Any]] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            parsed.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            _logger.warning(
+                "skipping a journal line a crash left unfinished",
+                extra={"path": str(path), "line": number, "detail": str(exc)},
+            )
+    return parsed
+
+
+def _sync_if_present(path: Path) -> None:
+    """Flush a log to the disk if it exists, so a checkpoint never outruns what it covers."""
+    if path.is_file():
+        _sync_file(path)
+
+
+def _key_entry_name(key: str, tenant: str | None) -> str:
+    """Return the index file name for a tenant's key, hashed so no key escapes the directory."""
+    return f"{text_hash(json.dumps([tenant, key]))}.json"
 
 
 def envelope(payload: dict[str, Any]) -> str:
@@ -232,6 +482,7 @@ class Journal:
         self.root = Path(root)
         self.checkpoint_every = checkpoint_every
         self.enabled = enabled
+        self._tails: dict[Path, int] = {}
 
     def _job_path(self, job: str) -> Path:
         """Return the path of a job record."""
@@ -279,15 +530,6 @@ class Journal:
         Replaying an idempotency key returns the original job and creates nothing, so a
         retried submission never starts a second ingest of the same corpus.
         """
-        if idempotency_key is not None:
-            existing = self.find_by_idempotency_key_blocking(idempotency_key, tenant=tenant)
-            if existing is not None:
-                _logger.info(
-                    "returning the existing job for a replayed idempotency key",
-                    extra={"job_id": existing.job_id},
-                )
-                return existing
-
         record = JobRecord(
             job_id=new_job_id(),
             collection=collection,
@@ -297,7 +539,20 @@ class Journal:
             idempotency_key=idempotency_key,
             tenant=tenant,
         )
-        self.save_job_blocking(record)
+        if idempotency_key is None:
+            self.save_job_blocking(record)
+            return record
+
+        with self._key_index_lock():
+            existing = self._find_indexed(idempotency_key, tenant)
+            if existing is not None:
+                _logger.info(
+                    "returning the existing job for a replayed idempotency key",
+                    extra={"job_id": existing.job_id},
+                )
+                return existing
+            self._index_key(record, idempotency_key)
+            self.save_job_blocking(record)
         return record
 
     async def save_job(self, record: JobRecord) -> None:
@@ -313,17 +568,29 @@ class Journal:
         return await asyncio.to_thread(self.load_job_blocking, job, tenant=tenant)
 
     def load_job_blocking(self, job: str, *, tenant: str | None = None) -> JobRecord:
-        """Load a job record, falling back to the previous good copy."""
-        path = self._job_path(job)
-        if not path.exists():
-            raise IngestionError(f"unknown ingest job {job!r}", code=ErrorCode.NOT_FOUND)
+        """Load a job record, falling back to the previous good copy.
 
-        payload = open_envelope(path.read_text(encoding="utf-8"))
+        A live record that is missing, busy or torn is read from its previous copy; a job
+        is unknown only when neither is on disk, and busy when neither opens (TASK-0437).
+        """
+        path = self._job_path(job)
+        busy: PermissionError | None = None
+        try:
+            live = _read_text(path)
+        except PermissionError as exc:
+            live, busy = None, exc
+        payload = open_envelope(live) if live is not None else None
         if payload is None:
-            previous = path.with_suffix(path.suffix + _PREVIOUS_SUFFIX)
-            payload = (
-                open_envelope(previous.read_text(encoding="utf-8")) if previous.exists() else None
-            )
+            try:
+                kept = _read_text(path.with_suffix(path.suffix + _PREVIOUS_SUFFIX))
+            except PermissionError as exc:
+                raise _busy(job, exc) from exc
+            if live is None and kept is None:
+                if busy is not None:
+                    raise _busy(job, busy) from busy
+                raise IngestionError(f"unknown ingest job {job!r}", code=ErrorCode.NOT_FOUND)
+
+            payload = open_envelope(kept) if kept is not None else None
             if payload is None:
                 raise IngestionError(
                     f"the journal record for job {job!r} is corrupt and has no readable "
@@ -332,8 +599,12 @@ class Journal:
                     retryable=False,
                 )
             _logger.warning(
-                "journal record failed its checksum; resuming from the previous checkpoint",
-                extra={"job_id": job},
+                "journal record is missing or failed its checksum; resuming from the "
+                "previous checkpoint",
+                extra={
+                    "job_id": job,
+                    "live_record": "busy" if busy else "missing" if live is None else "torn",
+                },
             )
 
         record = JobRecord.from_dict(payload)
@@ -352,20 +623,115 @@ class Journal:
     ) -> JobRecord | None:
         """Return the job ``tenant`` created with ``key``, if one exists.
 
-        Scoped to the tenant, because an unscoped match hands one tenant another's job id
-        and swallows the ingest it asked for (TASK-0318).
+        Scoped to the tenant (TASK-0318), and answered from the ``job-keys/`` index: one
+        entry and one record, whatever the number of jobs (TASK-0437).
         """
-        directory = self.root / _JOBS_DIR
-        if not directory.is_dir():
+        if not (self.root / _JOBS_DIR).is_dir():
             return None
+        with self._key_index_lock():
+            return self._find_indexed(key, tenant)
 
-        for path in sorted(directory.glob("*.json")):
-            payload = open_envelope(path.read_text(encoding="utf-8"))
-            if payload is None or payload.get("idempotency_key") != key:
-                continue
-            if payload.get("tenant") == tenant:
-                return JobRecord.from_dict(payload)
-        return None
+    def _key_index_lock(self) -> AbstractContextManager[None]:
+        """Return the lock that makes a keyed lookup and the job it creates one step."""
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise IngestionError(
+                f"the ingestion journal root {self.root} cannot be created: {exc}",
+                code=ErrorCode.INTERNAL,
+            ) from exc
+        return _exclusive(self.root / _KEY_INDEX_DIR)
+
+    def _find_indexed(self, key: str, tenant: str | None) -> JobRecord | None:
+        """Return the job the index names for ``(tenant, key)``, under the index lock.
+
+        An index that was never built, or an entry that names the wrong record, is rebuilt
+        from a full scan once, and the lookup asked again.
+        """
+        if not (self.root / _KEY_INDEX_DIR / _KEY_INDEX_BUILT).is_file():
+            self._rebuild_key_index()
+        found, stale = self._indexed_job(key, tenant)
+        if stale:
+            self._rebuild_key_index()
+            found, _ = self._indexed_job(key, tenant)
+        return found
+
+    def _indexed_job(self, key: str, tenant: str | None) -> tuple[JobRecord | None, bool]:
+        """Return the job the index entry names and whether the entry was stale."""
+        try:
+            text = _read_text(self.root / _KEY_INDEX_DIR / _key_entry_name(key, tenant))
+        except PermissionError as exc:
+            raise _busy(key, exc) from exc
+        if text is None:
+            return None, False
+        entry = open_envelope(text)
+        job = entry.get("job_id") if entry is not None else None
+        if not isinstance(job, str):
+            return None, True
+        try:
+            record = self.load_job_blocking(job)
+        except IngestionError as exc:
+            if exc.code is ErrorCode.NOT_READY:
+                raise
+            _logger.warning(
+                "an idempotency index entry names a job that cannot be read; rebuilding",
+                extra={"job_id": job, "detail": exc.detail},
+            )
+            return None, True
+        if record.idempotency_key != key or record.tenant != tenant:
+            return None, True
+        return record, False
+
+    def _index_key(self, record: JobRecord, key: str, *, durable: bool = True) -> None:
+        """Point the index at ``record``, before the record exists.
+
+        In that order an interruption leaves an entry naming no job, which a lookup sees
+        as stale and rebuilds; the other order would leave a job a replay cannot find.
+        """
+        entry = {"idempotency_key": key, "job_id": record.job_id, "tenant": record.tenant}
+        name = _key_entry_name(key, record.tenant)
+        _write_atomically(
+            self.root / _KEY_INDEX_DIR / name, envelope(entry), keep_previous=False, durable=durable
+        )
+
+    def _rebuild_key_index(self) -> None:
+        """Rebuild the idempotency index from every job record — the slow path, taken once.
+
+        The first record holding a key in name order wins, as in the scan this replaced.
+        Entries are not flushed one by one: an fsync each made 10,000 jobs take minutes.
+        """
+        started = time.monotonic()
+        wanted: dict[str, tuple[JobRecord, str]] = {}
+        for path in sorted((self.root / _JOBS_DIR).glob("*.json")):
+            record = self._record_for_index(path.stem)
+            if record is not None and record.idempotency_key is not None:
+                key = record.idempotency_key
+                wanted.setdefault(_key_entry_name(key, record.tenant), (record, key))
+        index = self.root / _KEY_INDEX_DIR
+        for entry in index.glob("*.json"):
+            if entry.name not in wanted and entry.name != _KEY_INDEX_BUILT:
+                _patiently(partial(entry.unlink, missing_ok=True))
+        for record, key in wanted.values():
+            self._index_key(record, key, durable=False)
+        built = {"built_at": _now(), "entries": len(wanted)}
+        _write_atomically(index / _KEY_INDEX_BUILT, envelope(built), keep_previous=False)
+        _logger.info(
+            "rebuilt the idempotency key index from a full scan of the job records",
+            extra={"entries": len(wanted), "seconds": round(time.monotonic() - started, 3)},
+        )
+
+    def _record_for_index(self, job: str) -> JobRecord | None:
+        """Return a job record for the index rebuild, or None when it cannot be read."""
+        try:
+            return self.load_job_blocking(job)
+        except IngestionError as exc:
+            if exc.code is ErrorCode.NOT_READY:
+                raise
+            _logger.warning(
+                "a job record could not be read while rebuilding the idempotency index",
+                extra={"job_id": job, "detail": exc.detail},
+            )
+            return None
 
     async def quiet_running_jobs(self, quiet_seconds: float) -> QuietJobs:
         """Return the ``running`` jobs not written to for ``quiet_seconds``, off the loop."""
@@ -411,13 +777,14 @@ class Journal:
     def _read_quiet_record(self, path: Path) -> dict[str, Any] | None:
         """Return a job record's payload, or None when it is torn or cannot be opened."""
         try:
-            return open_envelope(path.read_text(encoding="utf-8"))
+            text = _read_text(path)
         except OSError as exc:
             _logger.warning(
                 "a job record could not be read while looking for interrupted jobs",
                 extra={"job_id": path.stem, "detail": str(exc)},
             )
             return None
+        return open_envelope(text) if text is not None else None
 
     async def checkpoint(self, record: JobRecord, document_index: int) -> JobRecord:
         """Record progress off the event loop, writing only at the configured interval.
@@ -438,8 +805,24 @@ class Journal:
             record,
             checkpoint=Checkpoint(last_document_index=document_index, written_at=_now()),
         )
+        self._sync_logs(record)
         self.save_job_blocking(updated)
         return updated
+
+    def _sync_logs(self, record: JobRecord) -> None:
+        """Flush the job's document log and its collection's dedup file before a checkpoint.
+
+        Appends are not flushed one by one; this makes everything a checkpoint covers durable
+        before the checkpoint claims it (ADR-0009).
+        """
+        try:
+            _sync_if_present(self._documents_path(record.job_id))
+            _sync_if_present(self._dedup_path(record.collection))
+        except OSError as exc:
+            raise IngestionError(
+                f"the ingestion journal could not flush job {record.job_id!r} to disk: {exc}",
+                code=ErrorCode.INTERNAL,
+            ) from exc
 
     def _checkpoint_due(self, document_index: int) -> bool:
         """Return whether this document index is one a checkpoint is written at."""
@@ -459,11 +842,8 @@ class Journal:
 
     def record_document_blocking(self, job: str, record: DocumentRecord) -> None:
         """Append a document outcome; :meth:`record_document` is this off the loop."""
-        path = self._documents_path(job)
-        path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(asdict(record), sort_keys=True, separators=(",", ":"))
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{line}\n")
+        _append_line(self._documents_path(job), line, self._tails)
 
     async def record_indexed(
         self, job: str, collection: str, record: DocumentRecord, *, dedup: bool
@@ -556,15 +936,9 @@ class Journal:
         A list rather than a generator: a lazy read would do its file I/O in whichever
         thread consumed it, which is the event loop again.
         """
-        path = self._documents_path(job)
-        if not path.exists():
-            return []
-
         found: list[DocumentRecord] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            record = DocumentRecord(**json.loads(line))
+        for payload in _logged_lines(self._documents_path(job)):
+            record = DocumentRecord(**payload)
             if status is None or record.status == status:
                 found.append(record)
         return found
@@ -583,11 +957,8 @@ class Journal:
 
     def remember_content_blocking(self, collection: str, content: str, document: str) -> None:
         """Record an indexed content hash; :meth:`remember_content` is this off the loop."""
-        path = self._dedup_path(collection)
-        path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps({"content_hash": content, "document_id": document})
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{line}\n")
+        _append_line(self._dedup_path(collection), line, self._tails)
 
     async def forget_document(self, collection: str, document: str) -> bool:
         """Tombstone a document in a collection's dedup index, off the event loop."""
@@ -605,8 +976,7 @@ class Journal:
         line = json.dumps(
             {"deleted_at": _now(), "document_id": document, _TOMBSTONE_KEY: True}, sort_keys=True
         )
-        with self._dedup_path(collection).open("a", encoding="utf-8") as handle:
-            handle.write(f"{line}\n")
+        _append_line(self._dedup_path(collection), line, self._tails)
         return True
 
     async def known_content(self, collection: str) -> dict[str, str]:
@@ -615,23 +985,17 @@ class Journal:
 
     def known_content_blocking(self, collection: str) -> dict[str, str]:
         """Return the hash to document-id map; :meth:`known_content` is this off the loop."""
-        path = self._dedup_path(collection)
-        if not path.exists():
-            return {}
-
         known: dict[str, str] = {}
         held: dict[str, str] = {}
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                payload = json.loads(line)
-                document = payload["document_id"]
-                superseded = held.pop(document, None)
-                if superseded is not None and known.get(superseded) == document:
-                    del known[superseded]
-                if payload.get(_TOMBSTONE_KEY):
-                    continue
-                held[document] = payload["content_hash"]
-                known[held[document]] = document
+        for payload in _logged_lines(self._dedup_path(collection)):
+            document = payload["document_id"]
+            superseded = held.pop(document, None)
+            if superseded is not None and known.get(superseded) == document:
+                del known[superseded]
+            if payload.get(_TOMBSTONE_KEY):
+                continue
+            held[document] = payload["content_hash"]
+            known[held[document]] = document
         return known
 
     async def document_hashes(self, collection: str) -> dict[str, str]:
