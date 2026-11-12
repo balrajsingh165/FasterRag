@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+import httpx
 import pytest
 
 from fasterrag.adapters.llm.cohere import CohereGenerator
@@ -160,6 +161,32 @@ async def test_a_rejected_cohere_key_is_not_retried(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.usefixtures("cohere_key")
+async def test_a_rate_limited_cohere_call_is_sent_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The SDK retried a 429 twice by itself, under the service's own retry policy (TASK-0449)."""
+    replay = Replay(monkeypatch, {"/v2/chat": json_reply({"message": "slow down"}, status=429)})
+
+    with pytest.raises(GenerationError) as caught:
+        await CohereGenerator(cohere_settings()).complete("the question")
+
+    assert caught.value.retryable is True
+    assert replay.paths == ["/v2/chat"]
+
+
+@pytest.mark.usefixtures("cohere_key")
+async def test_cohere_s_retry_after_reaches_the_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read through the real client, so the header's path to the error is the library's own."""
+    limited = httpx.Response(429, json={"message": "slow down"}, headers={"Retry-After": "3"})
+    Replay(monkeypatch, {"/v2/chat": lambda _request: limited})
+
+    with pytest.raises(GenerationError) as caught:
+        await CohereGenerator(cohere_settings()).complete("the question")
+
+    assert caught.value.retry_after == 3.0
+
+
+@pytest.mark.usefixtures("cohere_key")
 async def test_the_v1_cohere_client_still_refuses_a_message_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -270,6 +297,18 @@ async def test_a_model_ollama_does_not_have_is_not_retried(monkeypatch: pytest.M
 
     assert caught.value.retryable is False
     assert "404" in caught.value.detail
+
+
+@pytest.mark.usefixtures("ollama_library")
+async def test_an_unavailable_ollama_server_is_asked_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pins that the Ollama client never retries, so the service's policy is the only one."""
+    replay = Replay(monkeypatch, {"/api/chat": json_reply({"error": "overloaded"}, status=503)})
+
+    with pytest.raises(GenerationError) as caught:
+        await OllamaGenerator(ollama_settings()).complete("the question")
+
+    assert caught.value.retryable is True
+    assert replay.paths == ["/api/chat"]
 
 
 @pytest.mark.usefixtures("ollama_library")

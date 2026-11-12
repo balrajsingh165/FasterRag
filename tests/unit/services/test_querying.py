@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -398,6 +399,39 @@ async def test_a_failing_reranker_degrades_instead_of_failing_the_query() -> Non
 
     assert result.mode == HYBRID_ONLY_MODE
     assert result.degraded is True
+    assert [chunk.chunk_id for chunk in result.chunks] == ["c_a", "c_b"]
+
+
+class HangingReranker:
+    """Never answers, as a reranker stuck on a lock or a wedged device does."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def rerank(self, query: str, chunks: Any) -> list[ScoredChunk]:
+        self.calls += 1
+        await asyncio.Event().wait()
+        raise AssertionError("a hung reranker never returns")
+
+
+async def test_a_reranker_that_does_not_answer_in_time_degrades_to_hybrid_only() -> None:
+    """There was no rerank timeout, so a hung reranker held the query forever (TASK-0449)."""
+    reranker = HangingReranker()
+    configured = settings(reliability={"timeouts": {"rerank_ms": 100}})
+    adapter = ScriptedAdapter(configured)
+    service = RetrievalService(
+        configured,
+        adapter,
+        TieringRouter(StubEmbedder(configured)),
+        reranker,
+    )
+    adapter.dense = [hit("c_a", 0.9), hit("c_b", 0.8)]
+    adapter.sparse = []
+
+    result = await asyncio.wait_for(service.search("notice"), 10)
+
+    assert reranker.calls == 1
+    assert result.mode == HYBRID_ONLY_MODE
     assert [chunk.chunk_id for chunk in result.chunks] == ["c_a", "c_b"]
 
 

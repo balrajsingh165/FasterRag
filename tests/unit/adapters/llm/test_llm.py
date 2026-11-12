@@ -1,6 +1,9 @@
 import importlib.util
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Any
 
+import httpx
 import pytest
 
 from fasterrag.adapters.llm import (
@@ -213,6 +216,53 @@ def test_a_status_outranks_the_exception_type() -> None:
 
 def test_a_secret_never_appears_in_a_classified_error() -> None:
     assert "sk-" not in classify(FakeStatusError(401)).detail
+
+
+class HeaderedStatusError(FakeStatusError):
+    """Carries headers the way Cohere's ``ApiError`` does: as a plain attribute."""
+
+    def __init__(self, status_code: int, headers: dict[str, str]) -> None:
+        super().__init__(status_code)
+        self.headers = headers
+
+
+class ResponseStatusError(FakeStatusError):
+    """Carries headers the way OpenAI's and Anthropic's ``APIStatusError`` do: on a response."""
+
+    def __init__(self, status_code: int, headers: dict[str, str]) -> None:
+        super().__init__(status_code)
+        self.response = httpx.Response(status_code, headers=headers)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (HeaderedStatusError(429, {"retry-after": "7"}), 7.0),
+        (ResponseStatusError(429, {"Retry-After": "2.5"}), 2.5),
+        (ResponseStatusError(503, {"retry-after-ms": "1500", "retry-after": "9"}), 1.5),
+        (HeaderedStatusError(429, {"Retry-After": "a fortnight"}), None),
+        (HeaderedStatusError(429, {"Retry-After": "-3"}), None),
+        (FakeStatusError(429), None),
+    ],
+)
+def test_a_provider_s_retry_after_is_carried_on_the_error(
+    error: Exception, expected: float | None
+) -> None:
+    """The provider's ``Retry-After`` was dropped, so a retry could arrive before it allowed."""
+    assert classify(error).retry_after == expected
+
+
+def test_a_retry_after_given_as_a_date_becomes_seconds_from_now() -> None:
+    moment = datetime.now(UTC) + timedelta(seconds=30)
+    error = classify(HeaderedStatusError(429, {"Retry-After": format_datetime(moment, True)}))
+
+    assert error.retry_after is not None
+    assert 25 <= error.retry_after <= 31
+
+
+def test_a_refused_credential_carries_no_retry_after() -> None:
+    """Only a failure worth retrying says when to retry."""
+    assert classify(HeaderedStatusError(401, {"Retry-After": "7"})).retry_after is None
 
 
 def test_a_completion_reports_whether_it_was_cut_short() -> None:

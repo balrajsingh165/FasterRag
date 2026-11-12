@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, ClassVar, Final
 
 from fasterrag.adapters.vectordb.base import HealthStatus
@@ -29,6 +31,7 @@ __all__ = [
     "classify_llm_failure",
     "require_llm_extra",
     "require_llm_key",
+    "retry_after_of",
 ]
 
 _AUTH_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
@@ -36,6 +39,7 @@ _TIMEOUT_STATUSES: Final[frozenset[int]] = frozenset({408, 504})
 _SERVER_ERROR_THRESHOLD: Final = 500
 _RATE_LIMITED: Final = 429
 _PROGRAMMING_ERRORS: Final[tuple[type[BaseException], ...]] = (TypeError, AttributeError)
+_MILLISECONDS: Final = 1000.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +81,54 @@ def require_llm_key(name: str | None, provider: str) -> str:
     return value
 
 
+def _headers_of(exc: BaseException) -> Mapping[str, str]:
+    """Return the response headers a vendor error carries, lower-cased, or none.
+
+    Cohere's ``ApiError`` holds them as ``headers``; OpenAI's and Anthropic's status errors
+    hold the ``httpx`` response. Ollama's error carries no headers at all.
+    """
+    headers = getattr(exc, "headers", None)
+    if not isinstance(headers, Mapping):
+        headers = getattr(getattr(exc, "response", None), "headers", None)
+    if not isinstance(headers, Mapping):
+        return {}
+    return {str(name).lower(): str(value) for name, value in headers.items()}
+
+
+def retry_after_of(exc: BaseException) -> float | None:
+    """Return the seconds a provider asked to wait before the next call, if it said.
+
+    ``retry-after-ms`` (OpenAI's and Anthropic's finer form) wins over ``Retry-After``,
+    which may be seconds or an HTTP date. Anything unreadable or negative is no answer.
+    """
+    headers = _headers_of(exc)
+    candidates = (
+        (headers.get("retry-after-ms"), _MILLISECONDS),
+        (headers.get("retry-after"), 1.0),
+    )
+    for raw, unit in candidates:
+        if raw is None:
+            continue
+        try:
+            seconds = float(raw) / unit
+        except ValueError:
+            seconds = _seconds_until(raw) if unit == 1.0 else -1.0
+        if seconds >= 0:
+            return seconds
+    return None
+
+
+def _seconds_until(moment: str) -> float:
+    """Return the seconds from now until an HTTP date, or -1 if it is not one."""
+    try:
+        when = parsedate_to_datetime(moment)
+    except (TypeError, ValueError):
+        return -1.0
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max((when - datetime.now(UTC)).total_seconds(), 0.0)
+
+
 def classify_llm_failure(
     exc: BaseException,
     *,
@@ -111,11 +163,14 @@ def classify_llm_failure(
             f"{provider} timed out during {operation}",
             code=ErrorCode.GENERATION_TIMEOUT,
             retryable=True,
+            retry_after=retry_after_of(exc),
         )
 
     if status == _RATE_LIMITED or (status is not None and status >= _SERVER_ERROR_THRESHOLD):
         return GenerationError(
-            f"{provider} returned status {status} during {operation}", retryable=True
+            f"{provider} returned status {status} during {operation}",
+            retryable=True,
+            retry_after=retry_after_of(exc),
         )
 
     if status is not None:

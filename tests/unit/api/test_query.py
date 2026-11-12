@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -340,6 +341,67 @@ def test_a_streamed_query_whose_provider_is_down_still_ends_with_done(
     assert events[1][1]["mode"] == "extractive"
     assert usage["mode"] == "extractive"
     assert usage["degraded"] is True
+
+
+class StalledRetrieval(StubRetrieval):
+    """Never answers, as a vector database that accepted the query and went silent does."""
+
+    async def search(self, text: str, **kwargs: Any) -> Retrieval:
+        await asyncio.Event().wait()
+        raise AssertionError("a stalled retrieval never returns")
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_query_past_its_deadline_before_any_event_is_a_504_problem(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, app: FastAPI, stream: bool
+) -> None:
+    """Nothing bounded a query end to end, so a stalled backend held the request (TASK-0449)."""
+    settings = Settings.model_validate({"reliability": {"request_deadline_ms": 100}})
+    llm = IdleLLM(settings)
+    service = GenerationService(settings, StalledRetrieval([]), llm)  # type: ignore[arg-type]
+    install_generation(monkeypatch, app, service)  # type: ignore[arg-type]
+
+    response = client.post("/v1/query", json={"query": "notice period?", "stream": stream})
+
+    assert response.status_code == 504
+    assert response.headers["content-type"].startswith(PROBLEM_MEDIA_TYPE)
+    assert response.json()["code"] == ErrorCode.DEADLINE_EXCEEDED.value
+    assert response.json()["retryable"] is True
+    assert llm.calls == 0
+
+
+class DownEverywhereLLM(DownLLM):
+    """Fails the whole-answer call as well as the stream."""
+
+    async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
+        self.calls += 1
+        raise GenerationError(self.outage, retryable=True)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_degraded_answer_s_trace_resolves_through_the_traces_endpoint(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, app: FastAPI, stream: bool
+) -> None:
+    """The extractive rung stored no trace, so the id it returned resolved to 404 (TASK-0505)."""
+    settings = Settings.model_validate(
+        {"reliability": {"retries": {"backoff_base_ms": 1, "backoff_max_ms": 1}}}
+    )
+    chunks = [ScoredChunk(chunk_id="c_a", text="Either party may terminate.", rrf_score=0.5)]
+    service = GenerationService(
+        settings,
+        StubRetrieval(chunks),  # type: ignore[arg-type]
+        DownEverywhereLLM(settings),
+        traces=app.state.traces,
+    )
+    install_generation(monkeypatch, app, service)  # type: ignore[arg-type]
+
+    response = client.post("/v1/query", json={"query": "notice period?", "stream": stream})
+    trace_id = frames(response.text)[0][1]["trace_id"] if stream else response.json()["trace_id"]
+    trace = client.get(f"/v1/traces/{trace_id}")
+
+    assert trace.status_code == 200
+    assert trace.json()["result"]["mode"] == "extractive"
+    assert "generation-failed" in [span["name"] for span in trace.json()["spans"]]
 
 
 def test_a_stream_that_fails_before_its_first_event_closes_its_service(

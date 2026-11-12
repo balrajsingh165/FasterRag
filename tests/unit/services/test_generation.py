@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -7,9 +8,10 @@ import pytest
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.llm.base import Completion, LLMAdapter
+from fasterrag.adapters.llm.ollama import OllamaGenerator
 from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
-from fasterrag.core.breaker import reset_shared_breakers
+from fasterrag.core.breaker import reset_shared_breakers, shared_breaker
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.cache.store import MemoryStore
 from fasterrag.core.chunking.models import EstimatingTokenCounter
@@ -24,9 +26,18 @@ from fasterrag.errors import (
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import use_trace_id
 from fasterrag.services.budget import reset_shared_governors
-from fasterrag.services.generation import EXTRACTIVE_MODE, GenerationService, QueryEvent
+from fasterrag.services.generation import (
+    EXTRACTIVE_MODE,
+    FALLBACK_BREAKER,
+    GenerationService,
+    QueryEvent,
+    fallback_settings,
+)
 from fasterrag.services.querying import FULL_MODE, HYBRID_ONLY_MODE, Retrieval
 from fasterrag.services.traces import TraceStore
+
+FAST_RETRIES: dict[str, Any] = {"retries": {"backoff_base_ms": 1, "backoff_max_ms": 1}}
+"""The configured retry policy with its waits shrunk, so a retried failure costs no wall time."""
 
 
 class ScriptedLLM(LLMAdapter):
@@ -40,11 +51,29 @@ class ScriptedLLM(LLMAdapter):
         self.error = error
         self.finish_reason: str | None = "stop"
         self.fail_after: int | None = None
+        self.failures: int | None = None
+        self.hang_after: int | None = None
         self.prompts: list[tuple[str, str | None]] = []
+
+    async def hang(self) -> None:
+        """Never return, as a provider that accepted the call and went silent does."""
+        await asyncio.Event().wait()
+
+    def failing(self) -> bool:
+        """Return whether this call fails: every call, or only the first ``failures``."""
+        if self.error is None:
+            return False
+        if self.failures is None:
+            return True
+        self.failures -= 1
+        return self.failures >= 0
 
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         self.prompts.append((prompt, system))
-        if self.error is not None:
+        if self.hang_after is not None:
+            await self.hang()
+        if self.failing():
+            assert self.error is not None
             raise self.error
         return Completion(
             text=self.text,
@@ -56,11 +85,14 @@ class ScriptedLLM(LLMAdapter):
 
     async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
         self.prompts.append((prompt, system))
-        if self.error is not None and self.fail_after is None:
+        if self.fail_after is None and self.failing():
+            assert self.error is not None
             raise self.error
         for sent, word in enumerate(self.text.split(" ")):
             if self.error is not None and sent == self.fail_after:
                 raise self.error
+            if sent == self.hang_after:
+                await self.hang()
             yield f"{word} "
 
     async def health(self) -> HealthStatus:
@@ -101,7 +133,8 @@ def build(
             "generation": {
                 "grounded_or_refuse": grounded_or_refuse,
                 "faithfulness_threshold": threshold,
-            }
+            },
+            "reliability": FAST_RETRIES,
         }
     )
     llm = ScriptedLLM(settings, text=answer, error=error)
@@ -602,7 +635,10 @@ def build_cached(
     embedder_error: bool = False,
 ) -> tuple[GenerationService, ScriptedLLM, SemanticCache]:
     settings = Settings.model_validate(
-        {"cache": {"semantic": True, "similarity_threshold": threshold}}
+        {
+            "cache": {"semantic": True, "similarity_threshold": threshold},
+            "reliability": FAST_RETRIES,
+        }
     )
     llm = ScriptedLLM(settings, text=answer)
     retrieval = ScriptedRetrieval([chunk("c_a", "Either party may terminate.")], mode)
@@ -940,6 +976,343 @@ async def test_a_success_clears_the_failure_count_rather_than_only_the_state() -
     assert service.breaker.is_open is False
 
 
+async def test_a_rate_limited_answer_is_retried_until_it_succeeds() -> None:
+    """A single 429 used to degrade straight to the extractive rung (TASK-0449)."""
+    service, llm = build(error=GenerationError("status 429", retryable=True))
+    llm.failures = 2
+
+    answer = await service.answer("what is the notice period?")
+
+    assert answer.mode == FULL_MODE
+    assert answer.answer == "The notice period is thirty days [^c_a]."
+    assert len(llm.prompts) == 3
+
+
+async def test_a_rate_limited_stream_is_retried_before_its_first_token() -> None:
+    service, llm = build(error=GenerationError("status 429", retryable=True))
+    llm.failures = 1
+
+    events = await collect(service)
+
+    assert [event.data["mode"] for event in events if event.type == "meta"] == [FULL_MODE]
+    assert "".join(e.data["text"] for e in events if e.type == "token").startswith("The notice")
+    assert len(llm.prompts) == 2
+
+
+async def test_a_stream_is_never_retried_after_its_first_token() -> None:
+    """A second call would splice a different answer onto text the caller already has."""
+    service, llm = build(error=GenerationError("connection reset", retryable=True))
+    llm.fail_after = 2
+
+    events = await collect(service)
+
+    assert events[-1].type == "error"
+    assert len(llm.prompts) == 1
+
+
+async def test_a_non_retryable_failure_is_called_once() -> None:
+    service, llm = build(error=GenerationError("model not found", retryable=False))
+
+    with pytest.raises(GenerationError):
+        await service.answer("q")
+
+    assert len(llm.prompts) == 1
+
+
+async def test_retries_are_bounded_by_the_configured_attempts() -> None:
+    service, llm = build(error=GenerationError("status 503", retryable=True))
+
+    answer = await service.answer("q")
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert len(llm.prompts) == 1 + service.settings.reliability.retries.max_attempts
+
+
+async def test_the_wait_is_never_shorter_than_the_provider_s_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[float] = []
+
+    async def record(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr("fasterrag.services.generation._pause", record)
+    settings = Settings.model_validate(
+        {"reliability": {"retries": {"backoff_base_ms": 1, "backoff_max_ms": 5000}}}
+    )
+    llm = ScriptedLLM(settings, text="an answer", error=GenerationError("429", retry_after=2.0))
+    llm.failures = 2
+    service = GenerationService(
+        settings,
+        ScriptedRetrieval([chunk("c_a", "Either party may terminate.")]),  # type: ignore[arg-type]
+        llm,
+    )
+
+    answer = await service.answer("q")
+
+    assert answer.mode == FULL_MODE
+    assert waits == [2.0, 2.0]
+
+
+async def test_a_retry_after_beyond_the_backoff_ceiling_is_not_waited_for() -> None:
+    """Sleeping for as long as a provider asks would let one request hold a worker for minutes."""
+    service, llm = build(error=GenerationError("status 429", retryable=True, retry_after=60.0))
+
+    answer = await service.answer("q")
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert len(llm.prompts) == 1
+
+
+async def test_retries_stop_once_the_breaker_opens() -> None:
+    """Checked before every attempt, as the embedding pool does, not once before the first."""
+    service, llm = build(error=GenerationError("status 503", retryable=True))
+    service.breaker.failure_threshold = 2
+
+    answer = await service.answer("q")
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert len(llm.prompts) == 2
+    assert service.breaker.is_open is True
+
+
+def with_fallback(
+    error: Exception, *, fallback_error: Exception | None = None
+) -> tuple[GenerationService, ScriptedLLM, ScriptedLLM]:
+    """Return a service whose primary fails with ``error`` and a lent second provider."""
+    service, primary = build(error=error)
+    second = ScriptedLLM(service.settings, text="The fallback says thirty days [^c_a].")
+    second.error = fallback_error
+    service.fallback_llm = second
+    service.owns_fallback = False
+    return service, primary, second
+
+
+async def test_a_provider_outage_falls_back_to_the_second_provider(tmp_path: Path) -> None:
+    """There was no second provider: an outage went straight to the extractive rung."""
+    service, primary, second = with_fallback(GenerationError("status 503", retryable=True))
+    service.traces = TraceStore(tmp_path)
+
+    answer = await service.answer("what is the notice period?")
+
+    assert answer.mode == FULL_MODE
+    assert answer.answer == "The fallback says thirty days [^c_a]."
+    assert len(primary.prompts) == 1 + service.settings.reliability.retries.max_attempts
+    assert len(second.prompts) == 1
+    stored = service.traces.load(answer.trace_id)
+    assert stored is not None
+    roles = [(span.name, span.attributes.get("role")) for span in stored.spans]
+    assert ("generation-failed", "primary") in roles
+    assert roles[-1] == ("generation", "fallback")
+
+
+async def test_a_streamed_outage_falls_back_before_any_token() -> None:
+    service, _, second = with_fallback(GenerationError("status 503", retryable=True))
+
+    events = await collect(service)
+
+    assert [event.data["mode"] for event in events if event.type == "meta"] == [FULL_MODE]
+    assert "".join(e.data["text"] for e in events if e.type == "token").startswith("The fallback")
+    assert len(second.prompts) == 1
+
+
+async def test_the_fallback_is_counted_under_its_own_breaker() -> None:
+    """Counted under the primary's key, the outage that triggers it would also shed it."""
+    service, primary, second = with_fallback(GenerationError("status 503", retryable=True))
+    service.breaker.failure_threshold = 1
+    await service.answer("q")
+    calls = len(primary.prompts)
+
+    answer = await service.answer("q")
+
+    assert service.breaker.is_open is True
+    assert len(primary.prompts) == calls
+    assert answer.mode == FULL_MODE
+    assert len(second.prompts) == 2
+    assert shared_breaker(FALLBACK_BREAKER, service.settings).is_open is False
+
+
+async def test_a_misconfigured_primary_is_reported_rather_than_covered_by_the_fallback() -> None:
+    service, _, second = with_fallback(GenerationError("rejected key", retryable=False))
+
+    with pytest.raises(GenerationError):
+        await service.answer("q")
+
+    assert second.prompts == []
+
+
+async def test_with_both_providers_down_the_retrieved_passages_are_served() -> None:
+    down = GenerationError("status 503", retryable=True)
+    service, _, second = with_fallback(down, fallback_error=down)
+
+    answer = await service.answer("q")
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert len(second.prompts) == 1 + service.settings.reliability.retries.max_attempts
+
+
+def test_the_fallback_block_answers_with_the_primary_s_sampling() -> None:
+    settings = Settings.model_validate(
+        {
+            "llm": {
+                "temperature": 0.4,
+                "max_tokens": 300,
+                "fallback": {"provider": "ollama", "model": "llama3.1:8b"},
+            }
+        }
+    )
+
+    configured = fallback_settings(settings)
+
+    assert configured is not None
+    assert (configured.llm.provider, configured.llm.model) == ("ollama", "llama3.1:8b")
+    assert (configured.llm.temperature, configured.llm.max_tokens) == (0.4, 300)
+    assert configured.llm.api_key_env is None
+    assert configured.llm.fallback is None
+    assert fallback_settings(Settings()) is None
+
+
+async def test_a_configured_fallback_is_built_on_first_need_and_closed_with_the_service() -> None:
+    settings = Settings.model_validate(
+        {"llm": {"fallback": {"provider": "ollama", "model": "llama3.1:8b"}}}
+    )
+    service = GenerationService(
+        settings,
+        ScriptedRetrieval([chunk("c_a", "Either party may terminate.")]),  # type: ignore[arg-type]
+        ScriptedLLM(settings),
+        owns_llm=False,
+    )
+    assert service.fallback_llm is None
+
+    provider = service._fallback()
+
+    assert provider is not None
+    assert isinstance(provider.llm, OllamaGenerator)
+    assert provider.llm.model == "llama3.1:8b"
+    await service.close()
+
+
+def with_deadline(
+    milliseconds: int = 100, **overrides: Any
+) -> tuple[GenerationService, ScriptedLLM]:
+    """Return ``build()``'s service under a short ``reliability.request_deadline_ms``."""
+    service, llm = build(**overrides)
+    reliability = service.settings.reliability.model_copy(
+        update={"request_deadline_ms": milliseconds}
+    )
+    service.settings = service.settings.model_copy(update={"reliability": reliability})
+    return service, llm
+
+
+class StalledRetrieval(ScriptedRetrieval):
+    """Never returns, as a vector database that accepted the query and went silent does."""
+
+    async def search(self, text: str, **kwargs: Any) -> Retrieval:
+        await asyncio.Event().wait()
+        raise AssertionError("a stalled retrieval never returns")
+
+
+async def test_a_deadline_hit_while_retrieving_is_refused_on_both_surfaces() -> None:
+    """Nothing bounded a request end to end, so a stalled backend held it forever (TASK-0449)."""
+    service, llm = with_deadline()
+    service.retrieval = StalledRetrieval([])  # type: ignore[assignment]
+    events: list[QueryEvent] = []
+
+    with pytest.raises(FasterRagError) as whole:
+        await asyncio.wait_for(service.answer("q"), 10)
+    with pytest.raises(FasterRagError) as streamed:
+        await asyncio.wait_for(collect_into(events, service), 10)
+
+    assert whole.value.code is ErrorCode.DEADLINE_EXCEEDED
+    assert whole.value.status == 504
+    assert streamed.value.code is ErrorCode.DEADLINE_EXCEEDED
+    assert events == [], "a refused stream had already begun"
+    assert llm.prompts == []
+
+
+async def test_a_provider_that_hangs_past_the_deadline_serves_the_retrieved_passages() -> None:
+    service, llm = with_deadline()
+    llm.hang_after = 0
+
+    answer = await asyncio.wait_for(service.answer("q"), 10)
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert "Either party may terminate." in (answer.answer or "")
+    assert len(llm.prompts) == 1
+    assert service.breaker.is_open is False
+
+
+async def test_a_stream_past_its_deadline_after_a_token_ends_on_error() -> None:
+    service, llm = with_deadline()
+    llm.hang_after = 2
+
+    events = await asyncio.wait_for(collect(service), 10)
+
+    assert [event.type for event in events].count("token") == 2
+    assert events[-1].type == "error"
+    assert events[-1].data["code"] == ErrorCode.DEADLINE_EXCEEDED.value
+    assert events[-1].data["status"] == 504
+    assert "done" not in [event.type for event in events]
+
+
+async def test_a_deadline_hit_while_grading_returns_the_answer_ungraded() -> None:
+    service, _ = with_deadline(grounded_or_refuse=True, verdict='{"score": 0.1}')
+    assert isinstance(service.grader, ScriptedLLM)
+    service.grader.hang_after = 0
+
+    answer = await asyncio.wait_for(service.answer("q"), 10)
+
+    assert answer.answer == "The notice period is thirty days [^c_a]."
+    assert answer.faithfulness is None
+
+
+async def test_no_retry_is_waited_for_that_would_outlast_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[float] = []
+
+    async def record(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr("fasterrag.services.generation._pause", record)
+    settings = Settings.model_validate(
+        {
+            "reliability": {
+                "request_deadline_ms": 1000,
+                "retries": {"backoff_base_ms": 1, "backoff_max_ms": 60000},
+            }
+        }
+    )
+    llm = ScriptedLLM(settings, text="an answer", error=GenerationError("429", retry_after=30.0))
+    service = GenerationService(
+        settings,
+        ScriptedRetrieval([chunk("c_a", "Either party may terminate.")]),  # type: ignore[arg-type]
+        llm,
+    )
+
+    answer = await service.answer("q")
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert waits == []
+    assert len(llm.prompts) == 1
+
+
+async def test_a_degraded_answer_s_trace_id_points_at_a_stored_trace(tmp_path: Path) -> None:
+    """The extractive rung stored no trace, so its trace id resolved to nothing (TASK-0505)."""
+    service, _ = build(error=GenerationError("status 503", retryable=True))
+    service.traces = TraceStore(tmp_path)
+
+    answer = await service.answer("what is the notice period?")
+    stored = service.traces.load(answer.trace_id)
+
+    assert stored is not None
+    assert stored.result["mode"] == EXTRACTIVE_MODE
+    assert stored.result["degraded"] is True
+    failed = [span for span in stored.spans if span.name == "generation-failed"]
+    assert failed[-1].attributes["code"] == ErrorCode.GENERATION_FAILED.value
+    assert failed[-1].attributes["detail"] == "status 503"
+
+
 async def test_a_misconfigured_provider_never_opens_the_breaker() -> None:
     """A misconfiguration never opens the breaker.
 
@@ -1158,7 +1531,10 @@ class MeteredLLM(ScriptedLLM):
 
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         self.prompts.append((prompt, system))
-        if self.error is not None:
+        if self.hang_after is not None:
+            await self.hang()
+        if self.failing():
+            assert self.error is not None
             raise self.error
         tokens = PARITY_COUNTER.count(self.text)
         return Completion(
@@ -1171,7 +1547,10 @@ class MeteredLLM(ScriptedLLM):
 
     async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
         self.prompts.append((prompt, system))
-        if self.error is not None:
+        if self.hang_after is not None:
+            await self.hang()
+        if self.failing():
+            assert self.error is not None
             raise self.error
         first, *rest = self.text.split(" ")
         yield first
@@ -1205,6 +1584,9 @@ class ParityCase:
     mode: str = FULL_MODE
     primed: bool = False
     tripped: bool = False
+    failures: int | None = None
+    fallback: bool = False
+    hangs: bool = False
 
 
 def _body(observed: Observed) -> dict[str, Any]:
@@ -1215,6 +1597,18 @@ def _body(observed: Observed) -> dict[str, Any]:
 def _span_names(observed: Observed) -> list[str]:
     assert observed.trace is not None
     return [name for name, _ in observed.trace["spans"]]
+
+
+def _degraded_trace_names(seen: Observed, code: ErrorCode) -> bool:
+    """Return whether an extractive answer left a trace naming the failure that caused it."""
+    assert seen.trace is not None, "a degraded answer stored no trace (TASK-0505)"
+    failed = [attributes for name, attributes in seen.trace["spans"] if name == "generation-failed"]
+    return (
+        seen.trace["result"]["mode"] == EXTRACTIVE_MODE
+        and seen.trace["response"] == ""
+        and bool(failed)
+        and failed[-1]["code"] == code.value
+    )
 
 
 PARITY_CASES: dict[str, ParityCase] = {
@@ -1232,6 +1626,22 @@ PARITY_CASES: dict[str, ParityCase] = {
             _body(seen)["cache"]["semantic_hit"] is True and seen.provider_calls == 1
         ),
     ),
+    "cache hit of a truncated answer": ParityCase(
+        settings={
+            "cache": {"semantic": True},
+            "llm": {"max_tokens": 4},
+            "generation": {"context_budget_tokens": 350},
+        },
+        answer="an answer [^c_a] [^c_b]",
+        chunks=(("c_a", "alpha " * 200), ("c_b", "bravo " * 200)),
+        primed=True,
+        holds=lambda seen: (
+            _body(seen)["cache"]["semantic_hit"] is True
+            and _body(seen)["truncated"] is True
+            and _body(seen)["evidence_dropped"] == 1
+            and seen.provider_calls == 1
+        ),
+    ),
     "retryable failure": ParityCase(
         error=lambda: GenerationError("provider is down", retryable=True),
         holds=lambda seen: (
@@ -1239,7 +1649,41 @@ PARITY_CASES: dict[str, ParityCase] = {
             and "Either party may terminate." in _body(seen)["answer"]
             and [cited["chunk_id"] for cited in _body(seen)["citations"]] == ["c_a"]
             and seen.metrics["fasterrag_degraded_responses_total{mode=extractive}"] == 1
+            and seen.provider_calls == 1 + Settings().reliability.retries.max_attempts
+            and _degraded_trace_names(seen, ErrorCode.GENERATION_FAILED)
+        ),
+    ),
+    "retried, then answered": ParityCase(
+        error=lambda: GenerationError("rate limited", retryable=True),
+        failures=2,
+        holds=lambda seen: (
+            _body(seen)["mode"] == FULL_MODE
+            and seen.provider_calls == 3
+            and _span_names(seen)[-1] == "generation"
+            and seen.trace is not None
+            and seen.trace["spans"][-1][1]["attempts"] == 3
+        ),
+    ),
+    "fallback answered": ParityCase(
+        error=lambda: GenerationError("provider is down", retryable=True),
+        fallback=True,
+        holds=lambda seen: (
+            _body(seen)["mode"] == FULL_MODE
+            and seen.trace is not None
+            and "generation-failed" in _span_names(seen)
+            and seen.trace["spans"][-1] == ("generation", seen.trace["spans"][-1][1])
+            and seen.trace["spans"][-1][1]["role"] == "fallback"
+            and seen.spent > 0
+        ),
+    ),
+    "deadline while generating": ParityCase(
+        settings={"reliability": {"request_deadline_ms": 100}},
+        hangs=True,
+        holds=lambda seen: (
+            _body(seen)["mode"] == EXTRACTIVE_MODE
             and seen.provider_calls == 1
+            and not seen.breaker_open
+            and _degraded_trace_names(seen, ErrorCode.DEADLINE_EXCEEDED)
         ),
     ),
     "open breaker": ParityCase(
@@ -1249,6 +1693,7 @@ PARITY_CASES: dict[str, ParityCase] = {
             and seen.metrics["fasterrag_degraded_responses_total{mode=extractive}"] == 1
             and seen.provider_calls == 0
             and seen.breaker_open
+            and _degraded_trace_names(seen, ErrorCode.CIRCUIT_OPEN)
         ),
     ),
     "non-retryable failure": ParityCase(
@@ -1299,9 +1744,15 @@ PARITY_CASES: dict[str, ParityCase] = {
 def _parity_service(case: ParityCase, root: Path) -> tuple[GenerationService, MeteredLLM]:
     """Build a fresh service for one surface, tracing into its own directory."""
     settings = Settings.model_validate(
-        {"cost": {"per_tenant_token_budget": 1_000_000}, **case.settings}
+        {
+            "cost": {"per_tenant_token_budget": 1_000_000},
+            "reliability": FAST_RETRIES,
+            **case.settings,
+        }
     )
     llm = MeteredLLM(settings, text=case.answer, error=case.error() if case.error else None)
+    llm.failures = case.failures
+    llm.hang_after = 0 if case.hangs else None
     cache = SemanticCache(settings, MemoryStore()) if settings.cache.semantic else None
     service = GenerationService(
         settings,
@@ -1312,6 +1763,7 @@ def _parity_service(case: ParityCase, root: Path) -> tuple[GenerationService, Me
         embedder=ScriptedEmbedder(settings) if cache is not None else None,
         traces=TraceStore(root),
         tenant=PARITY_TENANT,
+        fallback=MeteredLLM(settings, text=case.answer) if case.fallback else None,
     )
     return service, llm
 

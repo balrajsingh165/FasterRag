@@ -104,15 +104,13 @@ DENIAL_PATTERNS: Final[tuple[str, ...]] = (
 EXEMPT_DOCUMENTS: Final[frozenset[str]] = frozenset({"docs/CHANGELOG.md"})
 
 # CRITICAL: sentences whose ticked id names the task that FOUND the gap, not the task that
-# will close it. "Row 19 is unbuilt twice over, found while fixing row 18 (TASK-0289)" is
-# true today — TASK-0165 is the open id that builds the rerank timeout — and no pattern
-# separates an attribution clause from a citation. This is the umbrella-id hole in
-# miniature, recorded the way check_doc_truth.py records its duplicate ids: so the gate
-# reports growth rather than history. Never add an entry to quiet a new failure; repoint
-# the sentence at the id that covers what it denies, which is what the gate is asking for.
-ATTRIBUTED_DENIALS: Final[tuple[tuple[str, str], ...]] = (
-    ("docs/failure-modes.md", "Row 19 is unbuilt twice over"),
-)
+# will close it, because no pattern separates an attribution clause from a citation. This
+# is the umbrella-id hole in miniature, recorded the way check_doc_truth.py records its
+# duplicate ids: so the gate reports growth rather than history. The one entry it held,
+# failure-modes.md's row 19 sentence, was rewritten when TASK-0449 built the rerank timeout.
+# Never add an entry to quiet a new failure; repoint the sentence at the id that covers
+# what it denies, which is what the gate is asking for.
+ATTRIBUTED_DENIALS: Final[tuple[tuple[str, str], ...]] = ()
 
 _DENIAL: Final = re.compile("|".join(DENIAL_PATTERNS), re.IGNORECASE)
 _TASK: Final = re.compile(r"\bTASK-\d{4}\b")

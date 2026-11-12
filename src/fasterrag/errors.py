@@ -84,6 +84,7 @@ class ErrorCode(StrEnum):
     PDF_ENCRYPTED = "PDF_ENCRYPTED"
     NESTING_TOO_DEEP = "NESTING_TOO_DEEP"
     SOURCE_LINK_ESCAPES = "SOURCE_LINK_ESCAPES"
+    DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +171,9 @@ PROBLEM_SPECS: Final[dict[ErrorCode, ProblemSpec]] = {
     ),
     ErrorCode.SOURCE_LINK_ESCAPES: ProblemSpec(
         422, "source-link-escapes", "Source link resolves outside the allowed roots", False
+    ),
+    ErrorCode.DEADLINE_EXCEEDED: ProblemSpec(
+        504, "deadline-exceeded", "Request deadline exceeded", True
     ),
 }
 
@@ -261,6 +265,19 @@ class GenerationError(FasterRagError):
     """LLM generation failed after retries."""
 
     default_code: ClassVar[ErrorCode] = ErrorCode.GENERATION_FAILED
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        code: ErrorCode | None = None,
+        trace_id: str | None = None,
+        retryable: bool | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        """Build the error; ``retry_after`` is the wait in seconds the provider asked for."""
+        super().__init__(detail, code=code, trace_id=trace_id, retryable=retryable)
+        self.retry_after = retry_after
 
 
 class ProviderError(FasterRagError):

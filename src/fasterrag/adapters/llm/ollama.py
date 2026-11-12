@@ -11,6 +11,11 @@ return the typed shape.
 A streamed reply ends with a part whose ``content`` is empty and whose ``done`` is true; it
 carries the token counts, which ``stream`` does not report, and is skipped like any other
 part without text.
+
+The client takes no retry setting because it has no retry loop: it is a thin layer over
+``httpx``, whose default transport makes one attempt. That is what the adapter contract
+wants — the retry policy belongs to the caller (TASK-0449) — and
+``test_an_unavailable_ollama_server_is_asked_once`` pins it against the real library.
 """
 
 from __future__ import annotations

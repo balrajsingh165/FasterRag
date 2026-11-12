@@ -65,6 +65,7 @@ llm:
   temperature: 0.1
   max_tokens: 1024
   streaming: true
+  fallback: null
 
 parsing:
   minimum_chars_per_page: 40
@@ -143,6 +144,7 @@ reliability:
     embeddings_ms: 30000
     llm_ms: 120000
     redis_ms: 1000
+    rerank_ms: 30000
   retries:
     max_attempts: 3
     backoff_base_ms: 250
@@ -159,6 +161,7 @@ reliability:
   degradation_ladder: true
   shutdown_grace_seconds: 20
   stale_job_seconds: 120
+  request_deadline_ms: 300000
 
 traces:
   store: true
@@ -273,6 +276,7 @@ security:
 | `llm.temperature` | float | `0.1` | 0.0–2.0 | Sampling temperature. Low default favors grounded answers. |
 | `llm.max_tokens` | int | `1024` | 1–32768 | Max generated tokens per answer. |
 | `llm.streaming` | bool | `true` | — | Stream tokens via SSE (time-to-first-token). |
+| `llm.fallback` | object\|null | `null` | a block with `provider`, `model`, `api_key_env` and `base_url`, each held to the rule the same key under `llm` is held to | A second generation provider, tried after the first has exhausted `reliability.retries` on a *retryable* failure (rate limit, timeout, 5xx, open breaker) and before the `extractive` rung (TASK-0449). A non-retryable failure — a rejected key, an unknown model — is a misconfiguration and surfaces as it always has rather than being hidden behind the fallback. Sampling (`temperature`) and `max_tokens` are the primary's. The fallback has its own circuit breaker (`fasterrag_circuit_state{provider="llm_fallback"}`) and its own retries; a fallback answer is a full answer (`mode: full`), priced at the fallback's rate, and its trace records which provider served it (`role: fallback` on the `generation` span) and why the primary was passed over (a `generation-failed` span). Its `api_key_env` must be present at startup like any other referenced variable. Example: `fallback: {provider: ollama, model: llama3.1:8b}`. |
 
 ## `parsing`
 
@@ -411,6 +415,7 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | `reliability.timeouts.embeddings_ms` | int | `30000` | ≥ 100 | Timeout per embedding batch call. |
 | `reliability.timeouts.llm_ms` | int | `120000` | ≥ 1000 | Timeout per LLM call (streaming: per-connection). |
 | `reliability.timeouts.redis_ms` | int | `1000` | ≥ 10 | Socket and connect timeout for every Redis client — the `redis` cache backends and the `redis` rate limiter — so one Redis call waits at most this long for a connection and at most this long for a reply. A Redis that accepts connections and never answers then degrades exactly as a stopped one does: the cache misses, and the limiter serves the request unthrottled with a `WARNING` (TASK-0453). |
+| `reliability.timeouts.rerank_ms` | int | `30000` | ≥ 100 | How long one rerank may take before the query is served the fused order instead, flagged `hybrid_only` (D4, TASK-0449). Applied by `RetrievalService` around any reranker, a plugin's included. Scoring runs in a worker thread that cannot be cancelled, so a timed-out rerank keeps its thread until the model returns; `CrossEncoderReranker` therefore holds at most four scoring calls at once, and while all four are still running every further query degrades at once rather than queueing behind them. The first query after start also loads the model, which a cold cache can take minutes to download: that query degrades and the load carries on in the background. The default is a bound on a hang, not a measured latency. |
 | `reliability.retries.max_attempts` | int | `3` | 0–10 | Retries on errors flagged `retryable` only. |
 | `reliability.retries.backoff_base_ms` | int | `250` | ≥ 1 | Exponential backoff base. |
 | `reliability.retries.backoff_max_ms` | int | `10000` | ≥ `backoff_base_ms` | Backoff ceiling. |
@@ -423,6 +428,7 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | `reliability.idempotency.in_flight_lease_seconds` | int | `900` | ≥ 1, ≤ `ttl_seconds` | How long an unfinished reservation holds its key before another request may take it over. A worker killed mid-request frees its key on this lease rather than holding it for the full lifetime — which would force the client to invent a new key, the exact duplicate the header exists to prevent. The loader refuses a lease longer than `ttl_seconds`, because an unfinished request outliving a completed one inverts the intent. It is also the reclamation interval (TASK-0365): one host runs at most one pass per lease, so shortening the lease tightens cleanup as well as takeover. |
 | `reliability.degradation_ladder` | bool | `true` | — | D4: graceful fallbacks (reranker down → hybrid-only; vector DB down → semantic-cache-only; LLM down → extractive answers). Every degraded response carries `degraded: true` + `mode`. |
 | `reliability.shutdown_grace_seconds` | int | `20` | 0–3600 | How long a stopping API process waits for the ingestion jobs it is running before cancelling them (TASK-0436). During the wait it starts no new job (`POST /v1/ingest` answers `503 NOT_READY`, retryable); a job that finishes inside the window settles normally, and one that does not is cancelled and settled `failed` with `reason_code: INTERRUPTED`, keeping its checkpoint. Adapters are closed only after every job has settled. **Keep it below whatever kills the process**: `docker stop` sends `SIGKILL` after 10 s by default and Kubernetes after 30 s, and a process killed mid-wait settles nothing — its jobs stay `running` until the next start reaps them. `0` cancels at once. The wait is a floor on shutdown time only when jobs are running, and it is not a ceiling: a cancelled job still has to leave the parse pool, which waits for the documents already being parsed. |
+| `reliability.request_deadline_ms` | int | `300000` | ≥ 100 | End-to-end bound on one query, enforced inside `GenerationService` so REST, the CLI and the Python facade all get it (TASK-0449). It covers the cache lookup, retrieval, every generation attempt and retry wait, the fallback provider, and grading. What a deadline hit returns depends on how far the query got. **Before the first event** — cache lookup, retrieval, reranking — the query is refused with `504 DEADLINE_EXCEEDED` (retryable), on a stream as on a JSON body, because nothing has been sent; the CLI exits `3` and the Python facade raises `FasterRagError` with that code. **During generation, before any token is sent**, the retrieved passages are served on the `extractive` rung exactly as for a provider timeout, and no retry or fallback is started that the remaining time cannot cover. **While grading** (`generation.grounded_or_refuse`), the answer is returned ungraded, as for a grader outage. **On a stream after a token was sent**, the stream ends on an `error` event carrying `DEADLINE_EXCEEDED` and status `504`, without `done`. Only awaits inside the service are bounded: time a stream's consumer spends between events counts against the deadline but is never interrupted, and the trace and cache writes after the answer are not bounded. A deadline hit is not counted against a provider's circuit breaker, since the time may have been spent elsewhere. The default sits above a single `llm_ms` call plus retrieval and grading; it exists to bound retries and hangs, not as a measured latency. |
 | `reliability.stale_job_seconds` | int | `120` | 1–86400 | How long a `running` job must have been quiet before a starting process treats it as abandoned and settles it `failed` with `reason_code: INTERRUPTED` (TASK-0436). "Quiet" means neither the job record nor its per-document log has been written: the journal can be shared by several processes on one host, and a job still writing is the only evidence that some other process owns it. The look runs once at startup, in the background, and **once more this many seconds later** if any record was too recent to judge — a process restarted seconds after a crash finds the orphan still fresh, so without the second look it would stay `running` until some later restart. The cost of a low value: a live job that writes nothing for this long — one document that takes longer than this to parse, embed and index — is settled by *another* process starting on the same journal while it is still running. It corrects itself when the job finishes, because the final settle overwrites the record, but in between the job reads as interrupted. Raise it if a single document can take minutes. A job is only ever settled here, never resumed. |
 
 ## `traces`

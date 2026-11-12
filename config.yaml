@@ -58,6 +58,7 @@ llm:
   temperature: 0.1
   max_tokens: 1024
   streaming: true
+  fallback: null
 
 parsing:
   minimum_chars_per_page: 40
@@ -136,6 +137,7 @@ reliability:
     embeddings_ms: 30000
     llm_ms: 120000
     redis_ms: 1000
+    rerank_ms: 30000
   retries:
     max_attempts: 3
     backoff_base_ms: 250
@@ -152,6 +154,7 @@ reliability:
   degradation_ladder: true
   shutdown_grace_seconds: 20
   stale_job_seconds: 120
+  request_deadline_ms: 300000
 
 traces:
   store: true

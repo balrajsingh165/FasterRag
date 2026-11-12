@@ -50,9 +50,13 @@ class CohereGenerator(LLMAdapter):
             except ImportError as exc:
                 raise require_llm_extra(self.provider, "cohere", "cohere") from exc
 
+            # CRITICAL: `max_retries=0`. The SDK otherwise retries 429 and 5xx twice by
+            # itself, sleeping in between, underneath the service's own retry policy — so a
+            # rate limit cost three provider calls per service attempt (TASK-0449).
             self._client = AsyncClientV2(
                 api_key=require_llm_key(self.config.api_key_env, self.provider),
                 timeout=self.timeout,
+                max_retries=0,
             )
         return self._client
 

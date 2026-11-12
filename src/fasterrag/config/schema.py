@@ -17,7 +17,7 @@ import platform
 import re
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from fasterrag.config.plugins import (
@@ -465,6 +465,31 @@ class EmbeddingsSettings(Section):
         return self
 
 
+class LlmFallbackSettings(Section):
+    """A second generation provider, tried once the first has exhausted its retries.
+
+    Sampling and the token ceiling are the primary's; only who answers changes. The block is
+    held to every rule ``llm`` itself is held to, so a fallback cannot be misconfigured silently.
+    """
+
+    provider: str
+    model: str
+    api_key_env: str | None = None
+    base_url: str | None = None
+
+    @model_validator(mode="after")
+    def _check_as_a_provider(self) -> Self:
+        """Validate the block as a provider in its own right, naming it in any refusal."""
+        try:
+            LlmSettings.model_validate(self.model_dump())
+        except ValidationError as exc:
+            reasons = "; ".join(
+                str(error["msg"]).removeprefix("Value error, ") for error in exc.errors()
+            )
+            raise ValueError(f"llm.fallback is not a usable provider: {reasons}") from exc
+        return self
+
+
 class LlmSettings(Section):
     """Generation provider, model, sampling, and streaming."""
 
@@ -475,6 +500,7 @@ class LlmSettings(Section):
     temperature: Annotated[float, Field(ge=0.0, le=2.0)] = 0.1
     max_tokens: Annotated[int, Field(ge=1, le=32768)] = 1024
     streaming: bool = True
+    fallback: LlmFallbackSettings | None = None
 
     @field_validator("provider")
     @classmethod
@@ -688,6 +714,7 @@ class TimeoutSettings(Section):
     embeddings_ms: Annotated[int, Field(ge=100)] = 30000
     llm_ms: Annotated[int, Field(ge=1000)] = 120000
     redis_ms: Annotated[int, Field(ge=10)] = 1000
+    rerank_ms: Annotated[int, Field(ge=100)] = 30000
 
 
 class RetrySettings(Section):
@@ -756,6 +783,7 @@ class ReliabilitySettings(Section):
     degradation_ladder: bool = True
     shutdown_grace_seconds: Annotated[int, Field(ge=0, le=3600)] = 20
     stale_job_seconds: Annotated[int, Field(ge=1, le=86400)] = 120
+    request_deadline_ms: Annotated[int, Field(ge=100)] = 300000
 
 
 class TracesSettings(Section):
