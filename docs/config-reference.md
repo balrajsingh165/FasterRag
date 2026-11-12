@@ -124,6 +124,9 @@ ingestion:
     enabled: true
     max_retries: 3
   max_document_mb: 100
+  # Seconds one document may spend being parsed and chunked before it is
+  # dead-lettered as PARSE_TIMEOUT and its worker is replaced. 0 = no limit.
+  parse_timeout_seconds: 600
   # Directories a `path` source may read from. Empty is unconfined, which is
   # refused outright once security.auth is on -- see docs/security.md.
   allowed_source_roots: []
@@ -385,6 +388,7 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | `ingestion.dlq.enabled` | bool | `true` | — | Failed documents go to a dead-letter queue with machine-readable reason codes and per-document status. |
 | `ingestion.dlq.max_retries` | int | `3` | 0–10 | Retries before a document is dead-lettered. |
 | `ingestion.max_document_mb` | int | `100` | 1–1024 | Input size limit per document (security + stability). |
+| `ingestion.parse_timeout_seconds` | float | `600` | ≥ 0 (0 = no limit) | Time limit per document for loading, parsing and chunking, counted from the moment the document is handed to the worker pool. A document still being parsed when it expires is dead-lettered with reason `PARSE_TIMEOUT` and the job continues. A running process-pool task cannot be cancelled, so the pool is recycled: its workers are killed, a new pool is started, and the documents that were in flight beside the overdue one are parsed again from the start with a fresh limit (one that was itself within 50 ms of its own limit is dead-lettered with it). Set it above the slowest legitimate document — OCR of a long scan is the usual candidate — because a document that needs longer can never be ingested while the limit stands. `0` restores the unbounded wait, in which one hung parser stalls its job for ever. |
 | `ingestion.allowed_source_roots` | list[str] | `[]` | paths | Directories a `path` source may be read from. **Authorization boundary**: a `path` source names a file on the server, so an unconfined one lets any caller with the `ingest` scope read `.env` or an SSH key back out through a query. Paths are resolved before comparison, so `..` and symlinks cannot escape a root. Empty means unconfined, which is refused outright when `security.auth` is on — so forgetting it breaks a served deployment loudly instead of exposing it quietly. |
 
 ## `index`

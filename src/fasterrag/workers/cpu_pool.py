@@ -15,6 +15,17 @@ Documents are parsed concurrently, up to the pool size at a time, and consumed i
 submission order. Awaiting each document before submitting the next — which this module did
 until 2026-11-11 — keeps exactly one worker busy however many the pool holds.
 
+A parse has a deadline, ``ingestion.parse_timeout_seconds``, counted from the moment the
+document is handed to the pool (TASK-0473). A parser that hangs — a pathological PDF, a
+regular expression that backtracks for ever — used to stall the job without limit, because
+the pool future was awaited with none. Cancelling that future does not help: a process-pool
+task that is already running cannot be cancelled, and its worker stays occupied until it
+returns, which a hung one never does. So an overdue document costs its *pool*: the workers
+are killed, a fresh pool is started, the documents that were in flight beside it are
+submitted again with a new deadline, and only the overdue one is dead-lettered, as
+``PARSE_TIMEOUT``. One worker is started before any document is submitted, at pool start
+and after every recycle, so that process start-up is not billed to a document's deadline.
+
 A document is journalled as indexed only when the :class:`IndexLedger` says every chunk of
 it was written downstream (``workers/ledger.py``). With no ledger passed there is no
 downstream to wait for, and the chunks are acknowledged as they are enqueued.
@@ -34,6 +45,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mappi
 from concurrent.futures import Executor, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field, replace
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 from time import perf_counter
 from typing import Final
@@ -63,6 +75,13 @@ EMPTY_DOCUMENT: Final = "EMPTY_DOCUMENT"
 _MEGABYTE = 1024 * 1024
 
 _SLOW_TOKENIZER_LOAD_SECONDS = 0.5
+
+_OVERDUE_GRACE_SECONDS: Final = 0.05
+"""How close to its own deadline a document counts as overdue when the pool is recycled.
+
+Documents submitted together are due microseconds apart. Without this, the second of two
+hung documents would be resubmitted and given a whole new deadline to hang through.
+"""
 
 _logger = get_logger(__name__)
 
@@ -167,6 +186,46 @@ def _read(source: str, max_bytes: int) -> bytes:
         raise ParseError(f"{source} could not be read: {exc.strerror}") from exc
 
 
+@dataclass(slots=True)
+class _InFlight:
+    """One document in the pool: its task, its pending result, and when it is due."""
+
+    task: DocumentTask
+    future: asyncio.Future[ParseOutcome]
+    deadline: float | None
+    timed_out: bool = False
+
+
+def _ready() -> bool:
+    """Return from a worker process, which proves the pool can start one."""
+    return True
+
+
+def _abandon(executor: Executor) -> None:
+    """Shut a pool down without waiting for it, killing any worker that is still busy."""
+    workers: list[BaseProcess] = []
+    if isinstance(executor, ProcessPoolExecutor) and executor._processes:
+        # CRITICAL: `_processes` is private, and before Python 3.14 (`kill_workers`) there
+        # is no public way to reach a pool's workers. Cancelling a future does not stop a
+        # task that is already running and `shutdown` would wait for it, so a hung parser
+        # can only be stopped by killing its process. Copied first: `shutdown` clears it.
+        workers = list(executor._processes.values())
+    executor.shutdown(wait=False, cancel_futures=True)
+    for worker in workers:
+        if worker.is_alive():
+            worker.kill()
+
+
+def _parse_timeout_error(task: DocumentTask, limit: float) -> ParseError:
+    """Return the error for a document whose parse outlived its deadline."""
+    return ParseError(
+        f"{task.source} was still being parsed after {limit:g} seconds, the limit set by "
+        "ingestion.parse_timeout_seconds; its worker was stopped and the job continued",
+        code=ErrorCode.PARSE_TIMEOUT,
+        retryable=False,
+    )
+
+
 def _unguarded_entry_point_error() -> IngestionError:
     """Return the error for a worker pool that died before doing any work."""
     return IngestionError(
@@ -204,9 +263,23 @@ class CpuWorkerPool:
     async def __aenter__(self) -> CpuWorkerPool:
         """Start the worker processes and pay the tokenizer load up front."""
         self._executor = self._executor_factory(self.size)
+        try:
+            await self._start_worker()
+        except BaseException:
+            _abandon(self._executor)
+            self._executor = None
+            raise
         await self._warm_token_counter()
         _logger.info("cpu worker pool started", extra={"workers": self.size})
         return self
+
+    async def _start_worker(self) -> None:
+        """Start one worker now, so process start-up is not billed to a document's deadline."""
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(self._executor, _ready)
+        except BrokenProcessPool as exc:
+            raise _unguarded_entry_point_error() from exc
 
     async def _warm_token_counter(self) -> None:
         """Load the embedding tokenizer before the first document rather than during it."""
@@ -260,7 +333,7 @@ class CpuWorkerPool:
 
         stream = self._parsed(pending)
         try:
-            async for task, result in self._parsed(pending):
+            async for task, result in stream:
                 if isinstance(result, FasterRagError):
                     dead_lettered += 1
                     async with tracker.journal_lock:
@@ -328,9 +401,7 @@ class CpuWorkerPool:
         Up to ``self.size`` documents are in the pool at once. Order is kept so the dedup
         decision between two identical documents in one job stays deterministic.
         """
-        executor = self._executor
-        loop = asyncio.get_running_loop()
-        window: deque[tuple[DocumentTask, asyncio.Future[ParseOutcome]]] = deque()
+        window: deque[_InFlight] = deque()
         queued = iter(tasks)
 
         def fill() -> None:
@@ -338,15 +409,21 @@ class CpuWorkerPool:
                 task = next(queued, None)
                 if task is None:
                     return
-                future = loop.run_in_executor(executor, parse_and_chunk, task, self.settings)
-                window.append((task, future))
+                window.append(self._submit(task))
 
         try:
             fill()
             while window:
-                task, future = window.popleft()
+                entry = window[0]
+                if not entry.timed_out and not await self._returned(entry):
+                    await self._recycle(window)
+                window.popleft()
+                if entry.timed_out:
+                    yield entry.task, self._timeout_error(entry.task)
+                    fill()
+                    continue
                 try:
-                    outcome = await future
+                    outcome = await entry.future
                 except BrokenProcessPool as exc:
                     raise _unguarded_entry_point_error() from exc
                 except FasterRagError as exc:
@@ -354,13 +431,76 @@ class CpuWorkerPool:
                     # job's, so it carries a trace id the worker minted for itself. Without
                     # this the dead-letter entry cannot be joined to the job's own log lines.
                     exc.trace_id = current_trace_id()
-                    yield task, exc
+                    yield entry.task, exc
                 else:
-                    yield task, outcome
+                    yield entry.task, outcome
                 fill()
         finally:
-            for _, future in window:
-                future.cancel()
+            for entry in window:
+                entry.future.cancel()
+
+    def _submit(self, task: DocumentTask) -> _InFlight:
+        """Hand one document to the pool, due ``ingestion.parse_timeout_seconds`` from now."""
+        loop = asyncio.get_running_loop()
+        limit = self.settings.ingestion.parse_timeout_seconds
+        future = loop.run_in_executor(self._executor, parse_and_chunk, task, self.settings)
+        return _InFlight(task, future, loop.time() + limit if limit > 0 else None)
+
+    async def _returned(self, entry: _InFlight) -> bool:
+        """Wait for a document until it is due, and return whether its parse came back."""
+        if entry.deadline is None:
+            await asyncio.wait([entry.future])
+            return True
+
+        loop = asyncio.get_running_loop()
+        while not entry.future.done():
+            remaining = entry.deadline - loop.time()
+            if remaining <= 0:
+                return False
+            await asyncio.wait([entry.future], timeout=remaining)
+        return True
+
+    def _timeout_error(self, task: DocumentTask) -> ParseError:
+        """Return the typed failure for a document that outlived its deadline."""
+        return _parse_timeout_error(task, self.settings.ingestion.parse_timeout_seconds)
+
+    async def _recycle(self, window: deque[_InFlight]) -> None:
+        """Replace the pool because the document at the head of ``window`` is overdue.
+
+        Every other unfinished document is submitted again to the new pool with a fresh
+        deadline, unless it is overdue too; a finished one keeps the result it already has.
+        """
+        due = asyncio.get_running_loop().time() + _OVERDUE_GRACE_SECONDS
+        window[0].timed_out = True
+        unfinished = [entry for entry in window if not entry.future.done()]
+        for entry in unfinished:
+            # CRITICAL: cancelled before the workers are killed. Killing them fails every
+            # future still in the pool with BrokenProcessPool; a cancelled future ignores
+            # it, where a live one would carry an exception nobody is left to retrieve.
+            entry.future.cancel()
+            if entry.deadline is not None and entry.deadline <= due:
+                entry.timed_out = True
+
+        stale = self._executor
+        self._executor = self._executor_factory(self.size)
+        if stale is not None:
+            _abandon(stale)
+        await self._start_worker()
+
+        resubmitted = [entry for entry in unfinished if not entry.timed_out]
+        for entry in resubmitted:
+            fresh = self._submit(entry.task)
+            entry.future, entry.deadline = fresh.future, fresh.deadline
+
+        _logger.warning(
+            "a document outlived its parse timeout; the cpu worker pool was recycled",
+            extra={
+                "document_id": window[0].task.document_id,
+                "timeout_seconds": self.settings.ingestion.parse_timeout_seconds,
+                "resubmitted": len(resubmitted),
+                "trace_id": current_trace_id(),
+            },
+        )
 
     def _commit(
         self, job: str | None, collection: str, task: DocumentTask, outcome: ParseOutcome

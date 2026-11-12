@@ -558,6 +558,7 @@ class IngestionSettings(Section):
     journal: JournalSettings = JournalSettings()
     dlq: DlqSettings = DlqSettings()
     max_document_mb: Annotated[int, Field(ge=1, le=1024)] = 100
+    parse_timeout_seconds: Annotated[float, Field(ge=0)] = 600
 
     # CRITICAL: this is an authorization boundary, not a convenience. A `path` source names
     # a file on the SERVER, so without confinement any caller holding the `ingest` scope can

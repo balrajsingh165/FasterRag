@@ -48,6 +48,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `QUEUE_FULL` | 429 | `IngestionError` | Bounded queue overflow (`Retry-After` set). |
 | `BUDGET_EXCEEDED` | 402 | — | Per-query or per-tenant token budget exhausted (D9), raised by the runtime cost governor before the provider is called (TASK-0242 ✅). **Non-retryable**, which is deliberate: the degradation ladder absorbs retryable failures into an extractive answer, so a retryable budget error would serve a degraded answer instead of reporting the cap. The check weighs the prompt plus `llm.max_tokens`, the ceiling the call can reach. |
 | `PARSE_FAILED` | 422 | `ParseError` | Document unparseable; also the DLQ reason code. |
+| `PARSE_TIMEOUT` | 422 | `ParseError` | A document was still being parsed after `ingestion.parse_timeout_seconds`. A DLQ reason code only: the job carries on without the document, so no request is answered with it. Non-retryable as it stands — the same document will run out the same limit — until the limit is raised or the source is fixed. |
 | `CHUNK_FAILED` | 500 | `ChunkError` | Chunker invariant violated. |
 | `EMBED_PROVIDER_TIMEOUT` / `EMBED_PROVIDER_ERROR` | 503 | `EmbedError`/`ProviderError` | Embedding provider timeout / hard failure. |
 | `VECTOR_DB_AUTH_FAILED` | 503 | `ProviderError` | The vector database rejected our credentials. Distinct from `EMBED_PROVIDER_ERROR` because the knob to turn is `vector_db.api_key_env`, not the embedding provider. Never retried. |

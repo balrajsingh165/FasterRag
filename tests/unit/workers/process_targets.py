@@ -12,15 +12,26 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
+from typing import Final
 
 from fasterrag.config.schema import Settings
 from fasterrag.workers.cpu_pool import parse_and_chunk
 from fasterrag.workers.queues import DocumentTask, ParseOutcome
 
-HANG_MARKER = "hang"
-"""A source whose file name contains this never returns from :func:`hang_on_marker`."""
+HANG: Final = "hang"
+"""File stem of a document whose parse never returns within any test's patience."""
 
-_FOREVER_SECONDS = 3600.0
+PAUSE: Final = "pause"
+"""File stem of a document that parses after :data:`PAUSE_SECONDS`."""
+
+SLOW: Final = "slow"
+"""File stem of a document that parses after :data:`SLOW_SECONDS`."""
+
+PAUSE_SECONDS: Final = 2.0
+SLOW_SECONDS: Final = 3.0
+
+_DELAYS: Final[dict[str, float]] = {HANG: 3600.0, PAUSE: PAUSE_SECONDS, SLOW: SLOW_SECONDS}
 
 
 def die(task: DocumentTask, settings: Settings) -> ParseOutcome:
@@ -28,8 +39,7 @@ def die(task: DocumentTask, settings: Settings) -> ParseOutcome:
     os._exit(1)
 
 
-def hang_on_marker(task: DocumentTask, settings: Settings) -> ParseOutcome:
-    """Parse normally, except for a marked source, which blocks for an hour."""
-    if HANG_MARKER in os.path.basename(task.source):
-        time.sleep(_FOREVER_SECONDS)
+def parse_after_a_delay(task: DocumentTask, settings: Settings) -> ParseOutcome:
+    """Parse normally, after sleeping for as long as the source's file stem asks."""
+    time.sleep(_DELAYS.get(Path(task.source).stem, 0.0))
     return parse_and_chunk(task, settings)

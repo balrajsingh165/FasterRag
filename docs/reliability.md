@@ -10,7 +10,8 @@ That sentence governs this repository: every "fastest," "most reliable," or "bes
 FasterRagError                      # root; carries code, trace_id, retryable
 ├── ConfigError                     # invalid config / missing env var (fail-fast at startup)
 ├── IngestionError
-│   ├── ParseError                  # document unparseable → DLQ reason PARSE_FAILED
+│   ├── ParseError                  # document unparseable → DLQ reason PARSE_FAILED;
+│   │                               # still parsing after ingestion.parse_timeout_seconds → PARSE_TIMEOUT
 │   ├── ChunkError                  # chunker invariant violated
 │   └── EmbedError                  # embedding stage failure
 ├── RetrievalError                  # dense/BM25 leg, fusion, or rerank failure
