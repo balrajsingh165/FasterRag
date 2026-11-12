@@ -57,6 +57,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
+# CRITICAL: imported for its side effect, before any fasterrag import: it puts this
+# checkout's src first on sys.path, so a worktree measures its own code (TASK-0522).
+import _checkout  # noqa: F401
+
 from fasterrag.services.benchmark import commit_hash, fingerprint, percentile
 from fasterrag.services.idempotency import (
     RECLAIM_GRACE_SECONDS,
