@@ -184,6 +184,7 @@ The same `__main__` guard requirement applies here as in the async quickstart: i
 
 Every pipeline stage is importable and usable on its own, so applications can adopt fasterRag piecemeal — just the chunkers, just hybrid fusion, just the evaluator — before (or instead of) adopting the full engine:
 
+<!-- doc-example: illustrative -->
 ```python
 from fasterrag.parsing import parse_document            # -> ParsedDocument (reading order, tables, headings, metadata)
 from fasterrag.chunking import RecursiveChunker, SemanticChunker, LayoutChunker

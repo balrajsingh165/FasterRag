@@ -87,6 +87,16 @@ Lint + format clean (ruff) · `mypy --strict` zero errors · unit + integration 
 
 The supply-chain audit is defined **once**, as the composite action `.github/actions/dependency-audit`, which both `ci.yml` and `security.yml` call. An accepted advisory ignore is added there and nowhere else: when the same list lived in both workflows, four ignores went into one copy and the scheduled run was red every night until somebody noticed.
 
+## 7a. Code examples in documents
+
+Every fenced `python` block in `README.md`, [quickstart.md](quickstart.md) and [python-api.md](python-api.md) is executed by `tests/unit/docs/test_doc_examples.py` (TASK-0499), as a script, from a directory holding the files the examples name and a `config.yaml` that selects in-memory providers through real entry points. An example that calls a method that does not exist, or reads a field an object does not have, fails the build. A block that cannot run as written — it uses names it never defines, or a file the reader supplies — is marked by putting
+
+```html
+<!-- doc-example: illustrative -->
+```
+
+on the last non-blank line before its fence. The comment renders as nothing on GitHub and in MkDocs. A marked block must still compile. Mark a block only when it truly cannot run; a block that needs another file or name in the test's workspace is better served by adding it there.
+
 ## 8. Adding a provider adapter
 
 Implement the base class, register the entry point ([python-api.md](python-api.md) §Extending), and pass the shared adapter contract suite ([testing-strategy.md](testing-strategy.md) §1.5). Adapters that don't pass the contract suite are not merged.
