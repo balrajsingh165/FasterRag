@@ -10,19 +10,26 @@ and closes it on exit, because the alternatives are both wrong: ``asyncio.run`` 
 would tear down the connection pools between calls, and reusing an ambient loop would make
 this class fail unpredictably depending on what the caller happened to be running.
 
-That ownership is also why this refuses to start inside a running loop. Blocking on a future
-from the thread already driving the loop deadlocks — the loop cannot make progress because
-the thread that would advance it is waiting. Detected up front with a message naming the
-async facade, rather than left to hang.
+**Inside a running loop the private loop gets a thread of its own** (TASK-0497). A notebook
+always has a running loop, so refusing to start under one — what this class used to do —
+refused the use its first line names. Driving the private loop with ``run_until_complete``
+from a thread that is already running a loop is impossible, and blocking that thread on a
+future its own loop must resolve deadlocks. So the first call made under a running loop
+moves the private loop onto a dedicated daemon thread, which runs it until ``__exit__``
+stops and joins it; every call is then handed over with ``run_coroutine_threadsafe`` and the
+caller blocks on the result while its own loop stays where it was. Only a call from that
+dedicated thread is refused (``USAGE_ERROR``): it would wait on the loop it is running.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Awaitable, Coroutine, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self, TypeVar
+from typing import Any, NoReturn, Self, TypeVar
 
 from fasterrag.adapters.vectordb.base import CollectionInfo
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH
@@ -31,7 +38,7 @@ from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.facade import FasterRag as AsyncFasterRag
 from fasterrag.services.doctor import DoctorReport
-from fasterrag.services.documents import DocumentDeletion
+from fasterrag.services.documents import DEFAULT_PAGE_SIZE, DocumentDeletion, DocumentListing
 from fasterrag.services.estimation import Estimate
 from fasterrag.services.generation import Answer, QueryEvent
 from fasterrag.services.journal import JobRecord
@@ -42,6 +49,22 @@ __all__ = ["FasterRag"]
 
 _Result = TypeVar("_Result")
 
+_LOOP_THREAD_NAME = "fasterrag-sync-loop"
+
+
+async def _awaited[T](awaitable: Awaitable[T]) -> T:
+    """Wrap any awaitable in a coroutine, which ``run_coroutine_threadsafe`` requires."""
+    return await awaitable
+
+
+def _ambient_loop_running() -> bool:
+    """Return whether the calling thread is already running an event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
 
 class FasterRag:
     """A blocking fasterRag instance."""
@@ -50,6 +73,7 @@ class FasterRag:
         """Wrap an async facade. Prefer :meth:`from_config` or :meth:`from_settings`."""
         self._inner = inner
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
 
     @classmethod
     def from_config(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> Self:
@@ -68,20 +92,12 @@ class FasterRag:
 
     def __enter__(self) -> Self:
         """Create the private event loop and start the underlying facade."""
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
-            raise FasterRagError(
-                "fasterrag.sync.FasterRag cannot be used inside a running event loop, "
-                "because blocking on it from the thread driving that loop would deadlock. "
-                "Use 'from fasterrag import FasterRag' and 'async with' instead",
-                code=ErrorCode.CONFIG_INVALID,
-            )
-
         self._loop = asyncio.new_event_loop()
-        self._loop.run_until_complete(self._inner.__aenter__())
+        try:
+            self._run(self._inner.__aenter__())
+        except BaseException:
+            self._close_loop()
+            raise
         return self
 
     def __exit__(
@@ -90,26 +106,70 @@ class FasterRag:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        """Stop the underlying facade and close the loop this instance owns."""
+        """Stop the underlying facade, then stop, join and close the loop this instance owns."""
         if self._loop is None:
             return
         try:
-            self._loop.run_until_complete(self._inner.__aexit__(exc_type, exc, traceback))
+            self._run(self._inner.__aexit__(exc_type, exc, traceback))
         finally:
-            self._loop.close()
-            self._loop = None
+            self._close_loop()
+
+    def _close_loop(self) -> None:
+        """Stop the loop's thread if it has one, wait for it to finish, and close the loop."""
+        loop, thread = self._loop, self._thread
+        self._loop = None
+        self._thread = None
+        if loop is None:
+            return
+        if thread is not None:
+            loop.call_soon_threadsafe(loop.stop)
+            if thread is not threading.current_thread():
+                thread.join()
+        if not loop.is_running():
+            loop.close()
+
+    def _start_loop_thread(self, loop: asyncio.AbstractEventLoop) -> threading.Thread:
+        """Run the private loop on a dedicated daemon thread until :meth:`_close_loop`."""
+        thread = threading.Thread(target=loop.run_forever, name=_LOOP_THREAD_NAME, daemon=True)
+        thread.start()
+        self._thread = thread
+        return thread
 
     def _run(self, awaitable: Awaitable[_Result]) -> _Result:
-        """Drive one coroutine to completion on the owned loop."""
-        if self._loop is None:
-            if isinstance(awaitable, Coroutine):
-                awaitable.close()
-            raise FasterRagError(
+        """Drive one awaitable to completion on the owned loop, from whatever thread calls."""
+        loop = self._loop
+        if loop is None:
+            self._refuse(
+                awaitable,
                 "this FasterRag instance has not been started; use it as a context manager: "
                 "'with FasterRag.from_config(...) as rag:'",
-                code=ErrorCode.CONFIG_INVALID,
             )
-        return self._loop.run_until_complete(awaitable)
+        thread = self._thread
+        if thread is None and not _ambient_loop_running():
+            return loop.run_until_complete(awaitable)
+        if thread is threading.current_thread():
+            self._refuse(
+                awaitable,
+                "fasterrag.sync.FasterRag was called from the thread that runs its own event "
+                "loop, which would wait on itself forever. Use 'from fasterrag import "
+                "FasterRag' and 'async with' there instead",
+            )
+        if thread is None:
+            self._start_loop_thread(loop)
+
+        future = asyncio.run_coroutine_threadsafe(_awaited(awaitable), loop)
+        try:
+            return future.result()
+        except BaseException:
+            future.cancel()
+            raise
+
+    @staticmethod
+    def _refuse(awaitable: Awaitable[Any], detail: str) -> NoReturn:
+        """Raise ``USAGE_ERROR``, closing the coroutine so it is not reported as never awaited."""
+        if isinstance(awaitable, Coroutine):
+            awaitable.close()
+        raise FasterRagError(detail, code=ErrorCode.USAGE_ERROR)
 
     def ingest(
         self,
@@ -140,10 +200,13 @@ class FasterRag:
         collection: str | None = None,
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
+        tenant: str | None = None,
     ) -> Answer:
         """Answer a question through the full pipeline, blocking until it is complete."""
         return self._run(
-            self._inner.query(text, collection=collection, top_k=top_k, filters=filters)
+            self._inner.query(
+                text, collection=collection, top_k=top_k, filters=filters, tenant=tenant
+            )
         )
 
     def query_stream(
@@ -153,9 +216,12 @@ class FasterRag:
         collection: str | None = None,
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
+        tenant: str | None = None,
     ) -> Iterator[QueryEvent]:
         """Yield the answer's events as an ordinary iterator."""
-        events = self._inner.query_stream(text, collection=collection, top_k=top_k, filters=filters)
+        events = self._inner.query_stream(
+            text, collection=collection, top_k=top_k, filters=filters, tenant=tenant
+        )
         while True:
             try:
                 yield self._run(events.__anext__())
@@ -169,10 +235,13 @@ class FasterRag:
         collection: str | None = None,
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
+        tenant: str | None = None,
     ) -> list[ScoredChunk]:
         """Retrieve without generating, blocking until the results are in."""
         return self._run(
-            self._inner.retrieve(text, collection=collection, top_k=top_k, filters=filters)
+            self._inner.retrieve(
+                text, collection=collection, top_k=top_k, filters=filters, tenant=tenant
+            )
         )
 
     def doctor(self) -> DoctorReport:
@@ -182,7 +251,10 @@ class FasterRag:
         must work on an installation that cannot start — that is what it is for.
         """
         if self._loop is None:
-            return asyncio.run(self._inner.doctor())
+            if not _ambient_loop_running():
+                return asyncio.run(self._inner.doctor())
+            with ThreadPoolExecutor(1, thread_name_prefix=_LOOP_THREAD_NAME) as worker:
+                return worker.submit(asyncio.run, self._inner.doctor()).result()
         return self._run(self._inner.doctor())
 
     def collections(self) -> list[CollectionInfo]:
@@ -222,6 +294,16 @@ class FasterRag:
         return self._run(
             self._inner.delete_document(document_id, collection=collection, tenant=tenant)
         )
+
+    def documents(
+        self,
+        collection: str | None = None,
+        *,
+        offset: int = 0,
+        limit: int = DEFAULT_PAGE_SIZE,
+    ) -> DocumentListing:
+        """Return one page of the documents the journal records in a collection, blocking."""
+        return self._run(self._inner.documents(collection, offset=offset, limit=limit))
 
     def replay(self, trace_id: str, candidate: Settings | None = None) -> ReplayResult:
         """Re-execute a stored query under a candidate configuration and diff it (D8)."""

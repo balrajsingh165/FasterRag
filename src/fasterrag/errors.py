@@ -79,6 +79,7 @@ class ErrorCode(StrEnum):
     CACHE_ERROR = "CACHE_ERROR"
     NOT_READY = "NOT_READY"
     INTERNAL = "INTERNAL"
+    USAGE_ERROR = "USAGE_ERROR"
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +152,9 @@ PROBLEM_SPECS: Final[dict[ErrorCode, ProblemSpec]] = {
     ErrorCode.CACHE_ERROR: ProblemSpec(500, "cache-error", "Cache backend failure", False),
     ErrorCode.NOT_READY: ProblemSpec(503, "not-ready", "Service is not ready", True),
     ErrorCode.INTERNAL: ProblemSpec(500, "internal", "Internal error", False),
+    ErrorCode.USAGE_ERROR: ProblemSpec(
+        400, "usage-error", "The library was used incorrectly", False
+    ),
 }
 
 

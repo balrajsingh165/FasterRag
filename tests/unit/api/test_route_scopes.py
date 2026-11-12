@@ -38,6 +38,7 @@ EXPECTED: dict[str, tuple[str | None, list[str]]] = {
     "/v1/admin/provision/{tool}/status": ("admin", ["GET"]),
     "/v1/collections": ("collections", ["GET", "POST"]),
     "/v1/collections/{name}": ("collections", ["DELETE", "GET"]),
+    "/v1/collections/{name}/documents": ("collections", ["GET"]),
     "/v1/collections/{name}/documents/{document_id}": ("collections", ["DELETE"]),
     "/v1/estimate": ("admin", ["POST"]),
     "/v1/ingest": ("ingest", ["POST"]),

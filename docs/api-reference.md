@@ -62,6 +62,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `CACHE_ERROR` | 500 | `CacheError` | Cache backend failure (system degrades to cache-off rather than failing queries; surfaced on admin endpoints). |
 | `NOT_READY` | 503 | — | A readiness dependency check failed: returned by `/readyz`, with a `dependencies[]` extension member naming each check and its state. Also returned, retryable, by `POST /v1/ingest` and `POST /v1/ingest/{job_id}/retry-dlq` while the server is shutting down and has stopped starting jobs (see [`POST /v1/ingest`](#post-v1ingest)); that refusal carries no `dependencies[]`. Also returned, retryable, by `GET /v1/ingest/{job_id}` when the job's record stayed unopenable through a short retry (see [`GET /v1/ingest/{job_id}`](#get-v1ingestjob_id)). |
 | `INTERNAL` | 500 | `FasterRagError` | Anything unclassified. Always carries `trace_id`. Never returned without a problem body. |
+| `USAGE_ERROR` | 400 | `FasterRagError` | The Python package was called the wrong way: a facade method before `async with` / `with`, or a blocking-facade call made from the thread that runs that facade's own event loop. Raised by the library only — no REST request is answered with it. Not retryable: the calling code has to change (TASK-0461). |
 
 ---
 
@@ -182,8 +183,8 @@ Re-enqueues dead-lettered documents of the job. `202`, or `409 CONFLICT` under t
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `query` | str | yes | 1–8192 chars. |
-| `collection` | str | no | Defaults to configured default. |
+| `query` | str | yes | 1–8192 chars, and not whitespace only: a blank query is `422 VALIDATION_FAILED`, refused in the service layer before anything is embedded, so the CLI and the Python facades refuse it the same way (TASK-0468). |
+| `collection` | str | no | Defaults to configured default. A collection the vector database does not hold is `404 NOT_FOUND` with a `detail` naming it, on the CLI and facades too (TASK-0468). The vector contract suite requires every adapter to report a missing collection as `NOT_FOUND` on both legs, and the service names the collection whatever the vendor's wording. |
 | `top_k` | int | no | Overrides `retrieval.top_k`; same bounds. |
 | `filters` | object | no | Metadata filter expression, pushed down to both retrieval legs. With `security.tenant_scoped_retrieval` on, a `tenant` key here is refused with `403 TENANT_FORBIDDEN`: the tenant a retrieval runs as comes from the credential and is injected below this expression ([security.md](security.md) §3). |
 | `stream` | bool | no (default per `llm.streaming`) | `true` → SSE response. |
@@ -240,7 +241,7 @@ event: done       data: {}
 
 **A stream reports everything the JSON body reports.** Both shapes are produced by one pipeline (TASK-0438), so `usage` closes the stream with the same `mode`, `degraded`, `truncated` and `evidence_dropped` the non-streamed body carries, `meta` always carries the `cache` member, a streamed query increments the same metrics (plus `fasterrag_ttft_seconds`, which only a stream can have), and it stores the same trace — including the trace of a withheld answer, which a streamed refusal did not store before 2026-11-12. Two members are **estimates on a stream and provider-reported otherwise**, because a provider stream carries text only: `prompt_tokens` / `completion_tokens` are counted locally (and `estimated_cost_usd` is priced from those), and `truncated` is inferred from the local completion count reaching `llm.max_tokens` rather than read from the provider's finish reason. An answer that ended on its own just under the ceiling can therefore be flagged, and one the provider cut can be missed when the local count runs low.
 
-**A query refused before its first event is an ordinary problem response, not a stream.** Everything that can refuse a query outright — retrieval failing (`503 RETRIEVAL_FAILED`), the token budget (`402 BUDGET_EXCEEDED`) — happens before `meta` is produced, and the server produces `meta` before it sends the status line. Such a request gets the same status and `application/problem+json` body as `stream: false`, with no SSE frame at all. Before 2026-11-12 the budget check ran after `meta`, so a streamed request over its budget received `200` and then an `error` event (TASK-0438).
+**A query refused before its first event is an ordinary problem response, not a stream.** Everything that can refuse a query outright — a blank query (`422 VALIDATION_FAILED`), a missing collection (`404 NOT_FOUND`), retrieval failing (`503 RETRIEVAL_FAILED`), the token budget (`402 BUDGET_EXCEEDED`) — happens before `meta` is produced, and the server produces `meta` before it sends the status line. Such a request gets the same status and `application/problem+json` body as `stream: false`, with no SSE frame at all. Before 2026-11-12 the budget check ran after `meta`, so a streamed request over its budget received `200` and then an `error` event (TASK-0438).
 
 **A provider that is down degrades a stream the way it degrades a JSON body** (D4, TASK-0438). When generation fails with a *retryable* error — timeout, rate limit, 5xx, an open circuit breaker — **before the first `token` has been sent**, the stream serves the `extractive` rung instead of failing: a second `meta` announcing the mode, the retrieved passages as one `token`, then `citations`, `usage` and `done`.
 
@@ -277,7 +278,7 @@ Retrieval without generation, for callers bringing their own LLM step. Same requ
 {"query": "...", "collection": "docs", "top_k": 10, "filters": {"source": "handbook"}}
 ```
 
-Responds `200` with `{"chunks": [...], "trace_id": "..."}`. No generation happens, so no LLM cost is incurred and `INSUFFICIENT_EVIDENCE` cannot apply.
+Responds `200` with `{"chunks": [...], "trace_id": "..."}`. No generation happens, so no LLM cost is incurred and `INSUFFICIENT_EVIDENCE` cannot apply. A blank query is `422 VALIDATION_FAILED` and a collection that does not exist is `404 NOT_FOUND` naming it, exactly as on `/v1/query`.
 
 **Tenancy.** Both `/v1/query` and `/v1/retrieve` address the collection the body names, unprefixed — neither applies the `<tenant>__` scoping `/v1/collections` uses. Retrieval is filtered by tenant only when `security.tenant_scoped_retrieval` is on, and `403 TENANT_FORBIDDEN` is then also possible on both endpoints. See [security.md](security.md) §3 for what is enforced today and what the flag changes (TASK-0339). The pre-enable `tenant` backfill is **CLI-only** (`fasterrag index tenants`, `fasterrag index backfill-tenant`) and has no endpoint: it rewrites every point in a collection and chooses the tenant from an operator's argument rather than from a credential, which is not a decision a request-scoped surface should be able to make (TASK-0377).
 
@@ -290,13 +291,36 @@ Responds `200` with `{"chunks": [...], "trace_id": "..."}`. No generation happen
 | `GET /v1/collections/{name}` | Detail incl. `index.lock` summary and drift status (D1). | 200 | 404 |
 | `PATCH /v1/collections/{name}` | **Not yet implemented.** Mutable settings only (metadata schema, description). | 200 | 404, 422 |
 | `DELETE /v1/collections/{name}` | Drop collection (requires `admin` scope; refuses while it is an active alias target unless `?force=true`). | 204 | 404, 409 |
+| `GET /v1/collections/{name}/documents` | List the documents indexed in a collection, a page at a time (`?offset=0&limit=100`). See [Listing documents](#listing-documents). | 200 | 404, 422 |
 | `DELETE /v1/collections/{name}/documents/{document_id}` | Delete one document: every chunk carrying that `document_id`, its dedup record, its lockfile entry, and the semantic cache. See [Deleting a document](#deleting-a-document). | 200 | 404, 422 |
 | `POST /v1/collections/{name}/reindex` | **Not yet implemented over REST** — shipped on the CLI as `fasterrag index reindex`. D2 zero-downtime reindex: blue/green build → eval gate → alias swap. Returns a job id. | 202 | 404, 409 |
 | `POST /v1/collections/{name}/rollback` | **Not yet implemented over REST** — shipped on the CLI as `fasterrag index rollback`. Alias flip back to the retained previous collection (within retention window). | 200 | 404, 409 |
 
+### Listing documents
+
+`GET /v1/collections/{name}/documents?offset=0&limit=100` — `collections` scope (TASK-0469). `offset` is 0 or more and `limit` is 1 to 1000 (default 100); anything else is `422 VALIDATION_FAILED`. Documents are ordered by `document_id`, so pages do not overlap while the collection is unchanged; follow `next_offset` until it is `null`.
+
+```json
+{
+  "collection": "docs",
+  "documents": [
+    {"document_id": "d_0d06505c1a084fbc", "content_hash": "9f86d081884c7d65…"},
+    {"document_id": "d_2c26b46b68ffc68f", "content_hash": "fcde2b2edba56bf4…"}
+  ],
+  "total": 2,
+  "offset": 0,
+  "limit": 100,
+  "next_offset": null
+}
+```
+
+**The listing is the ingestion journal's record of what was indexed, not a scan of the vector database.** It reads the same per-collection record that deduplication and `DELETE …/documents/{document_id}` use, so a deleted document disappears from it at once, and a document re-ingested with new content is listed with its new `content_hash`. The cost of not scanning is the same caveat a delete's `known` carries: with `ingestion.dedup: false`, or for documents brought in by an archive import, the journal records nothing per collection, and those documents are indexed but not listed. A collection the vector database does not hold is `404 NOT_FOUND`, even when the journal still holds a record for that name. `POST /v1/ingest` does not record a document's source path in this record, so the listing carries ids and hashes only; `GET /v1/ingest/{job_id}/documents` maps an id to its source.
+
+**Tenancy.** Resolved exactly as the delete below: `<tenant>__<name>` when `security.multi_tenancy` is on, and the prefix never appears in the response. The journal record carries no tenant tag, so, unlike the delete, the listing cannot also filter by tenant inside a collection; with ingest not applying the prefix (TASK-0381), it lists what was ingested under the prefixed name only. Which tenancy model is correct is the open decision in TASK-0339.
+
 ### Deleting a document
 
-`DELETE /v1/collections/{name}/documents/{document_id}` — `collections` scope. The `document_id` is the `d_…` id `GET /v1/ingest/{job_id}/documents` reports for each source.
+`DELETE /v1/collections/{name}/documents/{document_id}` — `collections` scope. The `document_id` is the `d_…` id `GET /v1/collections/{name}/documents` lists, or that `GET /v1/ingest/{job_id}/documents` reports for each source of a job.
 
 ```json
 {

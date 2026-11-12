@@ -45,6 +45,7 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 | Ingest restarted from the beginning after a crash | Journal disabled | Set `ingestion.journal.enabled: true`; checkpoints every `checkpoint_every` documents let a crash resume exactly where it stopped |
 | Scanned PDFs index with no useful text | OCR yielded nothing; the chunk carries a `low_text_yield` parse flag rather than silently indexing emptiness | Check the flag in document metadata; verify the OCR path is available for that source type. If the pages carry a thin text layer (a stamped header, a page number) the OCR path never ran: raise `parsing.minimum_chars_per_page` above what such a page yields, and `parsing.ocr_resolution` if OCR output is garbled on fine print |
 | Ingestion is slow, GPU underutilized | CPU parse/chunk stage is the bottleneck, so embedding workers idle | Raise `workers.cpu_pool_size`; the streaming hand-off is designed so embedding never waits on parsing |
+| An indexed document is missing from `fasterrag documents list` / `GET /v1/collections/{name}/documents` | The listing is the ingestion journal's per-collection record, not a scan of the vector database (TASK-0469). It records nothing when `ingestion.dedup` is `false`, and an archive import writes nothing to it; with multi-tenancy on, the route lists the `<tenant>__` collection, which `POST /v1/ingest` does not write to (TASK-0381) | Query the document to confirm it is indexed. Re-ingesting it with `ingestion.dedup: true` (the default) records it; the vector database itself is unaffected either way |
 | Ingestion slow, CPU idle | Embedding is the bottleneck (or a provider is throttling) | Raise `workers.embedding_pool_size` / `embeddings.batch_size`; check for retry-storm logs indicating provider 429s |
 
 ### An ingest job is refused with `chunking.strategy is 'semantic', which needs a local embedding model`
@@ -82,6 +83,8 @@ Fixed on 2026-11-11 (TASK-0427). Earlier builds recorded a document as indexed w
 | `INSUFFICIENT_EVIDENCE` instead of an answer | Grounded-or-refuse declined below the faithfulness threshold — a feature, not a failure (D5) | Inspect `best_candidates`; if refusals are too aggressive, lower `generation.faithfulness_threshold`, or improve retrieval so real evidence reaches the context |
 | Answers look plausible but unsupported | Grounding not enforced | Enable `generation.grounded_or_refuse: true`; check the `faithfulness` field and `unsupported_claims` in the trace |
 | Response labelled `degraded: true` | The degradation ladder engaged — a component is down and you're being told, rather than silently served worse results (D4) | Read `mode`: `hybrid_only` = reranker down · `cache_only` = vector DB down · `extractive` = LLM down. Fix the named component; recovery is automatic |
+| A query returns `404 NOT_FOUND`: `no collection named '…'` | The query named a collection — or `vector_db.collection.default_name` names one — that the vector database does not hold. Typical after a `DELETE /v1/collections/{name}`, a typo, or with multi-tenancy on: `/v1/query` addresses the name unprefixed (TASK-0339) | `fasterrag index list` (or `GET /v1/collections`) shows what exists; ingest into the collection to create it. The vector contract suite requires every backend to report this the same way, and it does not count against the vector-database circuit breaker |
+| A query returns `422 VALIDATION_FAILED`: `a query must contain text to search for` | The query was empty or whitespace only. The request schema's `min_length` counts whitespace, so the service refuses it instead — on REST, the CLI and the Python facades alike (TASK-0468) | Send the question text. Nothing was embedded or charged for the refused query |
 | SSE stream ends with no `done` event | Mid-stream failure; the answer is incomplete | Treat as incomplete (never as final); an `error` event carries the problem document and `trace_id` |
 | Citations missing | `generation.citations` disabled | Re-enable it. It cannot be off while `grounded_or_refuse` is on — the config loader enforces this |
 
@@ -105,6 +108,14 @@ Fixed on 2026-11-11 (TASK-0427). Earlier builds recorded a document as indexed w
 | Langfuse headless bootstrap ignored | `LANGFUSE_INIT_*` values double-quoted in compose, or org vars missing (project/user require an org — [references.md](references.md) R10) | Remove the quotes; ensure `LANGFUSE_INIT_ORG_ID`/`_ORG_NAME` are set |
 | Grafana edits vanish | Working as designed: provisioned resources are read-only (`editable: false`, `allowUiUpdates: false`) to enforce GitOps | Edit the provisioning YAML/JSON files; they reload on the poll interval without a restart |
 | Dashboard down | Observability-only — RAG serving is entirely unaffected | Restart the dashboard container; no query impact (FMEA row 36) |
+
+## Python package
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `USAGE_ERROR: this FasterRag instance has not been started` | A facade method was called outside `async with` (async facade) or `with` (blocking facade) | Enter the context manager first: `async with FasterRag.from_config(...) as rag:` or, with `fasterrag.sync`, `with FasterRag.from_config(...) as rag:`. Builds before TASK-0461 reported this as `CONFIG_INVALID` |
+| `USAGE_ERROR: fasterrag.sync.FasterRag was called from the thread that runs its own event loop` | Code that the blocking facade is itself running — a callback scheduled on its private loop — called back into the blocking facade, which would wait on itself forever | Use the async facade there (`from fasterrag import FasterRag`, `async with`). Calling the blocking facade from a notebook cell or from under `asyncio.run` is fine: it runs its loop on a thread of its own (TASK-0497) |
+| `TENANT_FORBIDDEN` from `rag.query`, `rag.query_stream` or `rag.retrieve` | `security.tenant_scoped_retrieval` is on and the call named no tenant | Pass `tenant="<id>"` to the call. Before TASK-0461 the facade had no way to name one, so every read was refused under that flag |
 
 ## Performance
 

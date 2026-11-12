@@ -63,6 +63,7 @@ __all__ = [
     "Retrieval",
     "RetrievalService",
     "fused_shortlist",
+    "require_query_text",
 ]
 
 _logger = get_logger(__name__)
@@ -88,6 +89,31 @@ def fused_shortlist(shortlist: list[ScoredChunk], limit: int) -> list[ScoredChun
     tree can say the rung is built (D4, TASK-0394).
     """
     return shortlist[:limit]
+
+
+def require_query_text(text: str) -> None:
+    """Refuse a query with nothing to search for, the same way on every surface (TASK-0468).
+
+    Checked here, not in a request model, so REST, the CLI and both facades agree.
+    """
+    if not text.strip():
+        raise FasterRagError(
+            "a query must contain text to search for; it was empty or only whitespace",
+            code=ErrorCode.VALIDATION_FAILED,
+            retryable=False,
+        )
+
+
+def _missing_collection(exc: FasterRagError, collection: str) -> FasterRagError:
+    """Return ``exc``, or the same error type as ``NOT_FOUND`` naming ``collection``."""
+    if exc.code is not ErrorCode.NOT_FOUND:
+        return exc
+    return type(exc)(
+        f"no collection named {collection!r}",
+        code=ErrorCode.NOT_FOUND,
+        trace_id=exc.trace_id,
+        retryable=False,
+    )
 
 
 class RetrievalService:
@@ -137,6 +163,7 @@ class RetrievalService:
         The detailed form. Generation needs the mode so a degraded answer can be labelled
         as one rather than passed off as a full-quality result (D4).
         """
+        require_query_text(text)
         validate_filter(filters)
         scoped = self._tenant_scoped(filters)
         retrieval = self.settings.retrieval
@@ -238,8 +265,11 @@ class RetrievalService:
         try:
             legs = await self._execute_legs(vector, text, collection, candidates, filters)
         except FasterRagError as exc:
-            self.breaker.record_failure(admission, exc)
-            raise
+            named = _missing_collection(exc, collection)
+            self.breaker.record_failure(admission, named)
+            if named is exc:
+                raise
+            raise named from exc
 
         self.breaker.record_success(admission)
         return legs
