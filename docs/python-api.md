@@ -219,7 +219,7 @@ Deployment note: in-process worker pools are suitable for small/medium loads; fo
 
 Third parties add providers by implementing the adapter base classes and registering them via Python entry points — no fork required:
 
-> **Status (2026-11-11): the registration half works and the selection half does not.** The three factories discover `fasterrag.vectordb`, `fasterrag.embeddings` and `fasterrag.llm` entry points, and `resolve_adapter_class("mydb")` returns a plugin's class. But `vector_db.provider`, `embeddings.provider` and `llm.provider` are closed lists in the config schema, so `provider: mydb` in `config.yaml` is refused at load before any factory runs. Until TASK-0439 lands a plugin can be constructed in code and passed to the services directly, and cannot be named in configuration. Chunkers, parsers and rerankers have no entry-point group yet (same task).
+> **Status (2026-11-12): vector databases, embedders and LLMs are selectable by name; chunkers, parsers and rerankers are not.** A name registered under `fasterrag.vectordb`, `fasterrag.embeddings` or `fasterrag.llm` validates as `vector_db.provider`, `embeddings.provider` (and a tier rule's `provider`) or `llm.provider`, and the matching factory builds it. Validation reads the installed distributions' entry-point metadata and imports nothing, so a plugin's module is loaded only when its adapter is built. A name that is neither built in nor registered still stops the load, and the error lists the built-in names and the plugins that are installed. Chunkers, parsers and rerankers have no entry-point group yet (TASK-0439).
 
 ```toml
 [project.entry-points."fasterrag.vectordb"]

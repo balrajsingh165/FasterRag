@@ -20,6 +20,16 @@ from typing import Annotated, Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
+from fasterrag.config.plugins import (
+    BUILTIN_EMBEDDING_PROVIDERS,
+    BUILTIN_LLM_PROVIDERS,
+    BUILTIN_VECTOR_DB_PROVIDERS,
+    EMBEDDINGS_GROUP,
+    LLM_GROUP,
+    VECTOR_DB_GROUP,
+    require_selectable,
+)
+
 __all__ = [
     "AppSettings",
     "AutopilotSettings",
@@ -56,9 +66,6 @@ _DOCKER_VOLUME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 _HTTP_HEADER_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 _PATH_LIKE_RE = re.compile(r"^(~|\.{1,2}[\\/]|[A-Za-z]:[\\/])|[\\/]")
 
-VectorDbProvider = Literal["qdrant", "milvus", "weaviate", "pinecone", "pgvector", "chroma"]
-EmbeddingProvider = Literal["openai", "cohere", "huggingface", "ollama"]
-LlmProvider = Literal["openai", "anthropic", "cohere", "ollama", "openai_compatible"]
 ChunkStrategy = Literal["fixed", "recursive", "semantic", "layout", "late"]
 TokenCounterMode = Literal["auto", "estimate", "model"]
 
@@ -250,7 +257,7 @@ class CollectionSettings(Section):
 class VectorDbSettings(Section):
     """Vector database selection and connection settings."""
 
-    provider: VectorDbProvider = "qdrant"
+    provider: str = "qdrant"
     mode: Literal["docker", "external"] = "docker"
     host: str = "localhost"
     port: Annotated[int, Field(ge=1, le=65535)] = 6333
@@ -262,6 +269,12 @@ class VectorDbSettings(Section):
     pgvector: PgvectorSettings = PgvectorSettings()
     chroma: ChromaSettings = ChromaSettings()
     collection: CollectionSettings = CollectionSettings()
+
+    @field_validator("provider")
+    @classmethod
+    def _check_provider(cls, value: str) -> str:
+        """Require a built-in vector database or one an installed plugin registers."""
+        return require_selectable(value, builtin=BUILTIN_VECTOR_DB_PROVIDERS, group=VECTOR_DB_GROUP)
 
     @field_validator("host")
     @classmethod
@@ -320,8 +333,16 @@ class TierRule(Section):
     """One tiered-embedding routing rule; the first matching rule wins."""
 
     match: dict[str, Any]
-    provider: EmbeddingProvider
+    provider: str
     model: str
+
+    @field_validator("provider")
+    @classmethod
+    def _check_provider(cls, value: str) -> str:
+        """Require a built-in embedding provider or one an installed plugin registers."""
+        return require_selectable(
+            value, builtin=BUILTIN_EMBEDDING_PROVIDERS, group=EMBEDDINGS_GROUP
+        )
 
     @field_validator("model")
     @classmethod
@@ -349,13 +370,21 @@ class TieringSettings(Section):
 class EmbeddingsSettings(Section):
     """Embedding provider, model, batching, cache, and tiering."""
 
-    provider: EmbeddingProvider = "huggingface"
+    provider: str = "huggingface"
     model: str = "BAAI/bge-small-en-v1.5"
     api_key_env: str | None = None
     batch_size: Annotated[int, Field(ge=1, le=2048)] = 64
     dimensions: Annotated[int, Field(ge=8)] | None = None
     cache: EmbeddingCacheSettings = EmbeddingCacheSettings()
     tiering: TieringSettings = TieringSettings()
+
+    @field_validator("provider")
+    @classmethod
+    def _check_provider(cls, value: str) -> str:
+        """Require a built-in embedding provider or one an installed plugin registers."""
+        return require_selectable(
+            value, builtin=BUILTIN_EMBEDDING_PROVIDERS, group=EMBEDDINGS_GROUP
+        )
 
     @field_validator("model")
     @classmethod
@@ -385,13 +414,19 @@ class EmbeddingsSettings(Section):
 class LlmSettings(Section):
     """Generation provider, model, sampling, and streaming."""
 
-    provider: LlmProvider = "openai"
+    provider: str = "openai"
     model: str = "gpt-4o-mini"
     api_key_env: str | None = "OPENAI_API_KEY"
     base_url: str | None = None
     temperature: Annotated[float, Field(ge=0.0, le=2.0)] = 0.1
     max_tokens: Annotated[int, Field(ge=1, le=32768)] = 1024
     streaming: bool = True
+
+    @field_validator("provider")
+    @classmethod
+    def _check_provider(cls, value: str) -> str:
+        """Require a built-in LLM provider or one an installed plugin registers."""
+        return require_selectable(value, builtin=BUILTIN_LLM_PROVIDERS, group=LLM_GROUP)
 
     @field_validator("model")
     @classmethod
