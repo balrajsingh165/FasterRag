@@ -52,6 +52,7 @@ from fasterrag.core.retrieval.models import DENSE_LEG, SPARSE_LEG, ScoredChunk
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.degradation import DegradationMode, serving
+from fasterrag.services.lockfile import verify_query_lock
 from fasterrag.services.tenancy import TENANT_PAYLOAD_KEY
 
 FULL_MODE = DegradationMode.FULL.value
@@ -168,6 +169,7 @@ class RetrievalService:
         scoped = self._tenant_scoped(filters)
         retrieval = self.settings.retrieval
         target = collection or self.settings.vector_db.collection.default_name
+        await verify_query_lock(self.settings, self.router, target)
         limit = top_k or retrieval.top_k
         candidates = max(retrieval.rerank_top_n, limit) if self._reranking else limit
 

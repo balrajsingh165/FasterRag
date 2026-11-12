@@ -51,6 +51,7 @@ DOCUMENTED_STATUSES = {
     ErrorCode.NOT_READY: 503,
     ErrorCode.INTERNAL: 500,
     ErrorCode.USAGE_ERROR: 400,
+    ErrorCode.INDEX_DRIFT: 409,
 }
 
 DEFAULT_CODES = [

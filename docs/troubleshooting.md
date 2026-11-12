@@ -74,6 +74,7 @@ Fixed on 2026-11-11 (TASK-0427). Earlier builds recorded a document as indexed w
 | Retrieval finds it, but the answer misses it | Reranking off, or `top_k` truncating before the good chunk | Enable `retrieval.rerank` — expected to help most here, though the gain is unmeasured; raise `rerank_top_n` so the reranker sees more candidates |
 | Chunks lack context to be understood alone | Pronouns/shorthand referencing surrounding text | Enable `chunking.contextual_enrichment` and reindex ([prompts.md](prompts.md) P2; evidence in [references.md](references.md) R1) |
 | Quality dropped after a change | A retrieval-affecting change shipped ungated | Enable `eval.regression_gate: true`; use `fasterrag replay --trace <id> --config candidate.yaml` to see exactly what changed (D8) |
+| Every query fails with 409 `INDEX_DRIFT`, or the log says *was indexed by embedding model … not the configured one* | `embeddings.model` (or its version or dimensions) changed after the collection was indexed; the index's vectors and the query's come from two embedding spaces, so results would be confidently wrong (TASK-0477) | Rebuild the collection under the new model with `fasterrag index reembed <collection> <sources...>`, or put back the embedding settings it was built with. `retrieval.verify_lock: warn` serves such queries and only logs; `off` skips the check |
 | No idea which knob to turn | Guesswork is the actual problem | `fasterrag autopilot run` — measured suggestions from your own corpus, never auto-applied (D6) |
 
 ## Answers & generation

@@ -13,17 +13,26 @@ detectable and named: verify exits non-zero and says which field moved.
 
 The lockfile is written atomically, because a half-written lockfile is worse than none — it
 would report drift against a truncated record and send someone chasing a change nobody made.
+
+**The query path reads it too** (TASK-0477). :func:`verify_query_lock` compares a collection's
+lock with the embedder a query is about to use, on the first query per collection and
+process, and per ``retrieval.verify_lock`` refuses with ``INDEX_DRIFT``, warns, or does
+nothing. Only the embedding identity is compared: a changed chunker alters how the stored
+text was cut, not what its vectors mean, so it is left to ``index lock verify``. A passing
+verdict is remembered (the retrieval service is rebuilt per request); a refusal is not, so a
+re-embed that rewrites the lock clears it without a restart.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from fasterrag import __version__
 from fasterrag.config.schema import Settings
@@ -32,7 +41,12 @@ from fasterrag.core.identity import (
     chunker_config_hash,
     retrieval_config_hash,
 )
+from fasterrag.errors import ErrorCode, RetrievalError
 from fasterrag.observability.logging import get_logger
+
+if TYPE_CHECKING:
+    from fasterrag.adapters.embeddings.base import EmbeddingAdapter
+    from fasterrag.adapters.embeddings.tiering import TieringRouter
 
 __all__ = [
     "DEFAULT_LOCK_ROOT",
@@ -43,6 +57,8 @@ __all__ = [
     "build_lock",
     "create_lock_store",
     "detect_drift",
+    "reset_verified_locks",
+    "verify_query_lock",
 ]
 
 LOCK_VERSION: Final = "1.0.0"
@@ -336,3 +352,92 @@ class LockStore:
 def create_lock_store(settings: Settings, root: Path | None = None) -> LockStore:
     """Build a lock store from validated configuration."""
     return LockStore(root, enabled=settings.index.lockfile)
+
+
+_VERIFIED: Final[set[tuple[str, str, str, str]]] = set()
+
+
+def reset_verified_locks() -> None:
+    """Forget every collection the query path has already verified, so tests start clean."""
+    _VERIFIED.clear()
+
+
+def _identity(adapter: EmbeddingAdapter) -> dict[str, Any]:
+    """Return the embedding identity an adapter states, omitting what it does not state.
+
+    Read defensively: a duck-typed embedder that names no version or size is compared on
+    what it does name rather than failing every query it serves.
+    """
+    stated = {
+        "embedding_model": getattr(adapter, "model", None),
+        "embedding_model_version": getattr(adapter, "model_version", None),
+        "dimensions": getattr(adapter, "dimensions", None),
+    }
+    return {name: value for name, value in stated.items() if value is not None}
+
+
+def _embedding_mismatch(lock: IndexLock, live: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the embedding fields of ``lock`` that the live identity no longer matches."""
+    fields: list[str] = []
+    details: list[dict[str, Any]] = []
+    for name, value in live.items():
+        locked = getattr(lock, name)
+        if locked is not None:
+            _compare(name, locked, value, fields, details)
+    return details
+
+
+def _drift_detail(collection: str, lock: IndexLock, mismatch: list[dict[str, Any]]) -> str:
+    """Describe the drift and the command that resolves it."""
+    moved = "; ".join(
+        f"{entry['field']} was {entry['locked']!r} and is now {entry['live']!r}"
+        for entry in mismatch
+    )
+    return (
+        f"collection {collection!r} was indexed by embedding model {lock.embedding_model!r}, "
+        f"not the configured one ({moved}); its vectors and this query's would come from two "
+        f"embedding spaces. Rebuild it with 'fasterrag index reembed {collection} <sources...>', "
+        "or restore the embeddings settings it was built with"
+    )
+
+
+async def verify_query_lock(settings: Settings, router: TieringRouter, collection: str) -> None:
+    """Check ``collection``'s lock against the query embedder, per ``retrieval.verify_lock``.
+
+    Raises:
+        RetrievalError: ``INDEX_DRIFT`` in ``refuse`` mode when the embedding model moved.
+    """
+    mode = settings.retrieval.verify_lock
+    if mode == "off" or not settings.index.lockfile:
+        return
+
+    adapter = router.default
+    store = create_lock_store(settings)
+    live = _identity(adapter)
+    if "embedding_model" not in live:
+        return
+    key = (
+        str(store.root),
+        collection,
+        str(live["embedding_model"]),
+        str(live.get("embedding_model_version", "")),
+    )
+    if key in _VERIFIED:
+        return
+
+    lock = await asyncio.to_thread(store.read, collection)
+    mismatch = [] if lock is None else _embedding_mismatch(lock, live)
+    if lock is None or not mismatch:
+        _VERIFIED.add(key)
+        return
+
+    detail = _drift_detail(collection, lock, mismatch)
+    if mode == "warn":
+        _VERIFIED.add(key)
+        _logger.warning(
+            "querying an index another embedding model built; fix it with fasterrag index reembed",
+            extra={"collection": collection, "detail": detail},
+        )
+        return
+
+    raise RetrievalError(detail, code=ErrorCode.INDEX_DRIFT, retryable=False)

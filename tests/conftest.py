@@ -168,6 +168,16 @@ def _closed_circuits_and_no_loaded_models() -> Iterator[None]:
     cpu_pool.reset_shared_sentence_embedders()
 
 
+@pytest.fixture(autouse=True)
+def _no_verified_index_locks() -> Iterator[None]:
+    """Give every test a query path that has verified no collection's lock yet (TASK-0477)."""
+    from fasterrag.services import lockfile
+
+    lockfile.reset_verified_locks()
+    yield
+    lockfile.reset_verified_locks()
+
+
 _cache_roots = itertools.count()
 
 
