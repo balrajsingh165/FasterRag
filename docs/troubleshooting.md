@@ -16,6 +16,7 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 | Exits naming an environment variable | A `*_env` key references a variable missing from the environment/`.env` (the value is never logged, only the name) | Add it to `.env`; copy [`.env.example`](https://github.com/balrajsingh165/fasterrag/blob/main/.env.example) if you don't have one |
 | `top_k must be ≤ rerank_top_n` and similar | A cross-field validation rule was violated | See the cross-field rules list at the end of [config-reference.md](config-reference.md) |
 | Config change appears to do nothing | Config is read at startup/provision time, not live (deliberate — it keeps the control plane auditable) | Restart the process, or re-run the relevant `fasterrag provision` command |
+| `security.multi_tenancy requires security.auth` at load | Tenancy was turned on with auth off. The tenant of a request is resolved by the authentication middleware, so this combination used to load and enforce nothing (TASK-0460) | Set `security.auth: true` and give every key a tenant (`secret:scopes:tenant`), or set `security.multi_tenancy: false` |
 
 ### `fasterrag serve` prints a warning about binding with auth off
 

@@ -82,7 +82,7 @@ Enabling auth with no usable key **refuses to start**. Starting would refuse eve
 
 ## 3. Multi-tenancy isolation
 
-- `security.multi_tenancy: true` scopes collections and API keys to tenants; the tenant id arrives via `security.tenant_header` (default `X-Tenant-ID`) and must match the key's tenant.
+- `security.multi_tenancy: true` scopes collections and API keys to tenants; the tenant id arrives via `security.tenant_header` (default `X-Tenant-ID`) and must match the key's tenant. **It requires `security.auth: true`**, and the combination with auth off is refused at configuration load (TASK-0460, 2026-11-12): the middleware that resolves a tenant is the authentication middleware, so until then `multi_tenancy: true` with `auth: false` loaded silently and every request ran untenanted.
 - **Isolation is enforced at the service layer** (the only writer of state) for every collection operation, cache entry, trace, job, and metric; cross-tenant access to those is `TENANT_FORBIDDEN` regardless of endpoint. **Retrieval is the exception and is opt-in** — see "What retrieval actually enforces" below.
 
 **Shipped so far** (TASK-0179): the tenant is resolved once, in `AuthMiddleware`, from the key's own tenant and the request header, and placed on the request scope — one place decides who the caller is, so a second reader cannot disagree with the first. Three rules:
@@ -311,7 +311,11 @@ An independent audit found the service **open by default twice over**: `security
 - **Keys are compared as bytes.** `secrets.compare_digest` raises `TypeError` on a `str` holding a non-ASCII character and the `Authorization` header is latin-1 decoded, so one such byte in a bearer token turned a 401 into an unhandled 500 for an unauthenticated caller.
 - **The semantic cache is scoped by collection, filters and `top_k`** as well as by tenant. Its lookup ran before retrieval and matched on the query vector and tenant alone. A metadata filter is how an access-control restriction is expressed in a query, so an answer produced under one filter could be served to a request carrying another.
 
-**Still open from the same audit**, each with an entry in [todo.md](todo.md): retrieved text reaches the prompt unescaped (TASK-0446); a key with no tenant may act for any tenant, `multi_tenancy` without `auth` is accepted silently, and the `.env.example` placeholder is accepted as a live key (TASK-0460); tenant scoping of the ingest and query paths remains the opt-in described in §3 (TASK-0339, TASK-0381).
+**Closed since by TASK-0460 (2026-11-12), one change per finding:**
+
+- **`multi_tenancy` without `auth` is refused at load.** The tenant of a request is resolved by the authentication middleware, so `multi_tenancy: true` with `auth: false` loaded and enforced nothing. It is now a `ConfigError` naming both keys (§3).
+
+**Still open from the same audit**, each with an entry in [todo.md](todo.md): retrieved text reaches the prompt unescaped (TASK-0446); a key with no tenant may act for any tenant, and the `.env.example` placeholder is accepted as a live key (TASK-0460); tenant scoping of the ingest and query paths remains the opt-in described in §3 (TASK-0339, TASK-0381).
 
 ## 6. Supply chain
 

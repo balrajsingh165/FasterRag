@@ -879,6 +879,18 @@ class SecuritySettings(Section):
             )
         return self
 
+    @model_validator(mode="after")
+    def _check_multi_tenancy_needs_auth(self) -> Self:
+        """Refuse tenancy without the authentication that resolves every tenant (TASK-0460)."""
+        if self.multi_tenancy and not self.auth:
+            raise ValueError(
+                "security.multi_tenancy requires security.auth: the tenant of every request "
+                "is resolved by the authentication middleware, so with auth off tenancy "
+                "would be accepted and enforce nothing; set security.auth: true with keys "
+                "bound to tenants, or set security.multi_tenancy: false"
+            )
+        return self
+
 
 class Settings(BaseSettings):
     """The validated whole of ``config.yaml``."""
