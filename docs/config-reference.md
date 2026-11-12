@@ -192,6 +192,7 @@ observability:
   otel_endpoint: null
   langfuse: false
   grafana: false
+  dashboard_host: 127.0.0.1
 
 security:
   auth: false
@@ -209,6 +210,9 @@ security:
   # Directories admin export may write into and admin import may read from. Empty is
   # unconfined, which is refused outright once auth is on -- see docs/security.md.
   allowed_archive_roots: []
+  allow_unauthenticated: false
+  api_key_file: null
+  cors_allowed_origins: []
 ```
 
 ---
@@ -217,7 +221,7 @@ security:
 
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
-| `app.host` | str | `127.0.0.1` | valid IPv4/IPv6 address or hostname | Bind address for the API server and the dashboard. Loopback by default, because `security.auth` defaults to `false`: an unauthenticated API must not be reachable from other machines unless an operator says so. The container image passes `--host 0.0.0.0` explicitly and publishes on `127.0.0.1`; set this to a routable address only together with `security.auth: true`. `fasterrag serve` logs a warning when it binds a non-loopback address with auth off. |
+| `app.host` | str | `127.0.0.1` | valid IPv4/IPv6 address or hostname | Bind address for the API server (the dashboard has its own, `observability.dashboard_host`). Loopback by default, because `security.auth` defaults to `false`: an unauthenticated API must not be reachable from other machines unless an operator says so. The container image passes `--host 0.0.0.0` explicitly and publishes on `127.0.0.1`; set this to a routable address only together with `security.auth: true`. `fasterrag serve` **refuses** to bind a non-loopback address with auth off unless `security.allow_unauthenticated: true` (TASK-0460); the compose files set that flag because they publish on loopback. |
 | `app.port` | int | `8000` | 1–65535 | API server port. |
 | `app.log_level` | str | `info` | one of `debug`, `info`, `warning`, `error` | Structured-log verbosity. |
 
@@ -493,14 +497,15 @@ All integration toggles default `false`.
 | `observability.otel_endpoint` | str\|null | `null` | valid URL when `otel: true` | The collector's OTLP/HTTP endpoint, taken as a **base URL**: `/v1/traces` and `/v1/metrics` are derived from it, exactly as the OpenTelemetry specification treats `OTEL_EXPORTER_OTLP_ENDPOINT`. Set it to `http://collector:4318`, not to a signal path — one setting feeds both exporters and no single signal path can serve both. A value that already ends in `/v1/traces`, `/v1/metrics`, or `/v1/logs` has that path replaced rather than appended to, so configurations written against earlier docs keep working. |
 | `observability.langfuse` | bool | `false` | — | Flipping to `true` auto-provisions self-hosted Langfuse v3 (Docker Compose stack), performs all configuration incl. headless bootstrap, and returns the running URL `http://<host>:3000`. **No application-code changes at toggle time.** Gated by `fasterrag doctor`. See [observability.md](observability.md). |
 | `observability.grafana` | bool | `false` | — | Flipping to `true` auto-provisions Grafana via provisioning-as-code (datasources + dashboards read at startup; UI read-only for provisioned resources). No manual clicks; no code changes. Gated by `fasterrag doctor`. |
+| `observability.dashboard_host` | str | `127.0.0.1` | valid IPv4/IPv6 address or hostname | Dashboard bind address, **independent of `app.host`** (TASK-0460). Until 2026-11-12 the dashboard bound whatever the API bound, so `serve --host 0.0.0.0` exposed the corpus view as well, despite the dashboard being documented as separately bindable. It renders prompts, responses and corpus text verbatim, so it stays on loopback unless an operator widens it here; the compose `dashboard` service sets `0.0.0.0` inside its container and publishes on the host's loopback. An unauthenticated non-loopback dashboard bind is refused exactly as the API's is (`security.allow_unauthenticated`). |
 
 ## `security`
 
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
 | `security.auth` | bool | `false` | — | API-key authentication on all control-plane endpoints (keys carry scopes; see [security.md](security.md)). |
-| `security.api_key_env` | str | `FASTERRAG_API_KEY` | valid env-var name | Env var holding the API key material (never the key itself in YAML). Required to be set only when `security.auth: true` (rule 9). |
-| `security.multi_tenancy` | bool | `false` | — | Resolves a tenant per request and scopes collection, trace, job, metric and semantic-cache access to it. It does **not** by itself scope retrieval — see `security.tenant_scoped_retrieval` and [security.md](security.md) §3. |
+| `security.api_key_env` | str\|null | `FASTERRAG_API_KEY` | valid env-var name, or `null` | Env var holding the API key entries (never the key itself in YAML). Entries are `;`-separated, each `<secret>[:<scopes>[:<tenant>]]` or `sha256:<hex digest>[:<scopes>[:<tenant>]]`, optionally followed by ` expires=<ISO 8601>` ([security.md](security.md) §2). `null` reads no variable — for a deployment whose keys live only in `security.api_key_file`. Read once at startup: the environment of a running process cannot change. |
+| `security.multi_tenancy` | bool | `false` | requires `auth` | Resolves a tenant per request and scopes collection, trace, job, metric and semantic-cache access to it. It does **not** by itself scope retrieval — see `security.tenant_scoped_retrieval` and [security.md](security.md) §3. Combining it with `auth: false` is refused at load (TASK-0460): the tenant is resolved by the authentication middleware, so tenancy without auth was accepted and enforced nothing. |
 | `security.tenant_scoped_retrieval` | bool | `false` | requires `auth` and `multi_tenancy` | Pushes the caller's tenant into **both** retrieval legs as a mandatory `tenant` equality filter, injected below any `filters` in the request body; a body that names the `tenant` field is refused with `TENANT_FORBIDDEN` rather than overridden. **Off by default because turning it on changes what an existing corpus answers**: chunks indexed before `multi_tenancy` was enabled carry no `tenant` payload field, and an absent field never matches, so an unbackfilled collection returns empty results. Backfill first with `fasterrag index backfill-tenant <collection> --tenant <id>` (dry-run by default; `fasterrag index tenants` reports how many points are untagged before anything is written), and add a payload index on `tenant` in the backend or every query pays an unindexed filter. Combining it with `auth: false` or `multi_tenancy: false` is refused at load (TASK-0339). |
 | `security.tenant_header` | str | `X-Tenant-ID` | valid HTTP header name | Header carrying the tenant identifier when multi-tenancy is on. |
 | `security.rate_limit_per_minute` | int | `600` | ≥ 1 | Per-key request rate limit (on by default once `auth` is enabled). Counted in the window named by `security.rate_limit_backend`. |
@@ -508,6 +513,9 @@ All integration toggles default `false`.
 | `security.rate_limit_redis_url` | str | `redis://localhost:6379/0` | starts with `redis://`, `rediss://`, or `unix://` | Connection URL, read only when `security.rate_limit_backend` is `redis`. Counters are namespaced under `fasterrag:ratelimit`, so the same server can also back the caches. **A URL containing a password is a secret and must not be written here** — supply it through the environment instead (`FASTERRAG_SET=security.rate_limit_redis_url=...`). |
 | `security.max_request_mb` | int | `25` | 1–1024 | Input size limit for API request bodies (ingestion uploads are governed by `ingestion.max_document_mb`). |
 | `security.allowed_archive_roots` | list[str] | `[]` | paths | Directories `POST /v1/admin/export` may write an archive into and `POST /v1/admin/import` may read one from. **Authorization boundary**: both paths arrive in the request body, so an unconfined export overwrites any file the process can write (`config.yaml`, a web root) and an unconfined import reads any archive on the host. One list covers both verbs because they name the same artifact in the same directory. Paths are resolved before comparison, so `..` and symlinks cannot escape a root. Empty means unconfined, which is refused outright when `security.auth` is on — the same rule as `ingestion.allowed_source_roots`. |
+| `security.allow_unauthenticated` | bool | `false` | — | Lets `fasterrag serve` bind a non-loopback `app.host` (or `--host`), or a non-loopback `observability.dashboard_host`, while `security.auth` is `false`. **Without it such a bind is refused at startup** (TASK-0460, 2026-11-12; until then it was a warning). Set it only when something else stands between the port and the network: a reverse proxy that authenticates, or a container whose port is published on the host's loopback — the shipped compose files set it for exactly that reason through `FASTERRAG_SET`. With it set, `serve` still prints the warning. It has no effect when `auth` is on. |
+| `security.api_key_file` | str\|null | `null` | path | A file of API key entries, one per line (blank lines and `#` comments ignored), in the same grammar as `security.api_key_env`; its keys are loaded **in addition to** the variable's (TASK-0492). **Re-read without a restart**: every request checks the file's modification time and size at most once a second and reloads it when either moved, and on POSIX a `SIGHUP` forces a re-read. Windows has no `SIGHUP`, so there the change of the file is the only trigger. A file that changes into something that does not load — a malformed entry, a short key — is logged as an error and the keys already in force stay in force. Write it with an atomic rename. A missing file at startup refuses to start. `security.auth: true` with this and `api_key_env` both `null` is refused at load. |
+| `security.cors_allowed_origins` | list[str] | `[]` | each `http(s)://host[:port]`, no path, never `*` | Browser origins that may call the API cross-origin (TASK-0494). **Empty — the default — allows none**: a preflight from any origin is refused `400 VALIDATION_FAILED`, and no response carries `Access-Control-Allow-Origin`. A listed origin may send `GET`, `POST` and `DELETE` with `Authorization`, `Content-Type`, `Idempotency-Key` and the tenant header, and may read `Retry-After`; credentials mode is never enabled, because the API authenticates by header, not by cookie. Only browsers enforce CORS — it limits which pages can use a visitor's browser against the API, and is no substitute for `security.auth`. |
 
 ---
 
@@ -524,3 +532,4 @@ All integration toggles default `false`.
 9. Any `*_env` variable that an enabled feature reads and that is missing from the environment/`.env` at startup is a fatal `ConfigError` naming the variable (its value is never logged). A variable that nothing reads under the loaded configuration is not required (TASK-0444): `security.api_key_env` only when `security.auth: true`; `vector_db.api_key_env` for every vector database except `chroma` and `pgvector`, which never read it; `vector_db.pgvector.dsn_env` only when `provider: pgvector`; `embeddings.api_key_env` except for `huggingface` and `ollama`; `llm.api_key_env` except for `ollama`. The LLM key has no other exemption, because no setting turns generation off. `fasterrag doctor`'s `secrets` check applies the same rule.
 10. `index.reindex.strategy: in_place` logs a prominent warning (dev-only path; no zero-downtime guarantee).
 11. `vector_db.pgvector.dsn_env` required when `vector_db.provider: pgvector`.
+12. `security.multi_tenancy: true` requires `security.auth: true` (TASK-0460); `security.tenant_scoped_retrieval: true` requires both.

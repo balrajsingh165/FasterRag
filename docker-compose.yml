@@ -43,8 +43,14 @@ x-fasterrag-common: &fasterrag-common
     #
     # Compose merges `environment` per key, so a sizing preset that sets FASTERRAG_SET
     # replaces this value outright rather than adding to it. Every deploy/compose.*.yml
-    # therefore repeats `vector_db.host=qdrant` in its own FASTERRAG_SET.
-    FASTERRAG_SET: vector_db.host=qdrant
+    # therefore repeats `vector_db.host=qdrant,security.allow_unauthenticated=true` in its own
+    # FASTERRAG_SET.
+    #
+    # `serve` refuses a non-loopback bind with security.auth off, and inside a container it
+    # has to bind 0.0.0.0 to be reachable at all. The opt-in is safe here only because every
+    # port below is published on the host's loopback; remove it when auth is on, and never
+    # keep it while publishing on a routable address (docs/deployment.md §3).
+    FASTERRAG_SET: vector_db.host=qdrant,security.allow_unauthenticated=true
   volumes:
     # The config is mounted rather than baked so a change does not need a rebuild. Read-only
     # because nothing in fasterRag writes it, and a container that can rewrite its own
@@ -110,7 +116,7 @@ services:
     # dashboard's name. Leaving the API on its own port also keeps the image's HEALTHCHECK
     # meaningful: it probes 8000, which this container does bind.
     environment:
-      FASTERRAG_SET: vector_db.host=qdrant,observability.dashboard=true
+      FASTERRAG_SET: vector_db.host=qdrant,security.allow_unauthenticated=true,observability.dashboard=true,observability.dashboard_host=0.0.0.0
     ports:
       # CRITICAL: loopback, and not negotiable. The dashboard is read-only but renders
       # prompts and responses verbatim, so exposing it publicly publishes the corpus.

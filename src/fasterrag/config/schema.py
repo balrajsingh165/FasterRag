@@ -132,6 +132,9 @@ def _validate_env_var_name(value: str | None) -> str | None:
     return value
 
 
+_ORIGIN_RE = re.compile(r"^https?://[^/\s*]+$")
+
+
 class Section(BaseModel):
     """Base for every configuration section: unknown keys rejected, values immutable."""
 
@@ -828,6 +831,21 @@ class ObservabilitySettings(Section):
     langfuse: bool = False
     grafana: bool = False
 
+    # CRITICAL: loopback by default and independent of `app.host`. The dashboard renders
+    # prompts, responses and corpus text verbatim, so widening the API's bind for callers
+    # must not widen the dashboard's with it (TASK-0460).
+    dashboard_host: str = "127.0.0.1"
+
+    @field_validator("dashboard_host")
+    @classmethod
+    def _check_dashboard_host(cls, value: str) -> str:
+        """Require a valid IP address or hostname, by the rule ``app.host`` follows."""
+        if not value.strip():
+            raise ValueError("must not be empty")
+        if _is_ip_address(value) or _HOSTNAME_RE.match(value):
+            return value
+        raise ValueError(f"{value!r} is not a valid IP address or hostname")
+
     @field_validator("otel_endpoint")
     @classmethod
     def _check_endpoint(cls, value: str | None) -> str | None:
@@ -852,7 +870,7 @@ class SecuritySettings(Section):
     """Control-plane authentication, tenancy, and request limits."""
 
     auth: bool = False
-    api_key_env: str = "FASTERRAG_API_KEY"
+    api_key_env: str | None = "FASTERRAG_API_KEY"
     multi_tenancy: bool = False
     tenant_header: str = "X-Tenant-ID"
 
@@ -877,6 +895,33 @@ class SecuritySettings(Section):
     # on, so leaving it empty breaks a served deployment loudly instead of exposing it.
     allowed_archive_roots: list[str] = []
 
+    # CRITICAL: the only way `fasterrag serve` binds a non-loopback address with `auth` off.
+    # It exists for a proxy that authenticates in front, or a container whose port is
+    # published on the host's loopback; defaulting it on reopens TASK-0460's finding.
+    allow_unauthenticated: bool = False
+
+    # CRITICAL: a path, never key material. The file holds key entries one per line and is
+    # re-read when it changes, which is what makes a key rotatable without a restart
+    # (TASK-0492); `config.yaml` still never contains a credential.
+    api_key_file: str | None = None
+
+    # CRITICAL: empty means no browser page on another origin may call the API (TASK-0494).
+    # Each entry is an exact `scheme://host[:port]`; `*` is refused because it would open a
+    # credential-bearing control plane to every page on the web.
+    cors_allowed_origins: list[str] = []
+
+    @field_validator("cors_allowed_origins")
+    @classmethod
+    def _check_cors_allowed_origins(cls, value: list[str]) -> list[str]:
+        """Require exact ``scheme://host[:port]`` origins, never ``*`` or a path."""
+        for origin in value:
+            if not _ORIGIN_RE.match(origin):
+                raise ValueError(
+                    f"security.cors_allowed_origins entry {origin!r} is not an origin: write "
+                    f"it as scheme://host[:port] with no path, and never '*'"
+                )
+        return value
+
     @field_validator("rate_limit_redis_url")
     @classmethod
     def _check_rate_limit_redis_url(cls, value: str) -> str:
@@ -885,12 +930,9 @@ class SecuritySettings(Section):
 
     @field_validator("api_key_env")
     @classmethod
-    def _check_api_key_env(cls, value: str) -> str:
-        """Require an environment-variable name, never a key value."""
-        validated = _validate_env_var_name(value)
-        if validated is None:
-            raise ValueError("security.api_key_env must name an environment variable")
-        return validated
+    def _check_api_key_env(cls, value: str | None) -> str | None:
+        """Require an environment-variable name, never a key value; ``null`` reads no variable."""
+        return _validate_env_var_name(value)
 
     @field_validator("tenant_header")
     @classmethod
@@ -908,6 +950,28 @@ class SecuritySettings(Section):
                 "security.tenant_scoped_retrieval requires security.auth and "
                 "security.multi_tenancy, because the tenant it filters on is resolved by "
                 "the authentication middleware; without them every retrieval is refused"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_auth_has_a_key_source(self) -> Self:
+        """Refuse auth with neither a key variable nor a key file to read keys from."""
+        if self.auth and self.api_key_env is None and self.api_key_file is None:
+            raise ValueError(
+                "security.auth is true but security.api_key_env and security.api_key_file "
+                "are both null, so no key could ever be loaded; set one of them"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_multi_tenancy_needs_auth(self) -> Self:
+        """Refuse tenancy without the authentication that resolves every tenant (TASK-0460)."""
+        if self.multi_tenancy and not self.auth:
+            raise ValueError(
+                "security.multi_tenancy requires security.auth: the tenant of every request "
+                "is resolved by the authentication middleware, so with auth off tenancy "
+                "would be accepted and enforce nothing; set security.auth: true with keys "
+                "bound to tenants, or set security.multi_tenancy: false"
             )
         return self
 

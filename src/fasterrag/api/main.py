@@ -18,10 +18,13 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 from fastapi import FastAPI
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.datastructures import Headers
+from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from fasterrag import __version__
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
@@ -30,16 +33,23 @@ from fasterrag.api import admin, collections, health, ingest, metrics, query, tr
 from fasterrag.api.auth import AuthMiddleware
 from fasterrag.api.idempotency import IdempotencyMiddleware
 from fasterrag.api.limits import BodyLimitMiddleware
-from fasterrag.api.problems import install_exception_handlers
+from fasterrag.api.problems import install_exception_handlers, problem_response
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
 from fasterrag.config.schema import Settings
-from fasterrag.errors import FasterRagError
+from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import configure_logging, get_logger, use_trace_id
 from fasterrag.services.jobs import JobRegistry, reap_at_startup
 from fasterrag.services.journal import create_journal
 from fasterrag.services.traces import create_metric_pusher
 
-__all__ = ["CONFIG_PATH_VAR", "CorrelationIdMiddleware", "create_app"]
+__all__ = [
+    "CONFIG_PATH_VAR",
+    "SECURITY_HEADERS",
+    "CorrelationIdMiddleware",
+    "ProblemCORSMiddleware",
+    "SecurityHeadersMiddleware",
+    "create_app",
+]
 
 # CRITICAL: the only way `fasterrag serve --reload --config other.yaml` can reach the
 # application. Reload builds it in a child process from an import string, which carries no
@@ -47,6 +57,8 @@ __all__ = ["CONFIG_PATH_VAR", "CorrelationIdMiddleware", "create_app"]
 CONFIG_PATH_VAR = "FASTERRAG_CONFIG"
 
 _logger = get_logger(__name__)
+
+_PREFLIGHT_OK: Final = 200
 
 
 def _configured_path() -> Path:
@@ -76,6 +88,58 @@ class CorrelationIdMiddleware:
 
         with use_trace_id():
             await self.app(scope, receive, send)
+
+
+SECURITY_HEADERS: Final[tuple[tuple[bytes, bytes], ...]] = (
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"cache-control", b"no-store"),
+)
+
+
+class SecurityHeadersMiddleware:
+    """Add the response headers every API response carries (TASK-0494).
+
+    ``nosniff`` keeps a browser from rendering JSON as HTML, ``no-referrer`` keeps a path out
+    of other sites' logs, and ``no-store`` keeps corpus text out of shared caches.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        """Wrap the downstream ASGI application."""
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Add each header the response did not set itself."""
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                present = {name.lower() for name, _ in headers}
+                headers.extend(pair for pair in SECURITY_HEADERS if pair[0] not in present)
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+class ProblemCORSMiddleware(CORSMiddleware):
+    """Starlette's CORS policy, refusing a disallowed preflight with a problem document."""
+
+    def preflight_response(self, request_headers: Headers) -> Response:
+        """Answer an allowed preflight as Starlette does; refuse any other as RFC 9457."""
+        response = super().preflight_response(request_headers)
+        if response.status_code == _PREFLIGHT_OK:
+            return response
+        return problem_response(
+            FasterRagError(
+                "this cross-origin request is not allowed by security.cors_allowed_origins",
+                code=ErrorCode.VALIDATION_FAILED,
+            ),
+            status=response.status_code,
+        )
 
 
 async def _config_check() -> health.DependencyStatus:
@@ -286,6 +350,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # anything on it — checking after auth would mean an unauthenticated caller could still
     # make the server read the whole body.
     app.add_middleware(BodyLimitMiddleware, settings=resolved)
+    # CRITICAL: CORS sits outside authentication, because a browser's preflight never carries
+    # the bearer token, and the security headers sit outside everything, so a refusal from
+    # any layer below still carries them (TASK-0494). Credentials mode stays off: the API
+    # authenticates by header, so no cookie ever needs to cross an origin.
+    app.add_middleware(
+        ProblemCORSMiddleware,
+        allow_origins=resolved.security.cors_allowed_origins,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Idempotency-Key",
+            resolved.security.tenant_header,
+        ],
+        expose_headers=["Retry-After"],
+    )
+    app.add_middleware(SecurityHeadersMiddleware)
     install_exception_handlers(app)
     app.include_router(health.router)
     app.include_router(ingest.router)

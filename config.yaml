@@ -185,6 +185,8 @@ observability:
   otel_endpoint: null
   langfuse: false
   grafana: false
+  # Loopback by default and separate from app.host: the dashboard shows prompts and corpus text.
+  dashboard_host: 127.0.0.1
 
 security:
   auth: false
@@ -202,3 +204,12 @@ security:
   # Directories admin export may write into and admin import may read from. Empty is
   # unconfined, which is refused outright once auth is on -- see docs/security.md.
   allowed_archive_roots: []
+  # Let `serve` bind a non-loopback address with auth off. Only behind an authenticating
+  # proxy or a loopback-only port mapping -- see docs/deployment.md.
+  allow_unauthenticated: false
+  # A file of key entries, one per line, re-read when it changes (and on SIGHUP where the
+  # platform has it). A path only -- never key material. null reads no file.
+  api_key_file: null
+  # Browser origins allowed to call the API cross-origin, each scheme://host[:port]. Empty
+  # allows none.
+  cors_allowed_origins: []

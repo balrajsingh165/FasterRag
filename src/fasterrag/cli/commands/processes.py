@@ -79,12 +79,27 @@ async def run_serve(args: argparse.Namespace, console: Console) -> ExitCode:
 
     host = args.host or settings.app.host
     port = args.port or settings.app.port
+    binds = [host]
+    if settings.observability.dashboard:
+        binds.append(settings.observability.dashboard_host)
+    exposed = [bind for bind in binds if exposed_without_auth(bind, settings)]
+    if exposed and not settings.security.allow_unauthenticated:
+        console.problem(
+            ConfigError.default_code.value,
+            f"refusing to bind {', '.join(exposed)} with security.auth off: anyone who can "
+            "reach the port could ingest files readable by this process and query them back",
+            fix="set security.auth: true with keys in the environment, or bind 127.0.0.1, "
+            "or set security.allow_unauthenticated: true when an authenticating proxy or a "
+            "loopback-only port mapping stands in front (docs/deployment.md)",
+        )
+        return ExitCode.USAGE
+
     console.emit(f"serving on http://{host}:{port} (config: {args.config})")
-    if exposed_without_auth(host, settings):
+    for bind in exposed:
         console.error(
-            f"WARNING: binding {host} with security.auth off. Anyone who can reach this "
-            "port can ingest files readable by this process and query them back. Set "
-            "security.auth: true and ingestion.allowed_source_roots, or bind 127.0.0.1"
+            f"WARNING: binding {bind} with security.auth off, allowed by "
+            "security.allow_unauthenticated. Anyone who can reach this port can ingest files "
+            "readable by this process and query them back"
         )
 
     if args.reload:
@@ -110,13 +125,14 @@ async def run_serve(args: argparse.Namespace, console: Console) -> ExitCode:
     if settings.observability.dashboard:
         from fasterrag.observability.dashboard import create_dashboard
 
+        dashboard_host = settings.observability.dashboard_host
         dashboard_port = settings.observability.dashboard_port
-        console.emit(f"dashboard on http://{host}:{dashboard_port} (read-only)")
+        console.emit(f"dashboard on http://{dashboard_host}:{dashboard_port} (read-only)")
         servers.append(
             uvicorn.Server(
                 uvicorn.Config(
                     create_dashboard(settings),
-                    host=host,
+                    host=dashboard_host,
                     port=dashboard_port,
                     log_level=settings.app.log_level,
                 )

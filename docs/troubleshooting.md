@@ -16,10 +16,33 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 | Exits naming an environment variable | A `*_env` key references a variable missing from the environment/`.env` (the value is never logged, only the name) | Add it to `.env`; copy [`.env.example`](https://github.com/balrajsingh165/fasterrag/blob/main/.env.example) if you don't have one |
 | `top_k must be ≤ rerank_top_n` and similar | A cross-field validation rule was violated | See the cross-field rules list at the end of [config-reference.md](config-reference.md) |
 | Config change appears to do nothing | Config is read at startup/provision time, not live (deliberate — it keeps the control plane auditable) | Restart the process, or re-run the relevant `fasterrag provision` command |
+| `security.multi_tenancy requires security.auth` at load | Tenancy was turned on with auth off. The tenant of a request is resolved by the authentication middleware, so this combination used to load and enforce nothing (TASK-0460) | Set `security.auth: true` and give every key a tenant (`secret:scopes:tenant`), or set `security.multi_tenancy: false` |
 
-### `fasterrag serve` prints a warning about binding with auth off
+### `fasterrag serve` exits with `refusing to bind … with security.auth off`
 
-`app.host` (or `--host`) names an address other machines can reach while `security.auth` is `false`. Anyone who can reach that port can ingest files the process can read and query them back. Either keep the default `127.0.0.1`, or set `security.auth: true` together with `ingestion.allowed_source_roots` ([security.md](security.md) §5.7). A reverse proxy that authenticates in front of the API is the one case where the warning can be accepted.
+`app.host` (or `--host`), or `observability.dashboard_host` with the dashboard on, names an address other machines can reach while `security.auth` is `false`. Anyone who can reach that port could ingest files the process can read and query them back, so since TASK-0460 (2026-11-12) this is a refusal with exit code 2, not the warning it used to be. Three fixes, in order of preference:
+
+1. Turn auth on: `security.auth: true`, a key of at least 16 characters in `FASTERRAG_API_KEY`, and `ingestion.allowed_source_roots` ([security.md](security.md) §2).
+2. Bind loopback: keep the default `127.0.0.1`.
+3. Opt in with `security.allow_unauthenticated: true` — only when a reverse proxy that authenticates stands in front, or the port is published on the host's loopback, as in the shipped compose files. `serve` then starts and prints a `WARNING`.
+
+**A bare `docker run fasterrag` hits this**: the image runs `serve --host 0.0.0.0` with the shipped config, which has auth off. Pass `-e FASTERRAG_SET=security.allow_unauthenticated=true` together with `-p 127.0.0.1:8000:8000`, or mount a config with auth on ([deployment.md](deployment.md) §3).
+
+### `403 TENANT_FORBIDDEN`: `this key is bound to no tenant and does not hold the 'cross-tenant' scope`
+
+With `security.multi_tenancy` on, a key whose entry has no tenant field used to act for any tenant it named; since TASK-0460 (2026-11-12) it is refused on every request, and startup warns about it by its positional name (`key-2`). Either bind it — `secret:query:acme` — or, for an operator key that genuinely must act for every tenant, add the scope by name: `secret:query,cross-tenant`, or `secret:*,cross-tenant` for every scope. `*` and `admin` do not imply it.
+
+### A key stopped working with `401 AUTH_INVALID` and nothing changed
+
+Look for `an expired api key was presented` in the log: the key's entry carries an `expires=` that has passed (TASK-0492). The refusal is deliberately identical to an unknown key's. Issue a new key, or move the `expires=` and — if it lives in `security.api_key_file` — save the file; the server re-reads it within a second, or on `SIGHUP` on POSIX. A change to `FASTERRAG_API_KEY` itself needs a restart.
+
+### I edited the key file and the old keys still work
+
+The server logged `the api key file changed but could not be loaded; the keys already loaded stay in force` with the reason: a malformed entry, a key under 16 characters, or a `sha256:` value that is not 64 hex digits. Fix the file and save it again. Keys are only replaced by a file that loads in full.
+
+### Startup refuses an API key: `is the placeholder shipped in .env.example` or `is shorter than 16 characters`
+
+With `security.auth: true`, every key in `FASTERRAG_API_KEY` is checked at startup (TASK-0460). `change-me` — the value `.env.example` ships — is refused by name, and any key under 16 characters is refused as guessable. The message names the entry by its 1-based position and never prints the key. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
 ## Vector database
 

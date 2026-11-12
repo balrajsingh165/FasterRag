@@ -143,7 +143,7 @@ def test_the_dashboard_serves_no_schema(tmp_path: Path) -> None:
 def secured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *traces: Trace, tenancy: bool = False
 ) -> TestClient:
-    monkeypatch.setenv("FASTERRAG_API_KEY", "dash-key:admin:acme")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "dash-key-long-enough:admin:acme")
     settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": tenancy}})
     return TestClient(create_dashboard(settings, store(tmp_path, *traces)))
 
@@ -166,7 +166,7 @@ def test_the_dashboard_requires_a_key_when_the_api_does(
 
 def test_a_valid_key_reaches_the_dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with secured(tmp_path, monkeypatch, trace()) as client:
-        response = client.get("/", headers={"Authorization": "Bearer dash-key"})
+        response = client.get("/", headers={"Authorization": "Bearer dash-key-long-enough"})
 
     assert response.status_code == 200
 
@@ -178,7 +178,7 @@ def test_a_tenant_sees_only_its_own_traces(tmp_path: Path, monkeypatch: pytest.M
 
     with secured(tmp_path, monkeypatch, mine, theirs, tenancy=True) as client:
         body = client.get(
-            "/", headers={"Authorization": "Bearer dash-key", "X-Tenant-ID": "acme"}
+            "/", headers={"Authorization": "Bearer dash-key-long-enough", "X-Tenant-ID": "acme"}
         ).text
 
     assert "my own question" in body
@@ -192,7 +192,8 @@ def test_the_json_view_is_scoped_too(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     with secured(tmp_path, monkeypatch, mine, theirs, tenancy=True) as client:
         payload = client.get(
-            "/api/traces", headers={"Authorization": "Bearer dash-key", "X-Tenant-ID": "acme"}
+            "/api/traces",
+            headers={"Authorization": "Bearer dash-key-long-enough", "X-Tenant-ID": "acme"},
         ).json()
 
     assert [item["query"] for item in payload["traces"]] == ["mine"]

@@ -7,7 +7,7 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.errors import ErrorCode
 from tests.unit.api.conftest import StubVectorDB
 
-SECRET = "acme-key"
+SECRET = "acme-key-long-enough"
 VECTOR = [1.0, 0.0, 0.0, 0.0]
 NEAR = [0.999, 0.01, 0.0, 0.0]
 
@@ -112,7 +112,7 @@ def test_an_operator_key_may_act_for_any_tenant_but_must_say_which(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A key with no tenant is an operator credential, not a wildcard that skips the header."""
-    with tenanted(monkeypatch, keys=f"{SECRET}:admin") as client:
+    with tenanted(monkeypatch, keys=f"{SECRET}:admin,cross-tenant") as client:
         assert client.get("/metrics", headers=headers(tenant="anything")).status_code == 200
         assert client.get("/metrics", headers=headers(tenant=None)).status_code == 403
 

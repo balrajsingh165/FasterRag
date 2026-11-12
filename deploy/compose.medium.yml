@@ -11,7 +11,8 @@
 # service to size (TASK-0130). The API's limits are what the API and the removed worker
 # service were given between them.
 #
-# CRITICAL: every FASTERRAG_SET below repeats `vector_db.host=qdrant` from the base file.
+# CRITICAL: every FASTERRAG_SET below repeats `vector_db.host=qdrant` and
+# `security.allow_unauthenticated=true` from the base file.
 # Compose merges `environment` per key, so setting FASTERRAG_SET here replaces the base value
 # rather than extending it, and dropping the host sends the API at its own localhost.
 
@@ -19,7 +20,7 @@ services:
   api:
     # cpu_pool_size=0 means "one per core", which is what the schema documents.
     environment:
-      FASTERRAG_SET: vector_db.host=qdrant,workers.cpu_pool_size=0,workers.embedding_pool_size=2
+      FASTERRAG_SET: vector_db.host=qdrant,security.allow_unauthenticated=true,workers.cpu_pool_size=0,workers.embedding_pool_size=2
     deploy:
       resources:
         limits:

@@ -199,7 +199,7 @@ def test_rest_refuses_an_impossible_page(client: TestClient, query: dict[str, in
     assert response.json()["code"] == "VALIDATION_FAILED"
 
 
-KEYS = "acme-secret:collections:acme;reader-secret:query:acme"
+KEYS = "acme-secret-0123456789:collections:acme;reader-secret-0123456789:query:acme"
 
 
 @pytest.fixture
@@ -229,7 +229,7 @@ def test_a_tenant_lists_its_own_collection_under_the_name_it_chose(
     """Resolved like every sibling /v1/collections route: the prefix is applied, never shown."""
     response = tenanted.get(
         "/v1/collections/docs/documents",
-        headers={"Authorization": "Bearer acme-secret", "X-Tenant-ID": "acme"},
+        headers={"Authorization": "Bearer acme-secret-0123456789", "X-Tenant-ID": "acme"},
     )
 
     assert response.status_code == 200
@@ -241,7 +241,7 @@ def test_a_tenant_lists_its_own_collection_under_the_name_it_chose(
 def test_a_key_without_the_collections_scope_cannot_list(tenanted: TestClient) -> None:
     response = tenanted.get(
         "/v1/collections/docs/documents",
-        headers={"Authorization": "Bearer reader-secret", "X-Tenant-ID": "acme"},
+        headers={"Authorization": "Bearer reader-secret-0123456789", "X-Tenant-ID": "acme"},
     )
 
     assert response.status_code == 403

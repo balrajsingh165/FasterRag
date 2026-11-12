@@ -12,14 +12,15 @@
 # These are planning defaults, not measurements. Real numbers come from the benchmark ledger
 # once it has entries taken on isolated hardware (docs/benchmarks.md, TASK-0084).
 #
-# CRITICAL: every FASTERRAG_SET below repeats `vector_db.host=qdrant` from the base file.
+# CRITICAL: every FASTERRAG_SET below repeats `vector_db.host=qdrant` and
+# `security.allow_unauthenticated=true` from the base file.
 # Compose merges `environment` per key, so setting FASTERRAG_SET here replaces the base value
 # rather than extending it, and dropping the host sends the API at its own localhost.
 
 services:
   api:
     environment:
-      FASTERRAG_SET: vector_db.host=qdrant,workers.cpu_pool_size=4,workers.embedding_pool_size=1
+      FASTERRAG_SET: vector_db.host=qdrant,security.allow_unauthenticated=true,workers.cpu_pool_size=4,workers.embedding_pool_size=1
     deploy:
       resources:
         limits:

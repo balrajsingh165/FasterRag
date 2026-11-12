@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import secrets
 
@@ -8,6 +9,8 @@ from starlette.types import Message, Receive, Scope, Send
 from fasterrag.api.auth import (
     ALL_SCOPES,
     ALL_SCOPES_TOKEN,
+    CROSS_TENANT_SCOPE,
+    MINIMUM_KEY_LENGTH,
     PUBLIC_PATHS,
     ApiKey,
     AuthMiddleware,
@@ -29,6 +32,11 @@ from fasterrag.errors import ConfigError, ErrorCode
 from tests.unit.api.conftest import StubVectorDB
 
 SECRET = "secret-key-value"
+
+
+def sha256(value: bytes) -> bytes:
+    """Return the digest a key is stored and compared as."""
+    return hashlib.sha256(value).digest()
 
 
 async def _unreached(scope: Scope, receive: Receive, send: Send) -> None:
@@ -147,7 +155,7 @@ def test_public_paths_need_no_scope() -> None:
 
 
 def test_admin_implies_every_other_scope() -> None:
-    key = ApiKey(secret="s", scopes=frozenset({"admin"}))
+    key = ApiKey.from_secret("s", frozenset({"admin"}))
 
     for scope in ALL_SCOPES:
         assert key.permits(scope)
@@ -155,7 +163,7 @@ def test_admin_implies_every_other_scope() -> None:
 
 def test_a_bare_key_gets_every_scope(monkeypatch: pytest.MonkeyPatch) -> None:
     """The single-operator case must not require spelling out four scopes."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", "just-a-secret")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "just-a-secret-value")
 
     keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
 
@@ -163,18 +171,21 @@ def test_a_bare_key_gets_every_scope(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_several_keys_with_distinct_scopes_load(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("FASTERRAG_API_KEY", "reader:query; writer:ingest,collections")
+    monkeypatch.setenv(
+        "FASTERRAG_API_KEY", "reader-key-00001:query;writer-key-00001:ingest,collections"
+    )
 
     keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
 
-    assert [key.secret for key in keys] == ["reader", "writer"]
+    registry = KeyRegistry(keys)
+    assert [registry.resolve(secret) for secret in ("reader-key-00001", "writer-key-00001")] == keys
     assert keys[0].scopes == frozenset({"query"})
     assert keys[1].scopes == frozenset({"ingest", "collections"})
 
 
 def test_scopes_and_keys_use_different_separators(monkeypatch: pytest.MonkeyPatch) -> None:
     """One separator for both makes `a:query,ingest` ambiguous, and the parser must guess."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", "solo:query,ingest")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "solo-key-00000001:query,ingest")
 
     keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
 
@@ -183,7 +194,7 @@ def test_scopes_and_keys_use_different_separators(monkeypatch: pytest.MonkeyPatc
 
 
 def test_a_tenant_can_be_attached_to_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("FASTERRAG_API_KEY", "k:query:acme")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "operator-key-0001:query:acme")
 
     assert load_keys(Settings.model_validate({"security": {"auth": True}}))[0].tenant == "acme"
 
@@ -210,7 +221,7 @@ def test_the_blank_scope_refusal_names_the_entry_and_the_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Failing closed with no documented fix is just a different outage."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", "good:query;bad::acme")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "good-key-00000001:query;bad::acme")
 
     with pytest.raises(ConfigError) as refusal:
         load_keys(Settings.model_validate({"security": {"auth": True}}))
@@ -222,7 +233,7 @@ def test_the_blank_scope_refusal_names_the_entry_and_the_replacement(
 def test_the_all_scopes_token_asks_for_every_scope_in_writing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("FASTERRAG_API_KEY", f"k:{ALL_SCOPES_TOKEN}")
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"operator-key-0001:{ALL_SCOPES_TOKEN}")
 
     keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
 
@@ -233,7 +244,7 @@ def test_a_tenant_can_be_named_without_naming_individual_scopes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The replacement spelling for `k::acme`, which no longer parses."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", f"k:{ALL_SCOPES_TOKEN}:acme")
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"operator-key-0001:{ALL_SCOPES_TOKEN}:acme")
 
     keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
 
@@ -245,7 +256,7 @@ def test_a_bare_secret_still_needs_no_scope_field_at_all(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An omitted field and a blank one are different things; only the blank one is refused."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", "just-a-secret")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "just-a-secret-value")
 
     keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
 
@@ -257,7 +268,7 @@ def test_a_trailing_colon_after_the_scopes_leaves_the_key_unbound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`k:query:` is an operator key for any tenant, which TASK-0295 weighs, not this fix."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", "k:query:")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "operator-key-0001:query:")
 
     keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
 
@@ -267,7 +278,7 @@ def test_a_trailing_colon_after_the_scopes_leaves_the_key_unbound(
 
 def test_a_third_colon_lands_inside_the_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
     """Documented here as observed behaviour: the remainder is not split again."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", "k:query:acme:extra")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "operator-key-0001:query:acme:extra")
 
     keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
 
@@ -291,8 +302,8 @@ def test_auth_without_any_key_refuses_to_start(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_the_registry_matches_the_right_key() -> None:
-    first = ApiKey(secret="aaa", scopes=ALL_SCOPES)
-    second = ApiKey(secret="bbb", scopes=frozenset({"query"}))
+    first = ApiKey.from_secret("aaa", ALL_SCOPES)
+    second = ApiKey.from_secret("bbb", frozenset({"query"}))
     registry = KeyRegistry([first, second])
 
     assert registry.resolve("bbb") is second
@@ -384,8 +395,8 @@ def test_shutdown_releases_the_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_an_unbound_key_is_announced_when_multi_tenancy_is_on(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A key that omitted its tenant is an operator credential; say so at startup."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", "alpha-secret:query;beta-secret:query:acme")
+    """A key that omitted its tenant is refused under tenancy; say so at startup."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "alpha-secret-0001:query;beta-secret-00001:query:acme")
     settings = Settings.model_validate(
         {"security": {"auth": True, "multi_tenancy": True, "api_key_env": "FASTERRAG_API_KEY"}}
     )
@@ -394,7 +405,7 @@ def test_an_unbound_key_is_announced_when_multi_tenancy_is_on(
         AuthMiddleware(_unreached, settings)
 
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
-    assert any("may act for any tenant" in record.getMessage() for record in warnings)
+    assert any("refused on every request" in record.getMessage() for record in warnings)
     assert not any("alpha-secret" in record.getMessage() for record in warnings)
 
 
@@ -402,7 +413,7 @@ def test_a_fully_bound_key_set_is_announced_quietly(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The warning must discriminate, or it is noise everyone learns to ignore."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", "alpha-secret:query:acme")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "alpha-secret-0001:query:acme")
     settings = Settings.model_validate(
         {"security": {"auth": True, "multi_tenancy": True, "api_key_env": "FASTERRAG_API_KEY"}}
     )
@@ -410,7 +421,9 @@ def test_a_fully_bound_key_set_is_announced_quietly(
     with caplog.at_level(logging.WARNING):
         AuthMiddleware(_unreached, settings)
 
-    assert not any("may act for any tenant" in record.getMessage() for record in caplog.records)
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any("refused on every request" in message for message in messages)
+    assert not any("may act for any tenant" in message for message in messages)
 
 
 class _Recorder:
@@ -447,7 +460,7 @@ def test_a_key_cannot_be_rewritten_after_it_is_loaded() -> None:
     A mutable one would let any later code widen `scopes` for the whole process, so the
     key is frozen and slotted and neither an assignment nor a new attribute can land.
     """
-    key = ApiKey(secret="s", scopes=frozenset({"query"}))
+    key = ApiKey.from_secret("s", frozenset({"query"}))
     field = "scopes"
 
     with pytest.raises(AttributeError):
@@ -457,7 +470,7 @@ def test_a_key_cannot_be_rewritten_after_it_is_loaded() -> None:
 
 def test_a_narrow_scope_is_honoured_as_well_as_refused() -> None:
     """`permits` must not collapse to admin-only; a query key has to be able to query."""
-    key = ApiKey(secret="s", scopes=frozenset({"query"}))
+    key = ApiKey.from_secret("s", frozenset({"query"}))
 
     assert key.permits("query")
     assert not key.permits("ingest")
@@ -475,7 +488,7 @@ def test_the_scope_table_matches_both_exactly_and_by_prefix() -> None:
 
 def test_a_truncated_or_extended_key_does_not_resolve() -> None:
     """The comparison covers the whole secret, not a prefix of it."""
-    registry = KeyRegistry([ApiKey(secret="aaaa", scopes=ALL_SCOPES)])
+    registry = KeyRegistry([ApiKey.from_secret("aaaa", ALL_SCOPES)])
 
     assert registry.resolve("aaa") is None
     assert registry.resolve("aaaaa") is None
@@ -484,7 +497,7 @@ def test_a_truncated_or_extended_key_does_not_resolve() -> None:
 
 def test_the_empty_key_error_counts_entries_from_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """The operator has to be told which entry to fix, and the list they read is 1-based."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", "good:query;:ingest")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "good-key-00000001:query;:ingest")
 
     with pytest.raises(ConfigError, match="entry 2 has an empty key"):
         load_keys(Settings.model_validate({"security": {"auth": True}}))
@@ -492,7 +505,7 @@ def test_the_empty_key_error_counts_entries_from_one(monkeypatch: pytest.MonkeyP
 
 def test_each_key_is_named_by_its_position_from_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """The unbound-key warning names keys positionally; an off-by-one blames the wrong entry."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", "alpha:query;beta:ingest")
+    monkeypatch.setenv("FASTERRAG_API_KEY", "alpha-key-0000001:query;beta-key-00000001:ingest")
 
     keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
 
@@ -513,7 +526,7 @@ async def test_an_operator_key_acts_as_the_tenant_it_declared(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The declared tenant has to reach downstream, or the operator acts untenanted instead."""
-    monkeypatch.setenv("FASTERRAG_API_KEY", SECRET)
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{SECRET}:*,{CROSS_TENANT_SCOPE}")
     settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}})
     recorder = _Recorder()
 
@@ -589,10 +602,10 @@ def test_the_registry_compares_keys_in_constant_time(monkeypatch: pytest.MonkeyP
     """
     counting = _CountingSecrets()
     monkeypatch.setattr("fasterrag.api.auth.secrets", counting)
-    registry = KeyRegistry([ApiKey(secret="aaa", scopes=ALL_SCOPES)])
+    registry = KeyRegistry([ApiKey.from_secret("aaa", ALL_SCOPES)])
 
     assert registry.resolve("aaa") is not None
-    assert counting.compared == [(b"aaa", b"aaa")]
+    assert counting.compared == [(sha256(b"aaa"), sha256(b"aaa"))]
 
 
 def test_every_key_is_compared_even_after_one_matches(
@@ -606,11 +619,11 @@ def test_every_key_is_compared_even_after_one_matches(
     counting = _CountingSecrets()
     monkeypatch.setattr("fasterrag.api.auth.secrets", counting)
     registry = KeyRegistry(
-        [ApiKey(secret="aaa", scopes=ALL_SCOPES), ApiKey(secret="bbb", scopes=ALL_SCOPES)]
+        [ApiKey.from_secret("aaa", ALL_SCOPES), ApiKey.from_secret("bbb", ALL_SCOPES)]
     )
 
     assert registry.resolve("aaa") is not None
-    assert [stored for stored, _ in counting.compared] == [b"aaa", b"bbb"]
+    assert [stored for stored, _ in counting.compared] == [sha256(b"aaa"), sha256(b"bbb")]
 
 
 def test_a_bearer_token_with_a_non_ascii_byte_is_refused_not_crashed_on(
@@ -626,3 +639,127 @@ def test_a_bearer_token_with_a_non_ascii_byte_is_refused_not_crashed_on(
 
     assert response.status_code == 401
     assert response.json()["code"] == ErrorCode.AUTH_INVALID.value
+
+
+def test_a_collections_key_cannot_drop_a_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The prefix table gave `DELETE /v1/collections/{name}` to `collections` (TASK-0520)."""
+    with secured(monkeypatch, keys=f"{SECRET}:collections") as client:
+        dropped = client.delete("/v1/collections/docs?force=true", headers=bearer())
+        listed = client.get("/v1/collections", headers=bearer())
+
+    assert dropped.status_code == 403
+    assert dropped.json()["code"] == ErrorCode.AUTH_SCOPE.value
+    assert "'admin'" in dropped.json()["detail"]
+    assert listed.status_code == 200
+
+
+@pytest.mark.parametrize("placeholder", ["change-me", "CHANGE-ME", "changeme", "change_me"])
+def test_the_env_example_placeholder_is_refused_at_startup(
+    monkeypatch: pytest.MonkeyPatch, placeholder: str
+) -> None:
+    """`.env.example` ships `change-me`, and it was accepted as a live key (TASK-0460)."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{SECRET};{placeholder}:query")
+
+    with pytest.raises(ConfigError, match="entry 2 is the placeholder") as refusal:
+        load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+    assert placeholder not in str(refusal.value)
+
+
+def test_a_short_key_is_refused_without_printing_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A guessable key protected nothing; the refusal must not become the leak (TASK-0460)."""
+    short = "x" * (MINIMUM_KEY_LENGTH - 1)
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{short}:query:acme")
+
+    with pytest.raises(ConfigError, match=f"shorter than {MINIMUM_KEY_LENGTH}") as refusal:
+        load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+    assert short not in str(refusal.value)
+
+
+def test_a_key_of_exactly_the_minimum_length_loads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The boundary is inclusive, so the documented minimum is a length that works."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "y" * MINIMUM_KEY_LENGTH)
+
+    assert load_keys(Settings.model_validate({"security": {"auth": True}}))[0].name == "key-1"
+
+
+def test_the_server_refuses_to_start_on_the_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal is at startup, not at the first request that happens to present it."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", "change-me")
+
+    app = create_app(Settings.model_validate({"security": {"auth": True}}))
+    app.state.vector_db = StubVectorDB()
+
+    with pytest.raises(ConfigError, match="placeholder"), TestClient(app):
+        pass
+
+
+async def test_an_unbound_key_is_refused_for_every_tenant_without_the_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key that omitted its tenant used to act for any tenant it named (TASK-0460)."""
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{SECRET}:admin")
+    settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}})
+    recorder = _Recorder()
+
+    await drive(
+        AuthMiddleware(recorder, settings),
+        [
+            (b"authorization", f"Bearer {SECRET}".encode("latin-1")),
+            (b"x-tenant-id", b"globex"),
+        ],
+    )
+
+    assert recorder.state == {}
+
+
+def test_the_unbound_refusal_names_the_scope_that_fixes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FASTERRAG_API_KEY", SECRET)
+    app = create_app(Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}}))
+    app.state.vector_db = StubVectorDB()
+
+    with TestClient(app) as client:
+        response = client.get("/metrics", headers={**bearer(), "X-Tenant-ID": "acme"})
+
+    assert response.status_code == 403
+    assert response.json()["code"] == ErrorCode.TENANT_FORBIDDEN.value
+    assert f"'{CROSS_TENANT_SCOPE}'" in response.json()["detail"]
+
+
+def test_the_cross_tenant_scope_is_never_implied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neither a bare secret, `*`, nor `admin` grants it: it must be written by name."""
+    monkeypatch.setenv(
+        "FASTERRAG_API_KEY",
+        f"bare-operator-key-01;star-operator-key-1:*;admin-operator-key-1:admin;"
+        f"named-operator-key-1:*,{CROSS_TENANT_SCOPE}",
+    )
+
+    keys = load_keys(Settings.model_validate({"security": {"auth": True}}))
+
+    assert [CROSS_TENANT_SCOPE in key.scopes for key in keys] == [False, False, False, True]
+    assert keys[3].scopes == ALL_SCOPES | {CROSS_TENANT_SCOPE}
+
+
+def test_the_startup_warning_names_the_fix(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The warning used to say the key may act for any tenant; now it is refused instead."""
+    monkeypatch.setenv(
+        "FASTERRAG_API_KEY",
+        f"unbound-key-000001:query;crossing-key-00001:query,{CROSS_TENANT_SCOPE}",
+    )
+    settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}})
+
+    with caplog.at_level(logging.WARNING):
+        AuthMiddleware(_unreached, settings)
+
+    messages = [record.getMessage() for record in caplog.records]
+    refused = [message for message in messages if "refused on every request" in message]
+    assert refused
+    assert f"'{CROSS_TENANT_SCOPE}'" in refused[0]
+    assert "secret:scopes:tenant" in refused[0]
+    assert any("may act for any tenant" in message for message in messages)
+    assert not any("unbound-key-000001" in message for message in messages)

@@ -52,6 +52,11 @@ EXPECTED: dict[str, tuple[str | None, list[str]]] = {
     "/v1/traces/{trace_id}": ("admin", ["GET"]),
 }
 
+# (method, path) -> scope, where one verb on a path needs more than the table above says.
+BY_METHOD: dict[tuple[str, str], str] = {
+    ("DELETE", "/v1/collections/{name}"): "admin",
+}
+
 _MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -88,8 +93,11 @@ def test_the_route_inventory_is_what_is_expected() -> None:
 
 
 def test_every_route_requires_the_expected_scope() -> None:
-    for path, (scope, _) in EXPECTED.items():
-        assert required_scope(path) == scope, f"{path} resolves to {required_scope(path)!r}"
+    for path, (scope, methods) in EXPECTED.items():
+        for method in methods:
+            wanted = BY_METHOD.get((method, path), scope)
+            found = required_scope(path, method)
+            assert found == wanted, f"{method} {path} resolves to {found!r}"
 
 
 def test_the_methods_are_what_is_expected() -> None:
@@ -148,3 +156,12 @@ def test_provisioning_needs_admin_in_every_verb() -> None:
     """
     assert required_scope("/v1/admin/provision/qdrant") == "admin"
     assert required_scope("/v1/admin/provision/langfuse/status") == "admin"
+
+
+def test_dropping_a_collection_needs_admin_not_collections() -> None:
+    """The table gave `DELETE /v1/collections/{name}` `collections`; the docs said `admin`."""
+    assert required_scope("/v1/collections/docs", "DELETE") == "admin"
+    assert required_scope("/v1/collections/docs", "delete") == "admin"
+    assert required_scope("/v1/collections/docs", "GET") == "collections"
+    assert required_scope("/v1/collections/docs/documents/d_1", "DELETE") == "collections"
+    assert required_scope("/v1/collections", "POST") == "collections"

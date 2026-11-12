@@ -302,11 +302,20 @@ def test_auth_is_accepted_now_that_it_is_actually_enforced(tmp_path: Path) -> No
 @pytest.mark.usefixtures("env")
 def test_multi_tenancy_is_accepted_now_that_it_is_enforced(tmp_path: Path) -> None:
     """It left the unenforced list with TASK-0179; AuthMiddleware refuses a tenant mismatch."""
-    path = write_config(tmp_path, "security:\n  multi_tenancy: true\n")
+    path = write_config(tmp_path, "security:\n  auth: true\n  multi_tenancy: true\n")
 
     settings = load_settings(path, env_file=None)
 
     assert settings.security.multi_tenancy
+
+
+@pytest.mark.usefixtures("env")
+def test_multi_tenancy_without_auth_is_refused_at_load(tmp_path: Path) -> None:
+    """It was accepted and enforced nothing: only the auth middleware resolves a tenant."""
+    path = write_config(tmp_path, "security:\n  multi_tenancy: true\n")
+
+    with pytest.raises(ConfigError, match=r"security.multi_tenancy requires security.auth"):
+        load_settings(path, env_file=None)
 
 
 @pytest.mark.usefixtures("env")
