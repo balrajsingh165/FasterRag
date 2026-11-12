@@ -14,9 +14,10 @@
 # run with no configuration, no key and no server; and the console script can write a starter
 # configuration and run its own preflight.
 #
-# What it does not prove: an ingest and a query. Those need a vector database and an embedding
-# model, and the zero-infrastructure profile that would let a bare container run them is
-# TASK-0444. When it lands, the quickstart belongs at the foot of this file.
+# What it does not prove: an ingest and a retrieve. The local profile that runs them with no
+# service and no key (TASK-0444) is proved before anything is published, by
+# scripts/check_package.py in the same run; repeating it here against the index is part of
+# TASK-0445, because it installs torch and downloads an embedding model.
 #
 #   REQUIREMENT  what pip installs: a wheel path, or `fasterrag==0.1.0b1`
 #   VERSION      the `__version__` the installed package must report

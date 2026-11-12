@@ -129,7 +129,7 @@ Every symbol docs/python-api.md names as SemVer-stable. A name that stops import
 
 ### `EXTRA_ONLY_MODULES`
 
-Imported lazily by design, so a core install must NOT pull them. Asserting their absence is what keeps the dependency promise honest: `pip install fasterrag` claims not to drag in a multi-gigabyte deep-learning stack, and only a core-only environment can prove it.
+Imported lazily by design, so a core install must NOT pull them. Asserting their absence is what keeps the dependency promise honest: `pip install fasterrag` claims not to drag in a multi-gigabyte deep-learning stack, a web server, the Qdrant client or the PDF, DOCX and HTML parser libraries (TASK-0444), and only a core-only environment can prove it.
 
 ## `scripts/measure_rerank.py`
 

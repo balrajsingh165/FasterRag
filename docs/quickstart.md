@@ -35,7 +35,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Nothing has to be running: vectors live in an embedded Chroma directory (`.fasterrag/chroma`), and the embedding model runs in-process — it is downloaded once from the Hugging Face Hub on first use. The profile references no environment variable, so there is no `.env` to write. `fasterrag query` (a generated answer) additionally needs an LLM: the profile names a local Ollama (`llama3.1`), which needs no key either; point `llm` at any provider instead if you prefer. The rest of this page is the full walkthrough with the canonical configuration.
+`scripts/check_package.py` runs exactly these steps against the built wheel in a clean virtual environment. Nothing has to be running: vectors live in an embedded Chroma directory (`.fasterrag/chroma`), and the embedding model runs in-process — it is downloaded once from the Hugging Face Hub on first use. The profile references no environment variable, so there is no `.env` to write. `fasterrag query` (a generated answer) additionally needs an LLM: the profile names a local Ollama (`llama3.1`), which needs no key either; point `llm` at any provider instead if you prefer. The rest of this page is the full walkthrough with the canonical configuration.
 
 ## Step 0 — Install
 
