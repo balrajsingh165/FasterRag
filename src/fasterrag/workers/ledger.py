@@ -22,8 +22,13 @@ never committed — it is reported once, as one failed *document*, for the dead-
 
 The checkpoint is a contiguous watermark over document indexes rather than "the last index
 seen", because documents now settle out of order. It advances only across documents that
-are settled — committed, deduplicated, or dead-lettered — so resuming from it can never
-skip one that is still in flight.
+are settled — committed, deduplicated, skipped, or dead-lettered — so resuming from it can
+never skip one that is still in flight.
+
+A document that produced no chunks is never committed either (TASK-0470). The parse side
+records it as ``skipped`` and settles its index; registering it here with zero chunks used
+to run the commit at once, which journalled an empty file as indexed and put the hash of
+nothing into the dedup file, where it matched every empty file that came after.
 
 Every journal write of a job goes through one lock, :attr:`IndexLedger.journal_lock`:
 commits, checkpoints, and the parse side's own dead-letter and dedup records. The journal
@@ -99,19 +104,21 @@ class IndexLedger:
     ) -> None:
         """Register a document before its chunks are enqueued.
 
-        A document that produced no chunks has nothing to wait for and is committed at once.
+        A document with no chunks is settled without a commit: nothing of it can be indexed.
         """
+        if chunks <= 0:
+            await self._advance(index)
+            return
+
         self._pending[document_id] = _Pending(
             index=index, source=source, remaining=chunks, commit=commit
         )
-        if chunks <= 0:
-            await self._finish(document_id)
 
     async def settle(self, index: int) -> None:
         """Mark a document that never entered the queue as settled.
 
-        The parse side calls this for a dead-lettered or deduplicated document, so the
-        watermark can pass it.
+        The parse side calls this for a dead-lettered, deduplicated or skipped document, so
+        the watermark can pass it.
         """
         await self._advance(index)
 

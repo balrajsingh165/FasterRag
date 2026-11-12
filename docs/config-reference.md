@@ -124,6 +124,9 @@ ingestion:
     enabled: true
     max_retries: 3
   max_document_mb: 100
+  # Seconds one document may spend being parsed and chunked before it is
+  # dead-lettered as PARSE_TIMEOUT and its worker is replaced. 0 = no limit.
+  parse_timeout_seconds: 600
   # Directories a `path` source may read from. Empty is unconfined, which is
   # refused outright once security.auth is on -- see docs/security.md.
   allowed_source_roots: []
@@ -215,7 +218,7 @@ security:
 
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
-| `vector_db.provider` | str | `qdrant` | one of `qdrant`, `milvus`, `weaviate`, `pinecone`, `pgvector`, `chroma` | Selects the concrete `VectorDBAdapter` via the factory. Changing this swaps backends with zero code changes. |
+| `vector_db.provider` | str | `qdrant` | a built-in (`qdrant`, `milvus`, `weaviate`, `pgvector`, `chroma`) or a name an installed package registers under the `fasterrag.vectordb` entry-point group | Selects the concrete `VectorDBAdapter` via the factory. Changing this swaps backends with zero code changes. Any other name stops the load, and the error lists the built-in names and the plugins that are installed ([python-api.md](python-api.md), "Extending the framework"). A built-in name always wins over a plugin registered under the same name. `pinecone` is specified and its adapter is not built (TASK-0049): naming it stops the load with that task id, where it used to validate and fail later inside the factory. An installed package that registers `pinecone` itself is selectable. |
 | `vector_db.mode` | str | `docker` | one of `docker`, `external` | `docker` = system-managed container (fasterRag launches/manages it). `external` = user-run instance, local (no-Docker) **or** remote via `host`/`port` (covers the remote-IP mode). |
 | `vector_db.host` | str | `localhost` | non-empty hostname or IP | Backend host. For remote Qdrant set the remote machine's IP/hostname. |
 | `vector_db.port` | int | `6333` | 1–65535 | REST port. Qdrant client default is 6333. **The Milvus adapter reads this field too and Milvus serves gRPC on 19530**, so a Milvus deployment must set `port: 19530` — the default is Qdrant's and nothing will answer on it. Milvus has no second port here: `grpc_port` and `prefer_grpc` are Qdrant's and are ignored. The **Weaviate** adapter reads it as the HTTP port and must be set to `8080` for a default Weaviate; unlike Milvus it also reads `grpc_port`, because the v4 client requires both channels. |
@@ -244,7 +247,7 @@ security:
 
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
-| `embeddings.provider` | str | `huggingface` | one of `openai`, `cohere`, `huggingface`, `ollama` | Embedding adapter selection. `huggingface` = local sentence-transformers (no key needed). |
+| `embeddings.provider` | str | `huggingface` | a built-in (`openai`, `cohere`, `huggingface`, `ollama`) or a name registered under the `fasterrag.embeddings` entry-point group | Embedding adapter selection. `huggingface` = local sentence-transformers (no key needed). Any other name stops the load, naming what is installed. |
 | `embeddings.model` | str | `BAAI/bge-small-en-v1.5` | non-empty | Model name/ID understood by the selected provider. Recorded per chunk for drift detection (see `index.lockfile`). |
 | `embeddings.api_key_env` | str\|null | `null` | valid env-var name or null | Env var holding the provider key (e.g. `OPENAI_API_KEY`, `COHERE_API_KEY`). Required (non-null) when provider is `openai` or `cohere`. |
 | `embeddings.batch_size` | int | `64` | 1–2048 | Texts per embedding request. Batched embedding is far cheaper than one-at-a-time calls. |
@@ -254,16 +257,16 @@ security:
 | `embeddings.cache.backend` | str | `disk` | one of `memory`, `disk`, `redis` | Where embedding-cache entries live. `disk` survives a restart on one host; `redis` is the only backend several workers or replicas can share, so a vector one of them paid for is not re-embedded by the next. |
 | `embeddings.cache.redis_url` | str | `redis://localhost:6379/0` | starts with `redis://`, `rediss://`, or `unix://` | Connection URL, read only when `embeddings.cache.backend` is `redis`. Needs `pip install fasterrag[redis]`. Entries are namespaced under `fasterrag:embedding`, so one server can back both caches and `clear` never reaches the other's keys or a co-tenant application's. **A URL containing a password is a secret and must not be written here** — supply it through the environment instead (`FASTERRAG_SET=embeddings.cache.redis_url=...`), which is exactly what the `.env`-only policy requires. |
 | `embeddings.tiering.enabled` | bool | `false` | — | Tiered embedding: route document classes to different models (cheap models for high-volume/low-priority classes; higher-cost models where retrieval precision matters). |
-| `embeddings.tiering.rules` | list[TierRule] | `[]` | each rule: `{match: <metadata filter>, provider: <provider>, model: <model>}`; must be non-empty when tiering enabled | Ordered routing rules, first match wins. |
+| `embeddings.tiering.rules` | list[TierRule] | `[]` | each rule: `{match: <metadata filter>, provider: <provider>, model: <model>}`; must be non-empty when tiering enabled | Ordered routing rules, first match wins. A rule's `provider` is validated exactly as `embeddings.provider` is: a built-in or a registered `fasterrag.embeddings` plugin. |
 
 ## `llm`
 
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
-| `llm.provider` | str | `openai` | one of `openai`, `anthropic`, `cohere`, `ollama`, `openai_compatible` | LLM adapter selection. `openai_compatible` targets any endpoint speaking the OpenAI API shape (set `base_url`). |
+| `llm.provider` | str | `openai` | a built-in (`openai`, `anthropic`, `cohere`, `ollama`, `openai_compatible`) or a name registered under the `fasterrag.llm` entry-point group | LLM adapter selection. `openai_compatible` targets any endpoint speaking the OpenAI API shape (set `base_url`). Any other name stops the load, naming what is installed. |
 | `llm.model` | str | `gpt-4o-mini` | non-empty | Generation model ID understood by the selected provider (e.g. `claude-opus-5` for provider `anthropic`). |
 | `llm.api_key_env` | str\|null | `OPENAI_API_KEY` | valid env-var name or null | Env var holding the provider key. Null allowed only for `ollama`/local. |
-| `llm.base_url` | str\|null | `null` | valid URL when set | Endpoint override (required for `openai_compatible`, optional for `ollama`). |
+| `llm.base_url` | str\|null | `null` | valid URL when set | Endpoint override (required for `openai_compatible`, optional for `ollama`). When `llm.provider` is `ollama` this is also the server the `ollama` **embedding** provider uses — there is no `embeddings.base_url`. When the LLM is any other provider the Ollama embedder ignores it and uses the `OLLAMA_HOST` environment variable, else `http://127.0.0.1:11434`; before TASK-0441 it read this key whatever the LLM was, and so sent embedding requests to an `openai_compatible` gateway. |
 | `llm.temperature` | float | `0.1` | 0.0–2.0 | Sampling temperature. Low default favors grounded answers. |
 | `llm.max_tokens` | int | `1024` | 1–32768 | Max generated tokens per answer. |
 | `llm.streaming` | bool | `true` | — | Stream tokens via SSE (time-to-first-token). |
@@ -385,6 +388,7 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | `ingestion.dlq.enabled` | bool | `true` | — | Failed documents go to a dead-letter queue with machine-readable reason codes and per-document status. |
 | `ingestion.dlq.max_retries` | int | `3` | 0–10 | Retries before a document is dead-lettered. |
 | `ingestion.max_document_mb` | int | `100` | 1–1024 | Input size limit per document (security + stability). |
+| `ingestion.parse_timeout_seconds` | float | `600` | ≥ 0 (0 = no limit) | Time limit per document for loading, parsing and chunking, counted from the moment the document is handed to the worker pool. A document still being parsed when it expires is dead-lettered with reason `PARSE_TIMEOUT` and the job continues. A running process-pool task cannot be cancelled, so the pool is recycled: its workers are killed, a new pool is started, and the documents that were in flight beside the overdue one are parsed again from the start with a fresh limit (one that was itself within 50 ms of its own limit is dead-lettered with it). Set it above the slowest legitimate document — OCR of a long scan is the usual candidate — because a document that needs longer can never be ingested while the limit stands. `0` restores the unbounded wait, in which one hung parser stalls its job for ever. |
 | `ingestion.allowed_source_roots` | list[str] | `[]` | paths | Directories a `path` source may be read from. **Authorization boundary**: a `path` source names a file on the server, so an unconfined one lets any caller with the `ingest` scope read `.env` or an SSH key back out through a query. Paths are resolved before comparison, so `..` and symlinks cannot escape a root. Empty means unconfined, which is refused outright when `security.auth` is on — so forgetting it breaks a served deployment loudly instead of exposing it quietly. |
 
 ## `index`

@@ -35,7 +35,7 @@ The source unit as ingested. One document produces many chunks.
 | `parse_flags` | list[str] | Quality signals, e.g. `low_text_yield`, `tables_detected`, `ocr_applied` |
 | `metadata` | object | User metadata from ingest merged with extracted document metadata (title, author, dates) |
 | `tenant` | str\|null | Set when `security.multi_tenancy: true` |
-| `status` | str | `indexed` \| `deduplicated` \| `dead_lettered` \| `pending` |
+| `status` | str | `indexed` \| `deduplicated` \| `skipped` \| `dead_lettered` \| `pending`. `skipped` means the document parsed and produced no chunk (reason code `EMPTY_DOCUMENT`): nothing of it is in the index and its content hash is not kept for deduplication |
 
 ## Chunk
 
@@ -97,7 +97,7 @@ Drift = any mismatch between this file and live config/corpus. Reported, never s
 | `job_id` | str | `job_…` |
 | `collection` | str | Target |
 | `status` | str | `queued` \| `running` \| `completed` \| `failed` \| `partial` |
-| `counts` | object | `total`, `parsed`, `chunked`, `embedded`, `indexed`, `deduplicated`, `dead_lettered` |
+| `counts` | object | `total`, `parsed`, `chunked`, `embedded`, `indexed`, `deduplicated`, `skipped`, `dead_lettered`. `skipped` is the number of documents that parsed and held nothing to index; it does not count toward failure |
 | `sources` | list[Source] | `{type: path\|url\|inline, value: str}` |
 | `checkpoint` | `{last_document_index: int, written_at: str}` | Journal checkpoint — where a crash resumes from (D3) |
 | `started_at` / `finished_at` | str\|null | Timestamps |

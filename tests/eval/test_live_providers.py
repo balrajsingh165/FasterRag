@@ -209,15 +209,9 @@ EMBEDDING_CHECKS: tuple[LiveCheck, ...] = (
         package="ollama",
         extra="ollama",
         default_model="nomic-embed-text",
-        reports_token_usage=False,
+        reports_token_usage=True,
         base_url_env="OLLAMA_HOST",
         keyless=True,
-        usage_note=(
-            "the legacy /api/embeddings route the client's embeddings() call uses returns a "
-            "bare {'embedding': [...]} with no prompt_eval_count, so there is nothing to "
-            "extract; /api/embed does report one, which is a route change rather than an "
-            "extraction fix. Ollama is priced locally at zero, so no bill is understated"
-        ),
     ),
 )
 
@@ -388,8 +382,8 @@ def llm_settings(check: LiveCheck) -> Settings:
 def embedding_settings(check: LiveCheck) -> Settings:
     """Build configuration pointing embedding at the provider under check.
 
-    ``OllamaEmbedder`` reads its host from ``llm.base_url``, which is why the endpoint is
-    set there rather than under ``embeddings``.
+    ``OllamaEmbedder`` takes its host from ``llm.base_url`` when the LLM is Ollama too,
+    which is why the endpoint is set there rather than under ``embeddings``.
     """
     _require_opt_in(check)
     _require_package(check)

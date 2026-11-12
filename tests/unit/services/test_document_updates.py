@@ -328,3 +328,53 @@ async def test_a_known_document_that_became_empty_loses_every_chunk(
     await service.run(await service.accept([str(contract)]))
 
     assert adapter.chunks_of(COLLECTION, document) == []
+
+
+async def test_an_emptied_document_is_skipped_and_forgotten_not_indexed(
+    tmp_path: Path, contract: Path
+) -> None:
+    """Skipping an empty document (TASK-0470) must not keep the version it replaced."""
+    locks = LockStore(tmp_path / "locks")
+    service, _ = build(tmp_path, locks=locks)
+    document = document_id(str(contract))
+    await ingest(service, contract)
+
+    contract.write_text("", encoding="utf-8")
+    settled = await service.run(await service.accept([str(contract)]))
+
+    lock = locks.read(COLLECTION)
+    assert settled.counts["skipped"] == 1
+    assert settled.counts["indexed"] == 0
+    assert await service.journal.document_hashes(COLLECTION) == {}
+    assert lock is not None
+    assert document not in lock.document_hashes
+
+
+async def test_a_document_restored_after_being_emptied_is_indexed_again(
+    tmp_path: Path, contract: Path
+) -> None:
+    """Its old hash stayed remembered, so the restored file was a duplicate of nothing."""
+    service, adapter = build(tmp_path)
+    document = document_id(str(contract))
+    await ingest(service, contract)
+    original = adapter.chunks_of(COLLECTION, document)
+    contract.write_text("", encoding="utf-8")
+    await service.run(await service.accept([str(contract)]))
+
+    contract.write_text(LONG, encoding="utf-8")
+    counts = await ingest(service, contract)
+
+    assert counts["deduplicated"] == 0
+    assert adapter.chunks_of(COLLECTION, document) == original
+
+
+async def test_an_empty_document_never_indexed_before_deletes_nothing(
+    tmp_path: Path, contract: Path
+) -> None:
+    service, adapter = build(tmp_path)
+    contract.write_text("", encoding="utf-8")
+
+    settled = await service.run(await service.accept([str(contract)]))
+
+    assert settled.counts["skipped"] == 1
+    assert adapter.selectors == []

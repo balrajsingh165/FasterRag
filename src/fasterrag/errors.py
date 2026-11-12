@@ -64,6 +64,7 @@ class ErrorCode(StrEnum):
     QUEUE_FULL = "QUEUE_FULL"
     BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
     PARSE_FAILED = "PARSE_FAILED"
+    PARSE_TIMEOUT = "PARSE_TIMEOUT"
     CHUNK_FAILED = "CHUNK_FAILED"
     EMBED_PROVIDER_TIMEOUT = "EMBED_PROVIDER_TIMEOUT"
     EMBED_PROVIDER_ERROR = "EMBED_PROVIDER_ERROR"
@@ -121,6 +122,9 @@ PROBLEM_SPECS: Final[dict[ErrorCode, ProblemSpec]] = {
     ErrorCode.QUEUE_FULL: ProblemSpec(429, "queue-full", "Ingestion queue is full", True),
     ErrorCode.BUDGET_EXCEEDED: ProblemSpec(402, "budget-exceeded", "Token budget exhausted", False),
     ErrorCode.PARSE_FAILED: ProblemSpec(422, "parse-failed", "Document could not be parsed", False),
+    ErrorCode.PARSE_TIMEOUT: ProblemSpec(
+        422, "parse-timeout", "Document took too long to parse", False
+    ),
     ErrorCode.CHUNK_FAILED: ProblemSpec(500, "chunk-failed", "Chunker invariant violated", False),
     ErrorCode.EMBED_PROVIDER_TIMEOUT: ProblemSpec(
         503, "provider-timeout", "Embedding provider timed out", True

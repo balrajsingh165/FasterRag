@@ -48,6 +48,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `QUEUE_FULL` | 429 | `IngestionError` | Bounded queue overflow (`Retry-After` set). |
 | `BUDGET_EXCEEDED` | 402 | — | Per-query or per-tenant token budget exhausted (D9), raised by the runtime cost governor before the provider is called (TASK-0242 ✅). **Non-retryable**, which is deliberate: the degradation ladder absorbs retryable failures into an extractive answer, so a retryable budget error would serve a degraded answer instead of reporting the cap. The check weighs the prompt plus `llm.max_tokens`, the ceiling the call can reach. |
 | `PARSE_FAILED` | 422 | `ParseError` | Document unparseable; also the DLQ reason code. |
+| `PARSE_TIMEOUT` | 422 | `ParseError` | A document was still being parsed after `ingestion.parse_timeout_seconds`. A DLQ reason code only: the job carries on without the document, so no request is answered with it. Non-retryable as it stands — the same document will run out the same limit — until the limit is raised or the source is fixed. |
 | `CHUNK_FAILED` | 500 | `ChunkError` | Chunker invariant violated. |
 | `EMBED_PROVIDER_TIMEOUT` / `EMBED_PROVIDER_ERROR` | 503 | `EmbedError`/`ProviderError` | Embedding provider timeout / hard failure. |
 | `VECTOR_DB_AUTH_FAILED` | 503 | `ProviderError` | The vector database rejected our credentials. Distinct from `EMBED_PROVIDER_ERROR` because the knob to turn is `vector_db.api_key_env`, not the embedding provider. Never retried. |
@@ -146,11 +147,11 @@ Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `4
 
 ### `GET /v1/ingest/{job_id}`
 
-Job status: `{"job_id", "status": "queued|running|completed|failed|partial", "counts": {"total", "parsed", "chunked", "embedded", "indexed", "deduplicated", "dead_lettered"}, "started_at", "finished_at"}`. `404` if unknown.
+Job status: `{"job_id", "status": "queued|running|completed|failed|partial", "counts": {"total", "parsed", "chunked", "embedded", "indexed", "deduplicated", "skipped", "dead_lettered"}, "started_at", "finished_at"}`. `404` if unknown. `skipped` counts documents that parsed without error and held nothing to index; they are not failures, so a job whose only non-indexed documents are skipped is `completed`, not `partial`.
 
 ### `GET /v1/ingest/{job_id}/documents?status=dead_lettered`
 
-Per-document status (D3), filterable. Each entry: `{"document_id", "source", "status", "reason_code", "attempts", "content_hash"}`. Reason codes reuse the error `code` table (e.g. `PARSE_FAILED`).
+Per-document status (D3), filterable. Each entry: `{"document_id", "source", "status", "reason_code", "attempts", "content_hash"}`. Reason codes reuse the error `code` table (e.g. `PARSE_FAILED`). `status` is one of `indexed`, `deduplicated`, `skipped` or `dead_lettered`. A `skipped` entry carries the one reason code that is not an error code, `EMPTY_DOCUMENT`: a zero-byte or whitespace-only file, or any document whose parse produced no chunk. It is never written to the vector database, never remembered for deduplication, and `retry-dlq` does not pick it up — `?status=skipped` lists them.
 
 ### `POST /v1/ingest/{job_id}/retry-dlq`
 
@@ -223,16 +224,35 @@ Grounded-or-refuse (D5): when faithfulness < threshold, `200` with:
 event: meta       data: {"trace_id": "...", "mode": "full", "degraded": false, "cache": {...}}
 event: token      data: {"text": "The"}          (repeated; first token ASAP = TTFT)
 event: citations  data: {"citations": [...]}      (once, after retrieval concludes)
-event: usage      data: {"usage": {...}, "timings_ms": {...}, "faithfulness": 0.93}
+event: usage      data: {"usage": {"prompt_tokens": 3211, "completion_tokens": 187, "estimated_cost_usd": null},
+                         "timings_ms": {...}, "faithfulness": 0.93, "template_version": "...",
+                         "mode": "full", "degraded": false, "truncated": false, "evidence_dropped": 0}
 event: done       data: {}
 ```
 
-On mid-stream failure: `event: error` with a problem document, then the stream closes. Clients must treat a missing `done` as an incomplete answer.
+**A stream reports everything the JSON body reports.** Both shapes are produced by one pipeline (TASK-0438), so `usage` closes the stream with the same `mode`, `degraded`, `truncated` and `evidence_dropped` the non-streamed body carries, `meta` always carries the `cache` member, a streamed query increments the same metrics (plus `fasterrag_ttft_seconds`, which only a stream can have), and it stores the same trace — including the trace of a withheld answer, which a streamed refusal did not store before 2026-11-12. Two members are **estimates on a stream and provider-reported otherwise**, because a provider stream carries text only: `prompt_tokens` / `completion_tokens` are counted locally (and `estimated_cost_usd` is priced from those), and `truncated` is inferred from the local completion count reaching `llm.max_tokens` rather than read from the provider's finish reason. An answer that ended on its own just under the ceiling can therefore be flagged, and one the provider cut can be missed when the local count runs low.
+
+**A query refused before its first event is an ordinary problem response, not a stream.** Everything that can refuse a query outright — retrieval failing (`503 RETRIEVAL_FAILED`), the token budget (`402 BUDGET_EXCEEDED`) — happens before `meta` is produced, and the server produces `meta` before it sends the status line. Such a request gets the same status and `application/problem+json` body as `stream: false`, with no SSE frame at all. Before 2026-11-12 the budget check ran after `meta`, so a streamed request over its budget received `200` and then an `error` event (TASK-0438).
+
+**A provider that is down degrades a stream the way it degrades a JSON body** (D4, TASK-0438). When generation fails with a *retryable* error — timeout, rate limit, 5xx, an open circuit breaker — **before the first `token` has been sent**, the stream serves the `extractive` rung instead of failing: a second `meta` announcing the mode, the retrieved passages as one `token`, then `citations`, `usage` and `done`.
+
+```
+event: meta       data: {"trace_id": "...", "mode": "full", "degraded": false, "cache": {...}}
+event: meta       data: {"trace_id": "...", "mode": "extractive", "degraded": true}
+event: token      data: {"text": "<the retrieved passages>"}
+event: citations  data: {"citations": [...]}
+event: usage      data: {"usage": {"prompt_tokens": 0, "completion_tokens": 0, "estimated_cost_usd": null}, ..., "mode": "extractive", "degraded": true, ...}
+event: done       data: {}
+```
+
+`meta` can therefore arrive twice, and the later one wins: the first was sent before the provider had been called. A client that reads only the first still gets the truth from `usage`. `fasterrag_degraded_responses_total{mode="extractive"}` is incremented exactly as for a non-streamed query. Before 2026-11-12 this case ended the stream with `error` and no `done`.
+
+**The boundary is the first `token` sent.** After it, the caller has been shown text the retrieved passages cannot replace — appended, they would read as the answer's continuation — so there is no fallback: `event: error` carrying `code`, `detail`, `trace_id`, `retryable` and the `status` the problem would have had, then the stream closes. The same `error` event ends a stream on any *non-retryable* failure after `meta` (a rejected credential, an unknown model): the status is already `200` and cannot change. Clients must treat a missing `done` as an incomplete answer. With `generation.grounded_or_refuse: true` no `token` is sent until the answer has been graded, so there a retryable failure at any point of generation is still before the boundary and degrades.
 
 Grounded-or-refuse while streaming: a token cannot be unsaid once sent, so with `generation.grounded_or_refuse: true` no `token` event is emitted until the whole answer has been graded — time-to-first-token is traded for the guarantee the flag exists to provide, and the flag defaults to `false` so the trade is only made on request. A withheld answer replaces the `token`, `citations`, and `usage` events with one `insufficient_evidence` event carrying the same body as the non-streamed refusal, followed by `done`:
 
 ```
-event: meta                   data: {"trace_id": "...", "mode": "full", "degraded": false}
+event: meta                   data: {"trace_id": "...", "mode": "full", "degraded": false, "cache": {...}}
 event: insufficient_evidence  data: {"code": "INSUFFICIENT_EVIDENCE", "answer": null, "best_candidates": [...], "faithfulness": 0.38, "threshold": 0.7, "trace_id": "..."}
 event: done                   data: {}
 ```

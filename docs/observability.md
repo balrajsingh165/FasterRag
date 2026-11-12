@@ -42,7 +42,7 @@ It still has no transport security of its own — put it behind the same reverse
 | `fasterrag_cache_events_total` | counter | cache ∈ semantic, embedding; result ∈ hit, miss, invalidated | Cache hit/miss ratio source. |
 | `fasterrag_retrieval_quality` | gauge | metric ∈ precision_at_k, recall_at_k, mrr, ndcg | Latest eval-harness scores. |
 | `fasterrag_faithfulness` | histogram | — | Grounding/faithfulness score distribution (D5). |
-| `fasterrag_ingest_documents_total` | counter | status ∈ indexed, deduplicated, dead_lettered | Ingestion outcomes. |
+| `fasterrag_ingest_documents_total` | counter | status ∈ succeeded, deduplicated, skipped, dead_lettered | Ingestion outcomes. `skipped` is a document that parsed and held nothing to index (`EMPTY_DOCUMENT`). |
 | `fasterrag_ingest_throughput` | gauge | unit ∈ docs_per_sec, tokens_per_sec | Live ingestion throughput. |
 | `fasterrag_queue_depth` | gauge | queue ∈ ingest, chunk | Bounded-queue occupancy. |
 | `fasterrag_dlq_depth` | gauge | collection | Dead-letter queue depth. |

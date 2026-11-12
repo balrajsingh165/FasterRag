@@ -5,18 +5,34 @@ Produces the event sequence the SSE contract specifies —
 wire bytes, so the sequence is testable without HTTP and the router only has to serialize
 (``docs/api-reference.md``).
 
+One pipeline serves both shapes (TASK-0438). ``GenerationService._pipeline`` is the only
+place a query runs: it yields typed stages — admitted, text, refused, completed, interrupted
+— and owns the budget check, breaker accounting, metrics, spans, the cache write and the
+trace. ``answer()`` collects those stages into an ``Answer`` and ``stream()`` maps each one to
+events, so a degradation, refusal, flag, metric or trace cannot exist on one surface and not
+the other. The two used to be hand-kept copies, and had drifted apart on every one of those.
+
+What the surfaces cannot share is the provider call. A whole answer comes from ``complete``,
+which reports its own token counts and finish reason; a stream carries text only, so a
+streamed answer's counts are this process's estimate and ``truncated`` is inferred from that
+estimate reaching ``llm.max_tokens``.
+
 Ordering is a contract, not a convenience. ``meta`` arrives first so a client knows the
 trace id and whether the response is degraded *before* any text; ``citations`` arrives after
 the answer because a citation is only real once the model has actually referenced it; and
 ``usage`` is last because a streamed call cannot know its token count until it ends.
 
-A mid-stream failure emits ``error`` and stops without ``done``. Clients are told to treat a
-missing ``done`` as an incomplete answer, so the absence carries meaning and must never be
-papered over by emitting it anyway.
-
 When generation fails outright the degradation ladder serves an ``extractive`` answer — the
 retrieved passages themselves — rather than nothing (D4). Retrieval already succeeded at that
-point, so the user gets the material even though the model could not summarize it.
+point, so the user gets the material even though the model could not summarize it. A stream
+takes the same rung: a second ``meta`` announces the degraded mode, the passages arrive as a
+``token``, and the stream closes with ``citations``, ``usage`` and ``done`` like any other.
+
+The boundary is the first ``token`` sent. Before it the fallback replaces nothing; after it
+the caller has already been shown text that the passages cannot replace, so a failure there
+emits ``error`` and stops without ``done``. Clients are told to treat a missing ``done`` as
+an incomplete answer, so the absence carries meaning and must never be papered over by
+emitting it anyway.
 
 Only a **retryable** failure takes that rung. Degradation absorbs a provider that is *down* —
 rate-limited, timing out, returning 5xx. A rejected credential, an unknown model name, or a
@@ -46,7 +62,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
-from fasterrag.adapters.llm.base import LLMAdapter
+from fasterrag.adapters.llm.base import Completion, LLMAdapter
 from fasterrag.config.schema import GenerationSettings, Settings
 from fasterrag.core.breaker import CircuitBreaker, shared_breaker
 from fasterrag.core.cache.semantic import MISS, CacheHit, SemanticCache
@@ -61,7 +77,7 @@ from fasterrag.core.generation import (
 )
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.core.tracing import SpanRecorder, Trace, config_snapshot, record_chunk
-from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.errors import ErrorCode, FasterRagError, GenerationError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import current_trace_id, get_logger
 from fasterrag.services.budget import CostGovernor, shared_governor
@@ -230,39 +246,6 @@ def _cached_answer(hit: CacheHit, trace_id: str, elapsed_ms: int) -> Answer:
     )
 
 
-def _cached_events(answer: Answer) -> list[QueryEvent]:
-    """Return the event sequence a cache hit replays."""
-    return [
-        QueryEvent(
-            type="meta",
-            data={
-                "trace_id": answer.trace_id,
-                "mode": answer.mode,
-                "degraded": answer.degraded,
-                "cache": answer.cache,
-            },
-        ),
-        QueryEvent(type="token", data={"text": answer.answer or ""}),
-        QueryEvent(
-            type="citations",
-            data={"citations": [citation.as_dict() for citation in answer.citations]},
-        ),
-        QueryEvent(
-            type="usage",
-            data={
-                "usage": {
-                    "prompt_tokens": answer.prompt_tokens,
-                    "completion_tokens": answer.completion_tokens,
-                },
-                "timings_ms": answer.timings_ms,
-                "faithfulness": answer.faithfulness,
-                "template_version": P1_TEMPLATE_VERSION,
-            },
-        ),
-        QueryEvent(type="done", data={}),
-    ]
-
-
 def _best_candidates(chunks: Sequence[ScoredChunk]) -> list[dict[str, Any]]:
     """Return what a refusal offers instead of an answer.
 
@@ -292,6 +275,131 @@ class _Prepared:
     chunks: list[ScoredChunk]
     timings: dict[str, int]
     spans: SpanRecorder | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Started:
+    """The query was admitted: retrieval and the budget check passed, nothing is generated."""
+
+    trace_id: str
+    mode: str
+    cache: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _Delta:
+    """A piece of answer text the caller may be shown."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Degraded:
+    """The provider failed before any text was sent, so a lower rung is about to be served."""
+
+    trace_id: str
+    mode: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Completed:
+    """The finished answer, yielded after every record of producing it has been written."""
+
+    answer: Answer
+
+
+@dataclass(frozen=True, slots=True)
+class _Refused:
+    """Grounded-or-refuse withheld the answer (D5); the refusal is the response."""
+
+    answer: Answer
+
+
+@dataclass(frozen=True, slots=True)
+class _Interrupted:
+    """The provider failed after text was sent; a stream ends here, without `done`."""
+
+    error: FasterRagError
+
+
+type _Stage = _Started | _Delta | _Degraded | _Completed | _Refused | _Interrupted
+
+
+def _events(stage: _Stage) -> list[QueryEvent]:
+    """Return the events of the SSE contract that one pipeline stage becomes."""
+    if isinstance(stage, _Started):
+        return [
+            QueryEvent(
+                type="meta",
+                data={
+                    "trace_id": stage.trace_id,
+                    "mode": stage.mode,
+                    "degraded": stage.mode != FULL_MODE,
+                    "cache": stage.cache,
+                },
+            )
+        ]
+
+    if isinstance(stage, _Delta):
+        return [QueryEvent(type="token", data={"text": stage.text})]
+
+    if isinstance(stage, _Degraded):
+        # CRITICAL: a second `meta`, sent before the first `token`. The first one was
+        # truthful when it went out — the provider had not failed yet — and `meta` exists
+        # so a client knows whether a response is degraded *before* it renders any text.
+        # Reporting the rung only in `usage` would break that for the one case it matters.
+        return [
+            QueryEvent(
+                type="meta",
+                data={"trace_id": stage.trace_id, "mode": stage.mode, "degraded": True},
+            )
+        ]
+
+    if isinstance(stage, _Interrupted):
+        return [
+            QueryEvent(
+                type="error",
+                data={
+                    "code": stage.error.code.value,
+                    "detail": stage.error.detail,
+                    "trace_id": stage.error.trace_id,
+                    "retryable": stage.error.retryable,
+                    "status": stage.error.status,
+                },
+            )
+        ]
+
+    if isinstance(stage, _Refused):
+        return [
+            QueryEvent(type="insufficient_evidence", data=stage.answer.as_dict()),
+            QueryEvent(type="done", data={}),
+        ]
+
+    answer = stage.answer
+    return [
+        QueryEvent(
+            type="citations",
+            data={"citations": [citation.as_dict() for citation in answer.citations]},
+        ),
+        QueryEvent(
+            type="usage",
+            data={
+                "usage": {
+                    "prompt_tokens": answer.prompt_tokens,
+                    "completion_tokens": answer.completion_tokens,
+                    "estimated_cost_usd": answer.estimated_cost_usd,
+                },
+                "timings_ms": answer.timings_ms,
+                "faithfulness": answer.faithfulness,
+                "template_version": P1_TEMPLATE_VERSION,
+                "mode": answer.mode,
+                "degraded": answer.degraded,
+                "truncated": answer.truncated,
+                "evidence_dropped": answer.evidence_dropped,
+            },
+        ),
+        QueryEvent(type="done", data={}),
+    ]
 
 
 class GenerationService:
@@ -589,6 +697,96 @@ class GenerationService:
         filters: Mapping[str, Any] | None = None,
     ) -> Answer:
         """Answer a question completely, without streaming."""
+        final: Answer | None = None
+        async for stage in self._pipeline(
+            question, collection=collection, top_k=top_k, filters=filters, streaming=False
+        ):
+            if isinstance(stage, _Interrupted):
+                raise stage.error
+            if isinstance(stage, _Completed | _Refused):
+                final = stage.answer
+
+        if final is None:
+            raise GenerationError(
+                "the query pipeline ended without producing an answer", retryable=False
+            )
+        return final
+
+    async def stream(
+        self,
+        question: str,
+        *,
+        collection: str | None = None,
+        top_k: int | None = None,
+        filters: Mapping[str, Any] | None = None,
+    ) -> AsyncIterator[QueryEvent]:
+        """Answer a question as a stream of events in the documented order."""
+        async for stage in self._pipeline(
+            question, collection=collection, top_k=top_k, filters=filters, streaming=True
+        ):
+            for event in _events(stage):
+                yield event
+
+    def _streamed_completion(self, prompt: str, text: str) -> Completion:
+        """Describe a finished stream the way ``complete`` describes a whole call.
+
+        A stream carries text only, so the counts and the finish reason are this process's
+        own estimate: truncation is inferred from the count reaching ``llm.max_tokens``.
+        """
+        completion_tokens = self.counter.count(text)
+        return Completion(
+            text=text,
+            model=self.llm.model,
+            prompt_tokens=self.counter.count(prompt),
+            completion_tokens=completion_tokens,
+            finish_reason="length" if completion_tokens >= self.settings.llm.max_tokens else None,
+        )
+
+    def _degrade(
+        self, prepared: _Prepared, exc: FasterRagError, trace_id: str, timings: dict[str, int]
+    ) -> Answer:
+        """Serve the retrieved passages in place of an answer the provider could not give."""
+        # CRITICAL: the mode comes from the ladder's registry, never from a literal, so
+        # a rung cannot be served without registering itself and the documentation's
+        # claim about which rungs exist is decidable against the tree.
+        mode = serving(DegradationMode.EXTRACTIVE)
+        _logger.warning(
+            "generation failed, serving the retrieved passages instead",
+            extra={
+                "code": exc.code.value,
+                # CRITICAL: the detail belongs in the log. A degraded response reports
+                # only `mode`, so without the provider's own reason here there is no
+                # record anywhere of why the answer was extractive.
+                "detail": exc.detail,
+                "retryable": exc.retryable,
+                "trace_id": trace_id,
+                "mode": mode,
+            },
+        )
+        metrics.DEGRADED_RESPONSES.increment(mode=mode)
+        return Answer(
+            answer=extractive_answer(prepared.context),
+            citations=list(prepared.context.citations),
+            mode=mode,
+            trace_id=trace_id,
+            timings_ms=timings,
+            evidence_dropped=prepared.context.dropped_budget,
+        )
+
+    async def _pipeline(
+        self,
+        question: str,
+        *,
+        collection: str | None,
+        top_k: int | None,
+        filters: Mapping[str, Any] | None,
+        streaming: bool,
+    ) -> AsyncIterator[_Stage]:
+        """Run one query, yielding each stage as it concludes (TASK-0438).
+
+        The only place a query is executed. ``answer()`` collects these stages and
+        ``stream()`` maps them to events, so the two surfaces cannot disagree.
+        """
         trace_id = current_trace_id()
         started = time.perf_counter()
         vector = await self._cache_vector(question)
@@ -601,7 +799,11 @@ class GenerationService:
                 scope=self._cache_scope(collection, top_k, filters),
             )
             if hit is not None:
-                return _cached_answer(hit, trace_id, cache_ms)
+                cached = _cached_answer(hit, trace_id, cache_ms)
+                yield _Started(trace_id=trace_id, mode=cached.mode, cache=cached.cache)
+                yield _Delta(text=cached.answer or "")
+                yield _Completed(answer=cached)
+                return
 
         prepared = await self._prepare(
             question, collection=collection, top_k=top_k, filters=filters
@@ -610,14 +812,25 @@ class GenerationService:
         if vector is not None:
             timings["cache"] = cache_ms
 
-        # CRITICAL: *outside* the try below, and deliberately so. That block absorbs a
-        # retryable failure into an extractive answer, and a budget refusal must reach
-        # the caller as the 402 it is — degrading it would turn a spend control into a
-        # silent quality regression. BUDGET_EXCEEDED is non-retryable in the problem
-        # table, so it would re-raise anyway; keeping the call out here means that
-        # stays true even if the ladder's conditions are ever loosened.
+        # CRITICAL: *outside* the try below, and *above* the first stage, both deliberately.
+        # That block absorbs a retryable failure into an extractive answer, and a budget
+        # refusal must reach the caller as the 402 it is — degrading it would turn a spend
+        # control into a silent quality regression. BUDGET_EXCEEDED is non-retryable in the
+        # problem table, so it would re-raise anyway; keeping the call out here means that
+        # stays true even if the ladder's conditions are ever loosened. And once a stream
+        # has sent `meta` the HTTP status is committed to 200, so a refusal raised after it
+        # could only reach a REST client as an SSE `error` event (TASK-0438).
         self._charge_budget(prepared)
 
+        yield _Started(trace_id=trace_id, mode=prepared.mode, cache=dict(MISS))
+
+        # CRITICAL: text is held back, not yielded as it arrives, in the two cases where it
+        # may still be replaced by something else. A whole-answer call has no deltas, and
+        # with grounded-or-refuse a token cannot be unsaid once sent, so the answer is
+        # graded before a caller sees any of it.
+        held = not streaming or self.grounded_or_refuse
+        sent = False
+        parts: list[str] = []
         started = time.perf_counter()
         try:
             # CRITICAL: inside the try, so an open circuit takes the same route a live
@@ -625,7 +838,24 @@ class GenerationService:
             # makes shedding load a rung on the degradation ladder rather than a 503 — the
             # behaviour FMEA row 20 describes as "retries → breaker opens → extractive".
             self.breaker.check()
-            completion = await self.llm.complete(prepared.prompt, system=P1_SYSTEM_PROMPT)
+            if streaming:
+                async for delta in self.llm.stream(prepared.prompt, system=P1_SYSTEM_PROMPT):
+                    if not parts:
+                        # CRITICAL: time to first token is measured from the request
+                        # arriving, not from the provider call. What a user perceives
+                        # includes retrieval and assembly, and a TTFT that excluded them
+                        # would flatter every change that made retrieval slower.
+                        metrics.TTFT.observe(
+                            (timings.get("retrieve", 0) + timings.get("assemble", 0)) / 1000
+                            + (time.perf_counter() - started)
+                        )
+                    parts.append(delta)
+                    if not held:
+                        sent = True
+                        yield _Delta(text=delta)
+                completion = self._streamed_completion(prepared.prompt, "".join(parts))
+            else:
+                completion = await self.llm.complete(prepared.prompt, system=P1_SYSTEM_PROMPT)
         except FasterRagError as exc:
             self.breaker.record_failure(exc)
             # CRITICAL: only a retryable failure is a rung on the degradation ladder. A
@@ -636,31 +866,29 @@ class GenerationService:
             if not exc.retryable:
                 raise
             timings["generate"] = int((time.perf_counter() - started) * 1000)
-            # CRITICAL: the mode comes from the ladder's registry, never from a literal, so
-            # a rung cannot be served without registering itself and the documentation's
-            # claim about which rungs exist is decidable against the tree.
-            mode = serving(DegradationMode.EXTRACTIVE)
-            _logger.warning(
-                "generation failed, serving the retrieved passages instead",
-                extra={
-                    "code": exc.code.value,
-                    # CRITICAL: the detail belongs in the log. A degraded response reports
-                    # only `mode`, so without the provider's own reason here there is no
-                    # record anywhere of why the answer was extractive.
-                    "detail": exc.detail,
-                    "retryable": exc.retryable,
-                    "trace_id": trace_id,
-                    "mode": mode,
-                },
-            )
-            metrics.DEGRADED_RESPONSES.increment(mode=mode)
-            return Answer(
-                answer=extractive_answer(prepared.context),
-                citations=list(prepared.context.citations),
-                mode=mode,
-                trace_id=trace_id,
-                timings_ms=timings,
-            )
+            if sent:
+                # CRITICAL: the one failure the ladder cannot absorb. Text the caller has
+                # already been shown cannot be replaced by the retrieved passages — a
+                # fallback appended to half an answer would read as its continuation — so
+                # the stream ends on `error`, without `done`, and the client is told the
+                # answer is incomplete. With grounded-or-refuse nothing is sent until the
+                # verdict, so there the whole generation is still before this boundary.
+                _logger.warning(
+                    "generation stream failed after text was sent; the answer is incomplete",
+                    extra={
+                        "code": exc.code.value,
+                        "detail": exc.detail,
+                        "retryable": exc.retryable,
+                        "trace_id": trace_id,
+                    },
+                )
+                yield _Interrupted(error=exc)
+                return
+            degraded = self._degrade(prepared, exc, trace_id, timings)
+            yield _Degraded(trace_id=trace_id, mode=degraded.mode)
+            yield _Delta(text=degraded.answer or "")
+            yield _Completed(answer=degraded)
+            return
 
         self.breaker.record_success()
         generate_ms = int((time.perf_counter() - started) * 1000)
@@ -679,7 +907,11 @@ class GenerationService:
         if verdict.withholds(self.settings.generation.faithfulness_threshold):
             refusal = self._refusal(prepared, verdict, trace_id, timings)
             self._store_trace(question, collection, filters, prepared, completion.text, refusal)
-            return refusal
+            yield _Refused(answer=refusal)
+            return
+
+        if held:
+            yield _Delta(text=completion.text)
 
         if completion.truncated:
             _logger.warning(
@@ -731,167 +963,14 @@ class GenerationService:
                 scope=self._cache_scope(collection, top_k, filters),
             )
 
+        # CRITICAL: stored *before* the final stage is yielded, not after it. A stream's
+        # consumer is entitled to stop reading at `done`, and a generator abandoned there
+        # never runs the code after its last `yield` — which is where this used to live,
+        # so a consumer that stopped at `done` left no trace and no cache entry.
+        # Streaming is the default path, and replay (D8) is only as complete as the
+        # traces it has.
         self._store_trace(question, collection, filters, prepared, completion.text, answer)
-        return answer
-
-    async def stream(
-        self,
-        question: str,
-        *,
-        collection: str | None = None,
-        top_k: int | None = None,
-        filters: Mapping[str, Any] | None = None,
-    ) -> AsyncIterator[QueryEvent]:
-        """Answer a question as a stream of events in the documented order."""
-        trace_id = current_trace_id()
-        started = time.perf_counter()
-        vector = await self._cache_vector(question)
-        cache_ms = int((time.perf_counter() - started) * 1000)
-
-        if vector is not None and self.cache is not None:
-            hit = await self.cache.lookup(
-                vector,
-                tenant=self.tenant,
-                scope=self._cache_scope(collection, top_k, filters),
-            )
-            if hit is not None:
-                for event in _cached_events(_cached_answer(hit, trace_id, cache_ms)):
-                    yield event
-                return
-
-        prepared = await self._prepare(
-            question, collection=collection, top_k=top_k, filters=filters
-        )
-        timings = prepared.timings
-        if vector is not None:
-            timings["cache"] = cache_ms
-
-        yield QueryEvent(
-            type="meta",
-            data={
-                "trace_id": trace_id,
-                "mode": prepared.mode,
-                "degraded": prepared.mode != FULL_MODE,
-            },
-        )
-
-        self._charge_budget(prepared)
-
-        started = time.perf_counter()
-        parts: list[str] = []
-        gated = self.grounded_or_refuse
-        try:
-            self.breaker.check()
-            async for delta in self.llm.stream(prepared.prompt, system=P1_SYSTEM_PROMPT):
-                if not parts:
-                    # CRITICAL: time to first token is measured from the request arriving,
-                    # not from the provider call. What a user perceives includes retrieval
-                    # and assembly, and a TTFT that excluded them would flatter every change
-                    # that made retrieval slower.
-                    metrics.TTFT.observe(
-                        (timings.get("retrieve", 0) + timings.get("assemble", 0)) / 1000
-                        + (time.perf_counter() - started)
-                    )
-                parts.append(delta)
-                if not gated:
-                    yield QueryEvent(type="token", data={"text": delta})
-        except FasterRagError as exc:
-            self.breaker.record_failure(exc)
-            if not exc.retryable:
-                raise
-            _logger.warning(
-                "generation stream failed",
-                extra={
-                    "code": exc.code.value,
-                    "detail": exc.detail,
-                    "retryable": exc.retryable,
-                    "trace_id": trace_id,
-                },
-            )
-            yield QueryEvent(
-                type="error",
-                data={
-                    "code": exc.code.value,
-                    "detail": exc.detail,
-                    "trace_id": exc.trace_id,
-                    "retryable": exc.retryable,
-                },
-            )
-            return
-
-        self.breaker.record_success()
-        answer = "".join(parts)
-        generate_ms = int((time.perf_counter() - started) * 1000)
-        timings["generate"] = generate_ms
-        self._record_generation(
-            generate_ms, self.counter.count(prepared.prompt), self.counter.count(answer)
-        )
-
-        verdict = await self._grade(question, answer, prepared, timings)
-        if verdict.withholds(self.settings.generation.faithfulness_threshold):
-            refusal = self._refusal(prepared, verdict, trace_id, timings)
-            yield QueryEvent(type="insufficient_evidence", data=refusal.as_dict())
-            yield QueryEvent(type="done", data={})
-            return
-
-        if gated:
-            yield QueryEvent(type="token", data={"text": answer})
-
-        citations = resolve_citations(answer, prepared.context.citations)
-        usage: dict[str, Any] = {
-            "prompt_tokens": self.counter.count(prepared.prompt),
-            "completion_tokens": self.counter.count(answer),
-        }
-        # CRITICAL: the streamed counts are the local counter's, not the provider's —
-        # a stream never reports usage — so the cost derived from them is an estimate
-        # of an estimate. It is emitted anyway, because the alternative is a streaming
-        # caller having no cost signal at all, and it is the same field the
-        # non-streaming path fills so a client needs no second code path.
-        usage["estimated_cost_usd"] = price_generation(
-            self.llm.provider,
-            self.llm.model,
-            int(usage["prompt_tokens"]),
-            int(usage["completion_tokens"]),
-        )
-
-        yield QueryEvent(
-            type="citations",
-            data={"citations": [citation.as_dict() for citation in citations]},
-        )
-        yield QueryEvent(
-            type="usage",
-            data={
-                "usage": usage,
-                "timings_ms": timings,
-                "faithfulness": verdict.score,
-                "template_version": P1_TEMPLATE_VERSION,
-            },
-        )
-        yield QueryEvent(type="done", data={})
-
-        streamed = Answer(
-            answer=answer,
-            citations=citations,
-            mode=prepared.mode,
-            trace_id=trace_id,
-            prompt_tokens=usage["prompt_tokens"],
-            completion_tokens=usage["completion_tokens"],
-            timings_ms=timings,
-            faithfulness=verdict.score,
-        )
-
-        if vector is not None and self.cache is not None and prepared.mode == FULL_MODE:
-            await self.cache.store_response(
-                question,
-                vector,
-                streamed.as_dict(),
-                tenant=self.tenant,
-                scope=self._cache_scope(collection, top_k, filters),
-            )
-
-        # CRITICAL: streaming is the default path, so a trace stored only by `answer()`
-        # left replay (D8) with nothing to replay for the traffic a deployment mostly serves.
-        self._store_trace(question, collection, filters, prepared, answer, streamed)
+        yield _Completed(answer=answer)
 
     async def close(self) -> None:
         """Release the generation provider."""

@@ -1,4 +1,17 @@
-"""Ollama generation against a local server, so no credential is required."""
+"""Ollama generation against a local server, so no credential is required.
+
+From ``ollama`` 0.4 the client parses every reply into a typed response object
+(``ChatResponse``, holding a ``Message``) rather than returning the decoded JSON as a
+``dict``. This adapter reads the typed object by attribute. Until TASK-0441 it tested
+``isinstance(response, dict)`` first, which is false for a typed response, so every answer
+came back as empty text beside correct token counts and a stream yielded nothing — a
+failure with no error anywhere. ``pyproject.toml`` pins the client to the versions that
+return the typed shape.
+
+A streamed reply ends with a part whose ``content`` is empty and whose ``done`` is true; it
+carries the token counts, which ``stream`` does not report, and is skipped like any other
+part without text.
+"""
 
 from __future__ import annotations
 
@@ -64,13 +77,12 @@ class OllamaGenerator(LLMAdapter):
                 exc, provider=self.provider, operation="complete", key_env=None
             ) from exc
 
-        message = response.get("message", {}) if isinstance(response, dict) else {}
         return Completion(
-            text=str(message.get("content", "")),
+            text=_text_of(response),
             model=self.config.model,
-            prompt_tokens=int(response.get("prompt_eval_count", 0) or 0),
-            completion_tokens=int(response.get("eval_count", 0) or 0),
-            finish_reason=response.get("done_reason"),
+            prompt_tokens=int(getattr(response, "prompt_eval_count", None) or 0),
+            completion_tokens=int(getattr(response, "eval_count", None) or 0),
+            finish_reason=getattr(response, "done_reason", None),
         )
 
     async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
@@ -78,8 +90,7 @@ class OllamaGenerator(LLMAdapter):
         try:
             events = await self._connected().chat(**self._request(prompt, system, stream=True))
             async for event in events:
-                message = event.get("message", {}) if isinstance(event, dict) else {}
-                text = message.get("content")
+                text = _text_of(event)
                 if text:
                     yield text
         except ConfigError:
@@ -102,3 +113,9 @@ class OllamaGenerator(LLMAdapter):
     async def close(self) -> None:
         """Release the client."""
         self._client = None
+
+
+def _text_of(response: Any) -> str:
+    """Return the text of a chat response or stream part, empty when it carries none."""
+    content = getattr(getattr(response, "message", None), "content", None)
+    return content if isinstance(content, str) else ""

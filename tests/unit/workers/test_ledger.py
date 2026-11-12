@@ -98,13 +98,17 @@ async def test_a_failed_document_is_reported_once_however_many_chunks_failed() -
     ]
 
 
-async def test_a_document_with_no_chunks_is_committed_at_once() -> None:
+async def test_a_document_with_no_chunks_is_settled_without_a_commit() -> None:
+    """Zero chunks used to commit at once, journalling an empty file as indexed."""
     recorder = Recorder()
     ledger = IndexLedger(recorder.on_progress)
 
     await ledger.expect("empty", index=0, source="empty.md", chunks=0, commit=recorder.commit("e"))
 
-    assert recorder.commits == ["e"]
+    assert recorder.commits == []
+    assert ledger.committed == 0
+    assert ledger.in_flight == 0
+    assert ledger.failed_documents == []
     assert recorder.progress == [0]
 
 

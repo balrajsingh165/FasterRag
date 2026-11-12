@@ -35,6 +35,7 @@ _AUTH_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
 _TIMEOUT_STATUSES: Final[frozenset[int]] = frozenset({408, 504})
 _SERVER_ERROR_THRESHOLD: Final = 500
 _RATE_LIMITED: Final = 429
+_PROGRAMMING_ERRORS: Final[tuple[type[BaseException], ...]] = (TypeError, AttributeError)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +88,15 @@ def classify_llm_failure(
     status = getattr(exc, "status_code", None)
     if not isinstance(status, int):
         status = None
+
+    if status is None and isinstance(exc, _PROGRAMMING_ERRORS):
+        return GenerationError(
+            f"the {provider} adapter raised {type(exc).__name__} during {operation}; this is "
+            "a fault in the adapter or a client library version it was not written against, "
+            "not a provider outage",
+            code=ErrorCode.INTERNAL,
+            retryable=False,
+        )
 
     if status in _AUTH_STATUSES:
         named = key_env or "llm.api_key_env"
