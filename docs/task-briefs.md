@@ -106,7 +106,7 @@ Process-wide singletons (`shared_breaker`, the cross-encoder model cache, `share
 
 ## 1. P0 — blocks a credible public alpha
 
-Recommended order inside P0: TASK-0470 and TASK-0473 (small, and they stop data loss and hangs), then TASK-0436, TASK-0437, TASK-0443, TASK-0438, TASK-0441, TASK-0439, TASK-0442, TASK-0431, TASK-0440, TASK-0444, TASK-0445.
+Recommended order inside P0: TASK-0470 and TASK-0473 (small, and they stop data loss and hangs), then TASK-0436, TASK-0437, TASK-0443, TASK-0441, TASK-0439, TASK-0442, TASK-0431, TASK-0440, TASK-0444, TASK-0445.
 
 ### TASK-0431 — Semantic chunking in the ingestion pipeline
 
@@ -169,37 +169,6 @@ Recommended order inside P0: TASK-0470 and TASK-0473 (small, and they stop data 
 **Traps.** [api-reference.md](api-reference.md) `:113` states that the idempotency-key scan "will not be indexed; it retires with the field at 1.0 (TASK-0358)". That sentence and this task disagree: read TASK-0358 and resolve it in the same change, in whichever direction the maintainer decides. `tests/unit/test_no_blocking_journal_in_async.py` requires the two-faced method shape on any replacement. Windows cannot `fsync` a directory.
 
 **Done when.** The stateful test passes, the lookup is indexed, and the new ledger entry exists. **Moves:** reliability, performance, architecture.
-
-### TASK-0438 — One query pipeline behind `answer()` and `stream()`
-
-**Goal.** Every degradation, refusal, flag, metric and trace is identical whether a query is streamed or not.
-
-**Where.** `services/generation.py`: `answer` at `:583`, `stream` at `:737`, shared `_prepare` at `:385`. The verified differences:
-
-| Step | `answer()` | `stream()` |
-|---|---|---|
-| Budget check | `_charge_budget` at `:619`, before anything is returned | Yields `meta` first (`:769-776`), then charges at `:778` — so a refusal reaches the client as an SSE `error` over HTTP 200 (`api/query.py:67-86`) |
-| Retryable provider failure | Degrades to `extractive_answer`, increments `DEGRADED_RESPONSES` (`:656`), returns citations (`:657-663`) | Yields `error` and returns (`:811-819`): no fallback, no metric, no `done`, no trace |
-| Token counts | From the provider | Local estimate (`:826`); the provider's usage chunk is discarded |
-| `generation` span | Recorded (`:670`) | Missing |
-| Refusal (`grounded_or_refuse`) | Stores a trace (`:681`) | Yields `insufficient_evidence` then `done`, stores no trace (`:833-835`) |
-| `truncated`, `evidence_dropped`, `estimated_cost_usd` on the `Answer` | Set (`:715-716`) | Absent from the streamed `Answer` (`:872-881`) |
-
-SSE event names, serialised by `api/query.py:51` `encode_event`: `meta`, `token`, `citations`, `usage`, `done`, `error`, `insufficient_evidence`.
-
-**Steps.**
-1. Move the budget charge in `stream()` above the first `yield`. One commit, one test, and it fixes the 402-as-200 defect on its own.
-2. Introduce one private async generator that yields typed stage results (prepared, token delta, completed, degraded, refused) and owns breaker accounting, metrics, spans and the trace.
-3. Re-express `stream()` as a mapper from stage results to `QueryEvent`, and `answer()` as a consumer that collects them into an `Answer`.
-4. Give the streamed path the extractive rung: on a retryable failure before the first token, emit the extractive answer as `token` events followed by `citations`, `usage` and `done`, with `mode` set in `meta` or `usage`. After the first token a fallback cannot un-send text: emit `error`, and document that boundary.
-
-**Tests.** One parametrised test that runs each case — success, cache hit, retryable failure, non-retryable failure, budget refusal, grounded refusal, truncation, evidence dropped — through both surfaces and compares mode, flags, metric deltas and the stored trace. `test_a_retryable_stream_failure_still_emits_an_error_event` (`tests/unit/services/test_generation.py:197`) pins the old behaviour and must be rewritten. `test_a_streamed_query_over_the_budget_is_refused_before_any_token` (`:898`) must additionally assert that no `meta` event was produced. Keep `test_a_streamed_trace_matches_the_non_streamed_one` (`:1036`) and `tests/chaos/test_chaos.py:308`.
-
-**Documents.** [api-reference.md](api-reference.md) "Streaming semantics (SSE)" (`:218-242`), [reliability.md](reliability.md) §2, [prompts.md](prompts.md) P1 "Streaming".
-
-**Traps.** `api/query.py:67` also catches a `FasterRagError` raised mid-generator; keep that path. The `usage` event's shape is documented and parity-checked.
-
-**Done when.** The parametrised parity test passes. **Moves:** core RAG, reliability, architecture.
 
 ### TASK-0439 — Plugins that configuration can select
 
@@ -945,8 +914,8 @@ Use this to choose work by the category you want to move. The bar each category 
 
 | Category | Tasks |
 |---|---|
-| Architecture and design | TASK-0456, TASK-0466, TASK-0440, TASK-0130, TASK-0438, TASK-0457, TASK-0437 |
-| Core RAG functionality | TASK-0438, TASK-0443, TASK-0449, TASK-0441, TASK-0458, TASK-0467, TASK-0468, TASK-0469, TASK-0485 |
+| Architecture and design | TASK-0456, TASK-0466, TASK-0440, TASK-0130, TASK-0457, TASK-0437 |
+| Core RAG functionality | TASK-0443, TASK-0449, TASK-0441, TASK-0458, TASK-0467, TASK-0468, TASK-0469, TASK-0485 |
 | Document ingestion and processing | TASK-0470, TASK-0473, TASK-0431, TASK-0436, TASK-0459, TASK-0471, TASK-0472, TASK-0462, TASK-0504 |
 | Retrieval and search quality | TASK-0454, TASK-0447, TASK-0448, TASK-0481, TASK-0463, TASK-0480 |
 | Embedding and vector infrastructure | TASK-0442, TASK-0451, TASK-0452, TASK-0412, TASK-0352, TASK-0477, TASK-0478, TASK-0464, TASK-0479, TASK-0049 |
