@@ -234,6 +234,8 @@ Each line below names the entry-point group, the base class and every abstract m
 
 A registered provider becomes selectable in `config.yaml` (`vector_db.provider: mydb`) and MUST pass the shared **adapter contract test suite** ([testing-strategy.md](testing-strategy.md)) to be considered conformant.
 
+**Credentials.** A plugin reads its key through the name in its section's `api_key_env`, exactly as a built-in does, and never inherits a built-in's default: for a plugin provider `llm.api_key_env` and `vector_db.api_key_env` must be written in `config.yaml`, as a variable name or as `null`, or the load stops ([config-reference.md](config-reference.md), cross-field rule 3). Configuration is validated without loading the plugin, so it cannot know whether a key is needed — a plugin that needs one says so when it is built, by calling `require_key` (`fasterrag.adapters.embeddings.base`) or `require_llm_key` (`fasterrag.adapters.llm.base`) with its `api_key_env`, which raises a `ConfigError` naming the missing variable.
+
 ## Stability guarantees
 
 | Surface | Guarantee |

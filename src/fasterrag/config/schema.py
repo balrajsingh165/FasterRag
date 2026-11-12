@@ -128,6 +128,27 @@ class Section(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    # CRITICAL: a plugin provider never inherits a built-in provider's default key name.
+    # `llm.api_key_env` defaults to OPENAI_API_KEY and `vector_db.api_key_env` to
+    # QDRANT_API_KEY, and an adapter reads its credential through whatever name the field
+    # holds — so a config that only says `provider: acme` would hand a third party's code
+    # the name of another vendor's secret, and rule 9 would then refuse to start until that
+    # unrelated secret was present. The schema cannot ask the plugin whether it needs a key
+    # (that would load third-party code during validation), so it asks the operator: the
+    # field must be written, as a variable name or as null. `model_fields_set` is what tells
+    # a written null from an absent key.
+    def _require_written_plugin_key(self, section: str, provider: str) -> None:
+        """Refuse a plugin provider whose ``api_key_env`` was left to a built-in's default."""
+        if "api_key_env" in self.model_fields_set:
+            return
+        default = type(self).model_fields["api_key_env"].default
+        raise ValueError(
+            f"{section}.api_key_env must be written out for plugin provider {provider!r}: "
+            "name the environment variable holding its key, or set it to null if it needs "
+            f"none. The default, {default!r}, names a built-in provider's key and is never "
+            "handed to a plugin"
+        )
+
 
 class AppSettings(Section):
     """API server process settings."""
@@ -319,6 +340,13 @@ class VectorDbSettings(Section):
             )
         return self
 
+    @model_validator(mode="after")
+    def _check_plugin_key(self) -> Self:
+        """Enforce cross-field rule 3 for a plugin: its key name is written, never defaulted."""
+        if self.provider not in BUILTIN_VECTOR_DB_PROVIDERS:
+            self._require_written_plugin_key("vector_db", self.provider)
+        return self
+
 
 class EmbeddingCacheSettings(Section):
     """Embedding cache keyed by content hash plus model and version."""
@@ -408,7 +436,11 @@ class EmbeddingsSettings(Section):
 
     @model_validator(mode="after")
     def _check_key_required(self) -> Self:
-        """Enforce cross-field rule 3: hosted embedding providers need a key reference."""
+        """Enforce cross-field rule 3: hosted embedding providers need a key reference.
+
+        A plugin is asked for nothing here: the default is already null, so there is no
+        built-in key name to inherit, and whether it needs one is the plugin's to enforce.
+        """
         if self.provider in PROVIDERS_REQUIRING_EMBEDDING_KEY and self.api_key_env is None:
             raise ValueError(
                 f"embeddings.api_key_env is required for provider {self.provider!r}; "
@@ -460,7 +492,14 @@ class LlmSettings(Section):
 
     @model_validator(mode="after")
     def _check_provider_requirements(self) -> Self:
-        """Enforce cross-field rule 3 for LLMs and the ``openai_compatible`` endpoint."""
+        """Enforce cross-field rule 3 for LLMs and the ``openai_compatible`` endpoint.
+
+        A plugin may be keyless or keyed, which the schema cannot know without loading it,
+        so it is only required to say which: the key name is written, never defaulted.
+        """
+        if self.provider not in BUILTIN_LLM_PROVIDERS:
+            self._require_written_plugin_key("llm", self.provider)
+            return self
         if self.provider not in PROVIDERS_NOT_REQUIRING_LLM_KEY and self.api_key_env is None:
             raise ValueError(
                 f"llm.api_key_env is required for provider {self.provider!r}; "
