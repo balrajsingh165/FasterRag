@@ -48,6 +48,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `QUEUE_FULL` | 429 | `IngestionError` | Bounded queue overflow (`Retry-After` set). |
 | `BUDGET_EXCEEDED` | 402 | — | Per-query or per-tenant token budget exhausted (D9), raised by the runtime cost governor before the provider is called (TASK-0242 ✅). **Non-retryable**, which is deliberate: the degradation ladder absorbs retryable failures into an extractive answer, so a retryable budget error would serve a degraded answer instead of reporting the cap. The check weighs the prompt plus `llm.max_tokens`, the ceiling the call can reach. |
 | `PARSE_FAILED` | 422 | `ParseError` | Document unparseable; also the DLQ reason code. |
+| `PARSE_TIMEOUT` | 422 | `ParseError` | A document was still being parsed after `ingestion.parse_timeout_seconds`. A DLQ reason code only: the job carries on without the document, so no request is answered with it. Non-retryable as it stands — the same document will run out the same limit — until the limit is raised or the source is fixed. |
 | `CHUNK_FAILED` | 500 | `ChunkError` | Chunker invariant violated. |
 | `EMBED_PROVIDER_TIMEOUT` / `EMBED_PROVIDER_ERROR` | 503 | `EmbedError`/`ProviderError` | Embedding provider timeout / hard failure. |
 | `VECTOR_DB_AUTH_FAILED` | 503 | `ProviderError` | The vector database rejected our credentials. Distinct from `EMBED_PROVIDER_ERROR` because the knob to turn is `vector_db.api_key_env`, not the embedding provider. Never retried. |
@@ -80,7 +81,7 @@ Shipped by TASK-0318 (✅ 2026-11-08). Implemented in `api/idempotency.py` (tran
 
 **Concurrent duplicates.** Two copies of one request arriving before either finishes is the ordinary shape of a client retry, and it is the case a check-then-write implementation returns two `200`s for. The reservation is taken with `O_CREAT | O_EXCL`, so exactly one caller wins; the loser is refused `409 IDEMPOTENCY_IN_PROGRESS` with `Retry-After: 1` and executes nothing.
 
-**Covered endpoints.** Everything mutating: `POST /v1/ingest`, `POST /v1/ingest/{job_id}/retry-dlq`, `POST /v1/collections`, `DELETE /v1/collections/{name}`, `POST /v1/admin/doctor/fix`, `POST /v1/admin/provision/{tool}`, `DELETE /v1/admin/provision/{tool}`, `POST /v1/admin/export`, `POST /v1/admin/import`. A mutating router added later is covered the moment it is mounted, because this is middleware rather than a per-route dependency.
+**Covered endpoints.** Everything mutating: `POST /v1/ingest`, `POST /v1/ingest/{job_id}/retry-dlq`, `POST /v1/collections`, `DELETE /v1/collections/{name}`, `DELETE /v1/collections/{name}/documents/{document_id}`, `POST /v1/admin/doctor/fix`, `POST /v1/admin/provision/{tool}`, `DELETE /v1/admin/provision/{tool}`, `POST /v1/admin/export`, `POST /v1/admin/import`. A mutating router added later is covered the moment it is mounted, because this is middleware rather than a per-route dependency.
 
 **Deliberately not covered**, because they are `POST` for the body and not for an effect: `/v1/query`, `/v1/retrieve`, `/v1/estimate`, `/v1/replay`. A key sent to one of them is ignored rather than refused, so a client that sets the header on every request keeps working. `/v1/query` can also be a `text/event-stream`, which cannot be captured and handed back.
 
@@ -148,7 +149,7 @@ Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `4
 
 ### `GET /v1/ingest/{job_id}`
 
-Job status: `{"job_id", "status": "queued|running|completed|failed|partial", "reason_code", "counts": {"total", "parsed", "chunked", "embedded", "indexed", "deduplicated", "dead_lettered"}, "started_at", "finished_at"}`. `404` if unknown.
+Job status: `{"job_id", "status": "queued|running|completed|failed|partial", "reason_code", "counts": {"total", "parsed", "chunked", "embedded", "indexed", "deduplicated", "skipped", "dead_lettered"}, "started_at", "finished_at"}`. `404` if unknown. `skipped` counts documents that parsed without error and held nothing to index; they are not failures, so a job whose only non-indexed documents are skipped is `completed`, not `partial`.
 
 `reason_code` is `null` except on a job the process stopped working on before it finished, which is settled `failed` with `reason_code: "INTERRUPTED"` (TASK-0436). That pair means *nothing was wrong with the documents*: the job was cancelled, and its checkpoint is kept. `INTERRUPTED` is a reason on a job, not an entry in the error-code table — no request fails with it.
 
@@ -158,7 +159,7 @@ Job status: `{"job_id", "status": "queued|running|completed|failed|partial", "re
 
 ### `GET /v1/ingest/{job_id}/documents?status=dead_lettered`
 
-Per-document status (D3), filterable. Each entry: `{"document_id", "source", "status", "reason_code", "attempts", "content_hash"}`. Reason codes reuse the error `code` table (e.g. `PARSE_FAILED`).
+Per-document status (D3), filterable. Each entry: `{"document_id", "source", "status", "reason_code", "attempts", "content_hash"}`. Reason codes reuse the error `code` table (e.g. `PARSE_FAILED`). `status` is one of `indexed`, `deduplicated`, `skipped` or `dead_lettered`. A `skipped` entry carries the one reason code that is not an error code, `EMPTY_DOCUMENT`: a zero-byte or whitespace-only file, or any document whose parse produced no chunk. It is never written to the vector database, never remembered for deduplication, and `retry-dlq` does not pick it up — `?status=skipped` lists them.
 
 ### `POST /v1/ingest/{job_id}/retry-dlq`
 
@@ -231,16 +232,35 @@ Grounded-or-refuse (D5): when faithfulness < threshold, `200` with:
 event: meta       data: {"trace_id": "...", "mode": "full", "degraded": false, "cache": {...}}
 event: token      data: {"text": "The"}          (repeated; first token ASAP = TTFT)
 event: citations  data: {"citations": [...]}      (once, after retrieval concludes)
-event: usage      data: {"usage": {...}, "timings_ms": {...}, "faithfulness": 0.93}
+event: usage      data: {"usage": {"prompt_tokens": 3211, "completion_tokens": 187, "estimated_cost_usd": null},
+                         "timings_ms": {...}, "faithfulness": 0.93, "template_version": "...",
+                         "mode": "full", "degraded": false, "truncated": false, "evidence_dropped": 0}
 event: done       data: {}
 ```
 
-On mid-stream failure: `event: error` with a problem document, then the stream closes. Clients must treat a missing `done` as an incomplete answer.
+**A stream reports everything the JSON body reports.** Both shapes are produced by one pipeline (TASK-0438), so `usage` closes the stream with the same `mode`, `degraded`, `truncated` and `evidence_dropped` the non-streamed body carries, `meta` always carries the `cache` member, a streamed query increments the same metrics (plus `fasterrag_ttft_seconds`, which only a stream can have), and it stores the same trace — including the trace of a withheld answer, which a streamed refusal did not store before 2026-11-12. Two members are **estimates on a stream and provider-reported otherwise**, because a provider stream carries text only: `prompt_tokens` / `completion_tokens` are counted locally (and `estimated_cost_usd` is priced from those), and `truncated` is inferred from the local completion count reaching `llm.max_tokens` rather than read from the provider's finish reason. An answer that ended on its own just under the ceiling can therefore be flagged, and one the provider cut can be missed when the local count runs low.
+
+**A query refused before its first event is an ordinary problem response, not a stream.** Everything that can refuse a query outright — retrieval failing (`503 RETRIEVAL_FAILED`), the token budget (`402 BUDGET_EXCEEDED`) — happens before `meta` is produced, and the server produces `meta` before it sends the status line. Such a request gets the same status and `application/problem+json` body as `stream: false`, with no SSE frame at all. Before 2026-11-12 the budget check ran after `meta`, so a streamed request over its budget received `200` and then an `error` event (TASK-0438).
+
+**A provider that is down degrades a stream the way it degrades a JSON body** (D4, TASK-0438). When generation fails with a *retryable* error — timeout, rate limit, 5xx, an open circuit breaker — **before the first `token` has been sent**, the stream serves the `extractive` rung instead of failing: a second `meta` announcing the mode, the retrieved passages as one `token`, then `citations`, `usage` and `done`.
+
+```
+event: meta       data: {"trace_id": "...", "mode": "full", "degraded": false, "cache": {...}}
+event: meta       data: {"trace_id": "...", "mode": "extractive", "degraded": true}
+event: token      data: {"text": "<the retrieved passages>"}
+event: citations  data: {"citations": [...]}
+event: usage      data: {"usage": {"prompt_tokens": 0, "completion_tokens": 0, "estimated_cost_usd": null}, ..., "mode": "extractive", "degraded": true, ...}
+event: done       data: {}
+```
+
+`meta` can therefore arrive twice, and the later one wins: the first was sent before the provider had been called. A client that reads only the first still gets the truth from `usage`. `fasterrag_degraded_responses_total{mode="extractive"}` is incremented exactly as for a non-streamed query. Before 2026-11-12 this case ended the stream with `error` and no `done`.
+
+**The boundary is the first `token` sent.** After it, the caller has been shown text the retrieved passages cannot replace — appended, they would read as the answer's continuation — so there is no fallback: `event: error` carrying `code`, `detail`, `trace_id`, `retryable` and the `status` the problem would have had, then the stream closes. The same `error` event ends a stream on any *non-retryable* failure after `meta` (a rejected credential, an unknown model): the status is already `200` and cannot change. Clients must treat a missing `done` as an incomplete answer. With `generation.grounded_or_refuse: true` no `token` is sent until the answer has been graded, so there a retryable failure at any point of generation is still before the boundary and degrades.
 
 Grounded-or-refuse while streaming: a token cannot be unsaid once sent, so with `generation.grounded_or_refuse: true` no `token` event is emitted until the whole answer has been graded — time-to-first-token is traded for the guarantee the flag exists to provide, and the flag defaults to `false` so the trade is only made on request. A withheld answer replaces the `token`, `citations`, and `usage` events with one `insufficient_evidence` event carrying the same body as the non-streamed refusal, followed by `done`:
 
 ```
-event: meta                   data: {"trace_id": "...", "mode": "full", "degraded": false}
+event: meta                   data: {"trace_id": "...", "mode": "full", "degraded": false, "cache": {...}}
 event: insufficient_evidence  data: {"code": "INSUFFICIENT_EVIDENCE", "answer": null, "best_candidates": [...], "faithfulness": 0.38, "threshold": 0.7, "trace_id": "..."}
 event: done                   data: {}
 ```
@@ -270,8 +290,30 @@ Responds `200` with `{"chunks": [...], "trace_id": "..."}`. No generation happen
 | `GET /v1/collections/{name}` | Detail incl. `index.lock` summary and drift status (D1). | 200 | 404 |
 | `PATCH /v1/collections/{name}` | **Not yet implemented.** Mutable settings only (metadata schema, description). | 200 | 404, 422 |
 | `DELETE /v1/collections/{name}` | Drop collection (requires `admin` scope; refuses while it is an active alias target unless `?force=true`). | 204 | 404, 409 |
+| `DELETE /v1/collections/{name}/documents/{document_id}` | Delete one document: every chunk carrying that `document_id`, its dedup record, its lockfile entry, and the semantic cache. See [Deleting a document](#deleting-a-document). | 200 | 404, 422 |
 | `POST /v1/collections/{name}/reindex` | **Not yet implemented over REST** — shipped on the CLI as `fasterrag index reindex`. D2 zero-downtime reindex: blue/green build → eval gate → alias swap. Returns a job id. | 202 | 404, 409 |
 | `POST /v1/collections/{name}/rollback` | **Not yet implemented over REST** — shipped on the CLI as `fasterrag index rollback`. Alias flip back to the retained previous collection (within retention window). | 200 | 404, 409 |
+
+### Deleting a document
+
+`DELETE /v1/collections/{name}/documents/{document_id}` — `collections` scope. The `document_id` is the `d_…` id `GET /v1/ingest/{job_id}/documents` reports for each source.
+
+```json
+{
+  "collection": "docs",
+  "document_id": "d_0d06505c1a084fbc",
+  "known": true,
+  "deleted_at": "2026-11-12T02:14:07.512339+00:00"
+}
+```
+
+What it does, in order: writes a tombstone to the ingestion journal so the document's content hash stops counting as a duplicate and the same file can be ingested again; deletes every chunk whose `document_id` payload matches, by one filter pushed down to the vector database; removes the document from the collection's `index.lock`; invalidates the semantic response cache. A failure after the tombstone leaves chunks the journal has already forgotten — the request returns the error, and repeating it removes them.
+
+**It is idempotent, and it does not return 404 for a document that is not there.** `known` reports whether the journal held a live record of the document in that collection. Deleting a document nobody ingested, or deleting the same one twice, is `200` with `"known": false`: the vector database is still asked to delete, because the journal is not the index — with `ingestion.dedup: false`, or after an archive import, documents are indexed that the journal has never heard of — and no backend reports whether a filter matched anything. The response therefore never states how many chunks were removed. `404 NOT_FOUND` means the **collection** does not exist; `422 VALIDATION_FAILED` means the document id was blank.
+
+**Tenancy.** The collection is resolved exactly as every other `/v1/collections` route resolves it — `<tenant>__<name>` when `security.multi_tenancy` is on — and the delete additionally matches only chunks whose `tenant` payload tag is the caller's, so knowing another tenant's document id (it is derived from the source path) removes nothing of theirs. `POST /v1/ingest` does not apply that prefix (TASK-0381), so with multi-tenancy on, a document ingested into `docs` lives in the unprefixed `docs` collection and this route, which addresses `<tenant>__docs`, does not reach it; which of the two is correct is the open decision in TASK-0339.
+
+**Re-ingesting instead of deleting.** A source ingested again with different content is updated in place: its chunks are overwritten, and the chunks beyond its new length are deleted once the new ones are written. That needs the journal to know the document, so it applies when `ingestion.dedup` is on (the default).
 
 ## Health & readiness
 

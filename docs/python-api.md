@@ -9,7 +9,7 @@ fasterRag is released as an installable Python package so applications can **imp
 > | Standalone components — `fasterrag.parsing`, `.chunking`, `.retrieval`, `.rerank`, `.evals` | **Shipped** and importable today |
 > | Typed error taxonomy — `fasterrag.errors` (same `code`s as the API) | **Shipped** |
 > | `FasterRag` facade — `from_config`, `from_settings`, `ingest`, `query`, `query_stream`, `retrieve`, `estimate`, `index_lock` | **Shipped**. Verified end to end against live Qdrant and OpenAI — a one-off manual run, not a committed test, since a unit run must not depend on a credential or spend money (the standing gap is TASK-0205) |
-> | `FasterRag.doctor`, `.collections`, `.create_collection`, `.drop_collection`, `.replay` | **Shipped** on both facades |
+> | `FasterRag.doctor`, `.collections`, `.create_collection`, `.drop_collection`, `.delete_document`, `.replay` | **Shipped** on both facades |
 > | `FasterRag.vector_db`, `.embeddings`, `.cache`, `.journal` | **Shipped** on the async facade only. They hand back the live adapter for callers that need the backend directly; the sync facade has no counterparts, because an async adapter driven from the blocking facade's managed loop is not a thing a caller can hold |
 > | `FasterRag.export_archive` / `.import_archive` | **Not yet wrapped on the facade** (TASK-0079). The archive itself **is** built — `services/archive.py`, `services/archive_import.py`, the `export`/`import` CLI commands, and `POST /v1/admin/export` / `/import` all ship, and a Qdrant round trip is verified against a live backend (TASK-0214 ✅). Only the facade methods are missing |
 > | `fasterrag.sync` blocking facade | **Shipped**. Verified end to end against live Qdrant and OpenAI — a one-off manual run, not a committed test, since a unit run must not depend on a credential or spend money (the standing gap is TASK-0205) |
@@ -94,6 +94,7 @@ The async facade. Every **method** here has a blocking counterpart of the same n
 | `collections` | `() -> list[CollectionInfo]` | What the configured vector DB holds, as the adapter reports it. |
 | `create_collection` | `(name: str, *, distance: str \| None = None, shard_number: int = 1, replication_factor: int = 1) -> None` | Create a collection sized to the configured embedding dimensions. |
 | `drop_collection` | `(name: str) -> bool` | Delete a collection; `False` when there was none to delete. |
+| `delete_document` | `(document_id: str, *, collection: str \| None = None, tenant: str \| None = None) -> DocumentDeletion` | Delete one document from a collection (the configured default when `collection` is omitted): every chunk carrying that `document_id`, its dedup record — so the same source can be ingested again — its `index.lock` entry, and this instance's semantic cache. **Idempotent**: a document nothing holds is not an error, and `DocumentDeletion.known` says whether the journal held a live record of it; the number of chunks removed is not reported, because no adapter can count what a filter matched. A collection that does not exist raises `NOT_FOUND`. With `tenant`, only chunks whose `tenant` payload tag is that id are removed. The `document_id` is `DocumentRecord.document_id` from `await rag.journal.documents(job_id)`. |
 | `estimate` | `(sources: Sequence[str], *, all_providers: bool = False) -> Estimate` | D9 preflight, and the one call on this table that is not a coroutine: it parses and counts locally and reaches no provider. Raises `FasterRagError` (`VALIDATION_FAILED`) when `cost.estimator` is false — the library obeys the same switch as the CLI and the API. |
 | `doctor` | `() -> DoctorReport` | D10 diagnostics; each check carries its own `passed` flag and `fix` string. |
 | `replay` | `(trace_id: str, candidate: Settings \| None = None) -> ReplayResult` | D8 side-by-side replay of a journaled trace, optionally against a candidate configuration. |
@@ -127,6 +128,7 @@ Every one of them is frozen except `JobRecord`, which a running job is updated i
 - `DoctorReport` (`fasterrag.services.doctor`) — `checks`, and the computed `passed`, `failures`.
 - `ReplayResult` (`fasterrag.services.replay`) — `trace_id`, `query`, `config_changes`, `retrieval`, `original_answer`, `replayed_answer`, `original_citations`, `replayed_citations`, and the computed `answer_changed`, `deterministic`.
 - `CollectionInfo` (`fasterrag.adapters.vectordb.base`) — `name`, `vectors`, `dimensions`, `distance`, `sparse`.
+- `DocumentDeletion` (`fasterrag.services.documents`) — `collection`, `document_id`, `known`, `deleted_at`.
 - `IndexLock` (`fasterrag.services.lockfile`) — `collection`, `config_hash`, `embedding_model`, `embedding_model_version`, `dimensions`, `chunker_strategy`, `chunker_version`, `chunk_size`, `overlap`, `contextual_enrichment`, `identity_version`, `document_hashes`, `built_at`, `built_by`, `lock_version`.
 
 D5's refusal is `Answer.insufficient_evidence`, and the answer text is `None` when it fires.
@@ -219,7 +221,7 @@ Deployment note: in-process worker pools are suitable for small/medium loads; fo
 
 Third parties add providers by implementing the adapter base classes and registering them via Python entry points — no fork required:
 
-> **Status (2026-11-11): the registration half works and the selection half does not.** The three factories discover `fasterrag.vectordb`, `fasterrag.embeddings` and `fasterrag.llm` entry points, and `resolve_adapter_class("mydb")` returns a plugin's class. But `vector_db.provider`, `embeddings.provider` and `llm.provider` are closed lists in the config schema, so `provider: mydb` in `config.yaml` is refused at load before any factory runs. Until TASK-0439 lands a plugin can be constructed in code and passed to the services directly, and cannot be named in configuration. Chunkers, parsers and rerankers have no entry-point group yet (same task).
+> **Status (2026-11-12): vector databases, embedders and LLMs are selectable by name; chunkers, parsers and rerankers are not.** A name registered under `fasterrag.vectordb`, `fasterrag.embeddings` or `fasterrag.llm` validates as `vector_db.provider`, `embeddings.provider` (and a tier rule's `provider`) or `llm.provider`, and the matching factory builds it. Validation reads the installed distributions' entry-point metadata and imports nothing, so a plugin's module is loaded only when its adapter is built. A name that is neither built in nor registered still stops the load, and the error lists the built-in names and the plugins that are installed. `tests/unit/test_plugin_selection.py` proves the whole path: it installs a fake distribution, loads a `config.yaml` naming it through the real loader, ingests a document and answers a query. Chunkers, parsers and rerankers have no entry-point group yet (TASK-0513).
 
 ```toml
 [project.entry-points."fasterrag.vectordb"]
@@ -233,6 +235,17 @@ Each line below names the entry-point group, the base class and every abstract m
 - `fasterrag.llm` → subclass `LLMAdapter` (`from fasterrag.adapters.llm.base import LLMAdapter`): `close`, `complete`, `health`, `stream`
 
 A registered provider becomes selectable in `config.yaml` (`vector_db.provider: mydb`) and MUST pass the shared **adapter contract test suite** ([testing-strategy.md](testing-strategy.md)) to be considered conformant.
+
+**Credentials.** A plugin reads its key through the name in its section's `api_key_env`, exactly as a built-in does, and never inherits a built-in's default: for a plugin provider `llm.api_key_env` and `vector_db.api_key_env` must be written in `config.yaml`, as a variable name or as `null`, or the load stops ([config-reference.md](config-reference.md), cross-field rule 3). Configuration is validated without loading the plugin, so it cannot know whether a key is needed — a plugin that needs one says so when it is built, by calling `require_key` (`fasterrag.adapters.embeddings.base`) or `require_llm_key` (`fasterrag.adapters.llm.base`) with its `api_key_env`, which raises a `ConfigError` naming the missing variable.
+
+**The `provider` attribute.** `EmbeddingAdapter` and `LLMAdapter` declare a class attribute `provider` and give it no default; the pipeline reads it to label metrics, attribute cost and name circuit breakers. Set it on the subclass to the name the entry point registers — it is not an abstract member, so a plugin without it instantiates and then fails at its first embedding or completion.
+
+```yaml
+# config.yaml — the only change needed to select an installed plugin
+vector_db:
+  provider: mydb
+  api_key_env: MYDB_API_KEY   # or null; never left to the Qdrant default
+```
 
 ## Stability guarantees
 

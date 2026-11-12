@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 
-from fasterrag.adapters.embeddings.tiering import create_embedding_router
 from fasterrag.adapters.llm.factory import create_llm_adapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.commands.pipeline import _settings_or_none
@@ -21,6 +20,7 @@ from fasterrag.cli.output import Console, ExitCode
 from fasterrag.config.loader import load_settings
 from fasterrag.core.rerank import CrossEncoderReranker
 from fasterrag.errors import ConfigError, FasterRagError
+from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.generation import GenerationService
 from fasterrag.services.querying import RetrievalService
 from fasterrag.services.replay import ReplayResult, replay_trace

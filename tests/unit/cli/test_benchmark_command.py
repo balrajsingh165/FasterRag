@@ -253,6 +253,29 @@ def test_the_query_suite_disables_the_semantic_cache(
     assert query_service.cache is None
 
 
+def test_the_query_suite_disables_the_embedding_cache(
+    config: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Wired in, the cache answered every repeat of the question, so no repeat was a query."""
+    built: list[Any] = []
+
+    def build(settings: Any, adapter: object) -> FakeService:
+        built.append(settings)
+        return FakeService()
+
+    monkeypatch.setattr(benchmark_command, "create_vector_db_adapter", lambda s: Closeable())
+    monkeypatch.setattr(benchmark_command, "_build_generation", build)
+
+    code = main(
+        ["benchmark", "--config", config, "--suite", "query", "--iterations", "1", "--json"]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == ExitCode.SUCCESS
+    assert [settings.embeddings.cache.enabled for settings in built] == [False]
+    assert "embedding cache are disabled" in " ".join(payload["suites"][0]["notes"].split())
+
+
 def test_the_query_flag_is_the_question_that_gets_asked(
     config: str, query_service: FakeService
 ) -> None:

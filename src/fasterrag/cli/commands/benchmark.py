@@ -15,11 +15,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from fasterrag.adapters.embeddings.tiering import create_embedding_router
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.commands.pipeline import _build_generation, _settings_or_none
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.sources import expand_sources
+from fasterrag.config.schema import Settings
 from fasterrag.errors import FasterRagError
 from fasterrag.services.benchmark import (
     REPETITIONS,
@@ -28,12 +28,20 @@ from fasterrag.services.benchmark import (
     ledger_entry,
     measure,
 )
+from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.estimation import estimate_sources
 from fasterrag.services.evaluation import run_eval, summarize
 
 __all__ = ["run_benchmark"]
 
 _DEFAULT_QUERY = "What does this corpus say about the subject it covers?"
+
+
+def _without_embedding_cache(settings: Settings) -> Settings:
+    """Return ``settings`` with the embedding cache switched off, for a timed run."""
+    cache = settings.embeddings.cache.model_copy(update={"enabled": False})
+    embeddings = settings.embeddings.model_copy(update={"cache": cache})
+    return settings.model_copy(update={"embeddings": embeddings})
 
 
 async def _query_suite(
@@ -45,7 +53,11 @@ async def _query_suite(
         return None, ExitCode.USAGE
 
     adapter = create_vector_db_adapter(settings)
-    service = _build_generation(settings, adapter)
+    # CRITICAL: the embedding cache is off for the run, for the reason the semantic cache is
+    # below. The suite repeats one question; cached, it would be embedded once and every
+    # later iteration would skip the provider round trip the notes say is included — and a
+    # second run would skip it from the first iteration, off the entry left on disk.
+    service = _build_generation(_without_embedding_cache(settings), adapter)
     # CRITICAL: the suite issues the same question repeatedly, so with the semantic cache
     # live every repetition after the first would be a cache hit — the run would report
     # cache latency under the name "query latency". docs/performance.md is explicit that
@@ -73,9 +85,10 @@ async def _query_suite(
             runs=runs,
             notes=(
                 "end-to-end POST /v1/query equivalent through the service layer, including "
-                "retrieval, assembly, and generation. The semantic cache is disabled for the "
-                "run: the suite repeats one question, so a live cache would report hit "
-                "latency as query latency. These are non-cached, and include provider "
+                "retrieval, assembly, and generation. The semantic cache and the embedding "
+                "cache are disabled for the run: the suite repeats one question, so a live "
+                "cache would report hit latency as query latency. These are non-cached, and "
+                "include provider "
                 "round-trip time, which dominates and is not fasterRag's to control"
             ),
         ),

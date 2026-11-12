@@ -35,7 +35,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
-from fasterrag.adapters.embeddings.tiering import TieringRouter, create_embedding_router
+from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.adapters.llm.factory import create_llm_adapter
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
@@ -44,6 +44,7 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger, use_trace_id
+from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.jobs import requeue, resumable, settle_interrupted
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.lockfile import LockStore, build_lock
@@ -220,6 +221,7 @@ class IngestionService:
                 journal=self.journal,
                 executor_factory=self._executor_factory,
                 llm=enricher,
+                trim=indexer.trim,
             ) as cpu:
                 parse_report, embed_report = await _pipe(
                     cpu.process(
@@ -256,6 +258,7 @@ class IngestionService:
             "embedded": embed_report.embedded,
             "indexed": indexer.written,
             "deduplicated": parse_report.deduplicated,
+            "skipped": parse_report.empty,
             "dead_lettered": parse_report.dead_lettered + len(failed),
         }
         settled = replace(
@@ -267,10 +270,10 @@ class IngestionService:
         await _uninterrupted(self.journal.save_job(settled))
         await self._publish_metrics(settled, counts, elapsed=time.monotonic() - started)
 
-        if indexer.written:
+        if indexer.written or indexer.trimmed:
             await self._write_lockfile(record.collection)
 
-        if self.cache is not None and indexer.written:
+        if self.cache is not None and (indexer.written or indexer.trimmed):
             await self.cache.invalidate(f"ingest job {record.job_id} indexed {indexer.written}")
 
         _logger.info("ingest finished", extra={"job_id": record.job_id, **counts})
@@ -292,10 +295,11 @@ class IngestionService:
         """Publish the ingestion half of the metrics catalogue for a settled job."""
         indexed = counts["indexed"]
         failed = counts["dead_lettered"]
-        succeeded = counts["total"] - failed - counts["deduplicated"]
+        succeeded = counts["total"] - failed - counts["deduplicated"] - counts["skipped"]
 
         metrics.INGEST_DOCUMENTS.increment(float(max(succeeded, 0)), status="succeeded")
         metrics.INGEST_DOCUMENTS.increment(float(counts["deduplicated"]), status="deduplicated")
+        metrics.INGEST_DOCUMENTS.increment(float(counts["skipped"]), status="skipped")
         metrics.INGEST_DOCUMENTS.increment(float(failed), status="dead_lettered")
 
         if elapsed > 0:

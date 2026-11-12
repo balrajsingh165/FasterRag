@@ -35,7 +35,7 @@ The source unit as ingested. One document produces many chunks.
 | `parse_flags` | list[str] | Quality signals, e.g. `low_text_yield`, `tables_detected`, `ocr_applied` |
 | `metadata` | object | User metadata from ingest merged with extracted document metadata (title, author, dates) |
 | `tenant` | str\|null | Set when `security.multi_tenancy: true` |
-| `status` | str | `indexed` \| `deduplicated` \| `dead_lettered` \| `pending` |
+| `status` | str | `indexed` \| `deduplicated` \| `skipped` \| `dead_lettered` \| `pending`. `skipped` means the document parsed and produced no chunk (reason code `EMPTY_DOCUMENT`): nothing of it is in the index and its content hash is not kept for deduplication |
 
 ## Chunk
 
@@ -97,7 +97,7 @@ Drift = any mismatch between this file and live config/corpus. Reported, never s
 | `job_id` | str | `job_…` |
 | `collection` | str | Target |
 | `status` | str | `queued` \| `running` \| `completed` \| `failed` \| `partial` |
-| `counts` | object | `total`, `parsed`, `chunked`, `embedded`, `indexed`, `deduplicated`, `dead_lettered` |
+| `counts` | object | `total`, `parsed`, `chunked`, `embedded`, `indexed`, `deduplicated`, `skipped`, `dead_lettered`. `skipped` is the number of documents that parsed and held nothing to index; it does not count toward failure |
 | `sources` | list[Source] | `{type: path\|url\|inline, value: str}` |
 | `checkpoint` | `{last_document_index: int, written_at: str}` | Journal checkpoint — where a crash resumes from (D3) |
 | `started_at` / `finished_at` | str\|null | Timestamps |
@@ -116,6 +116,17 @@ Drift = any mismatch between this file and live config/corpus. Reported, never s
 | `attempts` | int | Retries consumed of `ingestion.dlq.max_retries` |
 | `first_failed_at` / `last_failed_at` | str | Timestamps |
 | `trace_id` | str | Correlates to logs and spans |
+
+### Dedup record and tombstone
+
+One JSON object per line in `<journal>/collections/<collection>/content-hashes.jsonl`. The file is append-only; it is read in order and the order is the meaning.
+
+| Record | Fields | Written |
+|---|---|---|
+| Remembered hash | `content_hash: str`, `document_id: str` | When every chunk of a document is in the vector database |
+| Tombstone | `tombstone: true`, `document_id: str`, `deleted_at: str` | When the document is deleted and a live record of it existed |
+
+A tombstone cancels the hash remembered for its `document_id` **earlier in the file**, and nothing after it: a document ingested again after its tombstone is known again. A later remembered hash for the same `document_id` replaces the earlier one in the same way, so a document holds one hash at a time — the version the index holds. A hash that a later line assigned to a different document is left with that document. `IndexLock.document_hashes` is derived from the same reading, so a deleted document leaves the lockfile too.
 
 ## Query-side entities
 

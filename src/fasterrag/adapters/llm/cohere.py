@@ -1,4 +1,23 @@
-"""Cohere generation."""
+"""Cohere generation through the v2 chat API.
+
+The ``cohere`` package ships two clients under one name. ``AsyncClient`` speaks the v1 chat
+API, whose ``chat`` takes a single ``message`` string; ``AsyncClientV2`` speaks the v2 API,
+whose ``chat`` takes a ``messages`` list and answers with content blocks. This adapter is
+written against v2 and builds ``AsyncClientV2`` by name: handing a ``messages`` list to the
+v1 client is a ``TypeError`` before any request is sent, which is what this adapter did
+until TASK-0441 replayed a recorded response through the real library.
+
+Two things in the v2 response are not what the other providers send, and both are
+normalised here so nothing downstream needs to know the vendor:
+
+* ``finish_reason`` is upper-case (``COMPLETE``, ``MAX_TOKENS``). It is lower-cased, so a
+  reply cut off at the token limit reads as ``max_tokens`` and ``Completion.truncated`` is
+  true for it.
+* ``usage`` carries two counts, ``billed_units`` and ``tokens``, and they are allowed to
+  differ. The adapter reports the billed figure, because that is what the invoice is
+  charged on, and falls back to ``tokens`` only when no billed figure is stated — the same
+  choice ``adapters/embeddings/cohere.py`` makes for the embedding side.
+"""
 
 from __future__ import annotations
 
@@ -27,11 +46,11 @@ class CohereGenerator(LLMAdapter):
         """Return the client, building it on first use."""
         if self._client is None:
             try:
-                from cohere import AsyncClient
+                from cohere import AsyncClientV2
             except ImportError as exc:
                 raise require_llm_extra(self.provider, "cohere", "cohere") from exc
 
-            self._client = AsyncClient(
+            self._client = AsyncClientV2(
                 api_key=require_llm_key(self.config.api_key_env, self.provider),
                 timeout=self.timeout,
             )
@@ -73,7 +92,7 @@ class CohereGenerator(LLMAdapter):
             model=self.config.model,
             prompt_tokens=_usage_of(response, "input_tokens"),
             completion_tokens=_usage_of(response, "output_tokens"),
-            finish_reason=getattr(response, "finish_reason", None),
+            finish_reason=_finish_reason_of(response),
         )
 
     async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
@@ -81,10 +100,7 @@ class CohereGenerator(LLMAdapter):
         try:
             events = self._connected().chat_stream(**self._request(prompt, system))
             async for event in events:
-                delta = getattr(event, "delta", None)
-                message = getattr(delta, "message", None) if delta else None
-                content = getattr(message, "content", None) if message else None
-                text = getattr(content, "text", None) if content else None
+                text = _delta_text_of(event)
                 if text:
                     yield text
         except ConfigError:
@@ -118,9 +134,26 @@ def _text_of(response: Any) -> str:
     return "".join(getattr(block, "text", "") or "" for block in blocks)
 
 
+def _delta_text_of(event: Any) -> str | None:
+    """Return the text a ``content-delta`` stream event carries, or None for any other."""
+    if getattr(event, "type", None) != "content-delta":
+        return None
+    message = getattr(getattr(event, "delta", None), "message", None)
+    text = getattr(getattr(message, "content", None), "text", None)
+    return text if isinstance(text, str) else None
+
+
+def _finish_reason_of(response: Any) -> str | None:
+    """Return the finish reason in the lower case every other provider uses."""
+    reason = getattr(response, "finish_reason", None)
+    return reason.lower() if isinstance(reason, str) else None
+
+
 def _usage_of(response: Any, field: str) -> int:
-    """Extract a billed token count, defaulting to zero when absent."""
+    """Extract a billed token count, then a consumed one, defaulting to zero when absent."""
     usage = getattr(response, "usage", None)
-    tokens = getattr(usage, "tokens", None) if usage else None
-    value = getattr(tokens, field, None) if tokens else None
-    return int(value or 0)
+    for source in ("billed_units", "tokens"):
+        value = getattr(getattr(usage, source, None), field, None)
+        if value is not None:
+            return int(value)
+    return 0

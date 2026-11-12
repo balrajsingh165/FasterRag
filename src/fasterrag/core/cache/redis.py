@@ -22,6 +22,14 @@ not exist, which the next read prunes. The reverse order would leave a value tha
 knows about — invisible to the ceiling, to ``items``, and to ``clear`` — and an entry
 nothing can find or evict is a leak rather than a miss.
 
+**A batch costs a fixed number of round trips, not one per key.** ``get_many`` and
+``set_many`` send their commands through a pipeline: a batch of sixty-four embeddings read
+one key at a time would be over a hundred round trips before the provider is asked, which
+on a network link costs more than the cache saves. The pipelines are deliberately not
+transactions — the index-first order above is what keeps an interrupted batch safe, and a
+``MULTI`` would only add a failure mode. Sequence numbers for a batch are reserved with one
+``INCRBY``, so recency within it follows the order the caller gave.
+
 TTL is written twice: into the payload, where ``Entry`` holds the deadline that makes an
 expired entry a miss on every backend, and as the key's native expiry, so Redis reclaims the
 memory instead of holding a dead payload until something happens to read it.
@@ -33,7 +41,7 @@ failure instead.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Final
 
@@ -135,6 +143,43 @@ class RedisStore(CacheStore):
             await self._touch(key)
             return entry.value
 
+    async def get_many(self, keys: Sequence[str]) -> list[bytes | None]:
+        """Return the value for each of ``keys`` in two round trips, restacking every hit."""
+        if not keys:
+            return []
+
+        async with self._guard("read entries"):
+            reading = self._client.pipeline(transaction=False)
+            reading.mget([self._key(key) for key in keys])
+            reading.incrby(self._sequence, len(keys))
+            raws, last = await reading.execute()
+
+            first = int(last) - len(keys) + 1
+            values: list[bytes | None] = []
+            hits: dict[str, int] = {}
+            misses: list[str] = []
+            dead: list[str] = []
+            for offset, (key, raw) in enumerate(zip(keys, raws, strict=True)):
+                entry = Entry.decode(raw) if isinstance(raw, bytes) else None
+                if entry is None or entry.expired:
+                    values.append(None)
+                    misses.append(key)
+                    if raw is not None:
+                        dead.append(self._key(key))
+                else:
+                    values.append(entry.value)
+                    hits[key] = first + offset
+
+            settling = self._client.pipeline(transaction=False)
+            if hits:
+                settling.zadd(self._index, hits)
+            if dead:
+                settling.delete(*dead)
+            if misses:
+                settling.zrem(self._index, *misses)
+            await settling.execute()
+            return values
+
     async def set(self, key: str, value: bytes, *, ttl: int | None = None) -> None:
         """Store ``value`` under ``key``, then evict down to the entry ceiling."""
         payload = Entry(value, deadline_for(ttl)).encode()
@@ -143,13 +188,34 @@ class RedisStore(CacheStore):
             await self._client.set(self._key(key), payload, ex=ttl or None)
             await self._evict()
 
+    async def set_many(self, entries: Mapping[str, bytes], *, ttl: int | None = None) -> None:
+        """Store every entry in two round trips, then evict down to the entry ceiling."""
+        if not entries:
+            return
+
+        deadline = deadline_for(ttl)
+        async with self._guard("write entries"):
+            last = int(await self._client.incrby(self._sequence, len(entries)))
+            first = last - len(entries) + 1
+
+            writing = self._client.pipeline(transaction=False)
+            writing.zadd(self._index, {key: first + offset for offset, key in enumerate(entries)})
+            for key, value in entries.items():
+                writing.set(self._key(key), Entry(value, deadline).encode(), ex=ttl or None)
+            writing.zcard(self._index)
+            results = await writing.execute()
+
+            await self._evict(int(results[-1]))
+
     async def _touch(self, key: str) -> None:
         """Restack ``key`` as the most recently used entry."""
         await self._client.zadd(self._index, {key: await self._client.incr(self._sequence)})
 
-    async def _evict(self) -> None:
+    async def _evict(self, held: int | None = None) -> None:
         """Drop the least recently used entries once the index exceeds the ceiling."""
-        excess = int(await self._client.zcard(self._index)) - self._maximum
+        if held is None:
+            held = int(await self._client.zcard(self._index))
+        excess = held - self._maximum
         if excess <= 0:
             return
 

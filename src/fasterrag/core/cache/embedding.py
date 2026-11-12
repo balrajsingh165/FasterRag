@@ -1,50 +1,124 @@
 """Embedding cache: never pay twice for the same text under the same model.
 
-Keyed by content hash plus model plus model version (``docs/architecture.md`` §7). All three
-belong in the key: the hash alone would serve a vector from the wrong model, and the model
-name alone would serve a stale vector after a provider silently upgraded the weights behind
-a stable name. Because the key pins the model version, a stale hit is not merely unlikely —
-it is unrepresentable.
+Keyed by everything that decides what vector a text gets (``docs/architecture.md`` §7): the
+provider, the model, the model version, the configured ``embeddings.dimensions``, whether
+the text is embedded as a document or as a query, and the text itself. Each one belongs in
+the key. Without the model version a provider that upgraded the weights behind a stable
+name would be served stale vectors. Without the provider two providers serving a model of
+the same name would share entries. Without the dimensions a vector shortened to 256 would
+be served after the setting changed to 512. Without the input type a query would be served
+a passage's vector, and several providers embed the two differently on purpose (Cohere's
+``search_query`` and ``search_document``). Because the key pins all of them, a stale hit is
+not merely unlikely — it is unrepresentable.
+
+The dimensions in the key are the *configured* ones, never ``adapter.dimensions``: a local
+model reports ``None`` until it has loaded, so the reported size changes during the first
+call and a key built from it would miss everything the previous process stored.
+
+The key names its fields in clear so an operator can read a Redis keyspace, and ends in a
+digest taken over every field with its length. Model ids contain colons
+(``nomic-embed-text:latest``), so the readable part alone cannot tell ``a:b`` + ``c`` from
+``a`` + ``b:c``; the digest can. Entries written under the earlier
+``emb:{model}:{version}:{sha256(text)}`` scheme can never match a key of this one, so they
+are simply never read again and age out through eviction.
 
 Implemented as a wrapper around any ``EmbeddingAdapter`` rather than as a branch inside each
 one, so a third-party adapter registered through the entry point gets caching without
 knowing the cache exists.
 
+**The wrapper must be indistinguishable from what it wraps**, because the pipeline asks an
+adapter more than the two embedding calls. The embedding pool prices and labels usage by
+``adapter.provider``, so the wrapper reports the wrapped provider's name; reporting its own
+would send every cached deployment's spend to the unpriced counter. The pool also decides
+whether to late-chunk by asking whether the adapter has ``embed_pooled``, so
+:func:`cache_embeddings` returns a wrapper that has it exactly when the wrapped adapter
+does. Pooled vectors pass straight through and are never cached: a late-chunked vector is a
+function of the whole document around the chunk, not of the chunk's text, so no key built
+from the text could be right for it — and for the same reason a pooled vector is never
+stored where a plain document lookup of the same text would find it.
+
+Several wrappers may share one store, one per embedding tier. Only the wrapper that owns the
+store closes it, so a router that closes each of its adapters releases a Redis pool once.
+
 Batches are resolved per text, not per batch: a batch that is nine-tenths cached sends only
 the missing tenth to the provider. Vectors are returned in the caller's original order, since
 retrieval matches vectors to chunks positionally and a reordered batch would silently attach
 every vector to the wrong chunk.
+
+The store is asked once per batch, not once per text: one ``get_many`` before the provider
+and one ``set_many`` after it, whatever the batch size. A text that appears several times in
+a batch is sent to the provider once, since paying twice inside one call is no better than
+paying twice across two.
 """
 
 from __future__ import annotations
 
 import hashlib
 import struct
-from collections.abc import Sequence
-from typing import ClassVar, Final
+from collections.abc import Mapping, Sequence
+from typing import Final, Literal, Protocol, cast
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.core.cache.stats import CacheStats
 from fasterrag.core.cache.store import CacheStore
-from fasterrag.errors import CacheError
+from fasterrag.errors import CacheError, EmbedError
 from fasterrag.observability.logging import get_logger
 
-__all__ = ["CachingEmbeddingAdapter", "decode_vector", "embedding_key", "encode_vector"]
+__all__ = [
+    "CachingEmbeddingAdapter",
+    "InputType",
+    "PoolingCachingEmbeddingAdapter",
+    "cache_embeddings",
+    "decode_vector",
+    "embedding_key",
+    "encode_vector",
+]
+
+InputType = Literal["document", "query"]
 
 _ELEMENT: Final = struct.Struct("<f")
+_NATIVE_SIZE: Final = "native"
+_LENGTH_BYTES: Final = 8
 
 _logger = get_logger(__name__)
 
 
-def embedding_key(text: str, model: str, model_version: str) -> str:
-    """Return the cache key for one text under one model.
+class _Pooling(Protocol):
+    """What the embedding pool looks for on an adapter before it late-chunks a document."""
 
-    The text is hashed rather than embedded in the key: keys reach a Redis keyspace and a
-    filename, and a document chunk is neither short enough nor safe enough to put in either.
+    async def embed_pooled(
+        self, document: str, spans: Sequence[tuple[int, int]]
+    ) -> EmbeddingResult:
+        """Return one vector per span, pooled from a pass over the whole document."""
+        ...
+
+
+def embedding_key(
+    text: str,
+    *,
+    provider: str,
+    model: str,
+    model_version: str,
+    dimensions: int | None,
+    input_type: InputType,
+) -> str:
+    """Return the cache key for ``text`` embedded one way by one provider's model.
+
+    The text is hashed, never placed in the key: keys reach a Redis keyspace and a filename.
     """
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return f"emb:{model}:{model_version}:{digest}"
+    size = _NATIVE_SIZE if dimensions is None else str(dimensions)
+    identity = (provider, model, model_version, size, input_type)
+    digest = hashlib.sha256()
+    for part in (*identity, text):
+        # CRITICAL: `surrogatepass`, not strict. A lone surrogate reaches here from a JSON
+        # escape in an API request, and a strict encode raises ValueError — which is not a
+        # typed error, so it would end the whole embedding pool where the provider's own
+        # refusal of the same text fails one batch.
+        encoded = part.encode("utf-8", "surrogatepass")
+        digest.update(len(encoded).to_bytes(_LENGTH_BYTES, "big"))
+        digest.update(encoded)
+    return f"emb:{':'.join(identity)}:{digest.hexdigest()}"
 
 
 def encode_vector(vector: Sequence[float]) -> bytes:
@@ -62,14 +136,21 @@ def decode_vector(raw: bytes) -> list[float] | None:
 class CachingEmbeddingAdapter(EmbeddingAdapter):
     """An embedding adapter that consults a cache before its provider."""
 
-    provider: ClassVar[str] = "cached"
-
-    def __init__(self, inner: EmbeddingAdapter, store: CacheStore) -> None:
+    def __init__(
+        self, inner: EmbeddingAdapter, store: CacheStore, *, owns_store: bool = True
+    ) -> None:
         """Wrap ``inner``, resolving what it can from ``store`` first."""
         super().__init__(inner.settings)
         self.inner = inner
         self.store = store
+        self.owns_store = owns_store
         self.stats = CacheStats(name="embedding")
+        # CRITICAL: the wrapped provider's name, not a name for the cache. The embedding
+        # pool prices and labels every batch by `adapter.provider`; a wrapper calling
+        # itself "cached" has no price, so all embedding spend would move to the unpriced
+        # counter the moment the cache was switched on. The base declares `provider` on
+        # the class, so the instance shadows it rather than assigning through it.
+        vars(self)["provider"] = inner.provider
 
     @property
     def model(self) -> str:
@@ -86,45 +167,74 @@ class CachingEmbeddingAdapter(EmbeddingAdapter):
         """Return the wrapped adapter's vector size."""
         return self.inner.dimensions
 
-    async def _lookup(self, text: str) -> list[float] | None:
-        """Return the cached vector for ``text``, or ``None`` on a miss or a cache failure."""
-        key = embedding_key(text, self.model, self.model_version)
+    def _key(self, text: str, input_type: InputType) -> str:
+        """Return the key for ``text`` under the wrapped adapter's identity, read now."""
+        return embedding_key(
+            text,
+            provider=self.inner.provider,
+            model=self.model,
+            model_version=self.model_version,
+            dimensions=self.inner.config.dimensions,
+            input_type=input_type,
+        )
+
+    async def _lookup(
+        self, texts: Sequence[str], input_type: InputType
+    ) -> list[list[float] | None]:
+        """Return the cached vector for each text in one store call, counting hits and misses."""
+        resolved: list[list[float] | None] = [None] * len(texts)
+        if texts:
+            try:
+                raws = await self.store.get_many([self._key(text, input_type) for text in texts])
+            except CacheError as exc:
+                self.stats.record_error()
+                _logger.warning(
+                    "embedding cache read failed; embedding directly",
+                    extra={"code": exc.code.value, "trace_id": exc.trace_id},
+                )
+            else:
+                if len(raws) == len(texts):
+                    resolved = [decode_vector(raw) if raw is not None else None for raw in raws]
+                else:
+                    self.stats.record_error()
+                    _logger.warning(
+                        "embedding cache answered a batch with the wrong number of values; "
+                        "embedding directly",
+                        extra={"asked": len(texts), "answered": len(raws)},
+                    )
+
+        for vector in resolved:
+            if vector is None:
+                self.stats.record_miss()
+            else:
+                self.stats.record_hit()
+        return resolved
+
+    async def _remember(
+        self, vectors: Mapping[str, Sequence[float]], input_type: InputType
+    ) -> None:
+        """Store each text's vector in one store call; a cache failure fails nothing."""
+        entries = {
+            self._key(text, input_type): encode_vector(vector) for text, vector in vectors.items()
+        }
         try:
-            raw = await self.store.get(key)
+            await self.store.set_many(entries)
         except CacheError as exc:
             self.stats.record_error()
             _logger.warning(
-                "embedding cache read failed; embedding directly",
-                extra={"code": exc.code.value, "trace_id": exc.trace_id},
-            )
-            return None
-
-        return decode_vector(raw) if raw is not None else None
-
-    async def _remember(self, text: str, vector: Sequence[float]) -> None:
-        """Store ``vector`` for ``text``, treating a cache failure as nothing worth failing for."""
-        key = embedding_key(text, self.model, self.model_version)
-        try:
-            await self.store.set(key, encode_vector(vector))
-        except CacheError as exc:
-            self.stats.record_error()
-            _logger.warning(
-                "embedding cache write failed; the vector is still returned",
+                "embedding cache write failed; the vectors are still returned",
                 extra={"code": exc.code.value, "trace_id": exc.trace_id},
             )
 
     async def embed_documents(self, texts: Sequence[str]) -> EmbeddingResult:
         """Embed ``texts``, sending only the ones the cache could not supply."""
-        resolved: list[list[float] | None] = []
-        for text in texts:
-            vector = await self._lookup(text)
-            if vector is None:
-                self.stats.record_miss()
-            else:
-                self.stats.record_hit()
-            resolved.append(vector)
+        resolved = await self._lookup(texts, "document")
 
-        missing = [index for index, vector in enumerate(resolved) if vector is None]
+        missing = list(
+            dict.fromkeys(
+                text for text, vector in zip(texts, resolved, strict=True) if vector is None
+            )
+        )
         if not missing:
             return EmbeddingResult(
                 vectors=[vector for vector in resolved if vector is not None],
@@ -133,10 +243,19 @@ class CachingEmbeddingAdapter(EmbeddingAdapter):
                 total_tokens=0,
             )
 
-        fetched = await self.inner.embed_documents([texts[index] for index in missing])
-        for index, vector in zip(missing, fetched.vectors, strict=True):
-            resolved[index] = vector
-            await self._remember(texts[index], vector)
+        fetched = await self.inner.embed_documents(missing)
+        if len(fetched.vectors) != len(missing):
+            raise EmbedError(
+                f"the embedding provider returned {len(fetched.vectors)} vectors for "
+                f"{len(missing)} texts",
+                retryable=False,
+            )
+
+        embedded = dict(zip(missing, fetched.vectors, strict=True))
+        await self._remember(embedded, "document")
+        for index, text in enumerate(texts):
+            if resolved[index] is None:
+                resolved[index] = embedded[text]
 
         return EmbeddingResult(
             vectors=[vector for vector in resolved if vector is not None],
@@ -148,17 +267,15 @@ class CachingEmbeddingAdapter(EmbeddingAdapter):
     async def embed_query(self, text: str) -> list[float]:
         """Embed one query, consulting the cache first.
 
-        Query vectors are cached alongside document vectors under the same key scheme: a
-        repeated question is common, and the model does not care which side asked.
+        A repeated question is common, so queries are cached too — under their own input
+        type, never under the entry a passage of the same text would use.
         """
-        vector = await self._lookup(text)
+        (vector,) = await self._lookup([text], "query")
         if vector is not None:
-            self.stats.record_hit()
             return vector
 
-        self.stats.record_miss()
         vector = await self.inner.embed_query(text)
-        await self._remember(text, vector)
+        await self._remember({text: vector}, "query")
         return vector
 
     async def health(self) -> HealthStatus:
@@ -166,6 +283,26 @@ class CachingEmbeddingAdapter(EmbeddingAdapter):
         return await self.inner.health()
 
     async def close(self) -> None:
-        """Release the wrapped provider and the cache backend."""
+        """Release the wrapped provider, and the cache backend if this wrapper owns it."""
         await self.inner.close()
-        await self.store.close()
+        if self.owns_store:
+            await self.store.close()
+
+
+class PoolingCachingEmbeddingAdapter(CachingEmbeddingAdapter):
+    """A caching adapter over a provider that can also late-chunk a document."""
+
+    async def embed_pooled(
+        self, document: str, spans: Sequence[tuple[int, int]]
+    ) -> EmbeddingResult:
+        """Late-chunk ``document`` through the wrapped adapter, bypassing the cache."""
+        return await cast(_Pooling, self.inner).embed_pooled(document, spans)
+
+
+def cache_embeddings(
+    inner: EmbeddingAdapter, store: CacheStore, *, owns_store: bool = True
+) -> CachingEmbeddingAdapter:
+    """Wrap ``inner`` behind ``store``, keeping late chunking if ``inner`` offers it."""
+    if callable(getattr(inner, "embed_pooled", None)):
+        return PoolingCachingEmbeddingAdapter(inner, store, owns_store=owns_store)
+    return CachingEmbeddingAdapter(inner, store, owns_store=owns_store)

@@ -213,6 +213,22 @@ def _add_index(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     verify.add_argument("name", nargs="?", default=None, help="collection; defaults to configured")
 
 
+def _add_documents(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register ``documents delete``."""
+    parser = subparsers.add_parser("documents", help="manage the documents in a collection")
+    _add_global_flags(parser)
+    actions = parser.add_subparsers(dest="action", required=True)
+
+    delete = actions.add_parser("delete", help="delete one document from a collection")
+    _add_global_flags(delete)
+    delete.add_argument("document_id", help="the d_… id the ingest job reported")
+    delete.add_argument(
+        "--tenant",
+        default=None,
+        help="delete only chunks tagged for this tenant; every chunk of the document if omitted",
+    )
+
+
 def _add_provision(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Register ``provision``."""
     parser = subparsers.add_parser("provision", help="config-driven provisioning")
@@ -423,6 +439,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_ingest(subparsers)
     _add_query(subparsers)
     _add_index(subparsers)
+    _add_documents(subparsers)
     _add_provision(subparsers)
 
     status = subparsers.add_parser("status", help="one-screen system status")

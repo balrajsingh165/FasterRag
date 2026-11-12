@@ -20,6 +20,17 @@ from typing import Annotated, Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
+from fasterrag.config.plugins import (
+    BUILTIN_EMBEDDING_PROVIDERS,
+    BUILTIN_LLM_PROVIDERS,
+    BUILTIN_VECTOR_DB_PROVIDERS,
+    EMBEDDINGS_GROUP,
+    LLM_GROUP,
+    PLANNED_VECTOR_DB_PROVIDERS,
+    VECTOR_DB_GROUP,
+    require_selectable,
+)
+
 __all__ = [
     "AppSettings",
     "AutopilotSettings",
@@ -56,9 +67,6 @@ _DOCKER_VOLUME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 _HTTP_HEADER_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 _PATH_LIKE_RE = re.compile(r"^(~|\.{1,2}[\\/]|[A-Za-z]:[\\/])|[\\/]")
 
-VectorDbProvider = Literal["qdrant", "milvus", "weaviate", "pinecone", "pgvector", "chroma"]
-EmbeddingProvider = Literal["openai", "cohere", "huggingface", "ollama"]
-LlmProvider = Literal["openai", "anthropic", "cohere", "ollama", "openai_compatible"]
 ChunkStrategy = Literal["fixed", "recursive", "semantic", "layout", "late"]
 TokenCounterMode = Literal["auto", "estimate", "model"]
 
@@ -119,6 +127,27 @@ class Section(BaseModel):
     """Base for every configuration section: unknown keys rejected, values immutable."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # CRITICAL: a plugin provider never inherits a built-in provider's default key name.
+    # `llm.api_key_env` defaults to OPENAI_API_KEY and `vector_db.api_key_env` to
+    # QDRANT_API_KEY, and an adapter reads its credential through whatever name the field
+    # holds — so a config that only says `provider: acme` would hand a third party's code
+    # the name of another vendor's secret, and rule 9 would then refuse to start until that
+    # unrelated secret was present. The schema cannot ask the plugin whether it needs a key
+    # (that would load third-party code during validation), so it asks the operator: the
+    # field must be written, as a variable name or as null. `model_fields_set` is what tells
+    # a written null from an absent key.
+    def _require_written_plugin_key(self, section: str, provider: str) -> None:
+        """Refuse a plugin provider whose ``api_key_env`` was left to a built-in's default."""
+        if "api_key_env" in self.model_fields_set:
+            return
+        default = type(self).model_fields["api_key_env"].default
+        raise ValueError(
+            f"{section}.api_key_env must be written out for plugin provider {provider!r}: "
+            "name the environment variable holding its key, or set it to null if it needs "
+            f"none. The default, {default!r}, names a built-in provider's key and is never "
+            "handed to a plugin"
+        )
 
 
 class AppSettings(Section):
@@ -250,7 +279,7 @@ class CollectionSettings(Section):
 class VectorDbSettings(Section):
     """Vector database selection and connection settings."""
 
-    provider: VectorDbProvider = "qdrant"
+    provider: str = "qdrant"
     mode: Literal["docker", "external"] = "docker"
     host: str = "localhost"
     port: Annotated[int, Field(ge=1, le=65535)] = 6333
@@ -262,6 +291,17 @@ class VectorDbSettings(Section):
     pgvector: PgvectorSettings = PgvectorSettings()
     chroma: ChromaSettings = ChromaSettings()
     collection: CollectionSettings = CollectionSettings()
+
+    @field_validator("provider")
+    @classmethod
+    def _check_provider(cls, value: str) -> str:
+        """Require a built-in vector database or one an installed plugin registers."""
+        return require_selectable(
+            value,
+            builtin=BUILTIN_VECTOR_DB_PROVIDERS,
+            group=VECTOR_DB_GROUP,
+            planned=PLANNED_VECTOR_DB_PROVIDERS,
+        )
 
     @field_validator("host")
     @classmethod
@@ -300,6 +340,13 @@ class VectorDbSettings(Section):
             )
         return self
 
+    @model_validator(mode="after")
+    def _check_plugin_key(self) -> Self:
+        """Enforce cross-field rule 3 for a plugin: its key name is written, never defaulted."""
+        if self.provider not in BUILTIN_VECTOR_DB_PROVIDERS:
+            self._require_written_plugin_key("vector_db", self.provider)
+        return self
+
 
 class EmbeddingCacheSettings(Section):
     """Embedding cache keyed by content hash plus model and version."""
@@ -320,8 +367,16 @@ class TierRule(Section):
     """One tiered-embedding routing rule; the first matching rule wins."""
 
     match: dict[str, Any]
-    provider: EmbeddingProvider
+    provider: str
     model: str
+
+    @field_validator("provider")
+    @classmethod
+    def _check_provider(cls, value: str) -> str:
+        """Require a built-in embedding provider or one an installed plugin registers."""
+        return require_selectable(
+            value, builtin=BUILTIN_EMBEDDING_PROVIDERS, group=EMBEDDINGS_GROUP
+        )
 
     @field_validator("model")
     @classmethod
@@ -349,13 +404,21 @@ class TieringSettings(Section):
 class EmbeddingsSettings(Section):
     """Embedding provider, model, batching, cache, and tiering."""
 
-    provider: EmbeddingProvider = "huggingface"
+    provider: str = "huggingface"
     model: str = "BAAI/bge-small-en-v1.5"
     api_key_env: str | None = None
     batch_size: Annotated[int, Field(ge=1, le=2048)] = 64
     dimensions: Annotated[int, Field(ge=8)] | None = None
     cache: EmbeddingCacheSettings = EmbeddingCacheSettings()
     tiering: TieringSettings = TieringSettings()
+
+    @field_validator("provider")
+    @classmethod
+    def _check_provider(cls, value: str) -> str:
+        """Require a built-in embedding provider or one an installed plugin registers."""
+        return require_selectable(
+            value, builtin=BUILTIN_EMBEDDING_PROVIDERS, group=EMBEDDINGS_GROUP
+        )
 
     @field_validator("model")
     @classmethod
@@ -373,7 +436,11 @@ class EmbeddingsSettings(Section):
 
     @model_validator(mode="after")
     def _check_key_required(self) -> Self:
-        """Enforce cross-field rule 3: hosted embedding providers need a key reference."""
+        """Enforce cross-field rule 3: hosted embedding providers need a key reference.
+
+        A plugin is asked for nothing here: the default is already null, so there is no
+        built-in key name to inherit, and whether it needs one is the plugin's to enforce.
+        """
         if self.provider in PROVIDERS_REQUIRING_EMBEDDING_KEY and self.api_key_env is None:
             raise ValueError(
                 f"embeddings.api_key_env is required for provider {self.provider!r}; "
@@ -385,13 +452,19 @@ class EmbeddingsSettings(Section):
 class LlmSettings(Section):
     """Generation provider, model, sampling, and streaming."""
 
-    provider: LlmProvider = "openai"
+    provider: str = "openai"
     model: str = "gpt-4o-mini"
     api_key_env: str | None = "OPENAI_API_KEY"
     base_url: str | None = None
     temperature: Annotated[float, Field(ge=0.0, le=2.0)] = 0.1
     max_tokens: Annotated[int, Field(ge=1, le=32768)] = 1024
     streaming: bool = True
+
+    @field_validator("provider")
+    @classmethod
+    def _check_provider(cls, value: str) -> str:
+        """Require a built-in LLM provider or one an installed plugin registers."""
+        return require_selectable(value, builtin=BUILTIN_LLM_PROVIDERS, group=LLM_GROUP)
 
     @field_validator("model")
     @classmethod
@@ -419,7 +492,14 @@ class LlmSettings(Section):
 
     @model_validator(mode="after")
     def _check_provider_requirements(self) -> Self:
-        """Enforce cross-field rule 3 for LLMs and the ``openai_compatible`` endpoint."""
+        """Enforce cross-field rule 3 for LLMs and the ``openai_compatible`` endpoint.
+
+        A plugin may be keyless or keyed, which the schema cannot know without loading it,
+        so it is only required to say which: the key name is written, never defaulted.
+        """
+        if self.provider not in BUILTIN_LLM_PROVIDERS:
+            self._require_written_plugin_key("llm", self.provider)
+            return self
         if self.provider not in PROVIDERS_NOT_REQUIRING_LLM_KEY and self.api_key_env is None:
             raise ValueError(
                 f"llm.api_key_env is required for provider {self.provider!r}; "
@@ -558,6 +638,7 @@ class IngestionSettings(Section):
     journal: JournalSettings = JournalSettings()
     dlq: DlqSettings = DlqSettings()
     max_document_mb: Annotated[int, Field(ge=1, le=1024)] = 100
+    parse_timeout_seconds: Annotated[float, Field(ge=0)] = 600
 
     # CRITICAL: this is an authorization boundary, not a convenience. A `path` source names
     # a file on the SERVER, so without confinement any caller holding the `ingest` scope can

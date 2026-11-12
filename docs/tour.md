@@ -29,16 +29,16 @@ journal never lies about the index: a document's dedup hash and its `indexed` re
 after its chunks, not before.
 
 !!! note "What is not built yet"
-    A job interrupted by the process exiting is not resumed automatically (TASK-0436), a document
-    cannot yet be deleted or updated in place (TASK-0443), and ingestion runs inside the API
-    process — the separate `worker` process does no work yet (TASK-0440).
+    A job interrupted by the process exiting is not resumed automatically (TASK-0436), and
+    ingestion runs inside the API process — the separate `worker` process does no work yet
+    (TASK-0440).
 
 ## A question comes out
 
 Nine stages. Retrieval is hybrid by default — meaning and keywords are searched together — and the
 stages that can fail have a defined fallback.
 
-<ol class="fr-track fr-track--q fr-track--9"><li style="--i:0"><span class="fr-step">01</span><strong>Ask</strong><code>api/query.py · cli · facade</code><p>A question arrives with an optional collection, filter and top-k.</p><p class="fr-guard">Validated at the boundary; errors are problem+json with a stable code.</p></li><li style="--i:1"><span class="fr-step">02</span><strong>Cache</strong><code>core/cache/semantic.py</code><p>A paraphrase of an earlier question can be answered from the semantic cache, scoped by collection and filter.</p><p class="fr-guard">A miss falls through to retrieval.</p></li><li style="--i:2"><span class="fr-step">03</span><strong>Embed</strong><code>adapters/embeddings/</code><p>The question is embedded with the configured embedding model.</p><p class="fr-guard">Behind the embeddings circuit breaker.</p></li><li style="--i:3"><span class="fr-step">04</span><strong>Search</strong><code>services/querying.py</code><p>Two searches run at once: dense vectors and BM25. Both receive the same pushed-down filter.</p><p class="fr-guard">If the keyword leg has no terms it is skipped and the dense leg answers.</p></li><li style="--i:4"><span class="fr-step">05</span><strong>Fuse</strong><code>core/retrieval/fusion.py</code><p>Reciprocal Rank Fusion merges the two rankings into one shortlist.</p><p class="fr-guard">Each result keeps the rank and score of both legs.</p></li><li style="--i:5"><span class="fr-step">06</span><strong>Rerank</strong><code>core/rerank/</code><p>A cross-encoder reads the question and each chunk together and reorders the shortlist.</p><p class="fr-guard">If the reranker fails, the fused order is used and the degradation is recorded.</p></li><li style="--i:6"><span class="fr-step">07</span><strong>Assemble</strong><code>core/context.py</code><p>Chunks are packed into the prompt inside a token budget; near-duplicates are dropped.</p><p class="fr-guard">Chunks that do not fit the budget are left out.</p></li><li style="--i:7"><span class="fr-step">08</span><strong>Generate</strong><code>services/generation.py</code><p>The LLM adapter answers, streamed as server-sent events, after the cost budget is charged.</p><p class="fr-guard">Without streaming, a provider failure degrades to an extractive answer from the retrieved chunks; the streamed path does not yet (TASK-0438).</p></li><li style="--i:8"><span class="fr-step">09</span><strong>Cite and trace</strong><code>core/generation.py · services/traces.py</code><p>Citation markers are resolved against the chunks that were supplied, and the whole query is stored as a trace.</p><p class="fr-guard">A stored trace can be replayed later under a different configuration.</p></li></ol>
+<ol class="fr-track fr-track--q fr-track--9"><li style="--i:0"><span class="fr-step">01</span><strong>Ask</strong><code>api/query.py · cli · facade</code><p>A question arrives with an optional collection, filter and top-k.</p><p class="fr-guard">Validated at the boundary; errors are problem+json with a stable code.</p></li><li style="--i:1"><span class="fr-step">02</span><strong>Cache</strong><code>core/cache/semantic.py</code><p>A paraphrase of an earlier question can be answered from the semantic cache, scoped by collection and filter.</p><p class="fr-guard">A miss falls through to retrieval.</p></li><li style="--i:2"><span class="fr-step">03</span><strong>Embed</strong><code>adapters/embeddings/</code><p>The question is embedded with the configured embedding model.</p><p class="fr-guard">Behind the embeddings circuit breaker.</p></li><li style="--i:3"><span class="fr-step">04</span><strong>Search</strong><code>services/querying.py</code><p>Two searches run at once: dense vectors and BM25. Both receive the same pushed-down filter.</p><p class="fr-guard">If the keyword leg has no terms it is skipped and the dense leg answers.</p></li><li style="--i:4"><span class="fr-step">05</span><strong>Fuse</strong><code>core/retrieval/fusion.py</code><p>Reciprocal Rank Fusion merges the two rankings into one shortlist.</p><p class="fr-guard">Each result keeps the rank and score of both legs.</p></li><li style="--i:5"><span class="fr-step">06</span><strong>Rerank</strong><code>core/rerank/</code><p>A cross-encoder reads the question and each chunk together and reorders the shortlist.</p><p class="fr-guard">If the reranker fails, the fused order is used and the degradation is recorded.</p></li><li style="--i:6"><span class="fr-step">07</span><strong>Assemble</strong><code>core/context.py</code><p>Chunks are packed into the prompt inside a token budget; near-duplicates are dropped.</p><p class="fr-guard">Chunks that do not fit the budget are left out.</p></li><li style="--i:7"><span class="fr-step">08</span><strong>Generate</strong><code>services/generation.py</code><p>The LLM adapter answers, streamed as server-sent events, after the cost budget is charged.</p><p class="fr-guard">A provider failure before the first token degrades to an extractive answer built from the retrieved chunks, streamed or not.</p></li><li style="--i:8"><span class="fr-step">09</span><strong>Cite and trace</strong><code>core/generation.py · services/traces.py</code><p>Citation markers are resolved against the chunks that were supplied, and the whole query is stored as a trace.</p><p class="fr-guard">A stored trace can be replayed later under a different configuration.</p></li></ol>
 
 The same path serves `POST /v1/query`, `fasterrag query` and `FasterRag.query`. `POST /v1/retrieve`
 stops after reranking and returns the chunks with the rank and score each stage gave them.
@@ -87,6 +87,7 @@ module's own docstring, as of the commit this page was generated from.
     | `cli/commands/backup.py` | The `backup` and `restore` commands. |
     | `cli/commands/benchmark.py` | The `benchmark` command. |
     | `cli/commands/diagnostics.py` | The commands that inspect an installation: `config validate`, `doctor`, `status`. |
+    | `cli/commands/documents.py` | The `documents` command: per-document operations on a collection. |
     | `cli/commands/infrastructure.py` | The commands that stand things up or price them out: `provision` and `estimate`. |
     | `cli/commands/pipeline.py` | The commands that move data: `ingest`, `query`, and `index`. |
     | `cli/commands/portability.py` | The commands that move a collection between deployments: `export` and `import` (D11). |
@@ -129,8 +130,10 @@ module's own docstring, as of the commit this page was generated from.
     | `services/benchmark.py` | The benchmark suite and ledger emitter. |
     | `services/budget.py` | The D9 runtime cost governor: token budgets enforced before a provider is called. |
     | `services/ci_status.py` | Reads the latest CI verdict for a branch from the GitHub Actions API. |
+    | `services/composition.py` | Composition root: where an entry point gets the pieces it runs on. |
     | `services/degradation.py` | The degradation ladder's registry: which rungs exist, and what serves each one. |
     | `services/doctor.py` | Preflight diagnostics (D10). |
+    | `services/documents.py` | Document lifecycle: taking one document out of a collection (TASK-0443). |
     | `services/estimation.py` | Preflight cost estimation (D9). |
     | `services/evaluation.py` | Running the eval harness against a live collection. |
     | `services/generation.py` | Answer generation: retrieve, assemble, generate, cite. |
@@ -172,7 +175,7 @@ module's own docstring, as of the commit this page was generated from.
     | --- | --- |
     | `core/__init__.py` | The RAG pipeline: parsing, chunking, retrieval, reranking, assembly, generation. |
     | `core/breaker.py` | Per-provider circuit breakers (`reliability.circuit_breaker`, docs/reliability.md §3). |
-    | `core/cache/embedding.py` | Embedding cache. Implemented, and not yet wired into the pipeline (TASK-0442). |
+    | `core/cache/embedding.py` | Embedding cache: never pay twice for the same text under the same model. |
     | `core/cache/redis.py` | Redis-backed cache store: one cache shared by every process that reaches the same server. |
     | `core/cache/semantic.py` | Semantic response cache: answer a paraphrase from the answer already given. |
     | `core/cache/stats.py` | Cache hit/miss accounting. |
@@ -226,7 +229,7 @@ module's own docstring, as of the commit this page was generated from.
     | `adapters/embeddings/tiering.py` | Tiered embedding: route document classes to different models. |
     | `adapters/llm/anthropic.py` | Anthropic generation. |
     | `adapters/llm/base.py` | Vendor-neutral LLM provider contract. |
-    | `adapters/llm/cohere.py` | Cohere generation. |
+    | `adapters/llm/cohere.py` | Cohere generation through the v2 chat API. |
     | `adapters/llm/factory.py` | Selects the concrete LLM adapter from configuration. |
     | `adapters/llm/ollama.py` | Ollama generation against a local server, so no credential is required. |
     | `adapters/llm/openai.py` | OpenAI and OpenAI-compatible generation. |
@@ -246,6 +249,7 @@ module's own docstring, as of the commit this page was generated from.
     | --- | --- |
     | `config/__init__.py` | Configuration schema and loader. |
     | `config/loader.py` | Fail-fast configuration loader. |
+    | `config/plugins.py` | Which provider names configuration may select, decided without loading a provider. |
     | `config/schema.py` | Pydantic models mirroring `docs/config-reference.md`. |
     | `config/template.py` | Access to the canonical `config.yaml` that ships inside the package. |
     | `errors.py` | Typed error taxonomy shared by the API, the CLI, and the Python package. |

@@ -1,4 +1,6 @@
-from collections.abc import Sequence
+import hashlib
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import pytest
 
@@ -7,12 +9,17 @@ from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache.embedding import (
     CachingEmbeddingAdapter,
+    InputType,
+    PoolingCachingEmbeddingAdapter,
+    cache_embeddings,
     decode_vector,
     embedding_key,
     encode_vector,
 )
 from fasterrag.core.cache.store import CacheStore, MemoryStore
 from fasterrag.errors import CacheError, EmbedError
+from fasterrag.services.estimation import price_for
+from fasterrag.workers.embed_pool import PoolingAdapter
 
 
 class CountingEmbedder(EmbeddingAdapter):
@@ -72,11 +79,79 @@ class BrokenStore(MemoryStore):
     async def set(self, key: str, value: bytes, *, ttl: int | None = None) -> None:
         raise CacheError("backend is unreachable")
 
+    async def get_many(self, keys: Sequence[str]) -> list[bytes | None]:
+        raise CacheError("backend is unreachable")
+
+    async def set_many(self, entries: Mapping[str, bytes], *, ttl: int | None = None) -> None:
+        raise CacheError("backend is unreachable")
+
+
+class RecordingStore(MemoryStore):
+    """Counts the calls the adapter makes, by name."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    async def get(self, key: str) -> bytes | None:
+        self.calls.append("get")
+        return await super().get(key)
+
+    async def set(self, key: str, value: bytes, *, ttl: int | None = None) -> None:
+        self.calls.append("set")
+        await super().set(key, value, ttl=ttl)
+
+    async def get_many(self, keys: Sequence[str]) -> list[bytes | None]:
+        self.calls.append("get_many")
+        return await super().get_many(keys)
+
+    async def set_many(self, entries: Mapping[str, bytes], *, ttl: int | None = None) -> None:
+        self.calls.append("set_many")
+        await super().set_many(entries, ttl=ttl)
+
+
+class OtherProviderEmbedder(CountingEmbedder):
+    """The same model name served by a different provider, with different vectors."""
+
+    provider = "other"
+
+    def _vector(self, text: str) -> list[float]:
+        return [-1.0, -1.0, -1.0]
+
 
 def build(store: CacheStore | None = None) -> tuple[CachingEmbeddingAdapter, CountingEmbedder]:
     settings = Settings()
     inner = CountingEmbedder(settings)
     return CachingEmbeddingAdapter(inner, store or MemoryStore()), inner
+
+
+def identity(inner: EmbeddingAdapter) -> dict[str, Any]:
+    """Return the key fields an adapter's own identity supplies."""
+    return {
+        "provider": inner.provider,
+        "model": inner.model,
+        "model_version": inner.model_version,
+        "dimensions": inner.config.dimensions,
+    }
+
+
+def key(
+    text: str = "text",
+    *,
+    provider: str = "provider",
+    model: str = "model",
+    model_version: str = "1.0",
+    dimensions: int | None = None,
+    input_type: InputType = "document",
+) -> str:
+    return embedding_key(
+        text,
+        provider=provider,
+        model=model,
+        model_version=model_version,
+        dimensions=dimensions,
+        input_type=input_type,
+    )
 
 
 def test_a_vector_round_trips_through_its_packing() -> None:
@@ -91,19 +166,56 @@ def test_a_truncated_vector_decodes_to_nothing() -> None:
 
 
 def test_the_key_separates_models() -> None:
-    assert embedding_key("text", "model-a", "1.0") != embedding_key("text", "model-b", "1.0")
+    assert key(model="model-a") != key(model="model-b")
 
 
 def test_the_key_separates_model_versions() -> None:
-    assert embedding_key("text", "model", "1.0") != embedding_key("text", "model", "2.0")
+    assert key(model_version="1.0") != key(model_version="2.0")
 
 
 def test_the_key_separates_texts() -> None:
-    assert embedding_key("a", "model", "1.0") != embedding_key("b", "model", "1.0")
+    assert key("a") != key("b")
+
+
+def test_the_key_separates_input_types() -> None:
+    """The key ignored the input type, so a query was served a document's vector."""
+    assert key(input_type="query") != key(input_type="document")
+
+
+def test_the_key_separates_providers() -> None:
+    """The key ignored the provider, so two providers' same-named models shared vectors."""
+    assert key(provider="openai") != key(provider="ollama")
+
+
+def test_the_key_separates_dimension_settings() -> None:
+    """The key ignored embeddings.dimensions, so a shortened vector outlived the setting."""
+    assert key(dimensions=None) != key(dimensions=256)
+    assert key(dimensions=256) != key(dimensions=512)
+
+
+def test_the_key_cannot_be_forged_by_moving_a_separator_between_fields() -> None:
+    """Model ids contain colons, so joining fields with one is not enough to tell them apart."""
+    assert key(model="a:b", model_version="c") != key(model="a", model_version="b:c")
+    assert key(provider="a:b", model="c") != key(provider="a", model="b:c")
 
 
 def test_the_key_never_contains_the_text_itself() -> None:
-    assert "secret passage" not in embedding_key("secret passage", "model", "1.0")
+    assert "secret passage" not in key("secret passage")
+
+
+def test_text_that_is_not_valid_unicode_still_gets_a_key_of_its_own() -> None:
+    """A lone surrogate made the key raise, which ended the pool instead of failing a batch."""
+    lone = "half a pair \ud83d"
+
+    assert key(lone) == key(lone)
+    assert key(lone) != key("half a pair ")
+    assert key(lone) != key("half a pair \ud83e")
+
+
+def test_the_key_is_stable_across_calls() -> None:
+    assert key("text", dimensions=256, input_type="query") == key(
+        "text", dimensions=256, input_type="query"
+    )
 
 
 async def test_a_repeated_text_is_embedded_once() -> None:
@@ -162,13 +274,59 @@ async def test_a_repeated_query_is_embedded_once() -> None:
     assert inner.embedded == ["what is the notice period?"]
 
 
-async def test_a_query_and_a_document_share_one_cached_vector() -> None:
+async def test_a_query_and_a_document_of_the_same_text_are_separate_entries() -> None:
+    """One entry served both, though a provider may embed a query and a passage differently."""
     adapter, inner = build()
 
     await adapter.embed_documents(["shared text"])
     await adapter.embed_query("shared text")
+    await adapter.embed_documents(["shared text"])
+    await adapter.embed_query("shared text")
 
-    assert inner.embedded == ["shared text"]
+    assert inner.embedded == ["shared text", "shared text"]
+    assert inner.calls == 2
+
+
+async def test_two_providers_sharing_a_store_never_share_a_vector() -> None:
+    """A second provider serving a model of the same name was handed the first one's vector."""
+    settings = Settings()
+    store = MemoryStore()
+    await CachingEmbeddingAdapter(CountingEmbedder(settings), store).embed_documents(["text"])
+
+    other = OtherProviderEmbedder(settings)
+    result = await CachingEmbeddingAdapter(other, store).embed_documents(["text"])
+
+    assert other.embedded == ["text"]
+    assert result.vectors == [[-1.0, -1.0, -1.0]]
+
+
+async def test_a_changed_dimension_setting_never_serves_the_old_vector() -> None:
+    """A vector cached at one embeddings.dimensions was served after the setting changed."""
+    store = MemoryStore()
+    native = CountingEmbedder(Settings())
+    await CachingEmbeddingAdapter(native, store).embed_documents(["text"])
+
+    shortened = CountingEmbedder(Settings.model_validate({"embeddings": {"dimensions": 256}}))
+    await CachingEmbeddingAdapter(shortened, store).embed_documents(["text"])
+    await CachingEmbeddingAdapter(shortened, store).embed_query("text")
+
+    assert shortened.embedded == ["text", "text"]
+
+
+async def test_an_entry_written_under_the_old_key_format_is_never_served() -> None:
+    """Entries keyed without provider, dimensions and input type must not survive the fix."""
+    adapter, inner = build()
+    digest = hashlib.sha256(b"text").hexdigest()
+    await adapter.store.set(
+        f"emb:{inner.model}:{inner.model_version}:{digest}", encode_vector([9.0, 9.0, 9.0])
+    )
+
+    result = await adapter.embed_documents(["text"])
+    vector = await adapter.embed_query("text")
+
+    assert inner.embedded == ["text", "text"]
+    assert result.vectors[0] == pytest.approx(inner._vector("text"))
+    assert vector == pytest.approx(inner._vector("text"))
 
 
 async def test_hits_and_misses_are_counted() -> None:
@@ -241,3 +399,186 @@ async def test_an_empty_batch_never_calls_the_provider() -> None:
 
     assert result.vectors == []
     assert inner.calls == 0
+
+
+async def test_a_batch_costs_one_store_read_and_one_store_write() -> None:
+    """Each text was its own get and its own set, awaited one after another."""
+    store = RecordingStore()
+    adapter, _ = build(store)
+
+    await adapter.embed_documents([f"text {index}" for index in range(64)])
+
+    assert store.calls == ["get_many", "set_many"]
+
+
+async def test_a_fully_cached_batch_costs_one_store_read_and_no_write() -> None:
+    store = RecordingStore()
+    adapter, _ = build(store)
+    texts = [f"text {index}" for index in range(64)]
+    await adapter.embed_documents(texts)
+    store.calls.clear()
+
+    await adapter.embed_documents(texts)
+
+    assert store.calls == ["get_many"]
+
+
+async def test_a_text_repeated_inside_a_batch_reaches_the_provider_once() -> None:
+    adapter, inner = build()
+
+    result = await adapter.embed_documents(["a", "b", "a", "a"])
+
+    assert inner.embedded == ["a", "b"]
+    assert result.vectors[0] == result.vectors[2] == result.vectors[3]
+    assert result.vectors[1] == pytest.approx(inner._vector("b"))
+
+
+async def test_a_provider_returning_the_wrong_number_of_vectors_is_a_typed_error() -> None:
+    """A short reply surfaced as a bare ValueError, which the embedding pool does not catch."""
+
+    class ShortEmbedder(CountingEmbedder):
+        async def embed_documents(self, texts: Sequence[str]) -> EmbeddingResult:
+            result = await super().embed_documents(texts)
+            return EmbeddingResult(
+                vectors=result.vectors[:-1], model=result.model, model_version=result.model_version
+            )
+
+    store = MemoryStore()
+    adapter = CachingEmbeddingAdapter(ShortEmbedder(Settings()), store)
+
+    with pytest.raises(EmbedError, match="returned 1 vectors for 2 texts"):
+        await adapter.embed_documents(["a", "b"])
+
+    assert await store.items() == []
+
+
+async def test_a_cache_that_fails_only_on_write_still_returns_the_vectors() -> None:
+    class ReadOnlyStore(MemoryStore):
+        async def set_many(self, entries: Mapping[str, bytes], *, ttl: int | None = None) -> None:
+            raise CacheError("the disk is full")
+
+    adapter, inner = build(ReadOnlyStore())
+
+    result = await adapter.embed_documents(["a", "b"])
+
+    assert result.vectors == [inner._vector("a"), inner._vector("b")]
+    assert adapter.stats.errors == 1
+
+
+async def test_a_store_that_answers_a_batch_with_too_few_values_is_stepped_past() -> None:
+    """A misbehaving backend must cost a provider call, never a mismatched batch."""
+
+    class ShortStore(MemoryStore):
+        async def get_many(self, keys: Sequence[str]) -> list[bytes | None]:
+            return (await super().get_many(keys))[:-1]
+
+    adapter, inner = build(ShortStore())
+    await adapter.embed_documents(["a", "b"])
+
+    result = await adapter.embed_documents(["a", "b"])
+
+    assert result.vectors == [inner._vector("a"), inner._vector("b")]
+    assert inner.embedded == ["a", "b", "a", "b"]
+    assert adapter.stats.errors == 2
+
+
+class PoolingEmbedder(CountingEmbedder):
+    """A provider that can late-chunk, as the local sentence-transformers adapter can."""
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__(settings)
+        self.pooled: list[tuple[str, list[tuple[int, int]]]] = []
+
+    async def embed_pooled(
+        self, document: str, spans: Sequence[tuple[int, int]]
+    ) -> EmbeddingResult:
+        self.pooled.append((document, list(spans)))
+        return EmbeddingResult(
+            vectors=[[float(start), float(end), 0.0] for start, end in spans],
+            model=self.model,
+            model_version=self.model_version,
+        )
+
+
+def test_a_cached_adapter_answers_to_its_provider_s_name() -> None:
+    """Named "cached", it had no price, so the pool counted all its spend as unpriced."""
+    adapter, inner = build()
+
+    assert adapter.provider == inner.provider == "counting"
+    assert CachingEmbeddingAdapter(OtherProviderEmbedder(Settings()), MemoryStore()).provider == (
+        "other"
+    )
+
+
+def test_a_cached_hosted_adapter_is_priced_as_its_provider() -> None:
+    class HostedEmbedder(CountingEmbedder):
+        provider = "openai"
+
+        @property
+        def model(self) -> str:
+            return "text-embedding-3-small"
+
+    adapter = cache_embeddings(HostedEmbedder(Settings()), MemoryStore())
+
+    cost, _ = price_for(adapter.provider, adapter.model, 1_000_000)
+
+    assert cost is not None
+    assert cost > 0
+
+
+def test_wrapping_a_late_chunking_provider_keeps_it_late_chunking() -> None:
+    """The pool asks whether an adapter can pool; a plain wrapper answered no for all of them."""
+    wrapped = cache_embeddings(PoolingEmbedder(Settings()), MemoryStore())
+
+    assert isinstance(wrapped, PoolingCachingEmbeddingAdapter)
+    assert isinstance(wrapped, PoolingAdapter)
+
+
+def test_wrapping_a_provider_that_cannot_pool_does_not_claim_it_can() -> None:
+    wrapped = cache_embeddings(CountingEmbedder(Settings()), MemoryStore())
+
+    assert type(wrapped) is CachingEmbeddingAdapter
+    assert not isinstance(wrapped, PoolingAdapter)
+
+
+async def test_pooled_vectors_bypass_the_cache_in_both_directions() -> None:
+    """A late-chunked vector depends on the whole document, so the chunk text cannot key it."""
+    store = RecordingStore()
+    inner = PoolingEmbedder(Settings())
+    wrapped = cache_embeddings(inner, store)
+    assert isinstance(wrapped, PoolingCachingEmbeddingAdapter)
+    await wrapped.embed_documents(["chunk"])
+    store.calls.clear()
+
+    first = await wrapped.embed_pooled("a chunk in context", [(2, 7)])
+    second = await wrapped.embed_pooled("a chunk in context", [(2, 7)])
+
+    assert first.vectors == second.vectors == [[2.0, 7.0, 0.0]]
+    assert inner.pooled == [("a chunk in context", [(2, 7)])] * 2
+    assert store.calls == []
+    assert await store.items() == [
+        (key("chunk", **identity(inner)), encode_vector(inner._vector("chunk")))
+    ]
+
+
+class ClosingStore(MemoryStore):
+    """Counts how many times it was released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closes = 0
+
+    async def close(self) -> None:
+        self.closes += 1
+
+
+async def test_only_the_wrapper_that_owns_a_shared_store_closes_it() -> None:
+    store = ClosingStore()
+    owner = cache_embeddings(CountingEmbedder(Settings()), store)
+    borrower = cache_embeddings(OtherProviderEmbedder(Settings()), store, owns_store=False)
+
+    await borrower.close()
+    assert store.closes == 0
+    await owner.close()
+
+    assert store.closes == 1

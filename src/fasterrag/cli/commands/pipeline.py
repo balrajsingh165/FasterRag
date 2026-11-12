@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
-from fasterrag.adapters.embeddings.tiering import create_embedding_router
 from fasterrag.adapters.llm.factory import create_llm_adapter
 from fasterrag.adapters.vectordb.base import CollectionSpec, Distance, VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
@@ -44,6 +43,7 @@ from fasterrag.services.backfill import (
     backfill_tenant,
     inventory_untagged,
 )
+from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.evaluation import run_eval
 from fasterrag.services.generation import GenerationService

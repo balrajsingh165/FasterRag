@@ -117,6 +117,9 @@ ingestion:
     enabled: true
     max_retries: 3
   max_document_mb: 100
+  # Seconds one document may spend being parsed and chunked before it is
+  # dead-lettered as PARSE_TIMEOUT and its worker is replaced. 0 = no limit.
+  parse_timeout_seconds: 600
   # Directories a `path` source may read from. Empty is unconfined, which is
   # refused outright once security.auth is on -- see docs/security.md.
   allowed_source_roots: []

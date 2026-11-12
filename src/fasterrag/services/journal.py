@@ -7,7 +7,14 @@ succeed into a resumable, auditable batch system:
   documents. A crash mid-ingest of millions of documents resumes from the last checkpoint
   instead of restarting, which is the difference between minutes and days.
 * **Deduplication.** Content hashes are remembered per collection, so re-running an
-  ingest is a no-op rather than a second copy of the corpus.
+  ingest is a no-op rather than a second copy of the corpus. The file is append-only, and a
+  deleted document is a **tombstone** appended to it rather than a line removed: every hash
+  remembered for that document *before* the tombstone stops counting, and one remembered
+  after it counts again, so removed content can be ingested a second time (TASK-0443).
+  A document remembered again under a new hash is the same reading: the hash it held
+  before stops counting, because the index no longer holds that version — otherwise a
+  document edited and then restored would be skipped as a duplicate of a version that is
+  gone.
 * **Dead-lettering.** A document that fails its retries is recorded with a machine-readable
   reason code and stays queryable, so a bad file never silently disappears and never stops
   the pipeline.
@@ -58,6 +65,7 @@ _COLLECTIONS_DIR: Final = "collections"
 _DOCUMENTS_FILE: Final = "documents.jsonl"
 _DEDUP_FILE: Final = "content-hashes.jsonl"
 _PREVIOUS_SUFFIX: Final = ".prev"
+_TOMBSTONE_KEY: Final = "tombstone"
 
 DocumentStatus = str
 JobStatus = str
@@ -581,6 +589,26 @@ class Journal:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(f"{line}\n")
 
+    async def forget_document(self, collection: str, document: str) -> bool:
+        """Tombstone a document in a collection's dedup index, off the event loop."""
+        return await asyncio.to_thread(self.forget_document_blocking, collection, document)
+
+    def forget_document_blocking(self, collection: str, document: str) -> bool:
+        """Tombstone a document; :meth:`forget_document` is this off the event loop.
+
+        Returns whether a live record was there. Nothing is written otherwise, so a
+        retried delete does not grow the file (TASK-0443).
+        """
+        if document not in self.known_content_blocking(collection).values():
+            return False
+
+        line = json.dumps(
+            {"deleted_at": _now(), "document_id": document, _TOMBSTONE_KEY: True}, sort_keys=True
+        )
+        with self._dedup_path(collection).open("a", encoding="utf-8") as handle:
+            handle.write(f"{line}\n")
+        return True
+
     async def known_content(self, collection: str) -> dict[str, str]:
         """Return the collection's content-hash to document-id map, off the event loop."""
         return await asyncio.to_thread(self.known_content_blocking, collection)
@@ -592,10 +620,18 @@ class Journal:
             return {}
 
         known: dict[str, str] = {}
+        held: dict[str, str] = {}
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 payload = json.loads(line)
-                known[payload["content_hash"]] = payload["document_id"]
+                document = payload["document_id"]
+                superseded = held.pop(document, None)
+                if superseded is not None and known.get(superseded) == document:
+                    del known[superseded]
+                if payload.get(_TOMBSTONE_KEY):
+                    continue
+                held[document] = payload["content_hash"]
+                known[held[document]] = document
         return known
 
     async def document_hashes(self, collection: str) -> dict[str, str]:

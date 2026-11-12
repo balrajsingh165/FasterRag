@@ -10,6 +10,12 @@ have gone out cannot change its status code. A 200 is already committed by the t
 provider dies, which is exactly why the contract makes the *absence* of ``done`` meaningful
 and sends errors as an ``error`` event rather than as a status.
 
+That only has to be true of failures that happen *after* the first event. The router asks the
+service for its first event before it builds the response, so a query that is refused before
+anything was produced — retrieval failed, the token budget would be exceeded — is answered
+with the same problem document and status the non-streamed path returns, not with a 200
+carrying an ``error`` event.
+
 Every stream closes its services. An SSE generator that returns early — a client
 disconnecting mid-answer is routine — would otherwise leak a connection pool per abandoned
 request, and abandoned requests are the common case for a slow answer.
@@ -54,16 +60,32 @@ def encode_event(event: QueryEvent) -> str:
     return f"event: {event.type}\ndata: {payload}\n\n"
 
 
-async def _stream(service: GenerationService, body: QueryRequest) -> AsyncIterator[str]:
+async def _first_event(
+    service: GenerationService, events: AsyncIterator[QueryEvent]
+) -> QueryEvent | None:
+    """Return the stream's first event, releasing the service if producing it fails."""
+    opened = False
+    try:
+        first = await anext(events, None)
+        opened = True
+    finally:
+        # CRITICAL: a failure here leaves through the problem handler, not through
+        # `_stream`, so that generator's `finally` never runs and nothing else would
+        # release the service.
+        if not opened:
+            await service.close()
+    return first
+
+
+async def _stream(
+    service: GenerationService, first: QueryEvent | None, events: AsyncIterator[QueryEvent]
+) -> AsyncIterator[str]:
     """Yield the answer as SSE frames, releasing the services whatever happens."""
     try:
-        async for event in service.stream(
-            body.query,
-            collection=body.collection,
-            top_k=body.top_k,
-            filters=body.filters,
-        ):
-            yield encode_event(event)
+        if first is not None:
+            yield encode_event(first)
+            async for event in events:
+                yield encode_event(event)
     except FasterRagError as exc:
         # CRITICAL: the status line is already sent, so this cannot become a problem
         # response. It goes out as an `error` event and the stream ends without `done`,
@@ -105,8 +127,20 @@ async def run_query(
 
     streaming = settings.llm.streaming if body.stream is None else body.stream
     if streaming:
+        events = service.stream(
+            body.query,
+            collection=body.collection,
+            top_k=body.top_k,
+            filters=body.filters,
+        )
+        # CRITICAL: the first event is produced *before* the response object exists
+        # (TASK-0438). Everything that can refuse a query outright — retrieval, the token
+        # budget — happens before the service's first event, and awaiting it here lets that
+        # refusal propagate to the problem handler with its real status. Handing the
+        # generator to `StreamingResponse` untouched would commit a 200 first.
+        first = await _first_event(service, events)
         return StreamingResponse(
-            _stream(service, body),
+            _stream(service, first, events),
             media_type=SSE_MEDIA_TYPE,
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

@@ -64,7 +64,9 @@ fasterRag/
 │       │   ├── doctor.py         # D10 preflight checks; gates provisioning
 │       │   ├── journal.py        # D3 checkpoints, dedup, DLQ; async over *_blocking twins
 │       │   ├── estimation.py     # D9 preflight token counts and projected cost
+│       │   ├── composition.py    # Composition root: the embedding router every entry point uses, cached when configured
 │       │   ├── ingestion.py      # Job lifecycle: run both pools, checkpoint, settle
+│       │   ├── documents.py      # Delete one document: chunks, dedup tombstone, lockfile, cache
 │       │   ├── querying.py       # Retrieve → fuse → rerank → assemble → generate
 │       │   └── collections.py    # Collection lifecycle (pending)
 │       ├── core/                 # RAG pipeline (pure domain logic)
@@ -91,6 +93,7 @@ fasterRag/
 │       │   └── indexer.py        # Batch upsert: dense vector + BM25 sparse vector + payload
 │       ├── config/               # Loaders + schema
 │       │   ├── schema.py         # Pydantic v2 models mirroring config-reference.md
+│       │   ├── plugins.py        # Entry-point names by group, read from metadata only
 │       │   └── loader.py         # pydantic-settings YAML source + .env; fail-fast
 │       ├── observability/        # Metrics, tracing, dashboard
 │       │   ├── logging.py        # Structured JSON logging + correlation ids

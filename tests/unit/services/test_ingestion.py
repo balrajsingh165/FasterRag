@@ -543,3 +543,83 @@ async def test_a_source_that_cannot_be_resolved_settles_the_job_as_failed(tmp_pa
         await service.run(record)
 
     assert service.journal.load_job_blocking(record.job_id).status == "failed"
+
+
+@pytest.fixture
+def empties(corpus: Path) -> list[str]:
+    """Return a zero-byte Markdown file and a whitespace-only text file."""
+    (corpus / "blank.md").write_bytes(b"")
+    (corpus / "spaces.txt").write_text("  \n\t\n   \n", encoding="utf-8")
+    return [str(corpus / "blank.md"), str(corpus / "spaces.txt")]
+
+
+async def test_an_empty_document_is_skipped_rather_than_recorded_as_indexed(
+    tmp_path: Path, corpus: Path, empties: list[str]
+) -> None:
+    """A document with no chunks was journalled 'indexed' though the index never held it."""
+    service, adapter = build(tmp_path)
+
+    record = await service.accept([*sources(corpus), *empties])
+    settled = await service.run(record)
+
+    indexed = service.journal.documents_blocking(record.job_id, status="indexed")
+    skipped = service.journal.documents_blocking(record.job_id, status="skipped")
+    assert sorted(entry.source for entry in indexed) == sorted(sources(corpus))
+    assert sorted(entry.source for entry in skipped) == sorted(empties)
+    assert {entry.reason_code for entry in skipped} == {"EMPTY_DOCUMENT"}
+    assert settled.status == "completed"
+    assert settled.counts["skipped"] == 2
+    assert settled.counts["parsed"] == 2
+    assert settled.counts["dead_lettered"] == 0
+    assert {point.payload["source_uri"] for point in adapter.points} == set(sources(corpus))
+
+
+async def test_an_empty_document_never_enters_the_dedup_file(
+    tmp_path: Path, corpus: Path, empties: list[str]
+) -> None:
+    """The hash of empty content was remembered, so every later empty file 'deduplicated'."""
+    service, _ = build(tmp_path)
+
+    first = await service.run(await service.accept(empties[:1]))
+    known = service.journal.known_content_blocking("default")
+    second_record = await service.accept(empties[:1])
+    second = await service.run(second_record)
+
+    assert known == {}
+    assert service.journal.known_content_blocking("default") == {}
+    assert first.counts["skipped"] == 1
+    assert second.counts["skipped"] == 1
+    assert second.counts["deduplicated"] == 0
+    skipped = service.journal.documents_blocking(second_record.job_id, status="skipped")
+    assert [entry.source for entry in skipped] == empties[:1]
+
+
+async def test_a_job_of_nothing_but_empty_documents_completes(
+    tmp_path: Path, empties: list[str]
+) -> None:
+    """A skipped document is not a failure: nothing was lost, there was nothing to index."""
+    service, adapter = build(tmp_path)
+
+    record = await service.accept(empties)
+    settled = await service.run(record)
+
+    assert settled.status == "completed"
+    assert settled.counts["total"] == settled.counts["skipped"] == 2
+    assert settled.checkpoint is not None
+    assert settled.checkpoint.last_document_index == 1
+    assert adapter.points == []
+    assert service.journal.dead_lettered_blocking(record.job_id) == []
+
+
+async def test_skipped_documents_are_counted_apart_from_indexed_ones(
+    tmp_path: Path, corpus: Path, empties: list[str]
+) -> None:
+    """A skipped document was published as a succeeded one in the ingestion metrics."""
+    service, _ = build(tmp_path)
+    succeeded = metrics.INGEST_DOCUMENTS.value(status="succeeded")
+    skipped = metrics.INGEST_DOCUMENTS.value(status="skipped")
+
+    await service.run(await service.accept([*sources(corpus), *empties]))
+
+    assert metrics.INGEST_DOCUMENTS.value(status="succeeded") - succeeded == 2
+    assert metrics.INGEST_DOCUMENTS.value(status="skipped") - skipped == 2

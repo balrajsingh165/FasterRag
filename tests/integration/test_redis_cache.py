@@ -79,6 +79,58 @@ async def test_an_entry_without_a_ttl_never_expires(store: RedisStore, redis_url
     assert remaining == -1
 
 
+async def test_a_batch_round_trips_through_a_real_pipeline(store: RedisStore) -> None:
+    """The fake pipeline replies in queue order; only a server proves the real one does."""
+    payloads = {f"k{index}": bytes([index]) * 64 for index in range(200)}
+    await store.set_many(payloads)
+
+    asked = ["k7", "never-written", "k199", "k0"]
+
+    assert await store.get_many(asked) == [payloads["k7"], None, payloads["k199"], payloads["k0"]]
+    assert len(await store.items()) == 200
+
+
+async def test_a_batch_write_hands_its_ttl_to_redis(store: RedisStore, redis_url: str) -> None:
+    redis = pytest.importorskip("redis.asyncio")
+    await store.set_many({"a": b"1", "b": b"2"}, ttl=30)
+
+    client = redis.Redis.from_url(redis_url, decode_responses=False)
+    try:
+        remaining = [await client.ttl(f"{store._namespace}:entry:{key}") for key in ("a", "b")]
+    finally:
+        await client.aclose()
+
+    assert all(0 < seconds <= 30 for seconds in remaining)
+
+
+async def test_a_batch_write_is_held_to_the_ceiling_and_keeps_the_newest(
+    redis_url: str, redis_namespace: str
+) -> None:
+    store = RedisStore(redis_url, namespace=redis_namespace, maximum_entries=5)
+    try:
+        await store.set_many({f"k{index}": b"v" for index in range(40)})
+
+        assert sorted(key for key, _ in await store.items()) == [f"k{n}" for n in range(35, 40)]
+    finally:
+        await store.clear()
+        await store.close()
+
+
+async def test_a_batch_read_spares_its_hits_from_the_next_eviction(
+    redis_url: str, redis_namespace: str
+) -> None:
+    store = RedisStore(redis_url, namespace=redis_namespace, maximum_entries=3)
+    try:
+        await store.set_many({"a": b"1", "b": b"2", "c": b"3"})
+        await store.get_many(["a", "b"])
+        await store.set_many({"d": b"4"})
+
+        assert await store.get_many(["a", "b", "c", "d"]) == [b"1", b"2", None, b"4"]
+    finally:
+        await store.clear()
+        await store.close()
+
+
 async def test_the_ceiling_is_enforced_against_a_real_server(
     redis_url: str, redis_namespace: str
 ) -> None:

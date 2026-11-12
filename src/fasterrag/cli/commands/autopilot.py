@@ -15,13 +15,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from fasterrag.adapters.embeddings.tiering import create_embedding_router
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.commands.pipeline import _settings_or_none
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.sources import expand_sources
 from fasterrag.errors import FasterRagError
 from fasterrag.services.autopilot import SUGGESTION_FILE, render_suggestion, tune
+from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.evaluation import load_dataset
 from fasterrag.services.golden_sets import generate_from_sources
 
