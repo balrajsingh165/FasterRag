@@ -245,20 +245,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 
 **Done when.** The three chaos scenarios pass. **Moves:** reliability, core RAG.
 
-### TASK-0450 — One probe in half-open
-
-**Goal.** With N callers waiting on an open circuit, exactly one is admitted when the timeout expires.
-
-**Where.** `core/breaker.py`: `CircuitState` (`:47`), `CircuitBreaker` (`:71`), `state` (lazy OPEN→HALF_OPEN, `:87`), `check` (`:127-138`, raises only when OPEN), `record_success` (`:140`, closes unconditionally — a late success from a call admitted before the circuit opened closes it), `record_failure` (`:145`), `shared_breaker` (`:179`). The module docstring (`:13-14`) promises one probe. Callers use `check()`, `record_success()`, `record_failure()` with no token: `services/generation.py:627`, `:665`, `:784`, `:822`; `services/querying.py:237`, `:241`, `:244`; and the embedding pool.
-
-**Steps.** Make `check()` return an admission token carrying the state generation it was issued in; in HALF_OPEN issue one token and refuse the rest until it resolves; make `record_success(token)` and `record_failure(token)` ignore a token from an earlier generation. Update every call site in one commit.
-
-**Tests.** A concurrency test with N waiters observing one admission; a late-success test. Existing tests that encode today's semantics: `tests/unit/core/test_breaker.py:162`, `:171`, `:371`.
-
-**Documents.** [reliability.md](reliability.md) §2.
-
-**Done when.** The concurrency test passes. **Moves:** reliability.
-
 ### TASK-0451 — One scaffold, one score convention, one error code for vector adapters
 
 **Goal.** New contract cases for Euclidean and dot scoring, list-valued filters and `$ne` on a missing field pass on all five adapters.
@@ -286,18 +272,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 **Traps.** The pgvector suite *does* run in CI's integration job, so this one is fully provable there.
 
 **Done when.** The contract case passes on pgvector. **Moves:** embedding and vector infrastructure.
-
-### TASK-0453 — Redis timeouts and pipelining
-
-**Goal.** A hung Redis degrades within a configured time.
-
-**Where.** `core/cache/redis.py:104` `Redis.from_url(url, decode_responses=False)`; `core/rate_limit.py:194` `Redis.from_url(url)`. A cache `get` hit is `GET` + `INCR` + `ZADD` — three round trips (`redis.py:124-148`).
-
-**Steps.** Add `reliability.timeouts.redis_ms`; pass `socket_timeout` and `socket_connect_timeout`; pipeline the get and set sequences.
-
-**Tests.** A local socket that accepts and never answers; assert the cache misses and the limiter fails open within the timeout. Existing: `tests/unit/core/test_rate_limit.py:205` `test_a_backend_outage_serves_the_request_and_says_so`.
-
-**Done when.** The non-responding-socket test passes. **Moves:** reliability.
 
 ### TASK-0454 — Build the measuring instrument
 
@@ -450,14 +424,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 **Where.** `journal.py:379-385` and `:503-509` append with no `try`; a full disk raises a raw `OSError`. `tests/chaos/test_chaos.py:341` accepts `(IngestionError, OSError)` — it tolerates the defect.
 
 **Steps.** Wrap both appends like `_write_atomically` does (`:153-165`); tighten the chaos assertion to `IngestionError` only. Do it with or before TASK-0437.
-
-**Moves:** reliability.
-
-### TASK-0476 — A timeout on embedded Chroma
-
-**Where.** `reliability.timeouts.vector_db_ms` (`schema.py:590`) is applied by Qdrant, pgvector, Milvus and Weaviate. Chroma runs a `PersistentClient` (`chroma.py:340`) through `asyncio.to_thread` with no `wait_for` (`:324-327`).
-
-**Steps.** Wrap in `asyncio.wait_for`, raising the typed timeout. The thread cannot be cancelled; bound concurrency so timed-out calls cannot exhaust the thread pool. Add the case to the Chroma unit tests.
 
 **Moves:** reliability.
 
@@ -726,7 +692,7 @@ Use this to choose work by the category you want to move. The bar each category 
 | Advanced RAG capabilities | TASK-0465, TASK-0448, TASK-0482, TASK-0483, TASK-0484, TASK-0463 |
 | Extensibility and modularity | TASK-0486 |
 | Performance and scalability | TASK-0454, TASK-0130, TASK-0437, TASK-0487, TASK-0488, TASK-0407 to TASK-0410 |
-| Reliability and error handling | TASK-0437, TASK-0449, TASK-0450, TASK-0453, TASK-0474, TASK-0475, TASK-0476 |
+| Reliability and error handling | TASK-0437, TASK-0449, TASK-0474, TASK-0475 |
 | Testing and quality assurance | TASK-0412, TASK-0454, TASK-0481, TASK-0489, TASK-0490, TASK-0300 |
 | Security | TASK-0339, TASK-0381, TASK-0446, TASK-0460, TASK-0326, TASK-0491, TASK-0492, TASK-0493, TASK-0494, TASK-0495 |
 | Developer experience and APIs | TASK-0444, TASK-0461, TASK-0497, TASK-0498, TASK-0500 |
