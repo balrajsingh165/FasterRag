@@ -124,13 +124,16 @@ COMPARABILITY_FIELDS: Final[tuple[str, ...]] = (
 )
 
 # CRITICAL: left out because changing one cannot change which chunks a query returns, only
-# how fast or from where they are fetched. `retrieval_config_hash` excludes the same three
-# from the lockfile for the same reason, so the two agree about them.
+# how fast or from where they are fetched. `retrieval_config_hash` excludes the three
+# `embeddings.*` keys from the lockfile for the same reason, so the two agree about them.
+# `retrieval.verify_lock` only decides whether a query against a drifted index is answered
+# at all; every answered query ranks exactly as before (TASK-0477).
 BEHAVIOUR_NEUTRAL_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "embeddings.api_key_env",
         "embeddings.batch_size",
         "embeddings.cache",
+        "retrieval.verify_lock",
     }
 )
 

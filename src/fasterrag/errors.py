@@ -86,6 +86,7 @@ class ErrorCode(StrEnum):
     SOURCE_LINK_ESCAPES = "SOURCE_LINK_ESCAPES"
     DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
     DLQ_RETRIES_EXHAUSTED = "DLQ_RETRIES_EXHAUSTED"
+    INDEX_DRIFT = "INDEX_DRIFT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +179,9 @@ PROBLEM_SPECS: Final[dict[ErrorCode, ProblemSpec]] = {
     ),
     ErrorCode.DLQ_RETRIES_EXHAUSTED: ProblemSpec(
         409, "dlq-retries-exhausted", "Dead-letter retries are exhausted", False
+    ),
+    ErrorCode.INDEX_DRIFT: ProblemSpec(
+        409, "index-drift", "The index was built by another embedding model", False
     ),
 }
 

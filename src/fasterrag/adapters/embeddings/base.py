@@ -18,14 +18,26 @@ that states nothing reports ``None``, never ``0``.
 Adapters do not retry. They classify failures — setting ``retryable`` from what the
 provider actually said — and the embedding worker pool owns backoff, so retry policy
 lives in exactly one place (``docs/reliability.md`` §2).
+
+Two refusals say more than "retry" or "do not" (TASK-0478). A request refused for its size —
+``413``, or a token or batch limit named in the message — is an :class:`EmbedTooLargeError`:
+the same request will fail forever, but a smaller one may not, so the pool halves the batch
+instead of retrying it. A retryable refusal that names a pause in ``Retry-After`` (or
+OpenAI's ``retry-after-ms``) is an :class:`EmbedThrottledError` carrying it, so the pool can
+wait as long as it was asked rather than as long as its own backoff guesses. A plugin
+adapter raises either one to get the same treatment.
 """
 
 from __future__ import annotations
 
+import math
 import os
+import re
+import time
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from email.utils import mktime_tz, parsedate_tz
 from typing import ClassVar, Final
 
 from fasterrag.adapters.vectordb.base import HealthStatus
@@ -33,11 +45,14 @@ from fasterrag.config.schema import Settings
 from fasterrag.errors import ConfigError, EmbedError, ErrorCode
 
 __all__ = [
+    "EmbedThrottledError",
+    "EmbedTooLargeError",
     "EmbeddingAdapter",
     "EmbeddingResult",
     "classify_provider_failure",
     "require_extra",
     "require_key",
+    "retry_after_seconds",
     "sum_reported",
 ]
 
@@ -45,6 +60,35 @@ _AUTH_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
 _TIMEOUT_STATUSES: Final[frozenset[int]] = frozenset({408, 504})
 _SERVER_ERROR_THRESHOLD: Final = 500
 _RATE_LIMITED: Final = 429
+_PROGRAMMING_ERRORS: Final[tuple[type[BaseException], ...]] = (TypeError, AttributeError)
+_PAYLOAD_TOO_LARGE: Final = 413
+_SIZE_STATUSES: Final[frozenset[int]] = frozenset({400, 413, 422, 500})
+_SIZE_MESSAGE: Final = re.compile(
+    r"context length|too many tokens|token limit|tokens per request|too large|too long"
+    r"|number of (?:texts|inputs)|too many (?:texts|inputs)|max(?:imum)? input",
+    re.IGNORECASE,
+)
+_SECONDS: Final = re.compile(r"^\s*\d+(?:\.\d+)?\s*$")
+_MILLISECONDS: Final = 1000.0
+
+
+class EmbedTooLargeError(EmbedError):
+    """The provider refused a request for its size: send less, not the same again."""
+
+    def __init__(self, detail: str, *, trace_id: str | None = None) -> None:
+        """Build the error; it is never retryable as sent."""
+        super().__init__(detail, trace_id=trace_id, retryable=False)
+
+
+class EmbedThrottledError(EmbedError):
+    """A retryable refusal that named how long to wait before the next attempt."""
+
+    def __init__(
+        self, detail: str, *, retry_after_seconds: float, trace_id: str | None = None
+    ) -> None:
+        """Build the error with the pause the provider asked for, in seconds."""
+        super().__init__(detail, trace_id=trace_id, retryable=True)
+        self.retry_after_seconds = retry_after_seconds
 
 
 def require_extra(provider: str, package: str, extra: str) -> ConfigError:
@@ -66,6 +110,58 @@ def require_key(name: str | None, provider: str) -> str:
     return value
 
 
+def _headers(exc: BaseException) -> Mapping[str, str] | None:
+    """Return the response headers a vendor error carries, wherever its SDK put them."""
+    headers = getattr(exc, "headers", None)
+    if not isinstance(headers, Mapping):
+        headers = getattr(getattr(exc, "response", None), "headers", None)
+    if not isinstance(headers, Mapping):
+        return None
+    return {str(name).lower(): str(value) for name, value in headers.items()}
+
+
+def _number(value: str | None) -> float | None:
+    """Return a non-negative decimal header value, or ``None`` when it is not one."""
+    if value is None or not _SECONDS.match(value):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def retry_after_seconds(exc: BaseException) -> float | None:
+    """Return the pause a refusal asked for, from ``retry-after-ms`` or ``Retry-After``.
+
+    Seconds or an HTTP date; anything unreadable is ``None`` and a date already past is 0.
+    """
+    headers = _headers(exc)
+    if headers is None:
+        return None
+
+    milliseconds = _number(headers.get("retry-after-ms"))
+    if milliseconds is not None:
+        return milliseconds / _MILLISECONDS
+
+    raw = headers.get("retry-after")
+    seconds = _number(raw)
+    if seconds is not None or raw is None:
+        return seconds
+
+    parsed = parsedate_tz(raw)
+    if parsed is None:
+        return None
+    return max(float(mktime_tz(parsed)) - time.time(), 0.0)
+
+
+def _refused_for_size(exc: BaseException, status: int | None) -> bool:
+    """Return whether the provider refused the request because of how much it carried."""
+    if status == _PAYLOAD_TOO_LARGE:
+        return True
+    if status not in _SIZE_STATUSES:
+        return False
+    message = f"{exc} {getattr(exc, 'body', '')}"
+    return _SIZE_MESSAGE.search(message) is not None
+
+
 def classify_provider_failure(
     exc: BaseException,
     *,
@@ -78,12 +174,27 @@ def classify_provider_failure(
     if not isinstance(status, int):
         status = None
 
+    if status is None and isinstance(exc, _PROGRAMMING_ERRORS):
+        return EmbedError(
+            f"the {provider} adapter raised {type(exc).__name__} during {operation}; this is "
+            "a fault in the adapter or a client library version it was not written against, "
+            "not a provider outage",
+            code=ErrorCode.INTERNAL,
+            retryable=False,
+        )
+
     if status in _AUTH_STATUSES:
         named = key_env or "embeddings.api_key_env"
         return EmbedError(
             f"{provider} rejected the credentials during {operation}; check the key in the "
             f"{named} environment variable",
             retryable=False,
+        )
+
+    if _refused_for_size(exc, status):
+        return EmbedTooLargeError(
+            f"{provider} refused the request as too large during {operation} (status {status}); "
+            "the batch will be split, and an input refused on its own exceeds the model's limit"
         )
 
     if status in _TIMEOUT_STATUSES:
@@ -94,6 +205,13 @@ def classify_provider_failure(
         )
 
     if status == _RATE_LIMITED or (status is not None and status >= _SERVER_ERROR_THRESHOLD):
+        pause = retry_after_seconds(exc)
+        if pause is not None:
+            return EmbedThrottledError(
+                f"{provider} returned status {status} during {operation} and asked for a "
+                f"{pause:.1f}s pause",
+                retry_after_seconds=pause,
+            )
         return EmbedError(
             f"{provider} returned status {status} during {operation}",
             retryable=True,

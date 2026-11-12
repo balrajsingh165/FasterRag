@@ -95,6 +95,7 @@ retrieval:
   rerank: true
   reranker_model: BAAI/bge-reranker-v2-m3
   rerank_top_n: 100
+  verify_lock: warn
 
 generation:
   grounded_or_refuse: false
@@ -324,6 +325,7 @@ Thresholds the parsers apply before chunking sees anything. They are corpus-depe
 | `retrieval.rerank` | bool | `true` | — | Cross-encoder reranking of fused candidates. Expected to be the largest single contributor to query latency and a major retrieval-quality lever; **neither is measured** — benchmark it on your own hardware (TASK-0084). |
 | `retrieval.reranker_model` | str | `BAAI/bge-reranker-v2-m3` | non-empty when `rerank: true` | Cross-encoder model ID. |
 | `retrieval.rerank_top_n` | int | `100` | 10–1000; ≥ `top_k` | Candidates retrieved per leg and fed to the reranker (retrieve top 100–1000 → rerank → truncate to `top_k`). |
+| `retrieval.verify_lock` | str | `warn` | `off` \| `warn` \| `refuse` | What a query does when the collection's `index.lock` names a different embedding model, model version or dimension count than the configured default embedder — vectors from two embedding spaces, which return confident and wrong results. Checked on the first query per collection and process; a verified collection is not read again. `refuse` fails the query with `409 INDEX_DRIFT` naming `fasterrag index reembed`; `warn` serves it and logs the same message once; `off` skips the check. A collection with no lockfile, or `index.lockfile: false`, is served unchecked. Chunker drift is not checked here: it changes how the stored text was cut, not what the vectors mean, and `index lock verify` reports it. **The default is `warn` for one release and becomes `refuse` after it** (TASK-0477), so an existing deployment that has been querying a drifted index learns of it before it starts failing. Adding this key moves `retrieval_config_hash`, so `index lock verify` reports `config_hash` drift on every lock written before it until the collection is next ingested. |
 
 ## `generation`
 
