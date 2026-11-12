@@ -15,7 +15,9 @@ from fasterrag.adapters.vectordb.base import (
     SearchQuery,
 )
 from fasterrag.adapters.vectordb.qdrant import (
+    DENSE_VECTOR_NAME,
     POINT_ID_PAYLOAD_KEY,
+    SPARSE_VECTOR_NAME,
     QdrantAdapter,
     to_point_id,
     to_qdrant_filter,
@@ -27,6 +29,7 @@ from fasterrag.errors import EmbedError, ErrorCode, FasterRagError
 @dataclass
 class Params:
     vectors: models.VectorParams | dict[str, models.VectorParams]
+    sparse_vectors: dict[str, models.SparseVectorParams] | None = None
 
 
 @dataclass
@@ -37,6 +40,7 @@ class Config:
 @dataclass
 class Info:
     config: Config
+    points_count: int = 0
 
 
 @dataclass
@@ -198,6 +202,55 @@ async def test_create_collection_conflicts_on_distance_mismatch() -> None:
             CollectionSpec(name="default", dimensions=3, distance="cosine")
         )
     assert caught.value.code is ErrorCode.CONFLICT
+
+
+def named_info(sparse: dict[str, models.SparseVectorParams] | None = None) -> Info:
+    dense = models.VectorParams(size=3, distance=models.Distance.COSINE)
+    return Info(
+        config=Config(params=Params(vectors={DENSE_VECTOR_NAME: dense}, sparse_vectors=sparse))
+    )
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        collection_info(),
+        named_info(),
+        named_info({"foreign": models.SparseVectorParams()}),
+    ],
+    ids=["dense-only", "named-without-sparse", "foreign-sparse"],
+)
+async def test_a_keyword_leg_the_collection_lacks_is_refused_at_creation(info: Info) -> None:
+    """Qdrant accepted the spec and the ingest died later with `EmbedError` (TASK-0305)."""
+    client = FakeClient(exists=True, info=info)
+
+    with pytest.raises(FasterRagError, match="without a keyword leg") as caught:
+        await build(client).create_collection(
+            CollectionSpec(name="default", dimensions=3, sparse=True)
+        )
+    assert caught.value.code is ErrorCode.CONFLICT
+    assert client.created == []
+
+
+async def test_a_collection_carrying_the_keyword_leg_is_compatible() -> None:
+    client = FakeClient(
+        exists=True, info=named_info({SPARSE_VECTOR_NAME: models.SparseVectorParams()})
+    )
+
+    await build(client).create_collection(CollectionSpec(name="default", dimensions=3, sparse=True))
+
+    assert client.created == []
+
+
+def test_a_foreign_sparse_vector_is_not_reported_as_the_keyword_leg() -> None:
+    """Any sparse config read as the leg, so the preflight passed and upsert failed (TASK-0320)."""
+    adapter = build(FakeClient())
+
+    foreign = adapter._describe("c", named_info({"foreign": models.SparseVectorParams()}))
+    ours = adapter._describe("c", named_info({SPARSE_VECTOR_NAME: models.SparseVectorParams()}))
+
+    assert foreign.sparse is False
+    assert ours.sparse is True
 
 
 async def test_named_vector_collections_are_refused() -> None:

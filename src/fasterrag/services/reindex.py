@@ -36,11 +36,12 @@ and report it at 3am to somebody who cannot act on it.
 
 It reads live state through ``CollectionInfo.sparse``, which every adapter reports from the
 server rather than from what creation was *asked* for, so the verdict is right even on a
-backend whose ``create_collection`` waved the mismatch through (TASK-0305). Detection needs
-no new adapter method and no new config key. It is a live-backend call and may raise, like
-any other: a caller that treats "unreachable" as "misconfigured" turns a transient outage
-into a refusal, so a caller that must not fail closed — a startup probe, a dashboard panel
-— uses :func:`audit_keyword_leg` and carries on with the verdict unknown.
+backend whose ``create_collection`` waves the mismatch through, as Qdrant's did until
+TASK-0305. Detection needs no new adapter method and no new config key. It is a
+live-backend call and may raise, like any other: a caller that treats "unreachable" as
+"misconfigured" turns a transient outage into a refusal, so a caller that must not fail
+closed — a startup probe, a dashboard panel — uses :func:`audit_keyword_leg` and carries
+on with the verdict unknown.
 
 **The verdict names the collection the way its caller does** (TASK-0324). A multi-tenant
 ``POST /v1/collections`` must audit the tenant-scoped backend name — that is the collection
