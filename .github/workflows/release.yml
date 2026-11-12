@@ -1,0 +1,488 @@
+# The release pipeline (docs/release.md §3, TASK-0445).
+#
+# A PyPI version can never be reused, even after it is deleted, so this file is written
+# around one question: can a run that was not meant to publish reach a step that does?
+#
+# It runs on exactly two triggers.
+#
+#   A pushed tag matching `v*`   the release. The tag must be the tree's own version
+#                                (`v0.1.0-beta.1` against `__version__ = "0.1.0b1"`), or the
+#                                first job refuses and nothing else starts.
+#   workflow_dispatch            a rehearsal. `dry_run` defaults to true, and a dry run does
+#                                everything up to the point of publishing: the whole gate
+#                                set, the build, the SBOM, the image, and the smoke test of
+#                                the built wheel in a clean container. Switching `dry_run`
+#                                off publishes only when the run was dispatched on a `v*`
+#                                tag — that is the way to finish a release whose tag run
+#                                failed part-way — and is refused on a branch.
+#
+# Four jobs publish: `publish-pypi`, `publish-image`, `github-release`, `post-publish`. Each
+# carries the same three-part `if:`, and the parts are deliberately redundant:
+#
+#   needs.verify.outputs.publish == 'true'    the decision .github/scripts/release.py made
+#   startsWith(github.ref, 'refs/tags/v')     the ref, asked of GitHub rather than of the script
+#   github.event_name == 'push' || inputs.dry_run == false
+#                                             the trigger, likewise
+#
+# So a bug in the script cannot publish from a branch or from a dry run, and a mistake in an
+# expression cannot publish what the script refused. A job-level `if:` without a status
+# function also implies `success()`: a publishing job is skipped when anything it `needs`
+# failed, was cancelled, or was itself skipped.
+#
+# Nothing here holds a credential. PyPI is reached through trusted publishing: the
+# `publish-pypi` job asks GitHub for a short-lived OIDC token (`id-token: write`) that PyPI
+# exchanges for an upload token scoped to this repository, this workflow file and the `pypi`
+# environment. That environment is where a human approves the irreversible step; its
+# protection rules are repository settings, listed in docs/release.md §3.1.
+#
+# Every action is pinned to a full commit SHA with its version beside it. A tag on someone
+# else's repository can be moved; a SHA cannot. Dependabot (.github/dependabot.yml) moves
+# the pins.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Rehearse the release and publish nothing"
+        type: boolean
+        default: true
+
+# Never cancelled: a release interrupted between the PyPI upload and the GitHub release is
+# worse than one that waits its turn.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# No job inherits anything. Each one states what it needs, and most need only to read.
+permissions: {}
+
+# CRITICAL: named explicitly because the default for an unnamed shell is `bash -e`, without
+# `pipefail`. `docker save | gzip` would then succeed on a failed save and upload an empty
+# archive for the push job to load.
+defaults:
+  run:
+    shell: bash
+
+env:
+  # CRITICAL: pinned because `uv export --format cyclonedx1.5` is experimental in this
+  # version ("may change without warning"), and an SBOM whose shape depends on the day the
+  # release ran is not a record. Raise it deliberately, with a dry run.
+  UV_VERSION: "0.12.3"
+
+jobs:
+  # (a) Is this a release, a rehearsal, or a mistake?
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.decide.outputs.version }}
+      label: ${{ steps.decide.outputs.label }}
+      publish: ${{ steps.decide.outputs.publish }}
+      prerelease: ${{ steps.decide.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      # Passes in the development state as well as the released one, which is what lets a
+      # rehearsal run on `main`. What it refuses is a half-finished stamp.
+      - name: Version is coherent across the tree
+        run: python scripts/stamp_release.py --check
+
+      # `version` is `__version__` (PEP 440, what PyPI and the wheel's filename carry);
+      # `label` is the tag without its `v` (SemVer, what the changelog heading and the
+      # release title carry), or the version again on a rehearsal that has no tag.
+      - name: Decide whether this run publishes
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if ! python .github/scripts/release.py decide \
+            --event "${EVENT_NAME}" --ref "${REF}" --dry-run "${DRY_RUN}" > decision.txt; then
+            cat decision.txt
+            exit 1
+          fi
+          cat decision.txt
+          cat decision.txt >> "${GITHUB_OUTPUT}"
+          if grep -qx 'publish=true' decision.txt; then
+            echo "## This run PUBLISHES \`${REF#refs/tags/}\`" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "## Dry run of \`${REF}\` — nothing will be published" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      # docs/release.md §1 requires CI green on the exact commit that is tagged, and the
+      # reviewed history is `main`. A tag on a commit that never reached it would release
+      # code no pull request or push run has seen.
+      - name: The tagged commit is on main
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main"
+            exit 1
+          fi
+
+  # (a, continued) The gate set, reused rather than repeated: ci.yml is called as it stands,
+  # so a gate added there is a gate a release must pass without anyone remembering to copy
+  # it here. That is every job a push to `main` runs — lint, format, types, the document
+  # gates, both unit lanes, packaging, the supply-chain job, integration, the model tier,
+  # the eval regression gate, and the must-run census.
+  gates:
+    needs: verify
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/ci.yml
+
+  # (b) The two files PyPI will receive.
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      # The build tooling comes from the lockfile, so the release is built by the versions
+      # of `build` and its dependencies that uv.lock names rather than by today's resolve.
+      - name: Install from the lockfile
+        run: |
+          uv sync --locked --extra dev --python 3.12
+          echo "${PWD}/.venv/bin" >> "${GITHUB_PATH}"
+
+      # The same gate CI's `packaging` job runs: it builds, installs the wheel into a
+      # throwaway environment, imports what docs/python-api.md promises, and runs the
+      # console script.
+      - name: Wheel installs and imports as a consumer gets it
+        run: python scripts/check_package.py
+
+      - name: Build the sdist and the wheel
+        run: python -m build --outdir dist
+
+      # Exactly two files, named for the version being released. A stray third file in
+      # dist/ would be uploaded with the other two, and an upload cannot be taken back.
+      - name: The built files are the release and nothing else
+        run: |
+          ls -l dist
+          test -f "dist/fasterrag-${VERSION}-py3-none-any.whl"
+          test -f "dist/fasterrag-${VERSION}.tar.gz"
+          test "$(find dist -type f | wc -l)" -eq 2
+
+      # What PyPI will render from the metadata. twine is deliberately not a dev dependency
+      # (docs/release.md), so it is fetched here at a pinned version.
+      - name: Metadata renders on PyPI
+        run: uvx --from twine==7.0.0 twine check --strict dist/*
+
+      # The GitHub release body is the changelog section, verbatim. A rehearsal has no
+      # version heading yet, so it shapes the Unreleased section instead — which is also the
+      # text the first release will carry, and it is longer than GitHub accepts in a body.
+      - name: Release notes from the changelog
+        env:
+          HEADING: ${{ startsWith(github.ref, 'refs/tags/v') && needs.verify.outputs.label || 'Unreleased' }}
+          LABEL: ${{ needs.verify.outputs.label }}
+        run: |
+          mkdir notes
+          python .github/scripts/release.py notes \
+            --label "${HEADING}" --ref "${GITHUB_REF_NAME}" --repository "${GITHUB_REPOSITORY}" \
+            --full "notes/CHANGELOG-${LABEL}.md" --body notes/release-body.md
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-notes
+          path: notes/
+          if-no-files-found: error
+
+  # (c) A CycloneDX SBOM of the locked dependency set: every package uv.lock names for the
+  # core install and every extra a user can ask for. The `dev` extra is left out — it is
+  # what the project is tested with, not what it ships.
+  sbom:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      # `--locked` fails rather than relocking, so the document describes the committed
+      # lockfile or the job is red.
+      - name: Export the lockfile as CycloneDX
+        run: |
+          mkdir sbom
+          uv export --format cyclonedx1.5 --preview-features sbom-export \
+            --locked --all-extras --no-extra dev \
+            --output-file "sbom/fasterrag-${VERSION}.cdx.json"
+
+      # uv writes the project's own component without a version, because the version is
+      # read from the source at build time. It is stamped in, and the shape is checked.
+      - name: Stamp the version and check the document
+        run: python .github/scripts/release.py sbom "sbom/fasterrag-${VERSION}.cdx.json" --version "${VERSION}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom
+          path: sbom/
+          if-no-files-found: error
+
+  # (g, rehearsed) The smoke test the post-publish job will run, run first against the wheel
+  # that is about to be uploaded. The container is the Dockerfile's own digest-pinned base,
+  # read from that file so there is one pin to keep current, and it sees two read-only
+  # mounts and nothing else: no checkout, no cache, no credentials.
+  smoke:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist
+
+      - name: Install the built wheel in a clean container and exercise it
+        run: |
+          base="$(sed -n 's/^FROM \(python:[^ ]*\) AS base$/\1/p' Dockerfile)"
+          test -n "${base}"
+          docker run --rm \
+            --volume "${PWD}/.github/scripts:/smoke:ro" \
+            --volume "${PWD}/dist:/dist:ro" \
+            --env REQUIREMENT="/dist/fasterrag-${VERSION}-py3-none-any.whl" \
+            --env VERSION="${VERSION}" \
+            "${base}" bash /smoke/release_smoke.sh
+
+  # (e, first half) Build the image and prove it is the one the documents describe. It is
+  # saved as an artifact so the job that pushes it pushes these bytes, not a rebuild, and
+  # so that job needs no checkout and no build tooling beside its write permission.
+  #
+  # The default build: no extras, which is the image for a hosted-provider deployment. The
+  # local-model stack is `--build-arg EXTRAS=huggingface` and several gigabytes; whether to
+  # publish that variant as well is a maintainer decision this file does not take.
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Build the image from the lockfile
+        run: |
+          docker build \
+            --label "org.opencontainers.image.version=${VERSION}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --tag "fasterrag:${VERSION}" .
+
+      - name: The image runs, as uid 10001, at this version, with its healthcheck
+        run: |
+          docker run --rm "fasterrag:${VERSION}" --help > /dev/null
+          test "$(docker run --rm --entrypoint id "fasterrag:${VERSION}" -u)" = "10001"
+          test "$(docker run --rm --entrypoint python "fasterrag:${VERSION}" \
+            -c 'import fasterrag; print(fasterrag.__version__)')" = "${VERSION}"
+          test "$(docker inspect --format '{{json .Config.Entrypoint}}' "fasterrag:${VERSION}")" = '["fasterrag"]'
+          docker inspect --format '{{json .Config.Healthcheck.Test}}' "fasterrag:${VERSION}" | grep -q readyz
+
+      - name: Save the image
+        run: docker save "fasterrag:${VERSION}" | gzip > image.tar.gz
+
+      # Seven days rather than one: the `pypi` environment may wait on a human, and the
+      # push job that follows it needs this file to still exist.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image
+          path: image.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  # (d) The irreversible step. Everything that can be checked without publishing has been:
+  # this job needs every job above it. It checks nothing out and installs nothing; it
+  # downloads the two files `build` produced and hands them to PyPI.
+  publish-pypi:
+    needs: [verify, gates, build, sbom, smoke, image]
+    if: ${{ needs.verify.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.dry_run == false) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/project/fasterrag/${{ needs.verify.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist
+
+      # Trusted publishing: no `password:` and no secret. The action exchanges this job's
+      # OIDC token for an upload token, and attaches PEP 740 attestations to both files.
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  # (e, second half) Push the image `image` built and tested, under the version in both of
+  # its spellings (`0.1.0b1` as pip names it, `0.1.0-beta.1` as the tag does). Never
+  # `latest`: docs/deployment.md tells operators to pin, and this registry will not teach
+  # them otherwise.
+  publish-image:
+    needs: [verify, image, publish-pypi]
+    if: ${{ needs.verify.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.dry_run == false) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      packages: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      LABEL: ${{ needs.verify.outputs.label }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: image
+
+      - name: Push to GHCR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          docker load --input image.tar.gz
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          for tag in $(printf '%s\n' "${VERSION}" "${LABEL}" | sort -u); do
+            docker tag "fasterrag:${VERSION}" "${repository}:${tag}"
+            docker push "${repository}:${tag}"
+          done
+          docker image rm "${repository}:${VERSION}"
+          docker pull "${repository}:${VERSION}"
+          docker run --rm "${repository}:${VERSION}" --help > /dev/null
+          docker logout ghcr.io
+          {
+            echo "### Image"
+            echo
+            echo "\`$(docker inspect --format '{{index .RepoDigests 0}}' "${repository}:${VERSION}")\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  # (f) The GitHub release: the changelog section as its body, the SBOM and both
+  # distribution files attached. `--verify-tag` refuses to create a tag as a side effect —
+  # the tag is the maintainer's act, never this job's.
+  github-release:
+    needs: [verify, build, sbom, publish-pypi, publish-image]
+    if: ${{ needs.verify.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.dry_run == false) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      LABEL: ${{ needs.verify.outputs.label }}
+      PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sbom
+          path: sbom
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-notes
+          path: notes
+
+      # The complete section is attached only when the body had to be cut to fit, which is
+      # when the body's own last line points at it.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(dist/* sbom/*)
+          if ! cmp -s notes/release-body.md "notes/CHANGELOG-${LABEL}.md"; then
+            assets+=("notes/CHANGELOG-${LABEL}.md")
+          fi
+          flags=(--verify-tag --title "fasterrag ${LABEL}" --notes-file notes/release-body.md)
+          if [ "${PRERELEASE}" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" "${flags[@]}" "${assets[@]}"
+
+  # (g) A stranger's install. The same script `smoke` ran, in the same clean container,
+  # but the requirement is `fasterrag==<version>` from the public index. A new upload takes
+  # a moment to reach every mirror, so the install is retried for up to ten minutes. A
+  # failure here cannot unpublish anything; it is what tells the maintainer to yank and
+  # ship the next number (docs/release.md §4).
+  post-publish:
+    needs: [verify, publish-pypi]
+    if: ${{ needs.verify.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.dry_run == false) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install the published version in a clean container and exercise it
+        run: |
+          base="$(sed -n 's/^FROM \(python:[^ ]*\) AS base$/\1/p' Dockerfile)"
+          test -n "${base}"
+          docker run --rm \
+            --volume "${PWD}/.github/scripts:/smoke:ro" \
+            --env REQUIREMENT="fasterrag==${VERSION}" \
+            --env VERSION="${VERSION}" \
+            --env ATTEMPTS=20 \
+            "${base}" bash /smoke/release_smoke.sh

@@ -7,9 +7,16 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  # release.yml calls this file as its gate set, so a release passes every job below as it
+  # stands on the tagged commit rather than a copy of them that drifts (TASK-0445).
+  workflow_call:
 
+# `github.workflow` is the CALLER's name when this file is called, so a release rehearsal
+# dispatched on `main` runs in `ci-release-refs/heads/main` and a push to `main` in
+# `ci-ci-refs/heads/main`. Keyed on the ref alone the two shared a group, and with
+# `cancel-in-progress` a rehearsal would have cancelled the push run it was started beside.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -623,6 +630,12 @@ jobs:
   # job on this runner, so the step authenticates with the workflow's own `actions: read`
   # token rather than gambling on a neighbour's spend. `fasterrag ci-status` never reads a
   # token it was not handed the name of.
+  #
+  # `--exclude release.yml` is the second exclusion and has a different reason. That workflow
+  # runs on a `v*` tag, or by hand as a rehearsal, and never on a push to `main` — so "no
+  # completed run on this branch" would be its permanent answer, and this job would have
+  # been red from the commit that added the file. Its verdict belongs to the tag it ran on,
+  # where it is the run the maintainer is watching.
   branch-verdict:
     runs-on: ubuntu-latest
     permissions:
@@ -647,4 +660,4 @@ jobs:
       - name: Every other workflow's last conclusion on main is green
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: fasterrag ci-status --branch main --exclude ci.yml --token-env GITHUB_TOKEN
+        run: fasterrag ci-status --branch main --exclude ci.yml --exclude release.yml --token-env GITHUB_TOKEN

@@ -203,9 +203,11 @@ balrajsingh165/FasterRag @ main
 
 ### Why `ci.yml` excludes itself in CI
 
-`ci.yml` runs this command against the other workflows (`--exclude ci.yml`) rather than all three, because a workflow that gates on its own previous conclusion has no working state. If it treats its own last red run as a failure, the push that fixes the cause still reads that red run and fails, and the branch can never return to green. If it excuses it, it excuses every red, because the latest completed run of `ci.yml` on `main` is always an ancestor of the commit being tested. There is no middle setting: self-checking is either deadlocked or vacuous.
+`ci.yml` runs this command against the other workflows (`--exclude ci.yml`) rather than all of them, because a workflow that gates on its own previous conclusion has no working state. If it treats its own last red run as a failure, the push that fixes the cause still reads that red run and fails, and the branch can never return to green. If it excuses it, it excuses every red, because the latest completed run of `ci.yml` on `main` is always an ancestor of the commit being tested. There is no middle setting: self-checking is either deadlocked or vacuous.
 
 Excluding it loses nothing. A workflow's own push run is attached to the commit, shown in the PR merge box, and emailed on failure — it is visible by construction. The invisible ones are exactly the workflows whose latest run came from a `schedule` nobody opens, and those are the ones the step checks.
+
+The step also passes `--exclude release.yml`, for a different reason. The release workflow runs on a `v*` tag, or by hand as a rehearsal, and never on a push to `main`, so "no completed run on this branch" would be its permanent answer and the step would be red from the commit that added the file. Its verdict belongs to the tag it ran on ([release.md](release.md) §3). Run locally with no flags, `fasterrag ci-status` still asks about it.
 
 The anonymous GitHub API budget is 60 requests an hour **per address**, shared with every other job on a runner, so the CI step passes `--token-env GITHUB_TOKEN` with the workflow's own `actions: read` token. Locally, anonymous is fine: two requests per workflow.
 
