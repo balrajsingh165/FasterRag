@@ -80,7 +80,7 @@ Shipped by TASK-0318 (✅ 2026-11-08). Implemented in `api/idempotency.py` (tran
 
 **Concurrent duplicates.** Two copies of one request arriving before either finishes is the ordinary shape of a client retry, and it is the case a check-then-write implementation returns two `200`s for. The reservation is taken with `O_CREAT | O_EXCL`, so exactly one caller wins; the loser is refused `409 IDEMPOTENCY_IN_PROGRESS` with `Retry-After: 1` and executes nothing.
 
-**Covered endpoints.** Everything mutating: `POST /v1/ingest`, `POST /v1/ingest/{job_id}/retry-dlq`, `POST /v1/collections`, `DELETE /v1/collections/{name}`, `POST /v1/admin/doctor/fix`, `POST /v1/admin/provision/{tool}`, `DELETE /v1/admin/provision/{tool}`, `POST /v1/admin/export`, `POST /v1/admin/import`. A mutating router added later is covered the moment it is mounted, because this is middleware rather than a per-route dependency.
+**Covered endpoints.** Everything mutating: `POST /v1/ingest`, `POST /v1/ingest/{job_id}/retry-dlq`, `POST /v1/collections`, `DELETE /v1/collections/{name}`, `DELETE /v1/collections/{name}/documents/{document_id}`, `POST /v1/admin/doctor/fix`, `POST /v1/admin/provision/{tool}`, `DELETE /v1/admin/provision/{tool}`, `POST /v1/admin/export`, `POST /v1/admin/import`. A mutating router added later is covered the moment it is mounted, because this is middleware rather than a per-route dependency.
 
 **Deliberately not covered**, because they are `POST` for the body and not for an effect: `/v1/query`, `/v1/retrieve`, `/v1/estimate`, `/v1/replay`. A key sent to one of them is ignored rather than refused, so a client that sets the header on every request keeps working. `/v1/query` can also be a `text/event-stream`, which cannot be captured and handed back.
 
@@ -262,8 +262,30 @@ Responds `200` with `{"chunks": [...], "trace_id": "..."}`. No generation happen
 | `GET /v1/collections/{name}` | Detail incl. `index.lock` summary and drift status (D1). | 200 | 404 |
 | `PATCH /v1/collections/{name}` | **Not yet implemented.** Mutable settings only (metadata schema, description). | 200 | 404, 422 |
 | `DELETE /v1/collections/{name}` | Drop collection (requires `admin` scope; refuses while it is an active alias target unless `?force=true`). | 204 | 404, 409 |
+| `DELETE /v1/collections/{name}/documents/{document_id}` | Delete one document: every chunk carrying that `document_id`, its dedup record, its lockfile entry, and the semantic cache. See [Deleting a document](#deleting-a-document). | 200 | 404, 422 |
 | `POST /v1/collections/{name}/reindex` | **Not yet implemented over REST** — shipped on the CLI as `fasterrag index reindex`. D2 zero-downtime reindex: blue/green build → eval gate → alias swap. Returns a job id. | 202 | 404, 409 |
 | `POST /v1/collections/{name}/rollback` | **Not yet implemented over REST** — shipped on the CLI as `fasterrag index rollback`. Alias flip back to the retained previous collection (within retention window). | 200 | 404, 409 |
+
+### Deleting a document
+
+`DELETE /v1/collections/{name}/documents/{document_id}` — `collections` scope. The `document_id` is the `d_…` id `GET /v1/ingest/{job_id}/documents` reports for each source.
+
+```json
+{
+  "collection": "docs",
+  "document_id": "d_0d06505c1a084fbc",
+  "known": true,
+  "deleted_at": "2026-11-12T02:14:07.512339+00:00"
+}
+```
+
+What it does, in order: writes a tombstone to the ingestion journal so the document's content hash stops counting as a duplicate and the same file can be ingested again; deletes every chunk whose `document_id` payload matches, by one filter pushed down to the vector database; removes the document from the collection's `index.lock`; invalidates the semantic response cache. A failure after the tombstone leaves chunks the journal has already forgotten — the request returns the error, and repeating it removes them.
+
+**It is idempotent, and it does not return 404 for a document that is not there.** `known` reports whether the journal held a live record of the document in that collection. Deleting a document nobody ingested, or deleting the same one twice, is `200` with `"known": false`: the vector database is still asked to delete, because the journal is not the index — with `ingestion.dedup: false`, or after an archive import, documents are indexed that the journal has never heard of — and no backend reports whether a filter matched anything. The response therefore never states how many chunks were removed. `404 NOT_FOUND` means the **collection** does not exist; `422 VALIDATION_FAILED` means the document id was blank.
+
+**Tenancy.** The collection is resolved exactly as every other `/v1/collections` route resolves it — `<tenant>__<name>` when `security.multi_tenancy` is on — and the delete additionally matches only chunks whose `tenant` payload tag is the caller's, so knowing another tenant's document id (it is derived from the source path) removes nothing of theirs. `POST /v1/ingest` does not apply that prefix (TASK-0381), so with multi-tenancy on, a document ingested into `docs` lives in the unprefixed `docs` collection and this route, which addresses `<tenant>__docs`, does not reach it; which of the two is correct is the open decision in TASK-0339.
+
+**Re-ingesting instead of deleting.** A source ingested again with different content is updated in place: its chunks are overwritten, and the chunks beyond its new length are deleted once the new ones are written. That needs the journal to know the document, so it applies when `ingestion.dedup` is on (the default).
 
 ## Health & readiness
 
