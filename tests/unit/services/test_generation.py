@@ -1,4 +1,5 @@
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -8,8 +9,10 @@ from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.llm.base import Completion, LLMAdapter
 from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
+from fasterrag.core.breaker import reset_shared_breakers
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.cache.store import MemoryStore
+from fasterrag.core.chunking.models import EstimatingTokenCounter
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import (
     ConfigError,
@@ -18,6 +21,9 @@ from fasterrag.errors import (
     FasterRagError,
     GenerationError,
 )
+from fasterrag.observability import metrics
+from fasterrag.observability.logging import use_trace_id
+from fasterrag.services.budget import reset_shared_governors
 from fasterrag.services.generation import EXTRACTIVE_MODE, GenerationService, QueryEvent
 from fasterrag.services.querying import FULL_MODE, HYBRID_ONLY_MODE, Retrieval
 from fasterrag.services.traces import TraceStore
@@ -1043,6 +1049,18 @@ async def test_a_streamed_query_stores_a_trace(tmp_path: Path) -> None:
     assert stored.response.strip() == "The notice period is thirty days [^c_a]."
 
 
+async def test_a_consumer_that_stops_at_done_still_leaves_a_trace(tmp_path: Path) -> None:
+    """The trace was written after `done` was yielded, so a reader that stopped there lost it."""
+    service, store = traced(tmp_path)
+    events = service.stream("what is the notice period?")
+
+    meta = await anext(events)
+    while (await anext(events)).type != "done":
+        continue
+
+    assert store.load(meta.data["trace_id"]) is not None
+
+
 async def test_a_streamed_trace_matches_the_non_streamed_one(tmp_path: Path) -> None:
     """Two code paths producing the same answer must leave the same evidence behind."""
     service, store = traced(tmp_path)
@@ -1058,3 +1076,290 @@ async def test_a_streamed_trace_matches_the_non_streamed_one(tmp_path: Path) -> 
     assert streamed.prompt == plain.prompt
     assert streamed.retrieved == plain.retrieved
     assert streamed.result["answer"] == plain.result["answer"]
+
+
+PARITY_QUESTION = "what is the notice period?"
+PARITY_TENANT = "acme"
+PARITY_COUNTER = EstimatingTokenCounter()
+
+
+class MeteredLLM(ScriptedLLM):
+    """A provider whose whole call reports exactly what its stream of the same text amounts to.
+
+    ``stream`` carries text only, so the service counts a streamed answer itself. For the two
+    surfaces to be comparable at all, ``complete`` has to report the same model, counts and
+    finish reason, measured the way the service measures them — and the stream has to
+    concatenate to the same text, which ``ScriptedLLM``'s trailing space does not.
+    """
+
+    async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
+        self.prompts.append((prompt, system))
+        if self.error is not None:
+            raise self.error
+        tokens = PARITY_COUNTER.count(self.text)
+        return Completion(
+            text=self.text,
+            model=self.model,
+            prompt_tokens=PARITY_COUNTER.count(prompt),
+            completion_tokens=tokens,
+            finish_reason="length" if tokens >= self.config.max_tokens else "stop",
+        )
+
+    async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
+        self.prompts.append((prompt, system))
+        if self.error is not None:
+            raise self.error
+        first, *rest = self.text.split(" ")
+        yield first
+        for word in rest:
+            yield f" {word}"
+
+
+@dataclass(frozen=True)
+class Observed:
+    """What one surface produced and left behind, with the surface itself taken out."""
+
+    raised: str | None
+    body: dict[str, Any] | None
+    metrics: dict[str, float]
+    trace: dict[str, Any] | None
+    spent: int
+    provider_calls: int
+    breaker_open: bool
+
+
+@dataclass(frozen=True)
+class ParityCase:
+    """One way a query can end, and the fact that proves the case really is that way."""
+
+    holds: Callable[[Observed], bool]
+    settings: dict[str, Any] = field(default_factory=dict)
+    answer: str = "The notice period is thirty days [^c_a]."
+    error: Callable[[], FasterRagError] | None = None
+    verdict: str | None = None
+    chunks: tuple[tuple[str, str], ...] = (("c_a", "Either party may terminate."),)
+    mode: str = FULL_MODE
+    primed: bool = False
+
+
+def _body(observed: Observed) -> dict[str, Any]:
+    assert observed.body is not None
+    return observed.body
+
+
+def _span_names(observed: Observed) -> list[str]:
+    assert observed.trace is not None
+    return [name for name, _ in observed.trace["spans"]]
+
+
+PARITY_CASES: dict[str, ParityCase] = {
+    "success": ParityCase(
+        holds=lambda seen: (
+            _body(seen)["mode"] == FULL_MODE
+            and _span_names(seen)[-1] == "generation"
+            and seen.spent > 0
+        ),
+    ),
+    "cache hit": ParityCase(
+        settings={"cache": {"semantic": True}},
+        primed=True,
+        holds=lambda seen: (
+            _body(seen)["cache"]["semantic_hit"] is True and seen.provider_calls == 1
+        ),
+    ),
+    "non-retryable failure": ParityCase(
+        error=lambda: GenerationError("the provider rejected the credentials", retryable=False),
+        holds=lambda seen: seen.raised == "GENERATION_FAILED" and seen.trace is None,
+    ),
+    "budget refusal": ParityCase(
+        settings={"cost": {"per_query_token_budget": 10}},
+        holds=lambda seen: seen.raised == "BUDGET_EXCEEDED" and seen.provider_calls == 0,
+    ),
+    "grounded refusal": ParityCase(
+        settings={"generation": {"grounded_or_refuse": True}},
+        verdict='{"score": 0.38}',
+        holds=lambda seen: (
+            _body(seen)["code"] == "INSUFFICIENT_EVIDENCE"
+            and seen.trace is not None
+            and seen.trace["result"]["answer"] is None
+            and seen.metrics["fasterrag_faithfulness{}"] == 1
+        ),
+    ),
+    "graded answer": ParityCase(
+        settings={"generation": {"grounded_or_refuse": True}},
+        verdict='{"score": 0.93}',
+        holds=lambda seen: _body(seen)["faithfulness"] == pytest.approx(0.93),
+    ),
+    "truncation": ParityCase(
+        settings={"llm": {"max_tokens": 4}},
+        holds=lambda seen: _body(seen)["truncated"] is True and seen.trace is not None,
+    ),
+    "evidence dropped": ParityCase(
+        settings={"generation": {"context_budget_tokens": 350}},
+        answer="an answer [^c_a] [^c_b]",
+        chunks=(("c_a", "alpha " * 200), ("c_b", "bravo " * 200)),
+        holds=lambda seen: (
+            _body(seen)["evidence_dropped"] == 1
+            and [cited["chunk_id"] for cited in _body(seen)["citations"]] == ["c_a"]
+        ),
+    ),
+    "degraded retrieval": ParityCase(
+        mode=HYBRID_ONLY_MODE,
+        holds=lambda seen: (
+            _body(seen)["mode"] == HYBRID_ONLY_MODE and _body(seen)["degraded"] is True
+        ),
+    ),
+}
+
+
+def _parity_service(case: ParityCase, root: Path) -> tuple[GenerationService, MeteredLLM]:
+    """Build a fresh service for one surface, tracing into its own directory."""
+    settings = Settings.model_validate(
+        {"cost": {"per_tenant_token_budget": 1_000_000}, **case.settings}
+    )
+    llm = MeteredLLM(settings, text=case.answer, error=case.error() if case.error else None)
+    cache = SemanticCache(settings, MemoryStore()) if settings.cache.semantic else None
+    service = GenerationService(
+        settings,
+        ScriptedRetrieval([chunk(*pair) for pair in case.chunks], case.mode),  # type: ignore[arg-type]
+        llm,
+        grader=ScriptedLLM(settings, text=case.verdict) if case.verdict is not None else None,
+        cache=cache,
+        embedder=ScriptedEmbedder(settings) if cache is not None else None,
+        traces=TraceStore(root),
+        tenant=PARITY_TENANT,
+    )
+    return service, llm
+
+
+def _metric_values() -> dict[str, float]:
+    """Return every series' counter value, or observation count for a histogram.
+
+    A histogram's sum is a wall-clock duration and differs between any two runs, so only how
+    many observations were taken is compared. ``fasterrag_ttft_seconds`` is left out by
+    definition rather than by convenience: a whole answer has no first streamed token.
+    """
+    values: dict[str, float] = {}
+    for sample in metrics.REGISTRY.snapshot():
+        if sample.name == metrics.TTFT.name:
+            continue
+        labels = ",".join(f"{key}={value}" for key, value in sorted(sample.labels.items()))
+        values[f"{sample.name}{{{labels}}}"] = (
+            float(sample.count) if sample.count is not None else sample.value
+        )
+    return values
+
+
+def _surface_free(body: dict[str, Any], trace_id: str) -> dict[str, Any]:
+    """Return a response body with its two per-run members reduced to what is comparable."""
+    assert body["trace_id"] == trace_id
+    reduced = {**body, "trace_id": "<this query>"}
+    if "timings_ms" in reduced:
+        reduced["timings_ms"] = sorted(reduced["timings_ms"])
+    return reduced
+
+
+def _body_from_events(events: list[QueryEvent]) -> dict[str, Any]:
+    """Rebuild the non-streamed response body from a completed event stream."""
+    kinds = [event.type for event in events]
+    assert kinds[0] == "meta"
+    assert kinds[-1] == "done"
+
+    withheld = [event for event in events if event.type == "insufficient_evidence"]
+    if withheld:
+        assert kinds == ["meta", "insufficient_evidence", "done"]
+        return dict(withheld[0].data)
+
+    meta = [event for event in events if event.type == "meta"]
+    usage = next(event for event in events if event.type == "usage")
+    assert kinds.index("citations") < kinds.index("usage")
+    assert meta[-1].data["mode"] == usage.data["mode"], "the mode was not known before the text"
+    assert meta[-1].data["degraded"] == usage.data["degraded"]
+    return {
+        "answer": "".join(event.data["text"] for event in events if event.type == "token"),
+        "citations": next(e for e in events if e.type == "citations").data["citations"],
+        "usage": usage.data["usage"],
+        "timings_ms": usage.data["timings_ms"],
+        "degraded": usage.data["degraded"],
+        "mode": usage.data["mode"],
+        "truncated": usage.data["truncated"],
+        "evidence_dropped": usage.data["evidence_dropped"],
+        "faithfulness": usage.data["faithfulness"],
+        "cache": meta[0].data["cache"],
+        "trace_id": meta[0].data["trace_id"],
+    }
+
+
+async def _observe(case: ParityCase, root: Path, *, streamed: bool) -> Observed:
+    """Run one case through one surface and record everything it left behind."""
+    reset_shared_breakers()
+    reset_shared_governors()
+    service, llm = _parity_service(case, root)
+    assert service.traces is not None
+    if case.primed:
+        with use_trace_id():
+            await service.answer(PARITY_QUESTION)
+
+    before = _metric_values()
+    raised: str | None = None
+    body: dict[str, Any] | None = None
+    events: list[QueryEvent] = []
+    with use_trace_id() as trace_id:
+        try:
+            if streamed:
+                await collect_into(events, service, PARITY_QUESTION)
+                body = _surface_free(_body_from_events(events), trace_id)
+            else:
+                body = _surface_free((await service.answer(PARITY_QUESTION)).as_dict(), trace_id)
+        except FasterRagError as exc:
+            raised = exc.code.value
+    after = _metric_values()
+
+    if raised == ErrorCode.BUDGET_EXCEEDED.value:
+        assert events == [], "a refused stream had already begun"
+
+    stored = service.traces.load(trace_id)
+    trace: dict[str, Any] | None = None
+    if stored is not None:
+        trace = {
+            "query": stored.query,
+            "collection": stored.collection,
+            "tenant": stored.tenant,
+            "filters": stored.filters,
+            "retrieved": stored.retrieved,
+            "prompt": stored.prompt,
+            "response": stored.response,
+            "result": _surface_free(stored.result, trace_id),
+            "spans": [(span.name, span.attributes) for span in stored.spans],
+        }
+
+    return Observed(
+        raised=raised,
+        body=body,
+        metrics={
+            name: value - before.get(name, 0.0)
+            for name, value in after.items()
+            if value != before.get(name, 0.0)
+        },
+        trace=trace,
+        spent=service.governor.spent(PARITY_TENANT),
+        provider_calls=len(llm.prompts),
+        breaker_open=service.breaker.is_open,
+    )
+
+
+@pytest.mark.parametrize("name", sorted(PARITY_CASES))
+async def test_both_surfaces_leave_the_same_outcome(name: str, tmp_path: Path) -> None:
+    """`answer()` and `stream()` were two hand-kept copies of one pipeline, and had diverged.
+
+    Each case is run through both and everything observable is compared: the response body
+    (mode, flags, usage, citations), every metric the query moved, the stored trace with its
+    spans, what the tenant was charged, and how often the provider was called (TASK-0438).
+    """
+    case = PARITY_CASES[name]
+
+    whole = await _observe(case, tmp_path / "whole", streamed=False)
+    streamed = await _observe(case, tmp_path / "streamed", streamed=True)
+
+    assert case.holds(whole), whole
+    assert streamed == whole

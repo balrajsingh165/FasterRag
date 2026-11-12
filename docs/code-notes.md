@@ -3917,6 +3917,10 @@ The same shape as a generated response — the whole answer simply arrives as on
     ``token`` event, since there is nothing left to stream incrementally. ``meta`` carries
     the cache member so a client learns it is being served from cache before the text.
 
+The function itself is gone (TASK-0438). A cache hit is now three stages of
+    ``GenerationService._pipeline`` — admitted, text, completed — mapped to events by
+    ``_events`` like every other answer, which is what keeps the shape above from drifting.
+
 ### `Answer.as_dict`
 
 > Return the non-streaming response body.

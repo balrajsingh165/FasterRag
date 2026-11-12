@@ -223,18 +223,22 @@ Grounded-or-refuse (D5): when faithfulness < threshold, `200` with:
 event: meta       data: {"trace_id": "...", "mode": "full", "degraded": false, "cache": {...}}
 event: token      data: {"text": "The"}          (repeated; first token ASAP = TTFT)
 event: citations  data: {"citations": [...]}      (once, after retrieval concludes)
-event: usage      data: {"usage": {...}, "timings_ms": {...}, "faithfulness": 0.93}
+event: usage      data: {"usage": {"prompt_tokens": 3211, "completion_tokens": 187, "estimated_cost_usd": null},
+                         "timings_ms": {...}, "faithfulness": 0.93, "template_version": "...",
+                         "mode": "full", "degraded": false, "truncated": false, "evidence_dropped": 0}
 event: done       data: {}
 ```
 
+**A stream reports everything the JSON body reports.** Both shapes are produced by one pipeline (TASK-0438), so `usage` closes the stream with the same `mode`, `degraded`, `truncated` and `evidence_dropped` the non-streamed body carries, `meta` always carries the `cache` member, a streamed query increments the same metrics (plus `fasterrag_ttft_seconds`, which only a stream can have), and it stores the same trace — including the trace of a withheld answer, which a streamed refusal did not store before 2026-11-12. Two members are **estimates on a stream and provider-reported otherwise**, because a provider stream carries text only: `prompt_tokens` / `completion_tokens` are counted locally (and `estimated_cost_usd` is priced from those), and `truncated` is inferred from the local completion count reaching `llm.max_tokens` rather than read from the provider's finish reason. An answer that ended on its own just under the ceiling can therefore be flagged, and one the provider cut can be missed when the local count runs low.
+
 **A query refused before its first event is an ordinary problem response, not a stream.** Everything that can refuse a query outright — retrieval failing (`503 RETRIEVAL_FAILED`), the token budget (`402 BUDGET_EXCEEDED`) — happens before `meta` is produced, and the server produces `meta` before it sends the status line. Such a request gets the same status and `application/problem+json` body as `stream: false`, with no SSE frame at all. Before 2026-11-12 the budget check ran after `meta`, so a streamed request over its budget received `200` and then an `error` event (TASK-0438).
 
-On mid-stream failure — anything after `meta` has been sent — the status is already `200` and cannot change: `event: error` with a problem document, then the stream closes. Clients must treat a missing `done` as an incomplete answer.
+On mid-stream failure — anything after `meta` has been sent — the status is already `200` and cannot change: `event: error` carrying `code`, `detail`, `trace_id`, `retryable` and the `status` the problem would have had, then the stream closes. Clients must treat a missing `done` as an incomplete answer.
 
 Grounded-or-refuse while streaming: a token cannot be unsaid once sent, so with `generation.grounded_or_refuse: true` no `token` event is emitted until the whole answer has been graded — time-to-first-token is traded for the guarantee the flag exists to provide, and the flag defaults to `false` so the trade is only made on request. A withheld answer replaces the `token`, `citations`, and `usage` events with one `insufficient_evidence` event carrying the same body as the non-streamed refusal, followed by `done`:
 
 ```
-event: meta                   data: {"trace_id": "...", "mode": "full", "degraded": false}
+event: meta                   data: {"trace_id": "...", "mode": "full", "degraded": false, "cache": {...}}
 event: insufficient_evidence  data: {"code": "INSUFFICIENT_EVIDENCE", "answer": null, "best_candidates": [...], "faithfulness": 0.38, "threshold": 0.7, "trace_id": "..."}
 event: done                   data: {}
 ```
