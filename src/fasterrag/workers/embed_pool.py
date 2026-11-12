@@ -12,6 +12,13 @@ exponential backoff and jitter from ``reliability.retries`` (``docs/reliability.
 A batch that exhausts its attempts dead-letters its documents with a reason code instead of
 stalling the pipeline.
 
+**Batches adapt to what the provider refuses** (TASK-0478). A batch refused for its size is
+halved and each half embedded on its own, recursively, without spending a retry; a single
+chunk refused on its own is one failed chunk through the ledger, not a failed batch. The
+refusal does not count against the circuit breaker — the caller sent too much, the provider
+answered. A retryable refusal carrying ``Retry-After`` waits that long instead of the
+backoff when it is longer, up to ``reliability.retries.backoff_max_ms``.
+
 The pool is also where embedding spend is accounted. Every successful batch is priced
 through ``services.estimation`` and charged to the shared ``CostGovernor``, using the
 *provider's* reported token count where the adapter surfaced one and the local count only
@@ -30,7 +37,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, cast, runtime_checkable
 
-from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
+from fasterrag.adapters.embeddings.base import (
+    EmbeddingAdapter,
+    EmbeddingResult,
+    EmbedThrottledError,
+    EmbedTooLargeError,
+)
 from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.config.schema import Settings
 from fasterrag.core.breaker import Admission, CircuitBreaker, CircuitOpenError, shared_breaker
@@ -274,6 +286,14 @@ class EmbeddingWorkerPool:
                     if documents
                     else await adapter.embed_documents([payload.text for payload in group])
                 )
+            except EmbedTooLargeError as exc:
+                # CRITICAL: a size refusal is the caller's fault and proof the provider is up.
+                # Recording it as a failure would open the breaker on a healthy provider, and
+                # recording nothing would leave a half-open probe's lease held, refusing the
+                # halves below with CIRCUIT_OPEN until it lapsed.
+                self.breaker.record_success(admission)
+                await self._split(adapter, group, worker, exc)
+                return
             except FasterRagError as exc:
                 last = exc
                 if not isinstance(exc, CircuitOpenError):
@@ -282,7 +302,7 @@ class EmbeddingWorkerPool:
                     break
 
                 self.report.retries += 1
-                delay = backoff_delay(attempt + 1, self.settings)
+                delay = self._delay(attempt + 1, exc)
                 _logger.warning(
                     "retrying an embedding batch",
                     extra={
@@ -317,6 +337,62 @@ class EmbeddingWorkerPool:
             return
 
         await self._give_up(group, last)
+
+    def _delay(self, attempt: int, error: FasterRagError) -> float:
+        """Return the wait before ``attempt``: the backoff, or the provider's pause if longer.
+
+        The pause is capped at ``reliability.retries.backoff_max_ms``, so a provider cannot
+        park a worker for longer than the retry budget already allows.
+        """
+        delay = backoff_delay(attempt, self.settings)
+        if isinstance(error, EmbedThrottledError):
+            ceiling = self.settings.reliability.retries.backoff_max_ms / 1000
+            delay = max(delay, min(error.retry_after_seconds, ceiling))
+        return delay
+
+    async def _split(
+        self,
+        adapter: EmbeddingAdapter,
+        group: Sequence[ChunkPayload],
+        worker: int,
+        error: EmbedTooLargeError,
+    ) -> None:
+        """Embed a group refused for its size as two halves, or give up on an indivisible one."""
+        halves = self._halves(group, self._pooled_documents(adapter, group))
+        if halves is None:
+            await self._give_up(group, error)
+            return
+
+        _logger.info(
+            "splitting an embedding batch the provider refused as too large",
+            extra={"worker": worker, "chunks": len(group), "trace_id": error.trace_id},
+        )
+        for half in halves:
+            await self._embed_group(adapter, half, worker)
+
+    @staticmethod
+    def _halves(
+        group: Sequence[ChunkPayload], documents: dict[str, list[ChunkPayload]] | None
+    ) -> tuple[list[ChunkPayload], list[ChunkPayload]] | None:
+        """Return ``group`` cut in two, by document when pooling, or ``None`` if it cannot be.
+
+        A pooled call embeds a whole document, so splitting one document's spans cannot
+        shrink the request; it is only divided between documents.
+        """
+        if documents is not None:
+            chunks = list(documents.values())
+            if len(chunks) < 2:
+                return None
+            middle = len(chunks) // 2
+            return (
+                [payload for document in chunks[:middle] for payload in document],
+                [payload for document in chunks[middle:] for payload in document],
+            )
+
+        if len(group) < 2:
+            return None
+        middle = len(group) // 2
+        return list(group[:middle]), list(group[middle:])
 
     async def _write(self, batch: EmbeddedBatch, worker: int) -> FasterRagError | None:
         """Hand a batch to the sink, retrying what is retryable, and return the last failure."""

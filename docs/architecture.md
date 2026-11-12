@@ -42,7 +42,7 @@ Design rules:
 
 ## 3. Batching
 
-- **Embedding**: per-document batched embedding amortizes per-request overhead that one-at-a-time calls pay per text — requests are aggregated to `embeddings.batch_size` texts. The saving is unmeasured (TASK-0084). Async batch embedding with queued workers prevents pipeline stalls and provider rate-limit throttling.
+- **Embedding**: per-document batched embedding amortizes per-request overhead that one-at-a-time calls pay per text — requests are aggregated to `embeddings.batch_size` texts. The saving is unmeasured (TASK-0084). Async batch embedding with queued workers prevents pipeline stalls and provider rate-limit throttling. A batch the provider refuses for its size is halved and re-sent, so only an input that cannot fit on its own fails, and a `Retry-After` on a rate limit is waited out up to `reliability.retries.backoff_max_ms` (TASK-0478).
 - **LLM inference**: provider calls are batched where the provider supports it; concurrent generation requests share connection pools.
 - **Indexing**: vector upserts go to the adapter in batches, amortizing network round-trips.
 
