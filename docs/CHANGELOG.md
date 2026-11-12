@@ -124,6 +124,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Qdrant refuses a hybrid collection it cannot serve, up front** (2026-11-13, TASK-0305). Creating a collection with `retrieval.hybrid: true` over an existing Qdrant collection that had no keyword index was accepted, and the ingest then failed at its first write with a misleading embedding error. It is now refused at creation with 409 `CONFLICT` saying what is missing and how to fix it, as every other adapter does.
+
+- **Two different files can no longer share a document id** (2026-11-13, TASK-0304). A path such as `É:/Docs/a.pdf` was mistaken for a Windows drive and lower-cased, so it collided with `é:/docs/a.pdf` and deduplication silently dropped one of them. Only `A`–`Z` now count as drive letters. Every other document id is unchanged.
+
 - **Cost estimates cover the current Claude models** (2026-11-12, TASK-0543). `fasterrag estimate` and the cost governor priced Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1/5.2 at nothing, and Sonnet 5 at its old rate. The table now carries their published prices.
 
 - **`llm.provider: anthropic` works with current Claude models** (2026-11-12, TASK-0539). The adapter always sent `temperature`, which Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and the Fable models refuse with a 400, so every answer through Anthropic failed. **`llm.temperature` now defaults to `null`**: OpenAI, Cohere and Ollama still receive 0.1, and Anthropic receives no sampling parameter unless you set one. The adversarial prompt-injection set was run against Claude Opus 5.5 and every attack was resisted.
