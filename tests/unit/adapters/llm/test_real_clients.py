@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+import httpx
 import pytest
 
 from fasterrag.adapters.llm.cohere import CohereGenerator
@@ -169,6 +170,20 @@ async def test_a_rate_limited_cohere_call_is_sent_once(monkeypatch: pytest.Monke
 
     assert caught.value.retryable is True
     assert replay.paths == ["/v2/chat"]
+
+
+@pytest.mark.usefixtures("cohere_key")
+async def test_cohere_s_retry_after_reaches_the_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read through the real client, so the header's path to the error is the library's own."""
+    limited = httpx.Response(429, json={"message": "slow down"}, headers={"Retry-After": "3"})
+    Replay(monkeypatch, {"/v2/chat": lambda _request: limited})
+
+    with pytest.raises(GenerationError) as caught:
+        await CohereGenerator(cohere_settings()).complete("the question")
+
+    assert caught.value.retry_after == 3.0
 
 
 @pytest.mark.usefixtures("cohere_key")

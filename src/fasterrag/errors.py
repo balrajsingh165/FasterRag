@@ -242,6 +242,19 @@ class GenerationError(FasterRagError):
 
     default_code: ClassVar[ErrorCode] = ErrorCode.GENERATION_FAILED
 
+    def __init__(
+        self,
+        detail: str,
+        *,
+        code: ErrorCode | None = None,
+        trace_id: str | None = None,
+        retryable: bool | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        """Build the error; ``retry_after`` is the wait in seconds the provider asked for."""
+        super().__init__(detail, code=code, trace_id=trace_id, retryable=retryable)
+        self.retry_after = retry_after
+
 
 class ProviderError(FasterRagError):
     """External provider transport or API error.

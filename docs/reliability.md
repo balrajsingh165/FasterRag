@@ -15,7 +15,8 @@ FasterRagError                      # root; carries code, trace_id, retryable
 │   ├── ChunkError                  # chunker invariant violated
 │   └── EmbedError                  # embedding stage failure
 ├── RetrievalError                  # dense/BM25 leg, fusion, or rerank failure
-├── GenerationError                 # LLM generation failure
+├── GenerationError                 # LLM generation failure; retry_after: the seconds the
+│                                   # provider's Retry-After asked for, or None (TASK-0449)
 ├── ProviderError                   # external provider transport/API error; retryable: bool
 ├── CacheError                      # cache backend failure (system degrades to cache-off)
 └── ProvisioningError               # doctor/provisioner failure; carries fix-it hint
