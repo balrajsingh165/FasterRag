@@ -40,3 +40,28 @@ def test_separators_are_unified_on_posix_paths() -> None:
 
 def test_the_tenant_still_separates_documents() -> None:
     assert document_id(r"D:\a.md", "tenant-a") != document_id(r"D:\a.md", "tenant-b")
+
+
+def test_a_non_ascii_letter_before_colon_slash_is_no_drive() -> None:
+    """`isalpha` is Unicode-wide, so `É:/` and `é:/` folded to one POSIX document (TASK-0304)."""
+    assert normalise_source("É:/Docs/A.PDF") == "É:/Docs/A.PDF"
+    assert document_id("É:/Docs/A.PDF") != document_id("é:/docs/a.pdf")
+
+
+@pytest.mark.parametrize(
+    ("source", "tenant", "pinned"),
+    [
+        (r"C:\Docs\A.MD", None, "d_000b4849727b6537"),
+        ("d:/docs/a.md", None, "d_04fe2bf8d5017587"),
+        ("Z:/x", None, "d_e6471c7a15e56a5d"),
+        ("/srv/docs/A.md", None, "d_e46d1eed0ffec501"),
+        ("docs/a.md", None, "d_56e17dddd1743075"),
+        ("https://x.test/A", None, "d_d92e842d7b84c04c"),
+        (r"D:\a.md", "tenant-a", "d_e4e86df494d185da"),
+    ],
+)
+def test_identity_version_three_ids_are_pinned(
+    source: str, tenant: str | None, pinned: str
+) -> None:
+    """Recorded under identity version 3; a change here needs an `IDENTITY_VERSION` bump."""
+    assert document_id(source, tenant) == pinned
