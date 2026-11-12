@@ -14,7 +14,6 @@ Conventions used below:
 app:
   host: 127.0.0.1
   port: 8000
-  workers: 4
   log_level: info
 
 vector_db:
@@ -213,8 +212,9 @@ security:
 |---|---|---|---|---|
 | `app.host` | str | `127.0.0.1` | valid IPv4/IPv6 address or hostname | Bind address for the API server and the dashboard. Loopback by default, because `security.auth` defaults to `false`: an unauthenticated API must not be reachable from other machines unless an operator says so. The container image passes `--host 0.0.0.0` explicitly and publishes on `127.0.0.1`; set this to a routable address only together with `security.auth: true`. `fasterrag serve` logs a warning when it binds a non-loopback address with auth off. |
 | `app.port` | int | `8000` | 1–65535 | API server port. |
-| `app.workers` | int | `4` | ≥ 1 | Uvicorn/Gunicorn worker process count for the API tier (not pipeline workers). **Status (2026-11-11): validated and read by nothing.** `fasterrag serve` starts a single server process whatever this says; several processes would also be unsafe today, because rate limits, token budgets, circuit breakers and the file journal are per process (TASK-0440, TASK-0437, TASK-0426). |
 | `app.log_level` | str | `info` | one of `debug`, `info`, `warning`, `error` | Structured-log verbosity. |
+
+**`app.workers` was removed on 2026-11-12.** It was validated and read by nothing: `fasterrag serve` runs one server process whatever it said. A `config.yaml` that still sets it fails at load with a message naming the key and the reason; delete the line. The pipeline pools are sized by [`workers.*`](#workers), a different section that is unchanged. Several API processes would also be unsafe today, because rate limits, token budgets, circuit breakers and the file journal are per process (TASK-0437, TASK-0426).
 
 ## `vector_db`
 

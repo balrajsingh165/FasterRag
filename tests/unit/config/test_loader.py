@@ -67,6 +67,23 @@ def test_unknown_key_is_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("env")
+def test_a_config_that_still_sets_app_workers_is_told_the_key_was_removed_and_why(
+    tmp_path: Path,
+) -> None:
+    """``app.workers`` was validated and read by nothing; a bare "extra input" hid why."""
+    path = write_config(tmp_path, "app:\n  port: 8000\n  workers: 4\n")
+
+    with pytest.raises(ConfigError) as caught:
+        load_settings(path, env_file=None)
+
+    detail = caught.value.detail
+    assert "app.workers was removed" in detail
+    assert "read by nothing" in detail
+    assert "TASK-0130" in detail
+    assert "Extra inputs are not permitted" not in detail
+
+
+@pytest.mark.usefixtures("env")
 def test_validation_error_never_echoes_the_offending_value(tmp_path: Path) -> None:
     secret = "sk-proj-supersecretvalue"
     path = write_config(tmp_path, f"security:\n  api_key_env: {secret}\n")
