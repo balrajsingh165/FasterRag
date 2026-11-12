@@ -82,6 +82,7 @@ class ErrorCode(StrEnum):
     ENCODING_UNREADABLE = "ENCODING_UNREADABLE"
     PDF_ENCRYPTED = "PDF_ENCRYPTED"
     NESTING_TOO_DEEP = "NESTING_TOO_DEEP"
+    SOURCE_LINK_ESCAPES = "SOURCE_LINK_ESCAPES"
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +163,9 @@ PROBLEM_SPECS: Final[dict[ErrorCode, ProblemSpec]] = {
     ),
     ErrorCode.NESTING_TOO_DEEP: ProblemSpec(
         422, "nesting-too-deep", "Document nests deeper than the parser allows", False
+    ),
+    ErrorCode.SOURCE_LINK_ESCAPES: ProblemSpec(
+        422, "source-link-escapes", "Source link resolves outside the allowed roots", False
     ),
 }
 

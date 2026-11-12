@@ -14,6 +14,7 @@ FasterRagError                      # root; carries code, trace_id, retryable
 │   │                               # still parsing after ingestion.parse_timeout_seconds → PARSE_TIMEOUT
 │   │                               # text no codec reads → ENCODING_UNREADABLE; PDF needs a password → PDF_ENCRYPTED
 │   │                               # JSON nested past 512 levels → NESTING_TOO_DEEP
+│   │                               # (a path whose link escapes the allowed roots → SOURCE_LINK_ESCAPES, an IngestionError)
 │   ├── ChunkError                  # chunker invariant violated
 │   └── EmbedError                  # embedding stage failure
 ├── RetrievalError                  # dense/BM25 leg, fusion, or rerank failure

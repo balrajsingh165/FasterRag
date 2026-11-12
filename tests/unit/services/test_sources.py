@@ -21,7 +21,7 @@ from fasterrag.services.sources import (
     resolve_sources,
     typed_source,
 )
-from fasterrag.workers.cpu_pool import CpuWorkerPool
+from fasterrag.workers.cpu_pool import CpuWorkerPool, parse_and_chunk
 
 
 def settings() -> Settings:
@@ -382,7 +382,8 @@ async def test_a_symlink_out_of_an_allowed_root_is_refused(tmp_path: Path) -> No
     """The other half of resolve-before-compare, which `..` alone does not prove.
 
     A comparison made on the path as written accepts a link that sits inside the root,
-    and the read then follows it to whatever it points at.
+    and the read then follows it to whatever it points at. Since TASK-0504 the job is not
+    refused for it: the worker resolves the path before reading and refuses that document.
     """
     allowed = tmp_path / "corpus"
     allowed.mkdir()
@@ -396,8 +397,15 @@ async def test_a_symlink_out_of_an_allowed_root_is_refused(tmp_path: Path) -> No
         {"security": {"auth": True}, "ingestion": {"allowed_source_roots": [str(allowed)]}}
     )
 
-    with pytest.raises(IngestionError, match="outside every directory"):
-        await resolve_sources([{"type": "path", "value": str(allowed / "innocent.md")}], configured)
+    resolved = await resolve_sources(
+        [{"type": "path", "value": str(allowed / "innocent.md")}], configured
+    )
+    task = CpuWorkerPool.tasks_for(resolved.sources)[0]
+
+    with pytest.raises(IngestionError, match="outside every directory") as caught:
+        parse_and_chunk(task, configured)
+
+    assert caught.value.code is ErrorCode.SOURCE_LINK_ESCAPES
 
 
 @pytest.mark.must_run

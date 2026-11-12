@@ -50,6 +50,7 @@ from urllib.parse import urlparse
 import httpx
 
 from fasterrag.config.schema import Settings
+from fasterrag.core.confinement import resolved_within, written_within
 from fasterrag.core.identity import text_hash
 from fasterrag.core.parsing import SUPPORTED_SUFFIXES
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError, ParseError
@@ -226,10 +227,7 @@ def _within(value: str, roots: Sequence[str]) -> Path | None:
     ``resolve()`` is what makes the comparison sound: it collapses ``..`` and follows
     symlinks, so neither traversal nor a link planted inside a root can escape it.
     """
-    candidate = Path(value).resolve()
-    if any(candidate.is_relative_to(Path(root).resolve()) for root in roots):
-        return candidate
-    return None
+    return resolved_within(value, roots)
 
 
 def _guard_path(value: str, settings: Settings) -> None:
@@ -252,7 +250,13 @@ def _guard_path(value: str, settings: Settings) -> None:
             )
         return
 
-    if _within(value, roots) is not None:
+    # CRITICAL: a path WRITTEN inside a root is let through here even when a symbolic link
+    # makes it resolve outside, so that one planted link costs one document rather than the
+    # whole job (TASK-0504). That is safe only because the parse worker resolves the path
+    # again immediately before reading it and dead-letters an escape as SOURCE_LINK_ESCAPES
+    # (`workers/cpu_pool.py::_confine`). Removing that check turns this return into an
+    # arbitrary file read.
+    if written_within(value, roots) or _within(value, roots) is not None:
         return
 
     raise IngestionError(

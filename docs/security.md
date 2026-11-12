@@ -194,7 +194,9 @@ could open, and the parsed content came back to the caller through an ordinary q
 holding only the `ingest` scope could therefore read `.env`, `config.yaml`, an SSH key, or
 another tenant's archive. `ingestion.allowed_source_roots` now confines it. Paths are
 `resolve()`d before comparison, so `..` is collapsed and a symlink planted inside a root
-cannot point out of it. An empty list means unconfined, and unconfined is **refused outright
+cannot point out of it. Since TASK-0504 such a link is refused by the parse worker, which
+resolves the path again immediately before reading it, as one dead-lettered document
+(`SOURCE_LINK_ESCAPES`) rather than by failing the whole job — see §5.8. An empty list means unconfined, and unconfined is **refused outright
 once `security.auth` is on** — forgetting the setting breaks a served deployment loudly, at
 the request, naming the setting, rather than exposing it quietly. With auth off the
 deployment is single-operator (the CLI case) and local paths work as before.
@@ -318,6 +320,7 @@ A document is attacker-controlled input whenever the corpus is, so each of these
 - **Decompression bombs (TASK-0459).** A DOCX is a zip archive and `python-docx` inflated every member it was handed, so a few hundred kilobytes could unpack to gigabytes inside a worker. The members' declared uncompressed sizes are now summed before anything is inflated, and a DOCX declaring more than 256 MiB (`MAX_UNZIPPED_BYTES` in `core/parsing/docx.py`, a constant, not a setting) is refused with `PAYLOAD_TOO_LARGE`. The declared size is a real bound: `zipfile` stops inflating a member at its declared size and fails the CRC check on one that lies, which surfaces as `PARSE_FAILED`. Both cases are tested with a real 300 KB archive that unpacks to 300 MiB.
 - **Deep nesting (TASK-0489).** A 10,000-deep JSON array raised `RecursionError` in a recursive walk. The walk now keeps its own stack, and JSON nested past 512 levels is refused with `NESTING_TOO_DEEP` — a limit of the parser's, because how deep `json.loads` will go differs between interpreters. HTML is walked the same way with no limit, so a 10,000-deep page parses.
 - **Damaged binaries (TASK-0489).** A truncated or bit-flipped DOCX raised whatever `zipfile`, `zlib`, `lxml` or `python-docx` met first; every such failure is now a `ParseError`, as it already was for PDF. Hypothesis generates both kinds of damage against both formats.
+- **Symbolic links (TASK-0504).** A link inside an allowed root that points out of it used to refuse the whole job, so one planted link stopped every good document beside it. The service now lets a path *written* inside a root through, and the parse worker resolves it immediately before reading and dead-letters an escape as `SOURCE_LINK_ESCAPES` — the file is never opened. The check moved, it did not weaken: the predicate lives once in `core/confinement.py` and both layers call it, and the worker's check also narrows the window in which a link can be swapped after the service looked. Directory expansion never descends a link to a directory, so a link back up the tree cannot loop it; a looping or dangling file link is listed and dead-lettered by name (on Python 3.12 resolving a loop raised an untyped `RuntimeError`, now a `ParseError`). With no roots configured — the single-operator CLI case — a link is followed wherever it points, as before. The link cases are marked `must_run`: Windows accounts without `SeCreateSymbolicLinkPrivilege` skip them, and the Ubuntu lane runs them.
 
 ## 6. Supply chain
 

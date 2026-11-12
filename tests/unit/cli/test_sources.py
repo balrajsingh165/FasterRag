@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
+import pytest
+
 from fasterrag.cli.sources import expand_sources
+from tests.unit.workers.test_hostile_documents import link
 
 
 def corpus(root: Path) -> Path:
@@ -97,3 +100,24 @@ def test_an_empty_directory_expands_to_nothing(tmp_path: Path) -> None:
     empty.mkdir()
 
     assert expand_sources([str(empty)]) == []
+
+
+@pytest.mark.must_run
+def test_a_link_loop_ends_the_walk_and_a_looping_file_is_kept_for_the_report(
+    tmp_path: Path,
+) -> None:
+    """A loop must not be walked forever, and a looping file link vanished unreported."""
+    root = tmp_path / "corpus"
+    (root / "sub").mkdir(parents=True)
+    (root / "a.md").write_text("a", encoding="utf-8")
+    (root / "sub" / "b.md").write_text("b", encoding="utf-8")
+    link(root, root / "sub" / "back")
+    link(root / "loop.md", root / "loop.md")
+
+    expanded = expand_sources([str(root)], recursive=True)
+
+    assert sorted(Path(path).relative_to(root).as_posix() for path in expanded) == [
+        "a.md",
+        "loop.md",
+        "sub/b.md",
+    ]
