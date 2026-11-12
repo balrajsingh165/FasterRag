@@ -1,0 +1,33 @@
+# fasterRag local profile — a first run that needs no running service and no API key.
+# Written by `fasterrag config init --profile local`. It sets only the keys that differ
+# from the defaults; every other key takes the default in docs/config-reference.md.
+#
+# Install what it uses:   pip install "fasterrag[chroma,huggingface]"
+# Then ingest and retrieve: fasterrag ingest ./notes.md, then from Python
+#   async with FasterRag.from_config("config.yaml") as rag: await rag.retrieve("question")
+#
+# Retrieval and ingestion run entirely in this process: vectors are stored by embedded
+# Chroma under .fasterrag/chroma, and the embedding model runs locally (it is downloaded
+# once from the Hugging Face Hub on first use, about 130 MB). Answering a question with
+# `fasterrag query` additionally needs an LLM; this profile names a local Ollama, which
+# needs no key — install Ollama and `ollama pull llama3.1`, or point llm at any provider.
+
+vector_db:
+  provider: chroma
+  api_key_env: null
+  chroma:
+    path: .fasterrag/chroma
+
+embeddings:
+  provider: huggingface
+  model: BAAI/bge-small-en-v1.5
+  api_key_env: null
+
+llm:
+  provider: ollama
+  model: llama3.1
+  api_key_env: null
+  base_url: http://localhost:11434
+
+retrieval:
+  rerank: false

@@ -13,6 +13,30 @@ Three paths, same engine and same `config.yaml`: [CLI](#path-a--cli) · [Python]
 | ~4 GB free RAM, SSD space for the index | Embedding + vector storage | `fasterrag doctor` |
 | Provider API key (optional) | Only if you choose a hosted embedding/LLM provider; the default stack is fully local | startup validation |
 
+## The shortest path — the local profile, no service and no key
+
+To see ingestion and retrieval work before deciding on a vector database or a provider:
+
+```bash
+pip install "fasterrag[chroma,huggingface]"
+fasterrag config init --profile local      # embedded Chroma, local embeddings, no reranker, no keys
+fasterrag ingest ./notes.md
+```
+
+```python
+import asyncio
+from fasterrag import FasterRag
+
+async def main() -> None:
+    async with FasterRag.from_config("config.yaml") as rag:
+        for chunk in await rag.retrieve("What do my notes say about X?", top_k=3):
+            print(chunk.final_rank, chunk.text[:80])
+
+asyncio.run(main())
+```
+
+Nothing has to be running: vectors live in an embedded Chroma directory (`.fasterrag/chroma`), and the embedding model runs in-process — it is downloaded once from the Hugging Face Hub on first use. The profile references no environment variable, so there is no `.env` to write. `fasterrag query` (a generated answer) additionally needs an LLM: the profile names a local Ollama (`llama3.1`), which needs no key either; point `llm` at any provider instead if you prefer. The rest of this page is the full walkthrough with the canonical configuration.
+
 ## Step 0 — Install
 
 ```bash

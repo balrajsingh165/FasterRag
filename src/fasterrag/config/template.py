@@ -9,6 +9,11 @@ So the packaged copy is not a copy. ``pyproject.toml`` force-includes the reposi
 ``config.yaml`` into the wheel at ``fasterrag/data/config.yaml``; this module reads whichever
 of the two is present, preferring the packaged one so an installed package never depends on
 the current working directory.
+
+The local profile (``fasterrag config init --profile local``, TASK-0444) is a second, short
+template that lives inside the package itself at ``fasterrag/data/config.local.yaml``. It
+holds only the keys that differ from the defaults, so it cannot drift from the canonical
+file the way a full second copy could.
 """
 
 from __future__ import annotations
@@ -22,12 +27,18 @@ from fasterrag.errors import ConfigError
 __all__ = [
     "CONFIG_TEMPLATE_RESOURCE",
     "ENV_TEMPLATE_RESOURCE",
+    "LOCAL_PROFILE_RESOURCE",
+    "PROFILES",
     "canonical_config_text",
     "env_template_text",
+    "profile_config_text",
 ]
 
 CONFIG_TEMPLATE_RESOURCE: Final = "data/config.yaml"
 ENV_TEMPLATE_RESOURCE: Final = "data/.env.example"
+LOCAL_PROFILE_RESOURCE: Final = "data/config.local.yaml"
+
+PROFILES: Final = ("default", "local")
 
 # CRITICAL: relative to this file, `../../..` is the repository root. Used only when the
 # packaged resource is absent, which is the editable-install and running-from-a-checkout
@@ -60,3 +71,12 @@ def canonical_config_text() -> str:
 def env_template_text() -> str:
     """Return the ``.env.example`` secrets template as text."""
     return _template_text(ENV_TEMPLATE_RESOURCE, ".env.example")
+
+
+def profile_config_text(profile: str) -> str:
+    """Return the ``config.yaml`` text a ``config init --profile`` writes."""
+    if profile == "default":
+        return canonical_config_text()
+    if profile == "local":
+        return _template_text(LOCAL_PROFILE_RESOURCE, "src/fasterrag/data/config.local.yaml")
+    raise ConfigError(f"unknown configuration profile {profile!r}; known: {', '.join(PROFILES)}")

@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from typing import Any, Final
 
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH
+from fasterrag.config.template import PROFILES
 from fasterrag.services.backfill import DEFAULT_BATCH_SIZE
 from fasterrag.services.backup import DEFAULT_RETAIN
 from fasterrag.services.ci_status import DEFAULT_BRANCH
@@ -382,6 +383,12 @@ def _add_config(subparsers: argparse._SubParsersAction[argparse.ArgumentParser])
         "--force",
         action="store_true",
         help="overwrite an existing file (it is never overwritten without this)",
+    )
+    init.add_argument(
+        "--profile",
+        choices=PROFILES,
+        default="default",
+        help="'local' writes a config that needs no running service and no API key",
     )
 
     validate = actions.add_parser("validate", help="validate config.yaml and referenced env vars")
