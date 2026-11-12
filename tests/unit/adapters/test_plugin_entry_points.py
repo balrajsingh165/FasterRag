@@ -72,3 +72,13 @@ def test_a_plugin_that_is_not_an_adapter_is_rejected(
 
     with pytest.raises(ConfigError, match=r"adapter contract|not a"):
         factory.resolve_adapter_class("acme")  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(("factory", "base", "group"), GROUPS)
+def test_every_factory_exports_the_same_plugin_surface(
+    factory: object, base: type, group: str
+) -> None:
+    """The vector database factory left ``resolve_adapter_class`` out of its ``__all__``."""
+    surface = {"ENTRY_POINT_GROUP", "available_providers", "resolve_adapter_class"}
+
+    assert surface <= set(factory.__all__)  # type: ignore[attr-defined]

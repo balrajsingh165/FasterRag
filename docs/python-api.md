@@ -219,7 +219,7 @@ Deployment note: in-process worker pools are suitable for small/medium loads; fo
 
 Third parties add providers by implementing the adapter base classes and registering them via Python entry points — no fork required:
 
-> **Status (2026-11-12): vector databases, embedders and LLMs are selectable by name; chunkers, parsers and rerankers are not.** A name registered under `fasterrag.vectordb`, `fasterrag.embeddings` or `fasterrag.llm` validates as `vector_db.provider`, `embeddings.provider` (and a tier rule's `provider`) or `llm.provider`, and the matching factory builds it. Validation reads the installed distributions' entry-point metadata and imports nothing, so a plugin's module is loaded only when its adapter is built. A name that is neither built in nor registered still stops the load, and the error lists the built-in names and the plugins that are installed. Chunkers, parsers and rerankers have no entry-point group yet (TASK-0439).
+> **Status (2026-11-12): vector databases, embedders and LLMs are selectable by name; chunkers, parsers and rerankers are not.** A name registered under `fasterrag.vectordb`, `fasterrag.embeddings` or `fasterrag.llm` validates as `vector_db.provider`, `embeddings.provider` (and a tier rule's `provider`) or `llm.provider`, and the matching factory builds it. Validation reads the installed distributions' entry-point metadata and imports nothing, so a plugin's module is loaded only when its adapter is built. A name that is neither built in nor registered still stops the load, and the error lists the built-in names and the plugins that are installed. `tests/unit/test_plugin_selection.py` proves the whole path: it installs a fake distribution, loads a `config.yaml` naming it through the real loader, ingests a document and answers a query. Chunkers, parsers and rerankers have no entry-point group yet (TASK-0439).
 
 ```toml
 [project.entry-points."fasterrag.vectordb"]
@@ -235,6 +235,15 @@ Each line below names the entry-point group, the base class and every abstract m
 A registered provider becomes selectable in `config.yaml` (`vector_db.provider: mydb`) and MUST pass the shared **adapter contract test suite** ([testing-strategy.md](testing-strategy.md)) to be considered conformant.
 
 **Credentials.** A plugin reads its key through the name in its section's `api_key_env`, exactly as a built-in does, and never inherits a built-in's default: for a plugin provider `llm.api_key_env` and `vector_db.api_key_env` must be written in `config.yaml`, as a variable name or as `null`, or the load stops ([config-reference.md](config-reference.md), cross-field rule 3). Configuration is validated without loading the plugin, so it cannot know whether a key is needed — a plugin that needs one says so when it is built, by calling `require_key` (`fasterrag.adapters.embeddings.base`) or `require_llm_key` (`fasterrag.adapters.llm.base`) with its `api_key_env`, which raises a `ConfigError` naming the missing variable.
+
+**The `provider` attribute.** `EmbeddingAdapter` and `LLMAdapter` declare a class attribute `provider` and give it no default; the pipeline reads it to label metrics, attribute cost and name circuit breakers. Set it on the subclass to the name the entry point registers — it is not an abstract member, so a plugin without it instantiates and then fails at its first embedding or completion.
+
+```yaml
+# config.yaml — the only change needed to select an installed plugin
+vector_db:
+  provider: mydb
+  api_key_env: MYDB_API_KEY   # or null; never left to the Qdrant default
+```
 
 ## Stability guarantees
 

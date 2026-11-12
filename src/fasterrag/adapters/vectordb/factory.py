@@ -25,6 +25,7 @@ __all__ = [
     "AdapterFactory",
     "available_providers",
     "create_vector_db_adapter",
+    "resolve_adapter_class",
 ]
 
 ENTRY_POINT_GROUP: Final = "fasterrag.vectordb"
