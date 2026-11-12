@@ -32,7 +32,7 @@ fasterRag is a FastAPI-based, backend-only, one-stop Retrieval-Augmented Generat
 - Typecheck: `mypy src/` (strict; zero errors)
 - Test: `pytest` (unit **and** integration — `addopts` excludes only the eval/load/soak/chaos tiers; measured 2026-11-09: a bare run collects the integration tier and zero live-provider probes) / `pytest -m "not integration and not eval and not load and not soak"` (what CI gates every commit on; the two tier exclusions are repeated here because `-m` **replaces** `addopts`' own `-m` rather than intersecting with it, so dropping them runs the 120 s soak on every push) / `pytest -m integration` / `pytest -m eval` (retrieval eval harness; the billed live-provider probes additionally need `FASTERRAG_LIVE_PROVIDER_TESTS=1`)
 - Run dev API: `uvicorn fasterrag.api.main:app --reload`
-- Run workers: there is no separate worker process yet. Ingestion runs inside the API process (or inline in the CLI and the facade); `fasterrag worker` only health-checks the vector database and waits, and `app.workers` is read by nothing (TASK-0440, TASK-0130). Do not document either as doing work.
+- Run workers: there is no separate worker process. Ingestion runs inside the process that accepts the job — `fasterrag serve`, `fasterrag ingest`, or the Python facade. The `worker` command and the `app.workers` setting were removed on 2026-11-12 because neither did anything; a queue-backed worker is TASK-0130. Do not document one as existing.
 
 ## Coding standards
 

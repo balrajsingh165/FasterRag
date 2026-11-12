@@ -110,7 +110,7 @@ Process-wide singletons (`shared_breaker`, the cross-encoder model cache, `share
 
 ## 1. P0 — blocks a credible public alpha
 
-Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs), then TASK-0437, TASK-0431, TASK-0440, TASK-0444, TASK-0445.
+Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs), then TASK-0437, TASK-0431, TASK-0444, TASK-0445.
 
 ### TASK-0431 — Semantic chunking in the ingestion pipeline
 
@@ -152,26 +152,6 @@ Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs
 **Traps.** [api-reference.md](api-reference.md) `:113` states that the idempotency-key scan "will not be indexed; it retires with the field at 1.0 (TASK-0358)". That sentence and this task disagree: read TASK-0358 and resolve it in the same change, in whichever direction the maintainer decides. `tests/unit/test_no_blocking_journal_in_async.py` requires the two-faced method shape on any replacement. Windows cannot `fsync` a directory.
 
 **Done when.** The stateful test passes, the lookup is indexed, and the new ledger entry exists. **Moves:** reliability, performance, architecture.
-
-### TASK-0440 — Process surfaces that do what the documents say
-
-**Goal.** Every process, flag and setting the documents name either does the work described or does not exist.
-
-**Where.** `cli/commands/processes.py:106` `run_worker` builds an `IngestionService` (`:120`), calls `adapter.health()` (`:122`), prints "worker ready" (`:137`) and then `await asyncio.Event().wait()` (`:140`). `run_serve` (`:42`) starts one `uvicorn.Server` (`:81`). `AppSettings.workers` (`schema.py:129`) is read nowhere. `docker-compose.yml:72-75` and `deploy/compose.{small,medium,large}.yml` each run a `worker` service. Status notes already exist in [python-api.md](python-api.md) `:216`, [deployment.md](deployment.md) `:6`, [cli-reference.md](cli-reference.md) `:56` and [config-reference.md](config-reference.md) `:211`.
-
-**Steps.**
-1. This is a **maintainer decision**, shared with TASK-0130: build the queue-backed worker, or remove the surface. Ask before writing code; record the answer in both task entries.
-2. If *remove*: delete the `worker` subcommand, `app.workers`, the worker services in all four compose files, and every sentence describing them. Keep a changelog entry under `Removed`.
-3. If *build*: that is TASK-0130; this task then reduces to making the documents match.
-4. Either way, add a process registry the gate can read — a literal mapping of documented process surfaces to the callable that implements each, like `_BUILTIN_RUNGS` — and teach `scripts/check_unbuilt_claims.py` to compare the documents against it.
-
-**Tests.** `tests/unit/cli/test_processes_commands.py` has three worker tests (`:163`, `:233`, `:246`) that will be deleted or rewritten. Add a test for the registry gate in `tests/unit/scripts/test_check_unbuilt_claims.py`.
-
-**Documents.** All four above, plus [architecture.md](architecture.md) §2 and §11, [cookbook.md](cookbook.md), `README.md`, `CLAUDE.md` (the "Run workers" line).
-
-**Traps.** `tests/unit/config/test_settings_are_wired.py:59-69` passes `app.workers` only because the leaf name `.workers` appears elsewhere in `src/` — the test cannot see this defect.
-
-**Done when.** No document names a process that does nothing, and the gate decides it from the registry. **Moves:** architecture, documentation.
 
 ### TASK-0444 — A first run that needs nothing but `pip`
 
@@ -769,7 +749,7 @@ Use this to choose work by the category you want to move. The bar each category 
 
 | Category | Tasks |
 |---|---|
-| Architecture and design | TASK-0456, TASK-0466, TASK-0440, TASK-0130, TASK-0457, TASK-0437 |
+| Architecture and design | TASK-0456, TASK-0466, TASK-0130, TASK-0457, TASK-0437 |
 | Core RAG functionality | TASK-0449, TASK-0458, TASK-0467, TASK-0468, TASK-0469, TASK-0485 |
 | Document ingestion and processing | TASK-0431, TASK-0459, TASK-0471, TASK-0472, TASK-0462, TASK-0504 |
 | Retrieval and search quality | TASK-0454, TASK-0447, TASK-0448, TASK-0481, TASK-0463, TASK-0480 |
@@ -781,5 +761,5 @@ Use this to choose work by the category you want to move. The bar each category 
 | Testing and quality assurance | TASK-0412, TASK-0454, TASK-0481, TASK-0489, TASK-0490, TASK-0300 |
 | Security | TASK-0339, TASK-0381, TASK-0446, TASK-0460, TASK-0326, TASK-0491, TASK-0492, TASK-0493, TASK-0494, TASK-0495 |
 | Developer experience and APIs | TASK-0444, TASK-0461, TASK-0497, TASK-0498, TASK-0500 |
-| Documentation | TASK-0440, TASK-0499, TASK-0500, TASK-0501, TASK-0486 |
+| Documentation | TASK-0499, TASK-0500, TASK-0501, TASK-0486 |
 | Packaging and release readiness | TASK-0445, TASK-0087, TASK-0444, TASK-0502, TASK-0503 |

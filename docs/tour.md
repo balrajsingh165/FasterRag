@@ -31,8 +31,8 @@ after its chunks, not before.
 !!! note "What is not built yet"
     Nothing resumes an interrupted job on its own: it is settled as interrupted when the server
     next starts, and runs again from its checkpoint when you ask (`fasterrag ingest --resume`).
-    Ingestion runs inside the API process — the separate `worker` process does no work yet
-    (TASK-0440).
+    Ingestion runs inside the process that accepts the job; a separate queue-backed worker is
+    not built (TASK-0130).
 
 ## A question comes out
 
@@ -92,7 +92,7 @@ module's own docstring, as of the commit this page was generated from.
     | `cli/commands/infrastructure.py` | The commands that stand things up or price them out: `provision` and `estimate`. |
     | `cli/commands/pipeline.py` | The commands that move data: `ingest`, `query`, and `index`. |
     | `cli/commands/portability.py` | The commands that move a collection between deployments: `export` and `import` (D11). |
-    | `cli/commands/processes.py` | The `serve` and `worker` commands. `worker` health-checks and waits; it consumes no work yet (TASK-0440). |
+    | `cli/commands/processes.py` | The command that runs a long-lived process: `serve`. |
     | `cli/commands/replay.py` | The `replay` command (D8). |
     | `cli/commands/traces.py` | The `traces` command: list and inspect stored query traces (D8). |
     | `cli/main.py` | The `fasterrag` entry point. |

@@ -706,12 +706,9 @@ def test_a_ratchet_entry_nothing_uses_is_itself_reported() -> None:
     assert "delete the entry" in messages[0]
 
 
-def test_the_shipped_ratchet_holds_only_the_stale_worker_sentences() -> None:
-    """Every other finding was fixed in its own series; these wait for the document edits."""
-    assert RATCHET == {
-        "CLAUDE.md": 1,
-        "README.md": 1,
-    }
+def test_the_shipped_ratchet_is_empty() -> None:
+    """Every finding the gate has made was fixed; an allowance would be a standing exception."""
+    assert RATCHET == {}
 
 
 def test_the_real_tree_is_clean() -> None:

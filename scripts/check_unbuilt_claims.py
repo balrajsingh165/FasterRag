@@ -254,14 +254,7 @@ RUNG_NOUNS: Final = r"(?:degrad(?:ed|ation)[\s-]+)?(?:rung|mode|fallback)s?"
 # every finding this gate has ever reported was a real one and was fixed, so an entry here
 # is a claim that something cannot be fixed and needs the reason written beside it.
 #
-# The entries below are the stale `fasterrag worker` sentences the process rule found when it
-# landed (TASK-0440). The ones in docs/ were rewritten in the same series; README.md and
-# CLAUDE.md are edited only by the maintainer, so their two lines wait here. Once they are
-# edited the allowance goes unused, the gate reports it, and the entry is deleted.
-RATCHET: Final[dict[str, int]] = {
-    "CLAUDE.md": 1,
-    "README.md": 1,
-}
+RATCHET: Final[dict[str, int]] = {}
 
 
 @dataclass(frozen=True)

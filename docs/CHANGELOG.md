@@ -241,6 +241,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Removed
 
+- **The queue-backed worker is deferred, and its absence is now gated** (2026-11-12, TASK-0130). With the idle `worker` command removed, `cli/commands/processes.py` lists `worker` as a planned process, and `scripts/check_unbuilt_claims.py` fails any document that tells an operator to run it.
+
+- **Removed: the `fasterrag worker` command, the `app.workers` setting, and the compose `worker` services** (2026-11-12, TASK-0440, a maintainer decision). `fasterrag worker` checked that the vector database answered, printed `worker ready` and waited for ever, consuming no work; `app.workers` was validated and read by nothing, because `fasterrag serve` always runs one server process; and the compose files ran an idle worker container. Ingestion runs inside the process that accepts the job — `fasterrag serve`, `fasterrag ingest`, or the Python facade. A queue-backed worker remains TASK-0130. **Breaking:** `fasterrag worker` now exits 2 with that explanation, and a `config.yaml` or `FASTERRAG_SET` that still sets `app.workers` fails at load naming the key and why it went — delete the line; `workers.*`, which sizes the pipeline pools, is a different section and is unchanged. The sizing presets in `deploy/` now give the API container the pool sizes and the resource limits the two containers had between them; those limits are unmeasured planning defaults. A new process registry in `cli/commands/processes.py` lets `scripts/check_unbuilt_claims.py` fail any document that tells an operator to run a process the CLI does not have.
+
 - _(none)_
 
 ### Fixed
