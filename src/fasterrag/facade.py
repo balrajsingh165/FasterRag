@@ -39,6 +39,7 @@ from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.doctor import DoctorReport
+from fasterrag.services.documents import DocumentDeletion
 from fasterrag.services.estimation import Estimate, estimate_sources, require_estimator
 from fasterrag.services.generation import Answer, GenerationService, QueryEvent
 from fasterrag.services.journal import JobRecord, Journal, create_journal
@@ -322,6 +323,28 @@ class FasterRag:
         """Drop a collection, returning whether it existed."""
         self._require_started()
         return await self.vector_db.drop_collection(name)
+
+    async def delete_document(
+        self,
+        document_id: str,
+        *,
+        collection: str | None = None,
+        tenant: str | None = None,
+    ) -> DocumentDeletion:
+        """Delete one document's chunks and every record that it was indexed.
+
+        Idempotent: ``known`` on the result says whether the journal held the document.
+        With ``tenant``, only chunks tagged for that tenant are removed.
+        """
+        from fasterrag.api.dependencies import build_documents
+
+        self._require_started()
+        service = build_documents(self.settings, self.vector_db, self.journal, self.cache)
+        return await service.delete(
+            collection or self.settings.vector_db.collection.default_name,
+            document_id,
+            tenant=tenant,
+        )
 
     async def replay(self, trace_id: str, candidate: Settings | None = None) -> ReplayResult:
         """Re-execute a stored query under a candidate configuration and diff it (D8)."""

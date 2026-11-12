@@ -31,6 +31,7 @@ from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.facade import FasterRag as AsyncFasterRag
 from fasterrag.services.doctor import DoctorReport
+from fasterrag.services.documents import DocumentDeletion
 from fasterrag.services.estimation import Estimate
 from fasterrag.services.generation import Answer, QueryEvent
 from fasterrag.services.journal import JobRecord
@@ -209,6 +210,18 @@ class FasterRag:
     def drop_collection(self, name: str) -> bool:
         """Drop a collection, returning whether it existed."""
         return self._run(self._inner.drop_collection(name))
+
+    def delete_document(
+        self,
+        document_id: str,
+        *,
+        collection: str | None = None,
+        tenant: str | None = None,
+    ) -> DocumentDeletion:
+        """Delete one document's chunks and every record that it was indexed, blocking."""
+        return self._run(
+            self._inner.delete_document(document_id, collection=collection, tenant=tenant)
+        )
 
     def replay(self, trace_id: str, candidate: Settings | None = None) -> ReplayResult:
         """Re-execute a stored query under a candidate configuration and diff it (D8)."""
