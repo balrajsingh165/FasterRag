@@ -1,0 +1,5 @@
+/* Terminal figures are real captured output; keep them legible and unstretched. */
+.md-typeset figure img { border-radius: 10px; max-width: 100%; }
+.md-typeset figure figcaption { font-size: .78rem; opacity: .8; margin-top: .4rem; }
+.md-typeset table:not([class]) { font-size: .78rem; }
+.md-typeset .md-button { margin: .2rem .4rem .2rem 0; }

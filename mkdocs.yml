@@ -8,20 +8,15 @@ site_description: >-
   and an observability dashboard that never controls the system.
 repo_url: https://github.com/balrajsingh165/fasterrag
 repo_name: balrajsingh165/fasterrag
-edit_uri: edit/main/docs/
+edit_uri: edit/main/userdocs/
 copyright: Apache-2.0 licensed. Every performance claim on this site is a goal unless it links to the benchmark ledger.
 
-# CRITICAL: todo.md and blockers.md are excluded from the build, not merely left out of the
-# nav. A page absent from the nav is still rendered and indexed by mkdocs. Those two files
-# describe unfixed security findings in enough detail to act on, and must not be published
-# until the findings they name are closed.
-exclude_docs: |
-  todo.md
-  blockers.md
-  code-notes.md
-  engineering-scorecard.md
-  engineering-audit.md
-  task-briefs.md
+# CRITICAL: the site is built from userdocs/, a short user-facing set, and never from docs/.
+# docs/ is the engineering record: it holds todo.md and blockers.md, which describe unfixed
+# security findings in enough detail to act on and must not be published, and dozens of
+# documents a user does not need. Pointing docs_dir back at docs/ publishes all of it.
+# tests/unit/docs/test_site_pages.py keeps every userdocs page in the nav and free of task ids.
+docs_dir: userdocs
 
 theme:
   name: material
@@ -97,57 +92,12 @@ extra_css:
   - assets/extra.css
   - assets/intro.css
 
-not_in_nav: |
-  references.md
-  glossary.md
-  data-model.md
-  prompts.md
-  archive-format.md
-  structure.md
-  flow.md
-  internals.md
-  reliability.md
-  failure-modes.md
-  slo.md
-  disaster-recovery.md
-  benchmarks.md
-  performance.md
-  testing-strategy.md
-  verification.md
-  release-readiness.md
-  rebuild-playbook.md
-  scope.md
-  differentiators.md
-  release.md
-  adr/*.md
-
-# CRITICAL: the navigation is deliberately short. It lists what someone using fasterRag needs:
-# how to start, the four references, how it works, how to run it. The design, reliability,
-# evidence and process documents are still built and still linked - from engineering-notes.md
-# and from each other - but they are not in the sidebar, because a reader who has to scan forty
-# entries to find the quickstart does not find it.
 nav:
   - Home: index.md
-  - Get started:
-      - Quickstart: quickstart.md
-      - User guide: how-to-use.md
-      - Configuration recipes: cookbook.md
-      - Troubleshooting: troubleshooting.md
-      - Coming from another framework: migration-guide.md
-  - Reference:
-      - REST API: api-reference.md
-      - CLI: cli-reference.md
-      - Configuration: config-reference.md
-      - Python package: python-api.md
-  - How it works:
-      - Visual tour: tour.md
-      - Architecture: architecture.md
-      - Integrations: integrations.md
-  - Run it:
-      - Deployment: deployment.md
-      - Security: security.md
-      - Observability: observability.md
-  - Project:
-      - Changelog: CHANGELOG.md
-      - Contributing: CONTRIBUTING.md
-      - Engineering notes: engineering-notes.md
+  - Quickstart: quickstart.md
+  - Configuration: configuration.md
+  - CLI: cli.md
+  - REST API: rest-api.md
+  - Python: python.md
+  - Providers & deployment: providers.md
+  - Troubleshooting: troubleshooting.md

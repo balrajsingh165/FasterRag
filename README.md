@@ -311,7 +311,8 @@ rule is listed in [docs/config-reference.md](docs/config-reference.md), and read
 
 ## Documentation
 
-The documentation site is at **<https://docs-fasterrag.fortiqo.xyz/>**, built from
+The documentation site at **<https://docs-fasterrag.fortiqo.xyz/>** is the short user guide,
+built from [`userdocs/`](userdocs/). The complete reference and engineering documents are in
 [`docs/`](docs/).
 
 | Start here | Reference | Operating it | Evidence |
