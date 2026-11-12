@@ -19,17 +19,22 @@ succeed into a resumable, auditable batch system:
   reason code and stays queryable, so a bad file never silently disappears and never stops
   the pipeline.
 
-Every write is atomic — written to a temporary file and renamed — and every job record
-carries a checksum. A torn write is therefore detectable, and the previous good record is
-kept so a damaged one degrades to resuming slightly earlier rather than to losing the job
-(``docs/reliability.md`` §3, ``docs/failure-modes.md`` rows 31 and 32).
+Every rewrite of a record is atomic and durable — written to a uniquely named temporary
+file, flushed, renamed over the live file, and the directory flushed where the platform
+allows — and every job record carries a checksum. The live record is replaced, never moved
+away, so a reader or a crash at any step finds a whole record; a torn one is detectable, and
+the previous good copy is kept so a damaged record degrades to resuming slightly earlier
+rather than to losing the job (``docs/reliability.md`` §3, ``docs/failure-modes.md`` rows 32
+and 33, ``docs/adr/ADR-0009-journal-stays-on-files.md``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
+import secrets
 import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -66,7 +71,9 @@ _DOCUMENTS_FILE: Final = "documents.jsonl"
 _DEDUP_FILE: Final = "content-hashes.jsonl"
 _PREVIOUS_SUFFIX: Final = ".prev"
 _TOMBSTONE_KEY: Final = "tombstone"
+_TEMPORARY_SUFFIX: Final = ".tmp"
 _BUSY_DELAYS: Final = (0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2)
+_DISK_FULL: Final = frozenset({errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)})
 
 DocumentStatus = str
 JobStatus = str
@@ -205,23 +212,104 @@ def _busy(job: str, exc: PermissionError) -> IngestionError:
     )
 
 
-def _write_atomically(path: Path, payload: str) -> None:
-    """Write a file atomically, keeping the previous version as a fallback."""
-    temporary = path.with_suffix(path.suffix + ".tmp")
+def _sync_file(path: Path) -> None:
+    """Flush a file's contents to the disk; Windows needs a writable handle to do it."""
+    descriptor = os.open(path, os.O_RDWR | getattr(os, "O_BINARY", 0))
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            os.replace(path, path.with_suffix(path.suffix + _PREVIOUS_SUFFIX))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
-        temporary.write_text(payload, encoding="utf-8")
-        os.replace(temporary, path)
+
+def _sync_directory(directory: Path) -> None:
+    """Make a rename in ``directory`` survive power loss, where the platform allows it.
+
+    Windows cannot open a directory to ``fsync`` it — NTFS journals the rename itself — and
+    a POSIX filesystem that refuses (``EINVAL``) is logged, since the rename already happened.
+    """
+    if os.name == "nt":
+        return
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
     except OSError as exc:
+        if exc.errno not in (errno.EINVAL, errno.ENOTSUP):
+            raise
+        _logger.warning(
+            "this filesystem cannot flush a directory; a rename may not survive power loss",
+            extra={"directory": str(directory), "detail": str(exc)},
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _stage(path: Path, payload: str, staged: list[Path]) -> Path:
+    """Write ``payload`` to a uniquely named, flushed temporary file beside ``path``."""
+    temporary = path.with_name(f"{path.name}.{secrets.token_hex(8)}{_TEMPORARY_SUFFIX}")
+    staged.append(temporary)
+    temporary.write_text(payload, encoding="utf-8")
+    _sync_file(temporary)
+    return temporary
+
+
+def _keep_previous(path: Path, staged: list[Path]) -> None:
+    """Copy the live record to its previous-good slot, when it is whole.
+
+    A copy rather than a rename, so the live record never leaves; a torn one is not copied,
+    so the last good copy is never replaced by a damaged one.
+    """
+    current = _read_text(path)
+    if current is None or open_envelope(current) is None:
+        return
+    previous = path.with_suffix(path.suffix + _PREVIOUS_SUFFIX)
+    copy = _stage(previous, current, staged)
+    _patiently(lambda: os.replace(copy, previous))
+
+
+def _make_room(path: Path, staged: list[Path], exc: OSError) -> None:
+    """Free what a rewrite on a full disk can spare: its staged files and the previous copy."""
+    _discard(staged)
+    previous = path.with_suffix(path.suffix + _PREVIOUS_SUFFIX)
+    previous.unlink(missing_ok=True)
+    _logger.warning(
+        "the disk is full; the previous copy of a journal record was dropped to make room",
+        extra={"path": str(path), "detail": str(exc)},
+    )
+
+
+def _discard(staged: list[Path]) -> None:
+    """Remove temporary files a failed write left behind."""
+    for temporary in staged:
         # CRITICAL: the cleanup is itself suppressed, for the reason recorded in
         # TraceStore.save and IndexLockStore.write — on Linux a parent that is a file rather
         # than a directory makes `unlink` raise from inside this handler, replacing the error
         # being reported with a second one that escapes.
         with suppress(OSError):
             temporary.unlink(missing_ok=True)
+    staged.clear()
+
+
+def _write_atomically(path: Path, payload: str, *, keep_previous: bool = True) -> None:
+    """Replace ``path`` so a reader, or a crash at any step, finds a whole record.
+
+    Stage a flushed, uniquely named file, ``os.replace`` it over the live one and flush the
+    directory: the live record is never renamed away, so it is never missing (TASK-0437).
+    """
+    staged: list[Path] = []
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if keep_previous:
+            try:
+                _keep_previous(path, staged)
+            except OSError as exc:
+                if exc.errno not in _DISK_FULL:
+                    raise
+                _make_room(path, staged, exc)
+        fresh = _stage(path, payload, staged)
+        _patiently(lambda: os.replace(fresh, path))
+        _sync_directory(path.parent)
+    except OSError as exc:
+        _discard(staged)
         raise IngestionError(
             f"the ingestion journal could not be written to {path}: {exc}. "
             "The last checkpoint is still readable, so the job can be resumed once the "

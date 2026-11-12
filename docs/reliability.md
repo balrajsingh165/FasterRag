@@ -43,7 +43,7 @@ Rules:
 
 ## 3. Data safety
 
-- **Atomic file writes** (write-temp-then-rename) for the ingestion journal, `index.lock`, and the index manifest — a crash can never leave a half-written control file.
+- **Atomic file writes** (write-temp-then-rename) for the ingestion journal, `index.lock`, and the index manifest — a crash can never leave a half-written control file. The ingestion journal goes further (TASK-0437, [ADR-0009](adr/ADR-0009-journal-stays-on-files.md)): its temporary files are uniquely named and `fsync`ed before the rename, the directory is `fsync`ed after it where the platform allows (not on Windows), and the live record is replaced rather than moved aside, so no instant exists without one; a crash, torn write or full disk injected between any two of its file operations is tested to leave the old record or the new one.
 - The index manifest and alias swap update **transactionally** (D2): the alias points at exactly one complete, eval-validated collection at all times.
 - Idempotent, deterministic chunk IDs make index writes replay-safe (exactly-once effects, D3).
 - Backups and the restore drill per [disaster-recovery.md](disaster-recovery.md); the drill must actually be executed and ticked in [todo.md](todo.md).
