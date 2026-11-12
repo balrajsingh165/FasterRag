@@ -44,13 +44,13 @@ Pain-point numbers reference the catalogue in [scope.md](scope.md). Config keys 
 
 ## D4 — Degradation Ladder
 
-- **What it is.** A documented table of graceful fallbacks: reranker down → hybrid-only retrieval; vector DB down → semantic-cache-only answers; LLM down → extractive, retrieval-only answers. Every degraded response carries explicit `degraded: true` + `mode`. **As built, two of the three rungs exist**: `hybrid_only` and `extractive` are served; the **`cache_only` rung is specified and not implemented** (TASK-0159), so a vector-DB outage currently raises a retryable `RETRIEVAL_FAILED` rather than serving a degraded answer.
+- **What it is.** A documented table of graceful fallbacks: reranker down → `hybrid_only` (the fused ranking, unreranked); LLM down → `extractive` (the retrieved passages with citations, no generated text). Every degraded response carries explicit `degraded: true` + `mode`. A vector-DB outage is deliberately **not** a rung: it raises a typed, retryable `RETRIEVAL_FAILED`, and the circuit breaker stops calling a database it has seen fail. A third rung, `cache_only` (answer from the semantic cache when the vector DB is down), was considered and deferred, because the cache is already consulted before retrieval at the same threshold and is off by default — see [ADR-0011](adr/ADR-0011-degradation-ladder-scope.md).
 - **Pain point it kills.** #12 latency (fail-fast fallbacks), #16 observability gaps (explicit modes), #22 debugging.
 - **Why it is unique.** Standard stacks return 500s or silently worse answers when a component dies. The ladder makes partial availability an explicit, tested product state.
 - **Config keys.** None to switch it: the ladder always runs (`reliability.degradation_ladder` was read by nothing and was removed on 2026-11-12, TASK-0507). Breaker and timeout keys under `reliability.*` decide when a rung engages.
 - **CLI / API surface.** `mode`/`degraded` fields on every `POST /v1/query` response and SSE `meta` event; `fasterrag status` shows current ladder state; `fasterrag_degraded_responses_total` metric.
-- **Acceptance test.** *(Partially satisfied.)* The chaos suite exercises the slow-LLM rung (`extractive` served) and stop-vector-DB — but the latter asserts a retryable `RETRIEVAL_FAILED`, which is the built behaviour, **not** the `cache_only` rung this row specifies. That rung cannot be acceptance-tested until TASK-0159 builds it.
-- **Proof metric.** *(Target, not a result.)* Availability under single-component failure (ledger — no entry yet); every degraded response flagged, which holds for the two rungs that exist.
+- **Acceptance test.** The chaos suite exercises both rungs and the case that is not a rung: reranker down (`tests/chaos/test_reranker_down.py`, `tests/chaos/test_generation_faults.py::test_a_hung_reranker_degrades_to_hybrid_only`) serves `hybrid_only`; a slow LLM (`tests/chaos/test_chaos.py::test_a_slow_llm_degrades_to_extractive_rather_than_failing`) serves `extractive`; a stopped vector DB (`tests/chaos/test_chaos.py::test_a_stopped_vector_database_raises_a_retryable_error`) raises the documented retryable `RETRIEVAL_FAILED`.
+- **Proof metric.** *(Target, not a result.)* Availability under single-component failure (ledger — no entry yet); every degraded response flagged, which holds for both rungs.
 
 ## D5 — Grounded-or-Refuse Answering
 

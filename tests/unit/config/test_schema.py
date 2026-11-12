@@ -29,7 +29,7 @@ def test_defaults_match_the_documented_reference() -> None:
     assert settings.chunking.strategy == "recursive"
     assert settings.chunking.chunk_size == 768
     assert settings.retrieval.rrf_k == 60
-    assert settings.retrieval.rerank is True
+    assert settings.retrieval.rerank is False
     assert settings.retrieval.rerank_top_n == 100
     assert settings.reliability.timeouts.llm_ms == 120000
     assert settings.index.reindex.strategy == "blue_green"

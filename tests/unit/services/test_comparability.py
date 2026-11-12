@@ -68,7 +68,7 @@ MUTATIONS: dict[str, dict[str, Any]] = {
     "retrieval.rrf_k": {"retrieval": {"rrf_k": 30}},
     "retrieval.bm25_k1": {"retrieval": {"bm25_k1": 1.5}},
     "retrieval.bm25_b": {"retrieval": {"bm25_b": 0.5}},
-    "retrieval.rerank": {"retrieval": {"rerank": False}},
+    "retrieval.rerank": {"retrieval": {"rerank": True}},
     "retrieval.reranker_model": {"retrieval": {"reranker_model": "other/reranker"}},
     "retrieval.rerank_top_n": {"retrieval": {"rerank_top_n": 200}},
 }
@@ -188,9 +188,9 @@ def test_a_baseline_from_an_older_fingerprint_version_is_refused() -> None:
 def test_the_fingerprint_names_the_field_rather_than_a_digest() -> None:
     """The hash could only say "different"; a reviewer needs to know what moved."""
     baseline = recorded(canonical())
-    changed = Settings.model_validate({"retrieval": {"rerank": False}})
+    changed = Settings.model_validate({"retrieval": {"rerank": True}})
 
-    assert baseline.incomparabilities(changed) == ["retrieval.rerank was true and is false"]
+    assert baseline.incomparabilities(changed) == ["retrieval.rerank was false and is true"]
 
 
 @pytest.mark.parametrize("dataset", ["handbook", "policies"])
@@ -205,7 +205,7 @@ def test_the_committed_baselines_carry_a_fingerprint(dataset: str) -> None:
 def test_the_handbook_baseline_states_exactly_why_it_is_not_yet_comparable() -> None:
     """The honest state of TASK-0244: named reasons, not an opaque hash mismatch.
 
-    All three are real behaviour differences from the shipped defaults. The five knobs
+    Both are real behaviour differences from the shipped defaults. The five knobs
     added since the recording are *not* among them, which is the point of the change.
     """
     baseline = load_baseline(DATASETS / "handbook" / "baseline.json")
@@ -214,7 +214,6 @@ def test_the_handbook_baseline_states_exactly_why_it_is_not_yet_comparable() -> 
     assert baseline.incomparabilities(canonical()) == [
         'chunking.token_counter was "estimate" and is "auto"',
         "retrieval.top_k was 5 and is 10",
-        "retrieval.rerank was false and is true",
     ]
 
 

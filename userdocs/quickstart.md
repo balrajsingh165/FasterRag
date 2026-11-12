@@ -21,7 +21,7 @@ parsing. Add only the extras you need:
 | `server` | the REST API (`fasterrag serve`) |
 | `qdrant`, `pgvector`, `chroma`, `milvus`, `weaviate` | that vector database |
 | `huggingface` | local embeddings (the default) |
-| `rerank` | the cross-encoder reranker (on by default) |
+| `rerank` | the cross-encoder reranker (off by default; set `retrieval.rerank: true`) |
 | `openai`, `anthropic`, `cohere`, `ollama` | that embedding or LLM provider |
 | `pdf`, `docx`, `html`, `ocr` | those document formats (`ocr` also needs the `tesseract` binary) |
 | `redis` | a shared cache and rate limit across replicas |

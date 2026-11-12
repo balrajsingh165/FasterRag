@@ -241,7 +241,7 @@ Non-streaming `200`:
 
 `evidence_dropped` counts chunks that were retrieved and reranked but did not fit the context budget. Unlike `truncated`, nothing was cut off — the answer is simply grounded in a subset of the evidence the retriever chose. A non-zero value is what tells an operator to raise `chunking.chunk_size` or lower `retrieval.top_k`.
 
-Degraded responses (D4) always carry `degraded: true` and `mode` ∈ `full`, `hybrid_only` (reranker down), `cache_only` (vector DB down), `extractive` (LLM down) — there is never a silent quality drop. **As built, only `hybrid_only` and `extractive` are served; `cache_only` is specified but not implemented (TASK-0159), and a vector-DB outage currently returns a retryable `RETRIEVAL_FAILED` problem instead.**
+Degraded responses (D4) always carry `degraded: true` and `mode` ∈ `full`, `hybrid_only` (reranker down), `extractive` (LLM down) — there is never a silent quality drop. **A vector-database outage is not a rung**: it returns a retryable `503 RETRIEVAL_FAILED` problem (`CIRCUIT_OPEN` once the breaker opens), and the client retries. A `cache_only` rung that would answer from the semantic cache instead was considered and deferred ([ADR-0011](adr/ADR-0011-degradation-ladder-scope.md)); no response carries that `mode`.
 
 Grounded-or-refuse (D5): when faithfulness < threshold, `200` with:
 

@@ -17,10 +17,10 @@ partition is one of the few environmental faults that can be reproduced honestly
 one. The companion to row 35's "DNS" half uses a name in the ``.invalid`` TLD, which RFC
 2606 reserves precisely so that it cannot resolve.
 
-**What is asserted is the built behavior, not the specified one.** Row 16's mitigation
-column names the ``cache_only`` degradation rung; that rung is not implemented (TASK-0159),
-so a partitioned vector database surfaces a retryable ``RETRIEVAL_FAILED`` and, once the
-breaker opens, ``CIRCUIT_OPEN``. Asserting the rung here would be asserting a plan.
+**What is asserted is the built behavior.** Row 16 once named a ``cache_only`` degradation
+rung; ADR-0011 deferred it and narrowed the ladder to the rungs that ship, so a partitioned
+vector database surfaces a retryable ``RETRIEVAL_FAILED`` and, once the breaker opens,
+``CIRCUIT_OPEN`` — which is now the documented mitigation, not a stand-in for one.
 
 The latency assertions are bounds in both directions, never a figure: the upper bound is
 the configured timeout plus slack, and the lower bound is what separates a partition from a

@@ -28,6 +28,3 @@ llm:
   model: llama3.1
   api_key_env: null
   base_url: http://localhost:11434
-
-retrieval:
-  rerank: false

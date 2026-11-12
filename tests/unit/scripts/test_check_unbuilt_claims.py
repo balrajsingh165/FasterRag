@@ -337,7 +337,7 @@ def test_a_denial_of_a_rung_the_ladder_serves_is_a_finding(tmp_path: Path) -> No
 
 
 def test_a_denial_of_a_declared_unbuilt_rung_is_not_a_finding(tmp_path: Path) -> None:
-    """`cache_only` is genuinely unbuilt (TASK-0159), and saying so must stay green."""
+    """`cache_only` is genuinely unbuilt (deferred by ADR-0011), and saying so must stay green."""
     root = build(tmp_path, docs={"a.md": "The cache_only rung is specified but not built.\n"})
 
     found, _ = prose_findings(root)
@@ -346,7 +346,7 @@ def test_a_denial_of_a_declared_unbuilt_rung_is_not_a_finding(tmp_path: Path) ->
 
 
 def test_the_live_wording_of_every_cache_only_denial_is_left_alone(tmp_path: Path) -> None:
-    """Four live sentences, one per document, that the rule must never fire on today."""
+    """Four sentences the documents carried before ADR-0011; the rule must never fire on them."""
     body = (
         "The `cache_only` rung is specified but not built (TASK-0159).\n\n"
         "As built, only `hybrid_only` and `extractive` are served; `cache_only` is "
@@ -733,7 +733,7 @@ def test_the_real_registry_names_the_adapters_that_shipped(name: str) -> None:
 
 
 def test_the_real_ladder_serves_two_rungs_and_declares_a_third() -> None:
-    """The pair the class turns on: `cache_only` is TASK-0159 and must stay undecided."""
+    """The pair the class turns on: `cache_only` is deferred (ADR-0011) and stays declared."""
     served, declared = registered_rungs()
 
     assert served == {"hybrid_only", "extractive"}

@@ -7,20 +7,22 @@ the documentation states which of them are built.
 
 Until this module nothing could decide that statement. ``hybrid_only`` was a bare constant in
 ``services.querying``, ``extractive`` one in ``services.generation``, and ``cache_only`` — the
-rung D4 specifies and TASK-0159 has not built — appeared nowhere in ``src`` at all. The only
-way to ask the tree whether a rung existed was to grep for its name, which answers *yes* off
-a docstring, and a wrong *yes* fails an honest sentence (TASK-0369).
+rung D4 once specified, deferred by ``docs/adr/ADR-0011-degradation-ladder-scope.md`` —
+appeared nowhere in ``src`` at all. The only way to ask the tree whether a rung existed was
+to grep for its name, which answers *yes* off a docstring, and a wrong *yes* fails an honest
+sentence (TASK-0369).
 
 ``_BUILTIN_RUNGS`` replaces the grep, and is modelled on ``adapters/*/factory.py``: a mapping
-from the wire value to the implementation that serves it, with ``_PLANNED_RUNGS`` naming what
-is specified and not built. ``scripts/check_unbuilt_claims.py`` reads both with ``ast``, the
-same way it reads ``_BUILTIN_ADAPTERS`` (TASK-0394).
+from the wire value to the implementation that serves it, with ``_PLANNED_RUNGS`` naming the
+rungs the documentation mentions and the code does not serve (today only the deferred
+``cache_only``). ``scripts/check_unbuilt_claims.py`` reads both with ``ast``, the same way it
+reads ``_BUILTIN_ADAPTERS`` (TASK-0394).
 
 A registry you can forget to update is not a registry, so two things hold it to the tree:
 
 * **the ladder dispatches through it.** ``serving()`` is the only producer of a degraded
   ``mode``, it imports the registered implementation before handing the value back, and it
-  refuses a rung that is planned or is not a rung at all. Shipping ``cache_only`` without
+  refuses a rung that is deferred or is not a rung at all. Shipping ``cache_only`` without
   moving it out of ``_PLANNED_RUNGS`` raises at the moment it tries to label its first
   response, so the registry cannot lag the code;
 * **the enum is checked against it at import.** A rung named in ``DegradationMode`` and
@@ -65,11 +67,10 @@ _BUILTIN_RUNGS: Final[dict[str, str]] = {
     "extractive": "fasterrag.services.generation:extractive_answer",
 }
 
-# TODO: TASK-0159 ships `cache_only` — answer from the semantic cache when retrieval raises —
-# and TASK-0165 may instead narrow D4 to the two rungs above. Whichever lands, this set is
-# what makes every "the cache_only rung is specified but not built" sentence in the
-# documentation decidable, so move the name into _BUILTIN_RUNGS when it ships rather than
-# deleting it from here.
+# CRITICAL: ADR-0011 narrowed D4 to the two rungs above and deferred `cache_only`. The name
+# stays here rather than being deleted, because this set is what lets
+# scripts/check_unbuilt_claims.py decide every documented sentence that says the rung is
+# not built. If it ever ships, move it into _BUILTIN_RUNGS in the commit that ships it.
 _PLANNED_RUNGS: Final[frozenset[str]] = frozenset({"cache_only"})
 
 # CRITICAL: checked at import, so a rung added to DegradationMode and to nothing else cannot
@@ -92,10 +93,10 @@ if _UNREGISTERED:
 
 
 def _refusal(mode: DegradationMode) -> str:
-    """Explain why a rung cannot be served: specified and unbuilt, or not a rung at all."""
+    """Explain why a rung cannot be served: deferred and unbuilt, or not a rung at all."""
     if mode.value in _PLANNED_RUNGS:
         return (
-            f"the {mode.value!r} rung is specified in docs/reliability.md and not built; "
+            f"the {mode.value!r} rung was deferred by ADR-0011 and is not built; "
             "register its implementation in _BUILTIN_RUNGS in the commit that ships it, "
             "because the documentation's denial is read off that registry"
         )

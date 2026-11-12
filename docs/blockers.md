@@ -16,24 +16,11 @@ Deliberately not real ids. The gate below reads every `TASK-` reference in this 
 checks it against todo.md, so an illustration built from live ids fails the moment one of
 them is ticked — the gate would then be reporting on the example rather than on a blocker.
 
-**Answering the root either resolves the children outright or opens the path to them.** That is the whole point of the grouping: `B3` is one conversation that unblocks three pieces of work, and it is worth more attention than three separate line items would suggest.
+**Answering the root either resolves the children outright or opens the path to them.** That is the whole point of the grouping: a root is one conversation that unblocks several pieces of work, and it is worth more attention than the same number of separate line items would suggest.
 
 A child is never *also* a root. If something is blocked by two roots it is listed under the one that must move first, with the other named inline.
 
 Rules: add nothing without a `TASK-` id; delete an entry when its blocker clears; mark a completed task cited as history with ✅ so it reads as context rather than as outstanding. `scripts/check_blockers.py` enforces the first and third in CI.
-
----
-
-## B3 — Degradation-ladder scope (TASK-0165)
-
-`docs/reliability.md` specifies a circuit breaker and a `cache_only` rung. Neither exists; only the breaker's *configuration* does.
-
-**Decide:** build both as specified, or formally narrow D4 to the two rungs that ship today.
-
-| | Task | Blocked because |
-|---|---|---|
-| **B3.1** | TASK-0159 | The `cache_only` rung — consult the semantic cache when retrieval raises, instead of returning a bare `RETRIEVAL_FAILED`. |
-| **B3.2** | — | Four documents (`reliability.md`, `api-reference.md`, `glossary.md`, `failure-modes.md`) carry *specified-not-built* annotations that stay until B3 is answered either way. |
 
 ---
 
@@ -58,22 +45,6 @@ The nightly CI job produces numbers but its own header states they are not citab
 | | Task | Blocked because |
 |---|---|---|
 | **B5.1** | — | RPO and RTO stay `TBD`. They are measurements, not estimates to fill in. |
-
----
-
-## B6 — The shipped reranker is 2.2 GB (TASK-0175)
-
-Default config is `retrieval.rerank: true` with `BAAI/bge-reranker-v2-m3`. **Measured (BENCH-0003, 2026-11-03, indicative only — non-isolated hardware): the 2.2 GB of weights download in 357 s, and the model then loads in 8.3–9.3 s from a populated cache** — about a second more than the 90 MB `cross-encoder/ms-marco-MiniLM-L-6-v2`. The earlier "over 400 s to load" figure conflated the download with the load. The download is paid once per machine; the recurring cost is the larger one: **17–25× the small model's per-query rerank latency**, which at the shipped `retrieval.rerank_top_n: 100` is **55.7–86.9 s per query**, CPU-only. With `rerank: false` the same query path returns in 4.3 s. A `pip install` user's first query downloads 2.2 GB and appears to hang.
-
-TASK-0174 ✅ made the wait *visible* — the loader now warns, names the cost, and names the two ways out — but it did not decide whether the wait should exist.
-
-**The tension is real:** cross-encoder reranking is expected to be the strongest retrieval-quality lever in the stack — expected, not measured (TASK-0084). Turning it off by default trades that expected quality for a faster first run, and the trade cannot be priced until the gain is a number.
-
-**Options:** a small cross-encoder by default with the large one as a documented upgrade; `rerank: false` by default; or keep it and treat the first-run cost as documented behaviour.
-
-| | Task | Blocked because |
-|---|---|---|
-| **B6.1** | — | The quickstart's credibility. Every documented first-run walkthrough currently understates how long it takes. |
 
 ---
 

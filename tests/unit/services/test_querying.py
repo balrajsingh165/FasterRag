@@ -257,7 +257,7 @@ async def test_an_explicit_top_k_overrides_the_configured_one() -> None:
 
 
 async def test_candidates_widen_to_the_rerank_depth_when_reranking() -> None:
-    configured = settings(retrieval={"top_k": 5, "rerank_top_n": 50})
+    configured = settings(retrieval={"top_k": 5, "rerank_top_n": 50, "rerank": True})
     adapter = ScriptedAdapter(configured)
     adapter.dense = [hit("c_a", 0.9)]
     adapter.sparse = [hit("c_a", 1.0)]
@@ -355,7 +355,7 @@ class ScriptedReranker:
 def build_with_reranker(
     reranker: ScriptedReranker, configured: Settings | None = None
 ) -> tuple[RetrievalService, ScriptedAdapter]:
-    resolved = configured or settings()
+    resolved = configured or settings(retrieval={"rerank": True})
     adapter = ScriptedAdapter(resolved)
     service = RetrievalService(resolved, adapter, TieringRouter(StubEmbedder(resolved)), reranker)
     return service, adapter
@@ -376,7 +376,7 @@ async def test_the_reranker_reorders_the_shortlist() -> None:
 
 async def test_the_reranker_sees_the_whole_shortlist_not_just_top_k() -> None:
     reranker = ScriptedReranker()
-    configured = settings(retrieval={"top_k": 2, "rerank_top_n": 20})
+    configured = settings(retrieval={"top_k": 2, "rerank_top_n": 20, "rerank": True})
     service, adapter = build_with_reranker(reranker, configured)
     adapter.dense = [hit(f"c_{index}", 1.0 - index / 10) for index in range(6)]
     adapter.sparse = []
@@ -417,7 +417,7 @@ class HangingReranker:
 async def test_a_reranker_that_does_not_answer_in_time_degrades_to_hybrid_only() -> None:
     """There was no rerank timeout, so a hung reranker held the query forever (TASK-0449)."""
     reranker = HangingReranker()
-    configured = settings(reliability={"timeouts": {"rerank_ms": 100}})
+    configured = settings(retrieval={"rerank": True}, reliability={"timeouts": {"rerank_ms": 100}})
     adapter = ScriptedAdapter(configured)
     service = RetrievalService(
         configured,

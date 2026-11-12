@@ -1,6 +1,6 @@
 # quickstart.md — From Zero to Answered Query
 
-> **Status: this walkthrough works today from a source checkout** (`pip install -e ".[all]"`; PyPI publication lands with the first tagged beta). All fourteen slices S1–S14 have shipped, so `config validate`, `doctor`, `provision`, `estimate`, `ingest`, `query`, `serve`, `index`, `replay`, and `benchmark` are real commands; ingestion accepts `path`, `url`, and `inline` sources; and Path B's `FasterRag` facade (async + sync) is shipped. `ingest --watch` and `index reembed --watch` follow a running job's per-document progress (TASK-0196 ✅), and both `cost.*_token_budget` keys are enforced before a provider is called (TASK-0242 ✅, per-replica for the tenant budget). Known gaps, tracked in [todo.md](todo.md): the `cache_only` degradation rung is not built (TASK-0159). For the semantic cache to persist between one-shot CLI invocations set `cache.backend: disk`, or `cache.backend: redis` (with `pip install fasterrag[redis]`) to share one cache across hosts and replicas — the default `memory` backend only helps a single `fasterrag serve` process and the library.
+> **Status: this walkthrough works today from a source checkout** (`pip install -e ".[all]"`; PyPI publication lands with the first tagged beta). All fourteen slices S1–S14 have shipped, so `config validate`, `doctor`, `provision`, `estimate`, `ingest`, `query`, `serve`, `index`, `replay`, and `benchmark` are real commands; ingestion accepts `path`, `url`, and `inline` sources; and Path B's `FasterRag` facade (async + sync) is shipped. `ingest --watch` and `index reembed --watch` follow a running job's per-document progress (TASK-0196 ✅), and both `cost.*_token_budget` keys are enforced before a provider is called (TASK-0242 ✅, per-replica for the tenant budget). For the semantic cache to persist between one-shot CLI invocations set `cache.backend: disk`, or `cache.backend: redis` (with `pip install fasterrag[redis]`) to share one cache across hosts and replicas — the default `memory` backend only helps a single `fasterrag serve` process and the library.
 
 Three paths, same engine and same `config.yaml`: [CLI](#path-a--cli) · [Python](#path-b--python-package) · [REST](#path-c--rest-service). Pick one; they interoperate.
 
@@ -40,7 +40,7 @@ asyncio.run(main())
 ## Step 0 — Install
 
 ```bash
-pip install "fasterrag[qdrant,huggingface,rerank,pdf,docx,html]"   # what the canonical config.yaml uses
+pip install "fasterrag[qdrant,huggingface,pdf,docx,html]"   # what the canonical config.yaml uses
 pip install "fasterrag[server]"       # add the REST server (Path C)
 pip install "fasterrag[openai]"       # add a hosted provider
 pip install "fasterrag[all]"          # everything
@@ -135,7 +135,7 @@ curl -X POST "$API/v1/ingest/$JOB/retry-dlq"
 fasterrag query "What does the vendor agreement say about termination?"
 ```
 
-The default pipeline runs dense ANN **and** BM25 in parallel, fuses with RRF (k=60), reranks the fused candidates with a cross-encoder, assembles a token-budgeted context with citations, and streams the answer ([ADR-0004](adr/ADR-0004-hybrid-search-plus-reranking.md)).
+The default pipeline runs dense ANN **and** BM25 in parallel, fuses with RRF (k=60), assembles a token-budgeted context with citations, and streams the answer ([ADR-0004](adr/ADR-0004-hybrid-search-plus-reranking.md)). Cross-encoder reranking of the fused candidates is **off by default** and is one setting away — `retrieval.rerank: true` plus the `rerank` extra ([ADR-0010](adr/ADR-0010-reranker-off-by-default.md): the shipped model is a 2.14 GB download and BENCH-0003 — indicative, not citable — measured it at tens of seconds per query on CPU).
 
 Debugging what came back:
 
@@ -144,7 +144,7 @@ fasterrag query "..." --show-chunks --show-timings   # retrieved chunks + per-st
 fasterrag query "..." --filter department=legal      # metadata filter, pushed into both legs
 ```
 
-Every response carries `degraded` and `mode`. When a component is down you get an explicitly labelled degraded answer rather than a silent quality drop (D4) — **for the two rungs that are built**: `hybrid_only` (reranker lost) and `extractive` (LLM lost). The `cache_only` rung is specified and **not implemented** (TASK-0159), so a vector-database outage currently returns a retryable `RETRIEVAL_FAILED` problem instead of a degraded answer.
+Every response carries `degraded` and `mode`. When a component is down you get an explicitly labelled degraded answer rather than a silent quality drop (D4): `hybrid_only` (reranker lost) or `extractive` (LLM lost). A vector-database outage is not a rung — it returns a retryable `RETRIEVAL_FAILED` problem; the ladder's scope is recorded in [ADR-0011](adr/ADR-0011-degradation-ladder-scope.md).
 
 ## Step 7 — Look at what happened
 
