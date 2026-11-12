@@ -157,9 +157,6 @@ EXCEPTIONS: Final[dict[str, str]] = {
     "fasterrag.workers.embed_pool -> fasterrag.services.estimation": (
         "TASK-0456 step 3: a function-level import of the price table"
     ),
-    "fasterrag.workers.indexer -> fasterrag.services.tenancy": (
-        "TASK-0456 step 3: the tenancy helpers a worker stamps payloads with are a service's"
-    ),
     "fasterrag.core.cache.embedding -> fasterrag.adapters.embeddings.base": (
         "TASK-0456 step 4: core names an adapter base interface; the rule is undecided"
     ),

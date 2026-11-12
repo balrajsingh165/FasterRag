@@ -213,6 +213,7 @@ module's own docstring, as of the commit this page was generated from.
     | `core/retrieval/bm25.py` | BM25 sparse encoding for the keyword retrieval leg. |
     | `core/retrieval/fusion.py` | Reciprocal Rank Fusion. |
     | `core/retrieval/models.py` | Retrieval result types. |
+    | `core/tenancy.py` | The payload field that names a chunk's owning tenant. |
     | `core/tracing.py` | Query traces and the four RAG spans (D8). |
 
 ??? abstract "adapters/ — vendor boundary"

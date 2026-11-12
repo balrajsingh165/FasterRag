@@ -72,6 +72,7 @@ fasterRag/
 │       │   └── collections.py    # Collection lifecycle (pending)
 │       ├── core/                 # RAG pipeline (pure domain logic)
 │       │   ├── identity.py       # Deterministic document, chunk, and config hashes
+│       │   ├── tenancy.py        # The payload field naming a chunk's owning tenant
 │       │   ├── parsing/          # PDF/HTML/MD/DOCX/OCR parsers, table extraction
 │       │   ├── chunking/         # fixed, recursive, semantic, layout, late, contextual
 │       │   ├── retrieval/        # bm25.py sparse encoding; fusion and filters

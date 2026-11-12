@@ -36,9 +36,9 @@ from fasterrag.adapters.vectordb.base import (
 )
 from fasterrag.config.schema import Settings
 from fasterrag.core.retrieval.bm25 import encode_document
+from fasterrag.core.tenancy import TENANT_PAYLOAD_KEY
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import get_logger
-from fasterrag.services.tenancy import TENANT_PAYLOAD_KEY
 from fasterrag.workers.embed_pool import backoff_delay
 from fasterrag.workers.queues import ChunkPayload, EmbeddedBatch
 
