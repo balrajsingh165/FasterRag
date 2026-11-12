@@ -31,7 +31,7 @@ import asyncio
 import json
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -66,6 +66,7 @@ _DOCUMENTS_FILE: Final = "documents.jsonl"
 _DEDUP_FILE: Final = "content-hashes.jsonl"
 _PREVIOUS_SUFFIX: Final = ".prev"
 _TOMBSTONE_KEY: Final = "tombstone"
+_BUSY_DELAYS: Final = (0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2)
 
 DocumentStatus = str
 JobStatus = str
@@ -169,16 +170,39 @@ def _modified(path: Path, *, missing: float) -> float:
         return missing
 
 
+def _patiently[T](operation: Callable[[], T]) -> T:
+    """Run a file operation, retrying it briefly while the file is reported busy.
+
+    Windows raises ``PermissionError`` for a file another handle is replacing at that
+    instant; elsewhere it is a real refusal, which the last attempt raises (TASK-0437).
+    """
+    for delay in _BUSY_DELAYS:
+        try:
+            return operation()
+        except PermissionError:
+            time.sleep(delay)
+    return operation()
+
+
 def _read_text(path: Path) -> str | None:
     """Return a file's text, or None when no such file is on disk.
 
-    Bytes that are not UTF-8 are replaced rather than raised, so a damaged record reaches
-    the checksum and fails there like any other torn write.
+    Bytes that are not UTF-8 are replaced, so a damaged record fails its checksum like any
+    torn write; a file still busy after the retries raises ``PermissionError``.
     """
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        return _patiently(lambda: path.read_text(encoding="utf-8", errors="replace"))
     except (FileNotFoundError, NotADirectoryError):
         return None
+
+
+def _busy(job: str, exc: PermissionError) -> IngestionError:
+    """Return the retryable error for a job record no read could open."""
+    return IngestionError(
+        f"the journal record for job {job!r} is being rewritten and could not be read: "
+        f"{exc}. Retry the request",
+        code=ErrorCode.NOT_READY,
+    )
 
 
 def _write_atomically(path: Path, payload: str) -> None:
@@ -327,15 +351,24 @@ class Journal:
     def load_job_blocking(self, job: str, *, tenant: str | None = None) -> JobRecord:
         """Load a job record, falling back to the previous good copy.
 
-        A live record that is missing is read exactly like one that is torn: the job is
-        unknown only when neither the record nor its previous copy is on disk (TASK-0437).
+        A live record that is missing, busy or torn is read from its previous copy; a job
+        is unknown only when neither is on disk, and busy when neither opens (TASK-0437).
         """
         path = self._job_path(job)
-        live = _read_text(path)
+        busy: PermissionError | None = None
+        try:
+            live = _read_text(path)
+        except PermissionError as exc:
+            live, busy = None, exc
         payload = open_envelope(live) if live is not None else None
         if payload is None:
-            kept = _read_text(path.with_suffix(path.suffix + _PREVIOUS_SUFFIX))
+            try:
+                kept = _read_text(path.with_suffix(path.suffix + _PREVIOUS_SUFFIX))
+            except PermissionError as exc:
+                raise _busy(job, exc) from exc
             if live is None and kept is None:
+                if busy is not None:
+                    raise _busy(job, busy) from busy
                 raise IngestionError(f"unknown ingest job {job!r}", code=ErrorCode.NOT_FOUND)
 
             payload = open_envelope(kept) if kept is not None else None
@@ -349,7 +382,10 @@ class Journal:
             _logger.warning(
                 "journal record is missing or failed its checksum; resuming from the "
                 "previous checkpoint",
-                extra={"job_id": job, "live_record": "missing" if live is None else "torn"},
+                extra={
+                    "job_id": job,
+                    "live_record": "busy" if busy else "missing" if live is None else "torn",
+                },
             )
 
         record = JobRecord.from_dict(payload)
@@ -376,7 +412,11 @@ class Journal:
             return None
 
         for path in sorted(directory.glob("*.json")):
-            payload = open_envelope(path.read_text(encoding="utf-8"))
+            try:
+                text = _read_text(path)
+            except PermissionError as exc:
+                raise _busy(path.stem, exc) from exc
+            payload = open_envelope(text) if text is not None else None
             if payload is None or payload.get("idempotency_key") != key:
                 continue
             if payload.get("tenant") == tenant:
@@ -427,13 +467,14 @@ class Journal:
     def _read_quiet_record(self, path: Path) -> dict[str, Any] | None:
         """Return a job record's payload, or None when it is torn or cannot be opened."""
         try:
-            return open_envelope(path.read_text(encoding="utf-8"))
+            text = _read_text(path)
         except OSError as exc:
             _logger.warning(
                 "a job record could not be read while looking for interrupted jobs",
                 extra={"job_id": path.stem, "detail": str(exc)},
             )
             return None
+        return open_envelope(text) if text is not None else None
 
     async def checkpoint(self, record: JobRecord, document_index: int) -> JobRecord:
         """Record progress off the event loop, writing only at the configured interval.

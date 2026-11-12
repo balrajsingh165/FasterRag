@@ -60,7 +60,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `CIRCUIT_OPEN` | 503 | `ProviderError` | Circuit breaker open for the named provider (`detail` names it, `Retry-After` set). |
 | `PROVISIONING_FAILED` | 500 | `ProvisioningError` | Auto-provisioning step failed; `detail` carries the doctor-style fix-it hint. |
 | `CACHE_ERROR` | 500 | `CacheError` | Cache backend failure (system degrades to cache-off rather than failing queries; surfaced on admin endpoints). |
-| `NOT_READY` | 503 | — | A readiness dependency check failed: returned by `/readyz`, with a `dependencies[]` extension member naming each check and its state. Also returned, retryable, by `POST /v1/ingest` and `POST /v1/ingest/{job_id}/retry-dlq` while the server is shutting down and has stopped starting jobs (see [`POST /v1/ingest`](#post-v1ingest)); that refusal carries no `dependencies[]`. |
+| `NOT_READY` | 503 | — | A readiness dependency check failed: returned by `/readyz`, with a `dependencies[]` extension member naming each check and its state. Also returned, retryable, by `POST /v1/ingest` and `POST /v1/ingest/{job_id}/retry-dlq` while the server is shutting down and has stopped starting jobs (see [`POST /v1/ingest`](#post-v1ingest)); that refusal carries no `dependencies[]`. Also returned, retryable, by `GET /v1/ingest/{job_id}` when the job's record stayed unopenable through a short retry (see [`GET /v1/ingest/{job_id}`](#get-v1ingestjob_id)). |
 | `INTERNAL` | 500 | `FasterRagError` | Anything unclassified. Always carries `trace_id`. Never returned without a problem body. |
 
 ---
@@ -149,7 +149,7 @@ Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `4
 
 ### `GET /v1/ingest/{job_id}`
 
-Job status: `{"job_id", "status": "queued|running|completed|failed|partial", "reason_code", "counts": {"total", "parsed", "chunked", "embedded", "indexed", "deduplicated", "skipped", "dead_lettered"}, "started_at", "finished_at"}`. `404` if unknown. `skipped` counts documents that parsed without error and held nothing to index; they are not failures, so a job whose only non-indexed documents are skipped is `completed`, not `partial`.
+Job status: `{"job_id", "status": "queued|running|completed|failed|partial", "reason_code", "counts": {"total", "parsed", "chunked", "embedded", "indexed", "deduplicated", "skipped", "dead_lettered"}, "started_at", "finished_at"}`. `404` if unknown. `503 NOT_READY` (retryable) if the job's record and its previous copy could both not be opened for the whole of a short retry — on Windows a file is briefly unopenable while another task replaces it; the request is safe to repeat (TASK-0437). `skipped` counts documents that parsed without error and held nothing to index; they are not failures, so a job whose only non-indexed documents are skipped is `completed`, not `partial`.
 
 `reason_code` is `null` except on a job the process stopped working on before it finished, which is settled `failed` with `reason_code: "INTERRUPTED"` (TASK-0436). That pair means *nothing was wrong with the documents*: the job was cancelled, and its checkpoint is kept. `INTERRUPTED` is a reason on a job, not an entry in the error-code table — no request fails with it.
 

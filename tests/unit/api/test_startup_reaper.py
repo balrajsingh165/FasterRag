@@ -18,6 +18,7 @@ from fasterrag.services.jobs import INTERRUPTED
 from fasterrag.services.journal import Journal, QuietJobs
 from tests.unit.api.conftest import StubVectorDB
 from tests.unit.services.test_job_reaper import left_behind
+from tests.unit.services.test_journal import busy_for
 
 WAIT_SECONDS = 10
 
@@ -69,6 +70,36 @@ def test_a_journal_the_test_supplied_is_kept(app: FastAPI) -> None:
 
     with TestClient(app):
         assert app.state.journal is supplied
+
+
+def test_a_job_read_while_its_record_is_being_replaced_is_served_not_a_500(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows CI: a read racing the reaper's rewrite raised PermissionError, served as a 500."""
+    journal: Journal = app.state.journal
+    job = left_behind(journal, quiet_for=1)
+
+    with TestClient(app) as client:
+        busy_for(monkeypatch, journal._job_path(job.job_id), reads=3)
+        response = client.get(f"/v1/ingest/{job.job_id}")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "running"
+
+
+def test_a_job_whose_record_never_stops_being_busy_is_a_retryable_problem(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    journal: Journal = app.state.journal
+    job = journal.create_job_blocking("default", [{"type": "path", "value": "docs/"}])
+
+    with TestClient(app) as client:
+        busy_for(monkeypatch, journal._job_path(job.job_id), reads=float("inf"))
+        response = client.get(f"/v1/ingest/{job.job_id}")
+
+    assert response.status_code == 503
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["code"] == "NOT_READY"
 
 
 class UnreadableJournal(Journal):

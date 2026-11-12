@@ -153,6 +153,64 @@ def test_a_record_that_is_not_text_falls_back_like_any_other_torn_write(journal:
     assert journal.load_job_blocking(record.job_id).job_id == record.job_id
 
 
+def busy_for(monkeypatch: pytest.MonkeyPatch, path: Path, reads: float) -> list[Path]:
+    """Make the first ``reads`` reads of ``path`` fail as Windows does mid-``os.replace``."""
+    real = Path.read_text
+    seen: list[Path] = []
+
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == path:
+            seen.append(self)
+            if len(seen) <= reads:
+                raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    return seen
+
+
+def test_a_record_busy_for_the_first_reads_is_read_once_it_settles(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read racing a rewrite on Windows raised a raw PermissionError, which became a 500."""
+    record = journal.create_job_blocking("default", SOURCES)
+    record = journal.checkpoint_blocking(record, 2)
+    seen = busy_for(monkeypatch, journal._job_path(record.job_id), reads=3)
+
+    loaded = journal.load_job_blocking(record.job_id)
+
+    assert loaded.checkpoint == record.checkpoint
+    assert len(seen) == 4
+
+
+def test_a_record_that_stays_busy_is_read_from_its_previous_copy(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = journal.create_job_blocking("default", SOURCES)
+    record = journal.checkpoint_blocking(record, 2)
+    busy_for(monkeypatch, journal._job_path(record.job_id), reads=float("inf"))
+
+    loaded = journal.load_job_blocking(record.job_id)
+
+    assert loaded.job_id == record.job_id
+    assert loaded.checkpoint is None
+
+
+def test_a_record_that_stays_busy_with_no_previous_copy_is_a_retryable_typed_error(
+    journal: Journal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never a raw OSError: the caller gets a typed error that says to try again."""
+    record = journal.create_job_blocking("default", SOURCES)
+    busy_for(monkeypatch, journal._job_path(record.job_id), reads=float("inf"))
+
+    with pytest.raises(IngestionError, match="being rewritten") as caught:
+        journal.load_job_blocking(record.job_id)
+
+    assert caught.value.code is ErrorCode.NOT_READY
+    assert caught.value.retryable is True
+    assert isinstance(caught.value.__cause__, PermissionError)
+
+
 def test_a_job_looked_up_under_a_root_that_is_a_file_is_unknown(tmp_path: Path) -> None:
     blocker = tmp_path / "journal"
     blocker.write_text("a file where the journal directory should be", encoding="utf-8")
