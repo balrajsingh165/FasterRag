@@ -106,6 +106,7 @@ def documents() -> list[tuple[str, str]]:
     """Return `(path, body)` for every prose document the policy governs."""
     paths = [path for path in sorted(DOCS.rglob("*.md")) if path.name != "todo.md"]
     paths += [ROOT / "README.md", ROOT / "CLAUDE.md"]
+    paths += sorted((ROOT / "userdocs").rglob("*.md"))
     return [
         (name, _body(path))
         for path in paths

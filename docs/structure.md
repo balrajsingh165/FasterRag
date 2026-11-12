@@ -52,6 +52,7 @@ fasterRag/
 │       ├── ADR-0005-api-cli-only-control-plane.md
 │       ├── ADR-0006-python-package-surface.md
 │       └── ADR-0007-bm25-as-backend-sparse-vectors.md
+├── userdocs/                     # Source of the published site (mkdocs.yml docs_dir): a short user guide linking back to docs/
 ├── src/
 │   └── fasterrag/
 │       ├── errors.py             # Typed error taxonomy + stable error-code table

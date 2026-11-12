@@ -7,12 +7,387 @@
   "redirects": [
     {
       "source": "/intro/",
-      "destination": "/tour/",
+      "destination": "/",
       "permanent": true
     },
     {
       "source": "/intro",
-      "destination": "/tour/",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/tour/",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/tour",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/how-to-use/",
+      "destination": "/quickstart/",
+      "permanent": true
+    },
+    {
+      "source": "/how-to-use",
+      "destination": "/quickstart/",
+      "permanent": true
+    },
+    {
+      "source": "/cookbook/",
+      "destination": "/configuration/",
+      "permanent": true
+    },
+    {
+      "source": "/cookbook",
+      "destination": "/configuration/",
+      "permanent": true
+    },
+    {
+      "source": "/config-reference/",
+      "destination": "/configuration/",
+      "permanent": true
+    },
+    {
+      "source": "/config-reference",
+      "destination": "/configuration/",
+      "permanent": true
+    },
+    {
+      "source": "/cli-reference/",
+      "destination": "/cli/",
+      "permanent": true
+    },
+    {
+      "source": "/cli-reference",
+      "destination": "/cli/",
+      "permanent": true
+    },
+    {
+      "source": "/api-reference/",
+      "destination": "/rest-api/",
+      "permanent": true
+    },
+    {
+      "source": "/api-reference",
+      "destination": "/rest-api/",
+      "permanent": true
+    },
+    {
+      "source": "/python-api/",
+      "destination": "/python/",
+      "permanent": true
+    },
+    {
+      "source": "/python-api",
+      "destination": "/python/",
+      "permanent": true
+    },
+    {
+      "source": "/migration-guide/",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/migration-guide",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/architecture/",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/architecture",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/integrations/",
+      "destination": "/providers/",
+      "permanent": true
+    },
+    {
+      "source": "/integrations",
+      "destination": "/providers/",
+      "permanent": true
+    },
+    {
+      "source": "/deployment/",
+      "destination": "/providers/",
+      "permanent": true
+    },
+    {
+      "source": "/deployment",
+      "destination": "/providers/",
+      "permanent": true
+    },
+    {
+      "source": "/security/",
+      "destination": "/providers/",
+      "permanent": true
+    },
+    {
+      "source": "/security",
+      "destination": "/providers/",
+      "permanent": true
+    },
+    {
+      "source": "/observability/",
+      "destination": "/providers/",
+      "permanent": true
+    },
+    {
+      "source": "/observability",
+      "destination": "/providers/",
+      "permanent": true
+    },
+    {
+      "source": "/CHANGELOG/",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/CHANGELOG",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/engineering-notes/",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/engineering-notes",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/CONTRIBUTING/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/CONTRIBUTING.md",
+      "permanent": true
+    },
+    {
+      "source": "/CONTRIBUTING",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/CONTRIBUTING.md",
+      "permanent": true
+    },
+    {
+      "source": "/references/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/references.md",
+      "permanent": true
+    },
+    {
+      "source": "/references",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/references.md",
+      "permanent": true
+    },
+    {
+      "source": "/glossary/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/glossary.md",
+      "permanent": true
+    },
+    {
+      "source": "/glossary",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/glossary.md",
+      "permanent": true
+    },
+    {
+      "source": "/data-model/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/data-model.md",
+      "permanent": true
+    },
+    {
+      "source": "/data-model",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/data-model.md",
+      "permanent": true
+    },
+    {
+      "source": "/prompts/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/prompts.md",
+      "permanent": true
+    },
+    {
+      "source": "/prompts",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/prompts.md",
+      "permanent": true
+    },
+    {
+      "source": "/archive-format/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/archive-format.md",
+      "permanent": true
+    },
+    {
+      "source": "/archive-format",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/archive-format.md",
+      "permanent": true
+    },
+    {
+      "source": "/structure/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/structure.md",
+      "permanent": true
+    },
+    {
+      "source": "/structure",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/structure.md",
+      "permanent": true
+    },
+    {
+      "source": "/flow/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/flow.md",
+      "permanent": true
+    },
+    {
+      "source": "/flow",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/flow.md",
+      "permanent": true
+    },
+    {
+      "source": "/internals/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/internals.md",
+      "permanent": true
+    },
+    {
+      "source": "/internals",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/internals.md",
+      "permanent": true
+    },
+    {
+      "source": "/reliability/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/reliability.md",
+      "permanent": true
+    },
+    {
+      "source": "/reliability",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/reliability.md",
+      "permanent": true
+    },
+    {
+      "source": "/failure-modes/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/failure-modes.md",
+      "permanent": true
+    },
+    {
+      "source": "/failure-modes",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/failure-modes.md",
+      "permanent": true
+    },
+    {
+      "source": "/slo/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/slo.md",
+      "permanent": true
+    },
+    {
+      "source": "/slo",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/slo.md",
+      "permanent": true
+    },
+    {
+      "source": "/disaster-recovery/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/disaster-recovery.md",
+      "permanent": true
+    },
+    {
+      "source": "/disaster-recovery",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/disaster-recovery.md",
+      "permanent": true
+    },
+    {
+      "source": "/benchmarks/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/benchmarks.md",
+      "permanent": true
+    },
+    {
+      "source": "/benchmarks",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/benchmarks.md",
+      "permanent": true
+    },
+    {
+      "source": "/performance/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/performance.md",
+      "permanent": true
+    },
+    {
+      "source": "/performance",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/performance.md",
+      "permanent": true
+    },
+    {
+      "source": "/testing-strategy/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/testing-strategy.md",
+      "permanent": true
+    },
+    {
+      "source": "/testing-strategy",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/testing-strategy.md",
+      "permanent": true
+    },
+    {
+      "source": "/verification/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/verification.md",
+      "permanent": true
+    },
+    {
+      "source": "/verification",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/verification.md",
+      "permanent": true
+    },
+    {
+      "source": "/release-readiness/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/release-readiness.md",
+      "permanent": true
+    },
+    {
+      "source": "/release-readiness",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/release-readiness.md",
+      "permanent": true
+    },
+    {
+      "source": "/rebuild-playbook/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/rebuild-playbook.md",
+      "permanent": true
+    },
+    {
+      "source": "/rebuild-playbook",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/rebuild-playbook.md",
+      "permanent": true
+    },
+    {
+      "source": "/scope/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/scope.md",
+      "permanent": true
+    },
+    {
+      "source": "/scope",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/scope.md",
+      "permanent": true
+    },
+    {
+      "source": "/differentiators/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/differentiators.md",
+      "permanent": true
+    },
+    {
+      "source": "/differentiators",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/differentiators.md",
+      "permanent": true
+    },
+    {
+      "source": "/release/",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/release.md",
+      "permanent": true
+    },
+    {
+      "source": "/release",
+      "destination": "https://github.com/balrajsingh165/fasterrag/blob/main/docs/release.md",
+      "permanent": true
+    },
+    {
+      "source": "/adr/:path*",
+      "destination": "https://github.com/balrajsingh165/fasterrag/tree/main/docs/adr",
       "permanent": true
     }
   ],
