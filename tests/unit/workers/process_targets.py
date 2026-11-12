@@ -26,18 +26,36 @@ from fasterrag.workers.cpu_pool import parse_and_chunk, use_sentence_embedder_fa
 from fasterrag.workers.queues import DocumentTask, ParseOutcome
 
 HANG: Final = "hang"
-"""File stem of a document whose parse never returns within any test's patience."""
+"""File stem of a document whose parse blocks until the test releases it, or for an hour."""
 
 PAUSE: Final = "pause"
 """File stem of a document that parses after :data:`PAUSE_SECONDS`."""
 
-SLOW: Final = "slow"
-"""File stem of a document that parses after :data:`SLOW_SECONDS`."""
+STALL_ONCE: Final = "stall_once"
+"""File stem of a document whose first parse blocks like :data:`HANG` and later ones do not."""
 
 PAUSE_SECONDS: Final = 2.0
-SLOW_SECONDS: Final = 3.0
+HANG_SECONDS: Final = 3600.0
 
-_DELAYS: Final[dict[str, float]] = {HANG: 3600.0, PAUSE: PAUSE_SECONDS, SLOW: SLOW_SECONDS}
+_DELAYS: Final[dict[str, float]] = {PAUSE: PAUSE_SECONDS}
+
+
+def marker(source: Path, kind: str) -> Path:
+    """Return the file beside ``source`` that says ``kind`` happened to its parse."""
+    return source.with_name(f"{source.name}.{kind}")
+
+
+def release(source: Path) -> None:
+    """Let a blocked parse of ``source`` return, from the test or from a watchdog thread."""
+    marker(source, "release").touch()
+
+
+def _block(source: Path) -> None:
+    """Announce that this parse has started, then block until released or for an hour."""
+    marker(source, "started").touch()
+    deadline = time.monotonic() + HANG_SECONDS
+    while not marker(source, "release").exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 def die(task: DocumentTask, settings: Settings) -> ParseOutcome:
@@ -46,8 +64,13 @@ def die(task: DocumentTask, settings: Settings) -> ParseOutcome:
 
 
 def parse_after_a_delay(task: DocumentTask, settings: Settings) -> ParseOutcome:
-    """Parse normally, after sleeping for as long as the source's file stem asks."""
-    time.sleep(_DELAYS.get(Path(task.source).stem, 0.0))
+    """Parse normally, after blocking or sleeping for as long as the source's file stem asks."""
+    source = Path(task.source)
+    if source.stem == HANG or (
+        source.stem == STALL_ONCE and not marker(source, "started").exists()
+    ):
+        _block(source)
+    time.sleep(_DELAYS.get(source.stem, 0.0))
     return parse_and_chunk(task, settings)
 
 

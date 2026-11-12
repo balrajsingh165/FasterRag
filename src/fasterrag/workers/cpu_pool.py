@@ -9,7 +9,14 @@ Failure is per-document by design. A corrupt file becomes a dead-letter entry wi
 code and the pipeline continues — including a parser that raises something untyped, which is
 converted to a ``ParseError`` inside the worker rather than aborting the job. A worker
 *process* dying is different: the standard library marks the whole pool broken, so the job
-fails rather than continuing on a pool that can no longer accept work.
+fails rather than continuing on a pool that can no longer accept work. A pool that dies
+before its first worker has run anything is reported as a script without a ``__main__``
+guard; one that dies later was killed or crashed, and is reported as that (TASK-0509).
+
+Leaving the pool with a parse still running — the job was cancelled, or failed elsewhere —
+kills the workers instead of joining them. Joining runs on the event loop and lasts as long
+as the slowest parse, which for a hung one is for ever, so a shutdown drain was bounded by
+the parser rather than by ``reliability.shutdown_grace_seconds`` (TASK-0525).
 
 Documents are parsed concurrently, up to the pool size at a time, and consumed in
 submission order. Awaiting each document before submitting the next — which this module did
@@ -332,6 +339,19 @@ def _unguarded_entry_point_error() -> IngestionError:
     )
 
 
+def _worker_died_error(during: str) -> IngestionError:
+    """Return the error for a worker that died after the pool had started and run work."""
+    return IngestionError(
+        f"a parsing worker process died {during}, after the pool had started and run work, "
+        "so the script's entry point is not the cause. Something outside fasterRag ended "
+        "it: most often the operating system's out-of-memory killer, or a crash in a "
+        "parser's native code. The job was stopped; if memory is short, lower "
+        "workers.cpu_pool_size or ingestion.max_document_mb, then ingest the sources again",
+        code=ErrorCode.CHUNK_FAILED,
+        retryable=False,
+    )
+
+
 class CpuWorkerPool:
     """Parses and chunks documents in worker processes, streaming chunks downstream."""
 
@@ -354,6 +374,7 @@ class CpuWorkerPool:
             lambda workers: ProcessPoolExecutor(max_workers=workers)
         )
         self._executor: Executor | None = None
+        self._stranded = False
 
     async def __aenter__(self) -> CpuWorkerPool:
         """Start the worker processes and pay the tokenizer load up front."""
@@ -453,10 +474,22 @@ class CpuWorkerPool:
             )
 
     async def __aexit__(self, *exc_info: object) -> None:
-        """Shut the worker processes down."""
-        if self._executor is not None:
-            self._executor.shutdown(wait=True)
-            self._executor = None
+        """Shut the worker processes down, killing them if the block left work in them.
+
+        Joining a busy worker blocks the event loop until its parse returns (TASK-0525).
+        """
+        executor, self._executor = self._executor, None
+        stranded, self._stranded = self._stranded, False
+        if executor is not None and (stranded or exc_info[0] is not None):
+            _abandon(executor)
+            if stranded:
+                _logger.warning(
+                    "the cpu worker pool was stopped with documents still being parsed; "
+                    "its workers were killed rather than waited for",
+                    extra={"trace_id": current_trace_id()},
+                )
+        elif executor is not None:
+            executor.shutdown(wait=True)
         _logger.info("cpu worker pool stopped")
 
     async def process(
@@ -589,7 +622,7 @@ class CpuWorkerPool:
                 try:
                     outcome = await entry.future
                 except BrokenProcessPool as exc:
-                    raise _unguarded_entry_point_error() from exc
+                    raise _worker_died_error(f"while {entry.task.source} was in the pool") from exc
                 except FasterRagError as exc:
                     # CRITICAL: the error was built in a worker, whose context is not this
                     # job's, so it carries a trace id the worker minted for itself. Without
@@ -601,13 +634,17 @@ class CpuWorkerPool:
                 fill()
         finally:
             for entry in window:
+                self._stranded = self._stranded or not entry.future.done()
                 entry.future.cancel()
 
     def _submit(self, task: DocumentTask) -> _InFlight:
         """Hand one document to the pool, due ``ingestion.parse_timeout_seconds`` from now."""
         loop = asyncio.get_running_loop()
         limit = self.settings.ingestion.parse_timeout_seconds
-        future = loop.run_in_executor(self._executor, parse_and_chunk, task, self.settings)
+        try:
+            future = loop.run_in_executor(self._executor, parse_and_chunk, task, self.settings)
+        except BrokenProcessPool as exc:
+            raise _worker_died_error(f"before {task.source} could be handed to the pool") from exc
         return _InFlight(task, future, loop.time() + limit if limit > 0 else None)
 
     async def _returned(self, entry: _InFlight) -> bool:

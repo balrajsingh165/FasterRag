@@ -22,8 +22,11 @@ import asyncio
 import logging
 import multiprocessing
 import os
-from collections.abc import Callable
+import threading
+import time
+from collections.abc import Callable, Iterator
 from concurrent.futures import Executor, ProcessPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +36,7 @@ from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, IngestionError
 from fasterrag.services.ingestion import IngestionService
+from fasterrag.services.jobs import INTERRUPTED, JobRegistry
 from fasterrag.services.journal import Journal
 from fasterrag.workers import cpu_pool
 from fasterrag.workers.cpu_pool import CpuWorkerPool
@@ -46,7 +50,10 @@ NAMES = ("expenses.md", "leave.md", "travel.md")
 
 HUNG = f"{process_targets.HANG}.md"
 PAUSED = f"{process_targets.PAUSE}.md"
-SLOW = f"{process_targets.SLOW}.md"
+STALLED = f"{process_targets.STALL_ONCE}.md"
+
+PATIENCE = 10.0
+"""Seconds a test waits for something that takes well under one on an idle machine."""
 
 
 def settings(**overrides: Any) -> Settings:
@@ -69,7 +76,7 @@ def settings(**overrides: Any) -> Settings:
 def corpus(tmp_path: Path) -> Path:
     root = tmp_path / "corpus"
     root.mkdir()
-    for name in (*NAMES, HUNG, PAUSED, SLOW):
+    for name in (*NAMES, HUNG, PAUSED, STALLED):
         (root / name).write_text(
             f"# {name}\n\n" + f"The policy in {name} applies to every employee. " * 20,
             encoding="utf-8",
@@ -213,8 +220,9 @@ async def test_documents_in_flight_beside_a_hung_one_are_parsed_again_not_lost(
 ) -> None:
     """Recycling kills every worker, so a document mid-parse beside the hung one would vanish.
 
-    The slow document is submitted two seconds after the hung one and takes three, so it is
-    still being parsed, and not yet overdue itself, when the hung one's four seconds run out.
+    The stalled document is submitted when the paused one returns, two seconds after the hung
+    one, and its first parse blocks, so it is mid-parse and not overdue when the hung one's
+    deadline passes. Only a second parse of it returns, so it is indexed only if resubmitted.
     """
     monkeypatch.setattr(cpu_pool, "parse_and_chunk", process_targets.parse_after_a_delay)
     before = worker_pids()
@@ -223,7 +231,7 @@ async def test_documents_in_flight_beside_a_hung_one_are_parsed_again_not_lost(
         ingestion={"parse_timeout_seconds": 4},
     )
     service, adapter = build(tmp_path, configured)
-    order = (PAUSED, HUNG, SLOW, NAMES[0], NAMES[1])
+    order = (PAUSED, HUNG, STALLED, NAMES[0], NAMES[1])
 
     record = await service.accept([str(corpus / name) for name in order])
     with caplog.at_level(logging.WARNING, logger="fasterrag.workers.cpu_pool"):
@@ -234,10 +242,109 @@ async def test_documents_in_flight_beside_a_hung_one_are_parsed_again_not_lost(
     assert outcomes(service, record.job_id, "dead_lettered") == [(HUNG, "PARSE_TIMEOUT")]
     assert outcomes(service, record.job_id, "indexed") == survivors
     assert [getattr(entry, "resubmitted", None) for entry in recycles] == [1]
+    assert process_targets.marker(corpus / STALLED, "started").exists()
     assert settled.status == "partial"
     assert settled.counts["parsed"] == 4
     assert len({point.point_id for point in adapter.points}) == len(adapter.points)
     assert await surviving_workers(before) == set()
+
+
+@contextmanager
+def released_after(source: Path, seconds: float) -> Iterator[None]:
+    """Release a blocked parse of ``source`` after ``seconds``, from a thread.
+
+    A pool that waits for the parse blocks the event loop, so only a thread can end the wait;
+    without this a regression would hang the run for an hour instead of failing it.
+    """
+    timer = threading.Timer(seconds, process_targets.release, args=(source,))
+    timer.start()
+    try:
+        yield
+    finally:
+        timer.cancel()
+
+
+async def parse_started(source: Path) -> None:
+    """Return once a blocking parse of ``source`` has begun in a worker."""
+    deadline = time.monotonic() + PATIENCE * 6
+    while not process_targets.marker(source, "started").exists():
+        assert time.monotonic() < deadline, f"the parse of {source.name} never started"
+        await asyncio.sleep(0.05)
+
+
+async def test_a_job_cancelled_beside_a_hung_parser_settles_within_the_grace_period(
+    tmp_path: Path, corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TASK-0525: a drain waited for the hung parse, because the pool's exit joined its workers."""
+    monkeypatch.setattr(cpu_pool, "parse_and_chunk", process_targets.parse_after_a_delay)
+    before = worker_pids()
+    configured = settings(
+        reliability={
+            "retries": {"max_attempts": 0, "backoff_base_ms": 1, "jitter": False},
+            "shutdown_grace_seconds": 1,
+        }
+    )
+    grace = configured.reliability.shutdown_grace_seconds
+    service, _ = build(tmp_path, configured)
+    registry = JobRegistry()
+    record = await service.accept([str(corpus / name) for name in (NAMES[0], HUNG, NAMES[1])])
+
+    async def work() -> None:
+        await service.run(record)
+
+    await registry.submit(record.job_id, work())
+    await parse_started(corpus / HUNG)
+    with released_after(corpus / HUNG, PATIENCE * 3):
+        began = time.monotonic()
+        drained = await registry.drain(grace)
+        took = time.monotonic() - began
+
+    settled = service.journal.load_job_blocking(record.job_id)
+    assert drained.cancelled == 1
+    assert took < grace + PATIENCE
+    assert (settled.status, settled.reason_code) == ("failed", INTERRUPTED)
+    assert await surviving_workers(before) == set()
+
+
+async def test_a_pool_with_no_parse_timeout_is_left_without_waiting_for_a_hung_parse(
+    corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TASK-0509: with parse_timeout_seconds 0, leaving the pool joined a hung worker for good."""
+    monkeypatch.setattr(cpu_pool, "parse_and_chunk", process_targets.parse_after_a_delay)
+    before = worker_pids()
+    configured = settings(ingestion={"parse_timeout_seconds": 0})
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(1000)
+
+    with released_after(corpus / HUNG, PATIENCE * 3):
+        async with CpuWorkerPool(configured) as pool:
+            tasks = pool.tasks_for([str(corpus / name) for name in (NAMES[0], HUNG)])
+            processing = asyncio.create_task(pool.process(tasks, queue))
+            await parse_started(corpus / HUNG)
+            began = time.monotonic()
+            processing.cancel()
+            await asyncio.gather(processing, return_exceptions=True)
+        took = time.monotonic() - began
+
+    assert processing.cancelled()
+    assert took < PATIENCE
+    assert await surviving_workers(before) == set()
+
+
+async def test_a_worker_killed_mid_job_is_not_blamed_on_a_missing_main_guard(
+    tmp_path: Path, corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TASK-0509: a worker the OS killed mid-job was reported as a script with no main guard."""
+    monkeypatch.setattr(cpu_pool, "parse_and_chunk", process_targets.die)
+    service, _ = build(tmp_path, settings())
+
+    record = await service.accept([str(corpus / name) for name in NAMES])
+    with pytest.raises(IngestionError) as raised:
+        await service.run(record)
+
+    assert raised.value.code is ErrorCode.CHUNK_FAILED
+    assert "__main__" not in raised.value.detail
+    assert "out-of-memory" in raised.value.detail
+    assert NAMES[0] in raised.value.detail
 
 
 def semantic(**overrides: Any) -> Settings:
