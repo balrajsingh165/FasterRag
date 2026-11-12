@@ -6,7 +6,7 @@ Conventions: paths are relative to `src/fasterrag/`; test paths relative to `tes
 
 ## 1. The one rule that explains the layout
 
-Imports point inward: `api/`+`cli/`+`facade.py` → `services/` → `core/`+`workers/` → `adapters/` interfaces. Vendor types never leave `adapters/`; routers and CLI commands contain no business logic (a router that grows an `if` about retrieval is a bug); `services/` is the only writer of state. The three control surfaces are thin shells over one service layer — which is why REST, CLI, and library behavior cannot diverge, and why a capability is "done" only when all three shells expose it (the gap class TASK-0251 was filed for: provisioning the CLI offered and REST refused).
+Imports point inward: `api/`+`cli/`+`facade.py` → `services/` → `workers/` → `adapters/` → `core/`, in the order [structure.md](structure.md) states and `scripts/check_layering.py` gates (TASK-0456 tracks the imports that still break it, named in that script). Vendor types never leave `adapters/`; routers and CLI commands contain no business logic (a router that grows an `if` about retrieval is a bug); `services/` is the only writer of state. The three control surfaces are thin shells over one service layer — which is why REST, CLI, and library behavior cannot diverge, and why a capability is "done" only when all three shells expose it (the gap class TASK-0251 was filed for: provisioning the CLI offered and REST refused).
 
 ## 2. Spec → module → proof map
 

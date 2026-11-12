@@ -125,6 +125,19 @@ jobs:
         if: ${{ !cancelled() }}
         run: python scripts/check_comments.py
 
+      # Nothing checked which way imports point: ruff sorts them, mypy follows them, and a
+      # cycle between two packages imports fine until the load order changes. A 2026-11-12
+      # scan found eighteen module pairs importing upward, among them the facade importing
+      # its service builders from the REST layer through function-level imports no
+      # module-level scan would see. The gate reads every import statement at any depth and
+      # every registry string naming a module; today's violations are named exceptions in
+      # the script, and an exception nothing matches any more fails it too (TASK-0456). A
+      # code gate, not a doc gate. Measured at 0.5-0.6 s locally on Windows, interpreter
+      # start included.
+      - name: Imports point down the layers
+        if: ${{ !cancelled() }}
+        run: python scripts/check_layering.py
+
       # The four mechanical places a version lives cannot be edited atomically by hand, and
       # a tree halfway through a stamp ships a wheel that contradicts its own README.
       - name: Version is coherent across the tree

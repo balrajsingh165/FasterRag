@@ -129,6 +129,16 @@ fasterRag/
 | `docs/adr/` | MADR decision records, sequentially numbered, never deleted (superseded ADRs get a "Superseded by ADR-XXXX" status). |
 | `tests/` | Unit, integration, and eval suites per [testing-strategy.md](testing-strategy.md). |
 
+## The import rule
+
+Imports point one way. A module may import its own layer and any layer listed after it, never one listed before it:
+
+`cli/` → `api/` | the facade | the dashboard → `services/` → `workers/` → `adapters/` → `core/` → `observability/` → `config/` → `errors.py`
+
+The three in the second position are siblings and may not import each other: the facade is `__init__.py`, `facade.py`, `sync.py` and the re-export modules beside them, and the dashboard is `observability/dashboard.py`, a second web application rather than instrumentation. `cli/` sits above them because the terminal is what starts the API and the dashboard.
+
+`scripts/check_layering.py` enforces this in CI's `quality` job and in the unit tier, reading every import statement at any depth — a function-level import is how the facade used to reach into `api/` unseen. **The tree does not satisfy the rule yet** (TASK-0456): the imports that break it are listed by name in that script's `EXCEPTIONS` table, each with the step that removes it, and the gate fails on any import not in the table and on any entry the tree no longer needs. Whether `core/` may name the adapter base interfaces — which the table below says it does, and which the order above does not allow — is the open decision in that task.
+
 ## Separation-of-concerns rationale
 
 - **Endpoints orchestrate use cases, nothing more.** A router that grows an `if` about chunking strategy is a bug; that decision belongs in `core/chunking` driven by config.
