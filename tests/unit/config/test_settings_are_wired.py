@@ -21,9 +21,7 @@ SRC = Path(__file__).resolve().parents[3] / "src" / "fasterrag"
 
 # Declared, and deliberately not consumed yet. Each names the task that will land it, so an
 # entry here is a decision somebody made rather than an omission nobody noticed.
-PENDING: dict[str, str] = {
-    "reliability.degradation_ladder": "TASK-0165",
-}
+PENDING: dict[str, str] = {}
 
 
 def leaves() -> list[tuple[str, str]]:

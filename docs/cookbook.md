@@ -114,7 +114,6 @@ workers:
 reliability:
   timeouts:
     llm_ms: 30000                # fail to extractive fast rather than hang
-  degradation_ladder: true
 ```
 
 **Why:** streaming plus a tight rerank pool plus a conservative cache attacks latency without abandoning quality; a short LLM timeout means a stalled provider degrades in seconds instead of stalling the request. **Trade-off:** `rerank_top_n: 50` and `top_k: 8` reduce recall headroom on hard queries.

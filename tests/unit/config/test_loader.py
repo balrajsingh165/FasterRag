@@ -67,6 +67,22 @@ def test_unknown_key_is_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("env")
+def test_a_config_that_still_sets_degradation_ladder_is_told_the_key_was_removed_and_why(
+    tmp_path: Path,
+) -> None:
+    """The ladder ran whatever the key said, so ``false`` silently changed nothing."""
+    path = write_config(tmp_path, "reliability:\n  degradation_ladder: false\n")
+
+    with pytest.raises(ConfigError) as caught:
+        load_settings(path, env_file=None)
+
+    detail = caught.value.detail
+    assert "reliability.degradation_ladder was removed" in detail
+    assert "read by nothing" in detail
+    assert "Extra inputs are not permitted" not in detail
+
+
+@pytest.mark.usefixtures("env")
 def test_a_config_that_still_sets_app_workers_is_told_the_key_was_removed_and_why(
     tmp_path: Path,
 ) -> None:

@@ -74,6 +74,13 @@ _REMOVED_APP_WORKERS = (
     "and a separate worker process is tracked as TASK-0130"
 )
 
+_REMOVED_DEGRADATION_LADDER = (
+    "reliability.degradation_ladder was removed on 2026-11-12: it was validated and read by "
+    "nothing, so the degradation ladder ran whatever it said and 'false' turned nothing off. "
+    "Delete the line; a degraded response is still labelled degraded: true with its mode "
+    "(docs/reliability.md)"
+)
+
 ChunkStrategy = Literal["fixed", "recursive", "semantic", "layout", "late"]
 TokenCounterMode = Literal["auto", "estimate", "model"]
 
@@ -779,16 +786,23 @@ class IdempotencySettings(Section):
 
 
 class ReliabilitySettings(Section):
-    """Timeouts, retries, circuit breakers, idempotency, and the degradation ladder."""
+    """Timeouts, retries, circuit breakers, idempotency, and shutdown behaviour."""
 
     timeouts: TimeoutSettings = TimeoutSettings()
     retries: RetrySettings = RetrySettings()
     circuit_breaker: CircuitBreakerSettings = CircuitBreakerSettings()
     idempotency: IdempotencySettings = IdempotencySettings()
-    degradation_ladder: bool = True
     shutdown_grace_seconds: Annotated[int, Field(ge=0, le=3600)] = 20
     stale_job_seconds: Annotated[int, Field(ge=1, le=86400)] = 120
     request_deadline_ms: Annotated[int, Field(ge=100)] = 300000
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_removed_keys(cls, data: Any) -> Any:
+        """Name a removed key and say why, where ``extra="forbid"`` would only call it unknown."""
+        if isinstance(data, dict) and "degradation_ladder" in data:
+            raise ValueError(_REMOVED_DEGRADATION_LADDER)
+        return data
 
 
 class TracesSettings(Section):

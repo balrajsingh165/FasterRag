@@ -4,7 +4,7 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 
 **Before anything else, run `fasterrag doctor`.** It checks Docker, ports, disk, RAM/GPU, backend reachability, key validity, and config validity, and prints a concrete fix for every failure. A large share of the table below is caught by it in one command. `fasterrag doctor --fix` then applies the repairs that are safe to apply — the missing named storage volume, and fasterRag's own stopped container — and re-checks; anything it will not touch (a held port, full disk, missing secret) is named with the reason and the command to run yourself.
 
-**Three things to grab before investigating anything:** the `trace_id` (on every response and every problem document), the problem `code`, and `fasterrag status` output. Those three make the difference between diagnosis and guesswork.
+**Three things to grab before investigating anything:** the `trace_id` (on every response and every problem document), the problem `code`, and `fasterrag status` output. Those three make the difference between diagnosis and guesswork. **Have a `code` and nothing else?** Every code is listed with its HTTP status, meaning and remedy in the [error code table](api-reference.md#error-code-table); this page is organised by symptom instead.
 
 ---
 
