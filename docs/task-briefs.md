@@ -315,14 +315,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 
 **Moves:** ingestion, reliability.
 
-### TASK-0472 — Inputs the pipeline has never been shown
-
-**Where.** `core/parsing/plaintext.py:20-27` `decode`: UTF-8 with BOM handling, then `errors="replace"` and an `ENCODING_FALLBACK` flag — Latin-1 and UTF-16 text becomes replacement characters and is indexed. An encrypted PDF falls into a broad catch (`pdf.py:171-172`) with no specific reason code and no test. [failure-modes.md](failure-modes.md) row 2 records "no scanned-document fixture".
-
-**Steps.** Detect UTF-16 by BOM and try a small ordered list of encodings before falling back; dead-letter, not index, a document that is mostly replacement characters. Give encrypted PDFs their own reason code. Generate a scanned-page PDF fixture with `reportlab` (already a dev dependency) for the OCR path.
-
-**Moves:** ingestion, testing.
-
 ### TASK-0474 — Dead letters: idempotent retry, bounded growth
 
 **Where.** `POST /v1/ingest/{job_id}/retry-dlq` (`api/ingest.py:217-247`) accepts a new job with no idempotency key, so a repeated call starts repeated jobs. `dlq.max_retries` (`schema.py:551`) is only recorded as `attempts` (`cpu_pool.py:370`). Neither `documents.jsonl` nor the dedup file is ever pruned.
@@ -378,14 +370,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 **Steps.** Add the query suite against a service-container Qdrant to the nightly; add a weekly short soak (`FASTERRAG_SOAK_SECONDS`) and a load smoke; add an import-time budget test for `import fasterrag` (the existing guard is `tests/unit/test_facade.py:57`).
 
 **Moves:** performance, testing.
-
-### TASK-0489 — Property and fuzz coverage where it is thin
-
-**Where.** `tests/unit/core/chunking/test_invariants.py:195-202` excludes the semantic chunker from the token-budget property, and its `TEXT` alphabet is ASCII (`:61-65`). `tests/unit/core/parsing/test_invariants.py` fuzzes plaintext, Markdown, CSV and HTML only (`TEXT_PARSERS`, `:89`). No corrupt-DOCX, zip-bomb or deeply nested HTML test. `core/parsing/tabular.py:110` `_walk` recurses without bound.
-
-**Steps.** Widen alphabets to full Unicode; add truncated and bit-flipped DOCX and PDF cases; add depth-bounded JSON and HTML cases and make `_walk` iterative or depth-limited with a typed error.
-
-**Moves:** testing, ingestion, security.
 
 ### TASK-0490 — Test what is claimed to be supported
 
@@ -539,12 +523,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 
 **Steps.** Add both. `CODEOWNERS` should name an owner for the sensitive folders listed in `CLAUDE.md`. **Moves:** packaging and release readiness.
 
-### TASK-0504 — Symbolic links during directory expansion
-
-**Where.** `cli/sources.py:33-54` expands directories with no symlink or loop handling of its own. An escaping link inside an expanded directory reaches `_guard_path` in `resolve_sources` (`services/sources.py:363`) and fails the **whole job**, and only when `allowed_source_roots` is set.
-
-**Steps.** Test a self-referential link and an escaping link; skip an escaping link as one dead-lettered document with a reason code instead of refusing the job. **Moves:** ingestion, security.
-
 ---
 
 ## 4. Earlier tasks that are on the path
@@ -574,14 +552,14 @@ Use this to choose work by the category you want to move. The bar each category 
 |---|---|
 | Architecture and design | TASK-0456, TASK-0130, TASK-0457 |
 | Core RAG functionality | TASK-0449, TASK-0458, TASK-0467, TASK-0485 |
-| Document ingestion and processing | TASK-0459, TASK-0471, TASK-0472, TASK-0462, TASK-0504 |
+| Document ingestion and processing | TASK-0459, TASK-0471, TASK-0462 |
 | Retrieval and search quality | TASK-0454, TASK-0447, TASK-0448, TASK-0481, TASK-0463, TASK-0480 |
 | Embedding and vector infrastructure | TASK-0451, TASK-0452, TASK-0412, TASK-0352, TASK-0477, TASK-0478, TASK-0464, TASK-0479, TASK-0049 |
 | Advanced RAG capabilities | TASK-0465, TASK-0448, TASK-0482, TASK-0483, TASK-0484, TASK-0463 |
 | Extensibility and modularity | TASK-0486 |
 | Performance and scalability | TASK-0454, TASK-0130, TASK-0487, TASK-0488, TASK-0407 to TASK-0410 |
 | Reliability and error handling | TASK-0449, TASK-0474 |
-| Testing and quality assurance | TASK-0412, TASK-0454, TASK-0481, TASK-0489, TASK-0490, TASK-0300 |
+| Testing and quality assurance | TASK-0412, TASK-0454, TASK-0481, TASK-0490, TASK-0300 |
 | Security | TASK-0339, TASK-0381, TASK-0460, TASK-0326, TASK-0492, TASK-0493, TASK-0494, TASK-0495 |
 | Developer experience and APIs | TASK-0498, TASK-0500 |
 | Documentation | TASK-0499, TASK-0500, TASK-0501, TASK-0486 |
