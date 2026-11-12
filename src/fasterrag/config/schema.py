@@ -26,6 +26,7 @@ from fasterrag.config.plugins import (
     BUILTIN_VECTOR_DB_PROVIDERS,
     EMBEDDINGS_GROUP,
     LLM_GROUP,
+    PLANNED_VECTOR_DB_PROVIDERS,
     VECTOR_DB_GROUP,
     require_selectable,
 )
@@ -274,7 +275,12 @@ class VectorDbSettings(Section):
     @classmethod
     def _check_provider(cls, value: str) -> str:
         """Require a built-in vector database or one an installed plugin registers."""
-        return require_selectable(value, builtin=BUILTIN_VECTOR_DB_PROVIDERS, group=VECTOR_DB_GROUP)
+        return require_selectable(
+            value,
+            builtin=BUILTIN_VECTOR_DB_PROVIDERS,
+            group=VECTOR_DB_GROUP,
+            planned=PLANNED_VECTOR_DB_PROVIDERS,
+        )
 
     @field_validator("host")
     @classmethod

@@ -16,6 +16,13 @@ at load before any factory ran.
 factories give: an installed package must not be able to take over ``qdrant``. It also
 means a configuration naming only built-in providers never scans anything.
 
+**A planned name is refused here, by name, with its task.** ``pinecone`` used to validate
+and then fail inside the factory, which is a startup failure for the API and a first-use
+failure for anything that builds its adapter later. The order is the factory's own —
+built-in, then plugin, then planned — so a package that registers ``pinecone`` itself is
+selectable, exactly as the factory's refusal has always suggested. The planned names are
+the factory's ``_PLANNED_ADAPTERS``, held to it by the same test as the built-in ones.
+
 **Nothing is imported and nothing is executed.** ``importlib.metadata`` reads each installed
 distribution's ``entry_points.txt``; the object an entry point refers to is loaded only by
 the factory that goes on to build it. A plugin whose module is broken therefore still
@@ -30,6 +37,7 @@ plugin does.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib.metadata import entry_points
 from typing import Final
 
@@ -39,6 +47,7 @@ __all__ = [
     "BUILTIN_VECTOR_DB_PROVIDERS",
     "EMBEDDINGS_GROUP",
     "LLM_GROUP",
+    "PLANNED_VECTOR_DB_PROVIDERS",
     "VECTOR_DB_GROUP",
     "registered_names",
     "require_selectable",
@@ -58,20 +67,40 @@ BUILTIN_LLM_PROVIDERS: Final[frozenset[str]] = frozenset(
     {"openai", "openai_compatible", "anthropic", "cohere", "ollama"}
 )
 
+PLANNED_VECTOR_DB_PROVIDERS: Final[dict[str, str]] = {"pinecone": "TASK-0049"}
+
 
 def registered_names(group: str) -> frozenset[str]:
     """Return every name installed distributions register under ``group``."""
     return frozenset(entry.name for entry in entry_points(group=group))
 
 
-def require_selectable(value: str, *, builtin: frozenset[str], group: str) -> str:
-    """Return ``value`` when it names a built-in or an installed plugin, else refuse it."""
+def require_selectable(
+    value: str,
+    *,
+    builtin: frozenset[str],
+    group: str,
+    planned: Mapping[str, str] | None = None,
+) -> str:
+    """Return ``value`` when it names a built-in or an installed plugin, else refuse it.
+
+    ``planned`` maps a specified-but-unbuilt name to the task that builds it, so the
+    refusal can say the name is known and where its adapter is tracked.
+    """
     if value in builtin:
         return value
 
     installed = registered_names(group)
     if value in installed:
         return value
+
+    task = (planned or {}).get(value)
+    if task is not None:
+        raise ValueError(
+            f"{value!r} is specified but its adapter is not built yet ({task}); "
+            f"{_alternatives(builtin, installed, group)}. Use one of those, or install a "
+            f"package that registers {value!r} under that group"
+        )
 
     raise ValueError(
         f"{value!r} is not an installed provider; {_alternatives(builtin, installed, group)}. "
