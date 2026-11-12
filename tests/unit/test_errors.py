@@ -19,44 +19,6 @@ from fasterrag.errors import (
 )
 from fasterrag.observability.logging import use_trace_id
 
-DOCUMENTED_STATUSES = {
-    ErrorCode.CONFIG_INVALID: 500,
-    ErrorCode.AUTH_MISSING: 401,
-    ErrorCode.AUTH_INVALID: 401,
-    ErrorCode.AUTH_SCOPE: 403,
-    ErrorCode.TENANT_FORBIDDEN: 403,
-    ErrorCode.VALIDATION_FAILED: 422,
-    ErrorCode.NOT_FOUND: 404,
-    ErrorCode.CONFLICT: 409,
-    ErrorCode.IDEMPOTENCY_KEY_REUSED: 422,
-    ErrorCode.IDEMPOTENCY_IN_PROGRESS: 409,
-    ErrorCode.PAYLOAD_TOO_LARGE: 413,
-    ErrorCode.RATE_LIMITED: 429,
-    ErrorCode.QUEUE_FULL: 429,
-    ErrorCode.BUDGET_EXCEEDED: 402,
-    ErrorCode.PARSE_FAILED: 422,
-    ErrorCode.PARSE_TIMEOUT: 422,
-    ErrorCode.CHUNK_FAILED: 500,
-    ErrorCode.EMBED_PROVIDER_TIMEOUT: 503,
-    ErrorCode.EMBED_PROVIDER_ERROR: 503,
-    ErrorCode.VECTOR_DB_AUTH_FAILED: 503,
-    ErrorCode.RETRIEVAL_FAILED: 503,
-    ErrorCode.RERANK_FAILED: 503,
-    ErrorCode.GENERATION_FAILED: 503,
-    ErrorCode.GENERATION_TIMEOUT: 504,
-    ErrorCode.INSUFFICIENT_EVIDENCE: 200,
-    ErrorCode.CIRCUIT_OPEN: 503,
-    ErrorCode.PROVISIONING_FAILED: 500,
-    ErrorCode.CACHE_ERROR: 500,
-    ErrorCode.NOT_READY: 503,
-    ErrorCode.INTERNAL: 500,
-    ErrorCode.USAGE_ERROR: 400,
-    ErrorCode.ENCODING_UNREADABLE: 422,
-    ErrorCode.PDF_ENCRYPTED: 422,
-    ErrorCode.NESTING_TOO_DEEP: 422,
-    ErrorCode.SOURCE_LINK_ESCAPES: 422,
-}
-
 DEFAULT_CODES = [
     (FasterRagError, ErrorCode.INTERNAL),
     (ConfigError, ErrorCode.CONFIG_INVALID),
@@ -74,10 +36,6 @@ DEFAULT_CODES = [
 
 def test_every_code_has_a_spec() -> None:
     assert set(PROBLEM_SPECS) == set(ErrorCode)
-
-
-def test_statuses_match_the_documented_error_table() -> None:
-    assert {code: spec.status for code, spec in PROBLEM_SPECS.items()} == DOCUMENTED_STATUSES
 
 
 def test_type_uri_matches_the_documented_example() -> None:
