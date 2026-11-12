@@ -22,6 +22,10 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 
 `app.host` (or `--host`) names an address other machines can reach while `security.auth` is `false`. Anyone who can reach that port can ingest files the process can read and query them back. Either keep the default `127.0.0.1`, or set `security.auth: true` together with `ingestion.allowed_source_roots` ([security.md](security.md) §5.7). A reverse proxy that authenticates in front of the API is the one case where the warning can be accepted.
 
+### Startup refuses an API key: `is the placeholder shipped in .env.example` or `is shorter than 16 characters`
+
+With `security.auth: true`, every key in `FASTERRAG_API_KEY` is checked at startup (TASK-0460). `change-me` — the value `.env.example` ships — is refused by name, and any key under 16 characters is refused as guessable. The message names the entry by its 1-based position and never prints the key. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+
 ## Vector database
 
 | Symptom | Likely cause | Fix |

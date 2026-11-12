@@ -7,7 +7,7 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.errors import ErrorCode
 from tests.unit.api.conftest import StubVectorDB
 
-SECRET = "acme-key"
+SECRET = "acme-key-long-enough"
 VECTOR = [1.0, 0.0, 0.0, 0.0]
 NEAR = [0.999, 0.01, 0.0, 0.0]
 

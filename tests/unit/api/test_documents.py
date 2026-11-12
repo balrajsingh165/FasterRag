@@ -28,9 +28,9 @@ from fasterrag.errors import ErrorCode
 from fasterrag.services.journal import Journal
 from tests.unit.services.test_documents import DIMENSIONS, MemoryAdapter, RecordingCache, chunk
 
-ACME_KEY = "acme-secret"
-GLOBEX_KEY = "globex-secret"
-READER_KEY = "reader-secret"
+ACME_KEY = "acme-secret-long-enough"
+GLOBEX_KEY = "globex-secret-long-enough"
+READER_KEY = "reader-secret-long-enough"
 KEYS = f"{ACME_KEY}:collections:acme;{GLOBEX_KEY}:collections:globex;{READER_KEY}:query:acme"
 
 

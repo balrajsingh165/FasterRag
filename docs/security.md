@@ -55,6 +55,8 @@ Auth runs **before** metrics and correlation-id middleware, so a rejected reques
 
 Key comparison uses `secrets.compare_digest` against every configured key with no early exit, so response timing does not reveal how much of a guess was correct.
 
+**Weak keys are refused at startup (TASK-0460, 2026-11-12).** `change-me` — the placeholder `.env.example` ships — is refused by name (as are `changeme` and `change_me`, in any case), and any key shorter than 16 characters is refused as guessable. Both refusals name the entry by its 1-based position and never print the key. Generate a key with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. **Breaking:** a key under 16 characters that used to load no longer does.
+
 Enabling auth with no usable key **refuses to start**. Starting would refuse every request afterwards, which reads as a broken deployment rather than a configuration mistake.
 - **Keys carry scopes**: `ingest`, `query`, `collections`, `admin`. Admin endpoints (provisioning, export/import, collection delete) require `admin`.
 
@@ -314,8 +316,9 @@ An independent audit found the service **open by default twice over**: `security
 **Closed since by TASK-0460 (2026-11-12), one change per finding:**
 
 - **`multi_tenancy` without `auth` is refused at load.** The tenant of a request is resolved by the authentication middleware, so `multi_tenancy: true` with `auth: false` loaded and enforced nothing. It is now a `ConfigError` naming both keys (§3).
+- **The `.env.example` placeholder and short keys are refused at startup.** `change-me` (and `changeme`, `change_me`, any case) is refused by name, and any key under 16 characters (`MINIMUM_KEY_LENGTH`) as guessable. The message names the entry by its 1-based position and never prints the key. **Breaking:** a deployment running with a key under 16 characters no longer starts.
 
-**Still open from the same audit**, each with an entry in [todo.md](todo.md): retrieved text reaches the prompt unescaped (TASK-0446); a key with no tenant may act for any tenant, and the `.env.example` placeholder is accepted as a live key (TASK-0460); tenant scoping of the ingest and query paths remains the opt-in described in §3 (TASK-0339, TASK-0381).
+**Still open from the same audit**, each with an entry in [todo.md](todo.md): retrieved text reaches the prompt unescaped (TASK-0446); a key with no tenant may act for any tenant (TASK-0460); tenant scoping of the ingest and query paths remains the opt-in described in §3 (TASK-0339, TASK-0381).
 
 ## 6. Supply chain
 

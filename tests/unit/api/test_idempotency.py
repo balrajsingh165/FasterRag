@@ -40,7 +40,7 @@ from tests.unit.api.conftest import StubVectorDB
 
 KEY = "11111111-2222-3333-4444-555555555555"
 OTHER_KEY = "99999999-8888-7777-6666-555555555555"
-SECRET = "acme-key"
+SECRET = "acme-key-long-enough"
 DIGEST = request_fingerprint("POST", "/v1/collections", "", b"{}")
 
 
@@ -269,7 +269,9 @@ def test_the_body_field_still_works_and_says_it_is_deprecated(client: TestClient
 
 
 def tenanted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
-    monkeypatch.setenv("FASTERRAG_API_KEY", f"{SECRET}:admin:acme;globex-key:admin:globex")
+    monkeypatch.setenv(
+        "FASTERRAG_API_KEY", f"{SECRET}:admin:acme;globex-key-long-enough:admin:globex"
+    )
     settings = Settings.model_validate({"security": {"auth": True, "multi_tenancy": True}})
     application = create_app(settings)
     application.state.vector_db = StubVectorDB()
@@ -284,7 +286,7 @@ def test_one_tenant_cannot_replay_anothers_key(
     """The disclosure this scoping exists to prevent: a stranger's response for your key."""
     client = tenanted(monkeypatch, tmp_path)
     acme = {"Authorization": f"Bearer {SECRET}", "X-Tenant-ID": "acme", **keyed()}
-    globex = {"Authorization": "Bearer globex-key", "X-Tenant-ID": "globex", **keyed()}
+    globex = {"Authorization": "Bearer globex-key-long-enough", "X-Tenant-ID": "globex", **keyed()}
 
     first = client.post("/v1/collections", json=body(), headers=acme)
     second = client.post("/v1/collections", json=body(), headers=globex)

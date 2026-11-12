@@ -37,8 +37,8 @@ from fasterrag.services.journal import Journal
 from fasterrag.services.traces import TraceStore
 
 DIMENSIONS = 8
-ACME_KEY = "acme-secret"
-GLOBEX_KEY = "globex-secret"
+ACME_KEY = "acme-secret-long-enough"
+GLOBEX_KEY = "globex-secret-long-enough"
 KEYS = f"{ACME_KEY}:query:acme;{GLOBEX_KEY}:query:globex"
 
 ACME_TEXT = "the acme turbo widget warranty lasts thirty days"

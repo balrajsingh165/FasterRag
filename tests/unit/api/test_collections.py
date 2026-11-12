@@ -24,7 +24,7 @@ from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.tenancy import SEPARATOR
 from tests.unit.api.conftest import StubVectorDB
 
-TENANT_SECRET = "acme-key"
+TENANT_SECRET = "acme-key-long-enough"
 
 
 class ExistingCollection(StubVectorDB):

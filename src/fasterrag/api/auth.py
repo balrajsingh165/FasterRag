@@ -82,6 +82,14 @@ _SCOPE_BY_PREFIX: Final[tuple[tuple[str, str], ...]] = (
     ("/api/metrics", "admin"),
 )
 
+MINIMUM_KEY_LENGTH: Final = 16
+
+# CRITICAL: `.env.example` ships `FASTERRAG_API_KEY=change-me`. A copied template that was
+# never edited would otherwise turn `security.auth: true` into a key every reader of this
+# repository holds, so the placeholder is refused by name even though the length rule would
+# refuse it too: the message has to say which mistake was made.
+PLACEHOLDER_KEYS: Final[frozenset[str]] = frozenset({"change-me", "changeme", "change_me"})
+
 _COLLECTION_ITSELF: Final = re.compile(r"^/v1/collections/[^/]+/?$")
 
 _BEARER: Final = "bearer"
@@ -152,6 +160,25 @@ def _parse_scopes(raw: str, where: str = "this key entry") -> frozenset[str]:
     return frozenset(scopes)
 
 
+def _refuse_weak_secret(secret: str, where: str) -> None:
+    """Refuse the shipped placeholder and any key too short to resist guessing.
+
+    The message names the entry and the rule, never the key (TASK-0460).
+    """
+    if secret.strip().lower() in PLACEHOLDER_KEYS:
+        raise ConfigError(
+            f"{where} is the placeholder shipped in .env.example, which anyone who has read "
+            f"that file can present; generate a real key, for example with "
+            f'`python -c "import secrets; print(secrets.token_urlsafe(32))"`'
+        )
+    if len(secret) < MINIMUM_KEY_LENGTH:
+        raise ConfigError(
+            f"{where} is shorter than {MINIMUM_KEY_LENGTH} characters, which is short enough "
+            f"to guess; generate a longer key, for example with "
+            f'`python -c "import secrets; print(secrets.token_urlsafe(32))"`'
+        )
+
+
 def load_keys(settings: Settings) -> list[ApiKey]:
     """Load API keys from the environment variable configuration names."""
     name = settings.security.api_key_env
@@ -174,6 +201,7 @@ def load_keys(settings: Settings) -> list[ApiKey]:
         # single-operator case. A field that is present and empty is a different thing and
         # is refused — the two were indistinguishable here until TASK-0327.
         scopes = _parse_scopes(scopes_raw, f"{name} entry {index + 1}") if separator else ALL_SCOPES
+        _refuse_weak_secret(secret, f"{name} entry {index + 1}")
         keys.append(
             ApiKey(
                 secret=secret,

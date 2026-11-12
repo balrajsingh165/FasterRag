@@ -18,8 +18,8 @@ from fasterrag.errors import ErrorCode
 from fasterrag.services.traces import TraceStore
 from tests.unit.api.conftest import StubVectorDB
 
-ACME_KEY = "acme-key"
-EVIL_KEY = "evil-key"
+ACME_KEY = "acme-key-long-enough"
+EVIL_KEY = "evil-key-long-enough"
 KEYS = f"{ACME_KEY}:admin:acme;{EVIL_KEY}:admin:evilcorp"
 TRACE_ID = "aaaabbbbccccddddeeeeffff00001111"
 

@@ -218,7 +218,7 @@ def test_importing_from_outside_the_allowed_roots_is_refused(tmp_path: Path) -> 
     assert "allowed_archive_roots" in response.json()["detail"]
 
 
-SECRET = "acme-key"
+SECRET = "acme-key-long-enough"
 
 
 def tenant_client(
