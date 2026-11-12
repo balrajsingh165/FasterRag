@@ -31,13 +31,16 @@ HANG: Final = "hang"
 PAUSE: Final = "pause"
 """File stem of a document that parses after :data:`PAUSE_SECONDS`."""
 
+PAUSE_TOO: Final = "pause_too"
+"""File stem of a second document that parses after :data:`PAUSE_SECONDS`."""
+
 STALL_ONCE: Final = "stall_once"
 """File stem of a document whose first parse blocks like :data:`HANG` and later ones do not."""
 
 PAUSE_SECONDS: Final = 2.0
 HANG_SECONDS: Final = 3600.0
 
-_DELAYS: Final[dict[str, float]] = {PAUSE: PAUSE_SECONDS}
+_DELAYS: Final[dict[str, float]] = {PAUSE: PAUSE_SECONDS, PAUSE_TOO: PAUSE_SECONDS}
 
 
 def marker(source: Path, kind: str) -> Path:
@@ -56,6 +59,11 @@ def _block(source: Path) -> None:
     deadline = time.monotonic() + HANG_SECONDS
     while not marker(source, "release").exists() and time.monotonic() < deadline:
         time.sleep(0.05)
+
+
+def start_slowly(seconds: float) -> None:
+    """Worker initializer: take ``seconds`` to start, as a worker on a loaded machine does."""
+    time.sleep(seconds)
 
 
 def die(task: DocumentTask, settings: Settings) -> ParseOutcome:

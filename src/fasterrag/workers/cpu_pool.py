@@ -30,8 +30,11 @@ task that is already running cannot be cancelled, and its worker stays occupied 
 returns, which a hung one never does. So an overdue document costs its *pool*: the workers
 are killed, a fresh pool is started, the documents that were in flight beside it are
 submitted again with a new deadline, and only the overdue one is dead-lettered, as
-``PARSE_TIMEOUT``. One worker is started before any document is submitted, at pool start
-and after every recycle, so that process start-up is not billed to a document's deadline.
+``PARSE_TIMEOUT``. One worker is started at pool start and after every recycle, and with a
+deadline set, as many as the documents will occupy are started before any is submitted, so
+that process start-up is not billed to a document's deadline. Before 2026-11-12 only the
+first was: a pool that spawns starts the others on demand, and on a loaded machine a
+healthy document could be dead-lettered while its worker was still starting.
 
 A document is journalled as indexed only when the :class:`IndexLedger` says every chunk of
 it was written downstream (``workers/ledger.py``). With no ledger passed there is no
@@ -301,6 +304,11 @@ def _ready() -> bool:
     return True
 
 
+def _process_id(_settings: Settings) -> int:
+    """Return the process this task ran in, which proves that worker has started."""
+    return os.getpid()
+
+
 def _abandon(executor: Executor) -> None:
     """Shut a pool down without waiting for it, killing any worker that is still busy."""
     workers: list[BaseProcess] = []
@@ -434,7 +442,9 @@ class CpuWorkerPool:
         else:
             _logger.info("loaded the sentence embedding model in every parse worker", extra=details)
 
-    async def _warmed_processes(self, expected: int) -> int:
+    async def _warmed_processes(
+        self, expected: int, target: Callable[[Settings], int] = _warm_sentence_embedder
+    ) -> int:
         """Send warm-up tasks until ``expected`` processes have answered, and return how many did.
 
         Gives up after ``_WARM_STALL_SECONDS`` in which only already-warm processes answered, so
@@ -446,7 +456,7 @@ class CpuWorkerPool:
         while len(warmed) < expected:
             replies = await asyncio.gather(
                 *(
-                    loop.run_in_executor(self._executor, _warm_sentence_embedder, self.settings)
+                    loop.run_in_executor(self._executor, target, self.settings)
                     for _ in range(expected - len(warmed))
                 )
             )
@@ -460,6 +470,31 @@ class CpuWorkerPool:
                 break
             await asyncio.sleep(_WARM_RETRY_SECONDS)
         return len(warmed)
+
+    async def _start_workers(self, documents: int) -> None:
+        """Start the workers ``documents`` will occupy before any of their deadlines runs.
+
+        A pool that spawns starts workers on demand, which billed every worker's start-up but
+        the first to a document's ``ingestion.parse_timeout_seconds``.
+        """
+        expected = min(documents, self.size)
+        if (
+            expected <= 1
+            or self.settings.ingestion.parse_timeout_seconds <= 0
+            or not isinstance(self._executor, ProcessPoolExecutor)
+        ):
+            return
+
+        try:
+            started = await self._warmed_processes(expected, _process_id)
+        except BrokenProcessPool as exc:
+            raise _worker_died_error("while the pool was starting its workers") from exc
+        if started < expected:
+            _logger.warning(
+                "not every parse worker started before the first document; one that starts "
+                "later does so inside a document's parse deadline",
+                extra={"workers": started, "expected": expected},
+            )
 
     async def _warm_token_counter(self) -> None:
         """Load the embedding tokenizer before the first document rather than during it."""
@@ -609,11 +644,12 @@ class CpuWorkerPool:
                 window.append(self._submit(task))
 
         try:
+            await self._start_workers(len(tasks))
             fill()
             while window:
                 entry = window[0]
                 if not entry.timed_out and not await self._returned(entry):
-                    await self._recycle(window)
+                    await self._recycle(window, len(tasks))
                 window.popleft()
                 if entry.timed_out:
                     yield entry.task, self._timeout_error(entry.task)
@@ -665,7 +701,7 @@ class CpuWorkerPool:
         """Return the typed failure for a document that outlived its deadline."""
         return _parse_timeout_error(task, self.settings.ingestion.parse_timeout_seconds)
 
-    async def _recycle(self, window: deque[_InFlight]) -> None:
+    async def _recycle(self, window: deque[_InFlight], documents: int) -> None:
         """Replace the pool because the document at the head of ``window`` is overdue.
 
         Every other unfinished document is submitted again to the new pool with a fresh
@@ -687,6 +723,7 @@ class CpuWorkerPool:
         if stale is not None:
             _abandon(stale)
         await self._start_worker()
+        await self._start_workers(documents)
 
         resubmitted = [entry for entry in unfinished if not entry.timed_out]
         for entry in resubmitted:

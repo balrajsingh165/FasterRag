@@ -50,6 +50,7 @@ NAMES = ("expenses.md", "leave.md", "travel.md")
 
 HUNG = f"{process_targets.HANG}.md"
 PAUSED = f"{process_targets.PAUSE}.md"
+PAUSED_TOO = f"{process_targets.PAUSE_TOO}.md"
 STALLED = f"{process_targets.STALL_ONCE}.md"
 
 PATIENCE = 10.0
@@ -76,7 +77,7 @@ def settings(**overrides: Any) -> Settings:
 def corpus(tmp_path: Path) -> Path:
     root = tmp_path / "corpus"
     root.mkdir()
-    for name in (*NAMES, HUNG, PAUSED, STALLED):
+    for name in (*NAMES, HUNG, PAUSED, PAUSED_TOO, STALLED):
         (root / name).write_text(
             f"# {name}\n\n" + f"The policy in {name} applies to every employee. " * 20,
             encoding="utf-8",
@@ -420,3 +421,29 @@ async def test_a_model_load_is_never_billed_to_a_documents_parse_deadline(
     assert report.parsed == 2
     assert {Path(payload.source).name for payload in chunks} == {NAMES[0], NAMES[1]}
     assert len(builds(log_dir)) == 2
+
+
+async def test_a_worker_starting_up_is_never_billed_to_a_documents_parse_deadline(
+    corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Workers after the first started on demand, inside a document's deadline.
+
+    Each worker takes three seconds to start and each document two to parse, against a
+    three-second deadline: the second document fits only if its worker started beforehand.
+    """
+    monkeypatch.setattr(cpu_pool, "parse_and_chunk", process_targets.parse_after_a_delay)
+    configured = settings(ingestion={"parse_timeout_seconds": 3})
+    queue: BoundedQueue[ChunkPayload] = BoundedQueue(1000)
+
+    def factory(workers: int) -> Executor:
+        return ProcessPoolExecutor(
+            max_workers=workers, initializer=process_targets.start_slowly, initargs=(3.0,)
+        )
+
+    async with CpuWorkerPool(configured, executor_factory=factory) as pool:
+        report = await pool.process(
+            pool.tasks_for([str(corpus / name) for name in (PAUSED, PAUSED_TOO)]), queue
+        )
+
+    assert report.dead_lettered == 0
+    assert report.parsed == 2
