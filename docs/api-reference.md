@@ -233,7 +233,20 @@ event: done       data: {}
 
 **A query refused before its first event is an ordinary problem response, not a stream.** Everything that can refuse a query outright — retrieval failing (`503 RETRIEVAL_FAILED`), the token budget (`402 BUDGET_EXCEEDED`) — happens before `meta` is produced, and the server produces `meta` before it sends the status line. Such a request gets the same status and `application/problem+json` body as `stream: false`, with no SSE frame at all. Before 2026-11-12 the budget check ran after `meta`, so a streamed request over its budget received `200` and then an `error` event (TASK-0438).
 
-On mid-stream failure — anything after `meta` has been sent — the status is already `200` and cannot change: `event: error` carrying `code`, `detail`, `trace_id`, `retryable` and the `status` the problem would have had, then the stream closes. Clients must treat a missing `done` as an incomplete answer.
+**A provider that is down degrades a stream the way it degrades a JSON body** (D4, TASK-0438). When generation fails with a *retryable* error — timeout, rate limit, 5xx, an open circuit breaker — **before the first `token` has been sent**, the stream serves the `extractive` rung instead of failing: a second `meta` announcing the mode, the retrieved passages as one `token`, then `citations`, `usage` and `done`.
+
+```
+event: meta       data: {"trace_id": "...", "mode": "full", "degraded": false, "cache": {...}}
+event: meta       data: {"trace_id": "...", "mode": "extractive", "degraded": true}
+event: token      data: {"text": "<the retrieved passages>"}
+event: citations  data: {"citations": [...]}
+event: usage      data: {"usage": {"prompt_tokens": 0, "completion_tokens": 0, "estimated_cost_usd": null}, ..., "mode": "extractive", "degraded": true, ...}
+event: done       data: {}
+```
+
+`meta` can therefore arrive twice, and the later one wins: the first was sent before the provider had been called. A client that reads only the first still gets the truth from `usage`. `fasterrag_degraded_responses_total{mode="extractive"}` is incremented exactly as for a non-streamed query. Before 2026-11-12 this case ended the stream with `error` and no `done`.
+
+**The boundary is the first `token` sent.** After it, the caller has been shown text the retrieved passages cannot replace — appended, they would read as the answer's continuation — so there is no fallback: `event: error` carrying `code`, `detail`, `trace_id`, `retryable` and the `status` the problem would have had, then the stream closes. The same `error` event ends a stream on any *non-retryable* failure after `meta` (a rejected credential, an unknown model): the status is already `200` and cannot change. Clients must treat a missing `done` as an incomplete answer. With `generation.grounded_or_refuse: true` no `token` is sent until the answer has been graded, so there a retryable failure at any point of generation is still before the boundary and degrades.
 
 Grounded-or-refuse while streaming: a token cannot be unsaid once sent, so with `generation.grounded_or_refuse: true` no `token` event is emitted until the whole answer has been graded — time-to-first-token is traded for the guarantee the flag exists to provide, and the flag defaults to `false` so the trade is only made on request. A withheld answer replaces the `token`, `citations`, and `usage` events with one `insufficient_evidence` event carrying the same body as the non-streamed refusal, followed by `done`:
 

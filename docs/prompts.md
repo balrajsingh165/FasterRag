@@ -46,7 +46,7 @@ Termination for cause requires...
 Question: What does the vendor agreement say about termination?
 ```
 
-**Streaming.** Emitted token-by-token; citations are resolved and sent as one `citations` SSE event once retrieval concludes ([api-reference.md](api-reference.md)). The streamed and the whole-answer call go through one pipeline (`GenerationService._pipeline`, TASK-0438): same prompt, same budget check, same breaker, same grading, same metrics and trace. They differ only in the provider call — `stream` instead of `complete` — and a provider stream carries text only, so a streamed answer's token counts are a local estimate and its `truncated` flag is inferred from that estimate.
+**Streaming.** Emitted token-by-token; citations are resolved and sent as one `citations` SSE event once retrieval concludes ([api-reference.md](api-reference.md)). The streamed and the whole-answer call go through one pipeline (`GenerationService._pipeline`, TASK-0438): same prompt, same budget check, same breaker, same grading, same metrics and trace. They differ only in the provider call — `stream` instead of `complete` — and a provider stream carries text only, so a streamed answer's token counts are a local estimate and its `truncated` flag is inferred from that estimate. The failure mode in the table above holds while streaming too: a retryable `GenerationError` before the first `token` is sent serves the `extractive` rung and the stream still ends with `done`. Once a `token` has gone out it cannot be replaced, so a failure after that point is an `error` event and no `done`.
 
 **Prompt caching.** The system prompt and any stable instruction block are placed first so provider prompt caching can hit across queries; volatile content (context, question) goes last.
 

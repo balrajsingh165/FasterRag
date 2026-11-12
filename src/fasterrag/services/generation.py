@@ -22,13 +22,17 @@ trace id and whether the response is degraded *before* any text; ``citations`` a
 the answer because a citation is only real once the model has actually referenced it; and
 ``usage`` is last because a streamed call cannot know its token count until it ends.
 
-A mid-stream failure emits ``error`` and stops without ``done``. Clients are told to treat a
-missing ``done`` as an incomplete answer, so the absence carries meaning and must never be
-papered over by emitting it anyway.
-
 When generation fails outright the degradation ladder serves an ``extractive`` answer — the
 retrieved passages themselves — rather than nothing (D4). Retrieval already succeeded at that
-point, so the user gets the material even though the model could not summarize it.
+point, so the user gets the material even though the model could not summarize it. A stream
+takes the same rung: a second ``meta`` announces the degraded mode, the passages arrive as a
+``token``, and the stream closes with ``citations``, ``usage`` and ``done`` like any other.
+
+The boundary is the first ``token`` sent. Before it the fallback replaces nothing; after it
+the caller has already been shown text that the passages cannot replace, so a failure there
+emits ``error`` and stops without ``done``. Clients are told to treat a missing ``done`` as
+an incomplete answer, so the absence carries meaning and must never be papered over by
+emitting it anyway.
 
 Only a **retryable** failure takes that rung. Degradation absorbs a provider that is *down* —
 rate-limited, timing out, returning 5xx. A rejected credential, an unknown model name, or a
@@ -290,6 +294,14 @@ class _Delta:
 
 
 @dataclass(frozen=True, slots=True)
+class _Degraded:
+    """The provider failed before any text was sent, so a lower rung is about to be served."""
+
+    trace_id: str
+    mode: str
+
+
+@dataclass(frozen=True, slots=True)
 class _Completed:
     """The finished answer, yielded after every record of producing it has been written."""
 
@@ -305,12 +317,12 @@ class _Refused:
 
 @dataclass(frozen=True, slots=True)
 class _Interrupted:
-    """The provider failed and no answer can be served; a stream ends here without `done`."""
+    """The provider failed after text was sent; a stream ends here, without `done`."""
 
     error: FasterRagError
 
 
-type _Stage = _Started | _Delta | _Completed | _Refused | _Interrupted
+type _Stage = _Started | _Delta | _Degraded | _Completed | _Refused | _Interrupted
 
 
 def _events(stage: _Stage) -> list[QueryEvent]:
@@ -330,6 +342,18 @@ def _events(stage: _Stage) -> list[QueryEvent]:
 
     if isinstance(stage, _Delta):
         return [QueryEvent(type="token", data={"text": stage.text})]
+
+    if isinstance(stage, _Degraded):
+        # CRITICAL: a second `meta`, sent before the first `token`. The first one was
+        # truthful when it went out — the provider had not failed yet — and `meta` exists
+        # so a client knows whether a response is degraded *before* it renders any text.
+        # Reporting the rung only in `usage` would break that for the one case it matters.
+        return [
+            QueryEvent(
+                type="meta",
+                data={"trace_id": stage.trace_id, "mode": stage.mode, "degraded": True},
+            )
+        ]
 
     if isinstance(stage, _Interrupted):
         return [
@@ -746,6 +770,7 @@ class GenerationService:
             mode=mode,
             trace_id=trace_id,
             timings_ms=timings,
+            evidence_dropped=prepared.context.dropped_budget,
         )
 
     async def _pipeline(
@@ -804,6 +829,7 @@ class GenerationService:
         # with grounded-or-refuse a token cannot be unsaid once sent, so the answer is
         # graded before a caller sees any of it.
         held = not streaming or self.grounded_or_refuse
+        sent = False
         parts: list[str] = []
         started = time.perf_counter()
         try:
@@ -825,6 +851,7 @@ class GenerationService:
                         )
                     parts.append(delta)
                     if not held:
+                        sent = True
                         yield _Delta(text=delta)
                 completion = self._streamed_completion(prepared.prompt, "".join(parts))
             else:
@@ -839,9 +866,15 @@ class GenerationService:
             if not exc.retryable:
                 raise
             timings["generate"] = int((time.perf_counter() - started) * 1000)
-            if streaming:
+            if sent:
+                # CRITICAL: the one failure the ladder cannot absorb. Text the caller has
+                # already been shown cannot be replaced by the retrieved passages — a
+                # fallback appended to half an answer would read as its continuation — so
+                # the stream ends on `error`, without `done`, and the client is told the
+                # answer is incomplete. With grounded-or-refuse nothing is sent until the
+                # verdict, so there the whole generation is still before this boundary.
                 _logger.warning(
-                    "generation stream failed",
+                    "generation stream failed after text was sent; the answer is incomplete",
                     extra={
                         "code": exc.code.value,
                         "detail": exc.detail,
@@ -851,7 +884,10 @@ class GenerationService:
                 )
                 yield _Interrupted(error=exc)
                 return
-            yield _Completed(answer=self._degrade(prepared, exc, trace_id, timings))
+            degraded = self._degrade(prepared, exc, trace_id, timings)
+            yield _Degraded(trace_id=trace_id, mode=degraded.mode)
+            yield _Delta(text=degraded.answer or "")
+            yield _Completed(answer=degraded)
             return
 
         self.breaker.record_success()

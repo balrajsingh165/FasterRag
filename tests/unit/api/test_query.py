@@ -303,6 +303,45 @@ def test_a_streamed_query_over_the_budget_is_a_402_problem_not_an_event_stream(
     assert llm.calls == 0
 
 
+class DownLLM(IdleLLM):
+    """A provider that fails every call the way an outage does."""
+
+    outage = "provider is down"
+
+    async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
+        self.calls += 1
+        if self.outage:
+            raise GenerationError(self.outage, retryable=True)
+        yield ""
+
+
+def test_a_streamed_query_whose_provider_is_down_still_ends_with_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, app: FastAPI
+) -> None:
+    """A provider outage ended a stream on `error` where the JSON body degraded (TASK-0438)."""
+    settings = Settings()
+    chunks = [ScoredChunk(chunk_id="c_a", text="Either party may terminate.", rrf_score=0.5)]
+    service = GenerationService(settings, StubRetrieval(chunks), DownLLM(settings))  # type: ignore[arg-type]
+    stub_shared(app)
+    monkeypatch.setattr(
+        query_router,
+        "build_generation",
+        lambda settings, adapter, router, cache=None, traces=None, tenant=None: service,
+    )
+
+    response = client.post("/v1/query", json={"query": "notice period?", "stream": True})
+    events = frames(response.text)
+    text = "".join(data["text"] for name, data in events if name == "token")
+    usage = next(data for name, data in events if name == "usage")
+
+    assert response.status_code == 200
+    assert [name for name, _ in events] == ["meta", "meta", "token", "citations", "usage", "done"]
+    assert "Either party may terminate." in text
+    assert events[1][1]["mode"] == "extractive"
+    assert usage["mode"] == "extractive"
+    assert usage["degraded"] is True
+
+
 def test_a_stream_that_fails_before_its_first_event_closes_its_service(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, app: FastAPI
 ) -> None:

@@ -39,6 +39,7 @@ class ScriptedLLM(LLMAdapter):
         self.text = text
         self.error = error
         self.finish_reason: str | None = "stop"
+        self.fail_after: int | None = None
         self.prompts: list[tuple[str, str | None]] = []
 
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
@@ -55,9 +56,11 @@ class ScriptedLLM(LLMAdapter):
 
     async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
         self.prompts.append((prompt, system))
-        if self.error is not None:
+        if self.error is not None and self.fail_after is None:
             raise self.error
-        for word in self.text.split(" "):
+        for sent, word in enumerate(self.text.split(" ")):
+            if self.error is not None and sent == self.fail_after:
+                raise self.error
             yield f"{word} "
 
     async def health(self) -> HealthStatus:
@@ -208,13 +211,65 @@ async def test_a_misconfigured_provider_fails_the_stream_rather_than_degrading_i
         await collect(service)
 
 
-async def test_a_retryable_stream_failure_still_emits_an_error_event() -> None:
+async def test_a_stream_whose_provider_is_down_serves_the_retrieved_passages() -> None:
+    """A streamed query got `error` and nothing else where the JSON path degraded (TASK-0438)."""
     service, _ = build(error=GenerationError("provider is rate limited", retryable=True))
+    degraded_before = metrics.DEGRADED_RESPONSES.value(mode=EXTRACTIVE_MODE)
+
+    events = await collect(service)
+    kinds = [event.type for event in events]
+    usage = next(event for event in events if event.type == "usage")
+
+    assert kinds == ["meta", "meta", "token", "citations", "usage", "done"]
+    assert "Either party may terminate." in events[2].data["text"]
+    assert events[3].data["citations"][0]["chunk_id"] == "c_a"
+    assert usage.data["mode"] == EXTRACTIVE_MODE
+    assert usage.data["degraded"] is True
+    assert metrics.DEGRADED_RESPONSES.value(mode=EXTRACTIVE_MODE) == degraded_before + 1
+
+
+async def test_the_degraded_mode_is_announced_before_the_fallback_text() -> None:
+    """`meta` exists so a client knows a response is degraded before it renders any of it."""
+    service, _ = build(error=GenerationError("provider is rate limited", retryable=True))
+
+    events = await collect(service)
+    announced = [event.data for event in events[: [e.type for e in events].index("token")]]
+
+    assert announced[0]["mode"] == FULL_MODE
+    assert announced[-1]["mode"] == EXTRACTIVE_MODE
+    assert announced[-1]["degraded"] is True
+    assert announced[-1]["trace_id"] == announced[0]["trace_id"]
+
+
+async def test_a_stream_through_an_open_breaker_degrades_too() -> None:
+    """Shedding load is the same rung on both surfaces, and never reaches the provider."""
+    service, llm = build(error=GenerationError("provider is down", retryable=True))
+    service.breaker.failure_threshold = 1
+    await collect(service)
+    calls = len(llm.prompts)
 
     kinds = [event.type for event in await collect(service)]
 
-    assert kinds[-1] == "error"
-    assert "done" not in kinds
+    assert service.breaker.is_open is True
+    assert len(llm.prompts) == calls, "the provider was called through an open breaker"
+    assert kinds == ["meta", "meta", "token", "citations", "usage", "done"]
+
+
+async def test_a_gated_stream_that_fails_part_way_still_degrades() -> None:
+    """With grounded-or-refuse nothing is sent until the verdict, so nothing needs unsaying."""
+    service, llm = build(
+        grounded_or_refuse=True,
+        verdict='{"score": 0.93}',
+        error=GenerationError("provider vanished", retryable=True),
+    )
+    llm.fail_after = 2
+
+    events = await collect(service)
+    text = "".join(event.data["text"] for event in events if event.type == "token")
+
+    assert events[-1].type == "done"
+    assert "Either party may terminate." in text
+    assert "notice period" not in text, "half a generated answer leaked ahead of the fallback"
 
 
 async def test_an_invented_citation_never_reaches_the_response() -> None:
@@ -300,24 +355,29 @@ async def test_usage_reports_timings_and_the_template_version() -> None:
 
 
 async def test_a_mid_stream_failure_emits_error_and_never_done() -> None:
-    service, _ = build(error=GenerationError("provider vanished"))
+    """Text already sent cannot be replaced, so past the first token there is no fallback."""
+    service, llm = build(error=GenerationError("provider vanished"))
+    llm.fail_after = 2
+    degraded_before = metrics.DEGRADED_RESPONSES.value(mode=EXTRACTIVE_MODE)
 
     events = await collect(service)
     kinds = [event.type for event in events]
 
-    assert "error" in kinds
+    assert kinds == ["meta", "token", "token", "error"]
     assert "done" not in kinds
-    assert kinds[-1] == "error"
+    assert metrics.DEGRADED_RESPONSES.value(mode=EXTRACTIVE_MODE) == degraded_before
 
 
 async def test_the_error_event_carries_the_stable_code_and_trace() -> None:
-    service, _ = build(error=GenerationError("provider vanished"))
+    service, llm = build(error=GenerationError("provider vanished"))
+    llm.fail_after = 1
 
     error = next(event for event in await collect(service) if event.type == "error")
 
     assert error.data["code"] == "GENERATION_FAILED"
     assert error.data["trace_id"]
-    assert "retryable" in error.data
+    assert error.data["retryable"] is True
+    assert error.data["status"] == 503
 
 
 async def test_a_degraded_retrieval_is_announced_in_meta() -> None:
@@ -1140,6 +1200,7 @@ class ParityCase:
     chunks: tuple[tuple[str, str], ...] = (("c_a", "Either party may terminate."),)
     mode: str = FULL_MODE
     primed: bool = False
+    tripped: bool = False
 
 
 def _body(observed: Observed) -> dict[str, Any]:
@@ -1165,6 +1226,25 @@ PARITY_CASES: dict[str, ParityCase] = {
         primed=True,
         holds=lambda seen: (
             _body(seen)["cache"]["semantic_hit"] is True and seen.provider_calls == 1
+        ),
+    ),
+    "retryable failure": ParityCase(
+        error=lambda: GenerationError("provider is down", retryable=True),
+        holds=lambda seen: (
+            _body(seen)["mode"] == EXTRACTIVE_MODE
+            and "Either party may terminate." in _body(seen)["answer"]
+            and [cited["chunk_id"] for cited in _body(seen)["citations"]] == ["c_a"]
+            and seen.metrics["fasterrag_degraded_responses_total{mode=extractive}"] == 1
+            and seen.provider_calls == 1
+        ),
+    ),
+    "open breaker": ParityCase(
+        tripped=True,
+        holds=lambda seen: (
+            _body(seen)["mode"] == EXTRACTIVE_MODE
+            and seen.metrics["fasterrag_degraded_responses_total{mode=extractive}"] == 1
+            and seen.provider_calls == 0
+            and seen.breaker_open
         ),
     ),
     "non-retryable failure": ParityCase(
@@ -1299,6 +1379,9 @@ async def _observe(case: ParityCase, root: Path, *, streamed: bool) -> Observed:
     if case.primed:
         with use_trace_id():
             await service.answer(PARITY_QUESTION)
+    if case.tripped:
+        service.breaker.failure_threshold = 1
+        service.breaker.record_failure(GenerationError("an earlier outage", retryable=True))
 
     before = _metric_values()
     raised: str | None = None
