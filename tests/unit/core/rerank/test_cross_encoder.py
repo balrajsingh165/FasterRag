@@ -1,10 +1,12 @@
+import asyncio
+import threading
 from typing import Any
 
 import pytest
 
 from fasterrag.config.schema import Settings
 from fasterrag.core.rerank import cross_encoder
-from fasterrag.core.rerank.cross_encoder import CrossEncoderReranker
+from fasterrag.core.rerank.cross_encoder import MAX_RERANKS_IN_FLIGHT, CrossEncoderReranker
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.errors import ConfigError, ErrorCode, RetrievalError
 
@@ -190,3 +192,52 @@ async def test_a_failed_load_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> N
     await CrossEncoderReranker(settings()).rerank("notice", shortlist)
 
     assert len(attempts) == 2
+
+
+class BlockingCrossEncoder:
+    """A model whose ``predict`` does not return until released, as a wedged device does."""
+
+    def __init__(self) -> None:
+        self.released = threading.Event()
+        self.calls = 0
+
+    def predict(self, pairs: list[tuple[str, str]]) -> list[float]:
+        self.calls += 1
+        self.released.wait(timeout=30)
+        return [0.0 for _ in pairs]
+
+
+async def drained(reranker: CrossEncoderReranker, shortlist: list[ScoredChunk]) -> bool:
+    """Return whether a rerank succeeds again within a bounded wait for slots to free."""
+    for _ in range(500):
+        try:
+            await reranker.rerank("notice", shortlist)
+        except RetrievalError:
+            await asyncio.sleep(0.01)
+            continue
+        return True
+    return False
+
+
+async def test_an_abandoned_scoring_call_keeps_its_slot_until_the_model_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``to_thread`` cannot be cancelled, so timed-out reranks piled up threads (TASK-0449)."""
+    model = BlockingCrossEncoder()
+    monkeypatch.setattr(cross_encoder, "load_cross_encoder", lambda name: model)
+    reranker = CrossEncoderReranker(settings())
+    shortlist = [chunk("c_a", "the notice period", 1)]
+    try:
+        for _ in range(MAX_RERANKS_IN_FLIGHT):
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(reranker.rerank("notice", shortlist), 0.05)
+
+        with pytest.raises(RetrievalError) as refused:
+            await reranker.rerank("notice", shortlist)
+
+        assert refused.value.code is ErrorCode.RERANK_FAILED
+        assert model.calls <= MAX_RERANKS_IN_FLIGHT
+    finally:
+        model.released.set()
+
+    assert await drained(reranker, shortlist)

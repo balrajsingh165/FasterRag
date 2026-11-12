@@ -15,26 +15,32 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Final
 
 import httpx
 import pytest
+from tests.unit.services.test_querying import ScriptedAdapter, StubEmbedder, hit
 
+from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.adapters.llm.base import Completion, LLMAdapter, classify_llm_failure
 from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
 from fasterrag.core.breaker import shared_breaker
+from fasterrag.core.rerank import CrossEncoderReranker
+from fasterrag.core.rerank.cross_encoder import MAX_RERANKS_IN_FLIGHT
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.services.generation import FALLBACK_BREAKER, GenerationService
-from fasterrag.services.querying import FULL_MODE, Retrieval
+from fasterrag.services.querying import FULL_MODE, HYBRID_ONLY_MODE, Retrieval, RetrievalService
 from fasterrag.services.traces import TraceStore
 
 pytestmark = pytest.mark.chaos
 
 ANSWER: Final = "Either party may terminate with thirty days notice [^c_a]."
 RETRY_AFTER_SECONDS: Final = 0.25
+LOADER: Final = "fasterrag.core.rerank.cross_encoder.load_cross_encoder"
 
 
 class RateLimitedError(Exception):
@@ -201,11 +207,84 @@ async def test_a_provider_outage_falls_back_to_the_second_provider(
     assert stored.spans[-1].attributes["role"] == "fallback"
 
 
+class WedgedCrossEncoder:
+    """A loaded cross-encoder whose ``predict`` never returns until released.
+
+    The shape a wedged GPU or a deadlocked tokenizer takes: the call is made and nothing
+    comes back. Injected at ``load_cross_encoder``, the one seam between this package and the
+    model stack, so the real ``CrossEncoderReranker`` and its thread handling run.
+    """
+
+    def __init__(self) -> None:
+        """Start wedged."""
+        self.released = threading.Event()
+        self.calls = 0
+
+    def predict(self, pairs: list[tuple[str, str]]) -> list[float]:
+        """Block until released, then score every pair alike."""
+        self.calls += 1
+        self.released.wait(timeout=60)
+        return [0.0 for _ in pairs]
+
+
+def hung_reranker_service(model: WedgedCrossEncoder) -> RetrievalService:
+    """Wire the real retrieval service to the real reranker with a short rerank budget."""
+    settings = Settings.model_validate(
+        {
+            "retrieval": {"rerank": True, "top_k": 2, "rerank_top_n": 10},
+            "reliability": {"timeouts": {"rerank_ms": 100}},
+        }
+    )
+    adapter = ScriptedAdapter(settings)
+    adapter.dense = [hit("c_a", 0.9), hit("c_b", 0.8), hit("c_c", 0.7)]
+    adapter.sparse = []
+    return RetrievalService(
+        settings,
+        adapter,
+        TieringRouter(StubEmbedder(settings)),
+        CrossEncoderReranker(settings),
+    )
+
+
+async def test_a_hung_reranker_degrades_to_hybrid_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scenario: the model stops answering; every query is still answered, unreranked.
+
+    The first queries each wait out ``rerank_ms``. Their threads cannot be cancelled, so they
+    keep their slots; once every slot is held, later queries degrade at once instead of
+    queueing a new thread behind a model that is not answering.
+    """
+    model = WedgedCrossEncoder()
+    monkeypatch.setattr(LOADER, lambda name: model)
+    service = hung_reranker_service(model)
+    try:
+        held = [
+            await asyncio.wait_for(service.search("notice"), 10)
+            for _ in range(MAX_RERANKS_IN_FLIGHT)
+        ]
+        shed = await asyncio.wait_for(service.search("notice"), 10)
+
+        assert {result.mode for result in [*held, shed]} == {HYBRID_ONLY_MODE}
+        assert [chunk.chunk_id for chunk in shed.chunks] == ["c_a", "c_b"]
+        assert model.calls <= MAX_RERANKS_IN_FLIGHT
+    finally:
+        model.released.set()
+
+    recovered = None
+    for _ in range(500):
+        recovered = await service.search("notice")
+        if recovered.mode == FULL_MODE:
+            break
+        await asyncio.sleep(0.01)
+    assert recovered is not None
+    assert recovered.mode == FULL_MODE
+
+
 async def test_every_scenario_defined_in_this_module_is_scripted() -> None:
     """The scenarios this module owns, held by name so deleting one is a visible diff."""
     scenarios = {
         "llm-429-storm": test_a_429_storm_is_retried_and_the_query_is_answered,
         "llm-outage-fallback": test_a_provider_outage_falls_back_to_the_second_provider,
+        "reranker-hang": test_a_hung_reranker_degrades_to_hybrid_only,
     }
 
     assert all(inspect.iscoroutinefunction(scenario) for scenario in scenarios.values())

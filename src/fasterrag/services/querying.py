@@ -49,7 +49,7 @@ from fasterrag.core.rerank import Reranker
 from fasterrag.core.retrieval.bm25 import encode_query
 from fasterrag.core.retrieval.fusion import Ranking, rrf_fuse
 from fasterrag.core.retrieval.models import DENSE_LEG, SPARSE_LEG, ScoredChunk
-from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.errors import ErrorCode, FasterRagError, RetrievalError
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.degradation import DegradationMode, serving
 from fasterrag.services.tenancy import TENANT_PAYLOAD_KEY
@@ -205,7 +205,7 @@ class RetrievalService:
             return shortlist[:limit], FULL_MODE
 
         try:
-            reordered = await reranker.rerank(text, shortlist)
+            reordered = await self._bounded_rerank(reranker, text, shortlist)
         except FasterRagError as exc:
             # CRITICAL: the mode comes from the ladder's registry, never from a literal. That
             # is what makes "which rungs are built" a question the tree answers rather than a
@@ -218,6 +218,28 @@ class RetrievalService:
             return fused_shortlist(shortlist, limit), mode
 
         return reordered[:limit], FULL_MODE
+
+    async def _bounded_rerank(
+        self, reranker: Reranker, text: str, shortlist: list[ScoredChunk]
+    ) -> list[ScoredChunk]:
+        """Rerank within ``reliability.timeouts.rerank_ms``, or fail as a typed error.
+
+        A reranker that does not answer in time has failed for this query, so it takes the
+        ``hybrid_only`` rung rather than holding the request (TASK-0449).
+        """
+        limit_ms = self.settings.reliability.timeouts.rerank_ms
+        try:
+            async with asyncio.timeout(limit_ms / 1000) as scope:
+                return await reranker.rerank(text, shortlist)
+        except TimeoutError as exc:
+            if not scope.expired():
+                raise
+            raise RetrievalError(
+                "the reranker did not answer within reliability.timeouts.rerank_ms "
+                f"({limit_ms} ms)",
+                code=ErrorCode.RERANK_FAILED,
+                retryable=True,
+            ) from exc
 
     async def _run_legs(
         self,

@@ -19,9 +19,11 @@ far better than no answer (D4).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import threading
 import time
 from collections.abc import Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from typing import Any, Final, Protocol
 
@@ -31,6 +33,7 @@ from fasterrag.errors import ConfigError, ErrorCode, RetrievalError
 from fasterrag.observability.logging import get_logger
 
 __all__ = [
+    "MAX_RERANKS_IN_FLIGHT",
     "CrossEncoderReranker",
     "Reranker",
     "load_cross_encoder",
@@ -64,11 +67,40 @@ def load_cross_encoder(model: str) -> Any:
 _MODELS: Final[dict[str, Any]] = {}
 _LOADING: Final = threading.Lock()
 
+MAX_RERANKS_IN_FLIGHT: Final = 4
+"""How many scoring calls may hold a worker thread at once (TASK-0449).
+
+A rerank abandoned at ``reliability.timeouts.rerank_ms`` keeps its thread until the model
+returns, because a thread cannot be cancelled. This bounds how many threads a hung model can
+take; it is a cap on damage, not a tuned or measured throughput figure.
+"""
+
+
+class _ScoringSlots:
+    """The threads scoring runs on, and the slots a call holds until its thread finishes."""
+
+    def __init__(self) -> None:
+        """Start with every slot free and no thread started."""
+        self.free = threading.BoundedSemaphore(MAX_RERANKS_IN_FLIGHT)
+        self._pool: ThreadPoolExecutor | None = None
+
+    def pool(self) -> ThreadPoolExecutor:
+        """Return the scoring threads, starting them on first use."""
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(
+                max_workers=MAX_RERANKS_IN_FLIGHT, thread_name_prefix="fasterrag-rerank"
+            )
+        return self._pool
+
+
+_SLOTS: Final = _ScoringSlots()
+
 
 def reset_shared_cross_encoders() -> None:
-    """Drop every loaded model, so a test or a reload starts from an empty cache."""
+    """Drop every loaded model and free every slot, so a test or a reload starts afresh."""
     with _LOADING:
         _MODELS.clear()
+    _SLOTS.free = threading.BoundedSemaphore(MAX_RERANKS_IN_FLIGHT)
 
 
 class CrossEncoderReranker:
@@ -150,16 +182,40 @@ class CrossEncoderReranker:
 
         return [float(score) for score in scores]
 
+    def _submit(self, query: str, chunks: Sequence[ScoredChunk]) -> Future[list[float]]:
+        """Start scoring on a worker thread, holding a slot until that thread is done.
+
+        The slot is freed by the thread finishing, not by the caller giving up, so an
+        abandoned call counts against ``MAX_RERANKS_IN_FLIGHT`` until the model returns.
+        """
+        slots = _SLOTS.free
+        if not slots.acquire(blocking=False):
+            raise RetrievalError(
+                f"all {MAX_RERANKS_IN_FLIGHT} reranking slots are held by scoring calls that "
+                "have not returned, so this query is served the fused order instead of "
+                "queueing behind them",
+                code=ErrorCode.RERANK_FAILED,
+                retryable=True,
+            )
+        try:
+            context = contextvars.copy_context()
+            future = _SLOTS.pool().submit(context.run, self.score, query, chunks)
+        except BaseException:
+            slots.release()
+            raise
+        future.add_done_callback(lambda _finished: slots.release())
+        return future
+
     async def rerank(self, query: str, chunks: Sequence[ScoredChunk]) -> list[ScoredChunk]:
         """Reorder chunks by cross-encoder score, best first.
 
         Scoring is CPU- or GPU-bound, so it runs in a worker thread and never blocks the
-        event loop serving other queries.
+        event loop serving other queries; at most ``MAX_RERANKS_IN_FLIGHT`` at once.
         """
         if not chunks:
             return []
 
-        scores = await asyncio.to_thread(self.score, query, chunks)
+        scores = await asyncio.wrap_future(self._submit(query, chunks))
         scored = [
             replace(chunk, rerank_score=score) for chunk, score in zip(chunks, scores, strict=True)
         ]

@@ -143,6 +143,7 @@ reliability:
     vector_db_ms: 5000
     embeddings_ms: 30000
     llm_ms: 120000
+    rerank_ms: 30000
   retries:
     max_attempts: 3
     backoff_base_ms: 250
@@ -411,6 +412,7 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | `reliability.timeouts.vector_db_ms` | int | `5000` | ≥ 100 | Timeout for every vector-DB call. Every external interaction MUST have an explicit timeout. |
 | `reliability.timeouts.embeddings_ms` | int | `30000` | ≥ 100 | Timeout per embedding batch call. |
 | `reliability.timeouts.llm_ms` | int | `120000` | ≥ 1000 | Timeout per LLM call (streaming: per-connection). |
+| `reliability.timeouts.rerank_ms` | int | `30000` | ≥ 100 | How long one rerank may take before the query is served the fused order instead, flagged `hybrid_only` (D4, TASK-0449). Applied by `RetrievalService` around any reranker, a plugin's included. Scoring runs in a worker thread that cannot be cancelled, so a timed-out rerank keeps its thread until the model returns; `CrossEncoderReranker` therefore holds at most four scoring calls at once, and while all four are still running every further query degrades at once rather than queueing behind them. The first query after start also loads the model, which a cold cache can take minutes to download: that query degrades and the load carries on in the background. The default is a bound on a hang, not a measured latency. |
 | `reliability.retries.max_attempts` | int | `3` | 0–10 | Retries on errors flagged `retryable` only. |
 | `reliability.retries.backoff_base_ms` | int | `250` | ≥ 1 | Exponential backoff base. |
 | `reliability.retries.backoff_max_ms` | int | `10000` | ≥ `backoff_base_ms` | Backoff ceiling. |
