@@ -1077,3 +1077,19 @@ async def test_index_tenants_writes_the_untagged_subset_for_the_operator_to_judg
     assert code == ExitCode.SUCCESS
     assert rows == [{"collection": "docs", "document_id": "", "source_uri": "", "chunks": 2}]
     assert "no tool can say who owns them" in capsys.readouterr().out
+
+
+def test_the_text_summary_of_a_job_prints_how_many_documents_were_skipped(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """TASK-0509: the JSON summary counted skipped documents and the text one never said so."""
+    record = JobRecord(
+        job_id="job-9",
+        collection="default",
+        status="completed",
+        counts={"indexed": 4, "dead_lettered": 0, "skipped": 3},
+    )
+
+    pipeline._report_job(record, Console(), announce=False)
+
+    assert "skipped         3" in capsys.readouterr().out
