@@ -626,3 +626,15 @@ def test_a_bearer_token_with_a_non_ascii_byte_is_refused_not_crashed_on(
 
     assert response.status_code == 401
     assert response.json()["code"] == ErrorCode.AUTH_INVALID.value
+
+
+def test_a_collections_key_cannot_drop_a_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The prefix table gave `DELETE /v1/collections/{name}` to `collections` (TASK-0520)."""
+    with secured(monkeypatch, keys=f"{SECRET}:collections") as client:
+        dropped = client.delete("/v1/collections/docs?force=true", headers=bearer())
+        listed = client.get("/v1/collections", headers=bearer())
+
+    assert dropped.status_code == 403
+    assert dropped.json()["code"] == ErrorCode.AUTH_SCOPE.value
+    assert "'admin'" in dropped.json()["detail"]
+    assert listed.status_code == 200

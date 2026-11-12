@@ -30,6 +30,7 @@ This module holds no limiting logic of its own; it owns the limiter's lifetime a
 from __future__ import annotations
 
 import os
+import re
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -81,6 +82,8 @@ _SCOPE_BY_PREFIX: Final[tuple[tuple[str, str], ...]] = (
     ("/api/metrics", "admin"),
 )
 
+_COLLECTION_ITSELF: Final = re.compile(r"^/v1/collections/[^/]+/?$")
+
 _BEARER: Final = "bearer"
 
 _logger = get_logger(__name__)
@@ -104,10 +107,16 @@ class ApiKey:
         return "admin" in self.scopes or scope in self.scopes
 
 
-def required_scope(path: str) -> str | None:
-    """Return the scope an endpoint needs, or ``None`` when it is public."""
+def required_scope(path: str, method: str = "GET") -> str | None:
+    """Return the scope an endpoint needs, or ``None`` when it is public.
+
+    Dropping a whole collection is destructive, so ``DELETE /v1/collections/{name}`` needs
+    ``admin`` although its prefix grants ``collections`` (TASK-0520).
+    """
     if path in PUBLIC_PATHS:
         return None
+    if method.upper() == "DELETE" and _COLLECTION_ITSELF.match(path):
+        return "admin"
     for prefix, scope in _SCOPE_BY_PREFIX:
         if path == prefix or path.startswith(f"{prefix}/"):
             return scope
@@ -257,7 +266,7 @@ class AuthMiddleware:
             return
 
         path = scope.get("path", "")
-        needed = required_scope(path)
+        needed = required_scope(path, scope.get("method", "GET"))
         if needed is None:
             await self.app(scope, receive, send)
             return

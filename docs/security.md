@@ -57,6 +57,8 @@ Key comparison uses `secrets.compare_digest` against every configured key with n
 
 Enabling auth with no usable key **refuses to start**. Starting would refuse every request afterwards, which reads as a broken deployment rather than a configuration mistake.
 - **Keys carry scopes**: `ingest`, `query`, `collections`, `admin`. Admin endpoints (provisioning, export/import, collection delete) require `admin`.
+
+**Dropping a collection needs `admin` in the code as well as here (TASK-0520, 2026-11-12).** The scope table in `api/auth.py` is keyed by path prefix, so `DELETE /v1/collections/{name}` inherited the `collections` scope of its prefix while this page and [api-reference.md](api-reference.md) said `admin`. `required_scope` now takes the method, and a `DELETE` on a collection itself needs `admin`; listing, creating and reading collections, and deleting one *document* (`DELETE /v1/collections/{name}/documents/{document_id}`), keep `collections`. **Breaking:** a key holding `collections` but not `admin` that used to drop collections is now refused `403 AUTH_SCOPE`. Pinned in `tests/unit/api/test_route_scopes.py`.
 - **Rate limiting is on by default once auth is enabled** (`security.rate_limit_per_minute`, per key), returning `429` + `Retry-After`. Keyed per API key, not per IP — a limit keyed on something the caller chooses is not a limit.
 
 **Where the window is counted is a deployment choice** (`security.rate_limit_backend`, TASK-0216).
