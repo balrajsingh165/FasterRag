@@ -9,10 +9,19 @@ from typing import Any, ClassVar
 import pytest
 
 from fasterrag.api.main import CONFIG_PATH_VAR
-from fasterrag.cli.commands.processes import exposed_without_auth
+from fasterrag.cli.commands.processes import (
+    BUILTIN_PROCESSES,
+    PLANNED_PROCESSES,
+    exposed_without_auth,
+)
 from fasterrag.cli.main import main
 from fasterrag.cli.output import ExitCode
-from fasterrag.cli.parser import REMOVED_COMMANDS, build_parser, removed_command
+from fasterrag.cli.parser import (
+    PENDING_COMMANDS,
+    REMOVED_COMMANDS,
+    build_parser,
+    removed_command,
+)
 from fasterrag.config.schema import Settings
 from tests.unit.cli.conftest import write_config
 from tests.unit.docs.test_cli_flag_parity import parsers_by_path
@@ -190,6 +199,15 @@ def test_every_removed_command_names_the_task_that_tracks_it() -> None:
 def test_a_value_that_spells_a_removed_command_is_not_mistaken_for_it(argv: list[str]) -> None:
     """Only the command position counts: a collection or a source path may be named anything."""
     assert removed_command(argv) is None
+
+
+def test_every_registered_process_is_a_command_and_every_planned_one_explains_itself() -> None:
+    """The gate reads the registry, so the registry has to be the CLI's truth too."""
+    registered = set(parsers_by_path())
+
+    assert set(BUILTIN_PROCESSES) <= registered
+    assert not PLANNED_PROCESSES & registered
+    assert set(REMOVED_COMMANDS) | set(PENDING_COMMANDS) >= PLANNED_PROCESSES
 
 
 def test_no_shipped_compose_service_runs_a_command_the_cli_does_not_have() -> None:

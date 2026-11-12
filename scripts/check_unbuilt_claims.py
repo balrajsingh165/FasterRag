@@ -34,6 +34,14 @@ and ask the tree, for the narrow set of claims where the tree gives a yes or no:
   alone: ``hybrid_only`` was a bare constant, ``extractive`` not even that, ``cache_only``
   appeared nowhere, and a grep decided a rung by whether a docstring happened to spell it
   — ``cross_encoder.py``'s does;
+* **process surfaces** (TASK-0440). ``cli/commands/processes.py`` maps each process an
+  operator may be told to run to its implementation in ``BUILTIN_PROCESSES`` and names the
+  unbuilt ones in ``PLANNED_PROCESSES``; the CLI dispatches ``serve`` through it. This rule
+  runs the other way from the rest: it fails a document that names ``fasterrag <process>``
+  for a planned process *without* saying it is absent, because ``fasterrag worker`` sat in
+  the reference pages, a quick-start code block and the compose files as a process to run
+  while it only checked the database and waited. Code blocks are read too, line by line, since a
+  command in a fence is the most direct instruction a document gives;
 * **an inherited denial** (TASK-0371), in a table column header or in a prose lead-in
   label. README's capability table puts the denial in the header — "Not yet" — and no cell
   under it carries a denial verb, so both gates read those cells as ordinary prose; that is
@@ -102,7 +110,7 @@ from typing import Final
 # gates reading the same documents must agree on where a sentence ends or they disagree about
 # which claims exist, and that splitter carries three incidents' worth of table-cell and
 # colon handling. A second copy would drift away from it silently.
-from check_claims import ROOT_DOCUMENTS, _sentences, scanned_documents
+from check_claims import _FENCE, ROOT_DOCUMENTS, _sentences, scanned_documents
 
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 ADAPTERS: Final = Path("src/fasterrag/adapters")
@@ -110,6 +118,7 @@ STRUCTURE_MAP: Final = Path("docs/structure.md")
 PROJECT_FILE: Final = Path("pyproject.toml")
 TESTS: Final = Path("tests")
 LADDER: Final = Path("src/fasterrag/services/degradation.py")
+PROCESSES: Final = Path("src/fasterrag/cli/commands/processes.py")
 
 PROVIDER: Final = "provider"
 TIER: Final = "tier"
@@ -119,6 +128,7 @@ ADAPTER_DENIAL: Final = "adapter-denial"
 LAYER_DENIAL: Final = "layer-denial"
 RUNG_DENIAL: Final = "rung-denial"
 COLUMN_DENIAL: Final = "column-denial"
+PROCESS_SURFACE: Final = "process-surface"
 LABEL_DENIAL: Final = "label-denial"
 STRUCTURE_PENDING: Final = "structure-pending"
 STRUCTURE_ABSENT: Final = "structure-absent"
@@ -139,6 +149,25 @@ DENIAL_PATTERNS: Final[tuple[str, ...]] = (
     r"\bspecified\s+but\b",
     r"\bpending\b",
 )
+
+# CRITICAL: what a clause naming an unbuilt process must say for the name to be honest. It is
+# DENIAL_PATTERNS plus the words a removal is written in, kept apart from that tuple because
+# "removed" beside a provider's name is not a denial that the provider exists ("Milvus removed
+# the limit") and widening the shared list would decide adapter sentences on it.
+PROCESS_ABSENCE: Final = re.compile(
+    "|".join(
+        (
+            *DENIAL_PATTERNS,
+            r"\bremoved\b",
+            r"\bretired\b",
+            r"\bno\s+longer\b",
+            r"\bthere\s+is\s+no\b",
+        )
+    ),
+    re.IGNORECASE,
+)
+PROCESS_MENTION: Final = r"\bfasterrag`?\s+`?{name}\b"
+NEWLINE: Final = chr(10)
 
 # CRITICAL: an affirmation immediately before a provider's name means the name is the
 # subject of a claim and not of the denial beside it. "doctor-gating shipped for Qdrant
@@ -224,7 +253,19 @@ RUNG_NOUNS: Final = r"(?:degrad(?:ed|ation)[\s-]+)?(?:rung|mode|fallback)s?"
 # edit into a failure, which is how a ratchet gets deleted. Empty is the correct state:
 # every finding this gate has ever reported was a real one and was fixed, so an entry here
 # is a claim that something cannot be fixed and needs the reason written beside it.
-RATCHET: Final[dict[str, int]] = {}
+#
+# The entries below are the stale `fasterrag worker` sentences the process rule found when it
+# landed (TASK-0440). README.md and CLAUDE.md are edited only by the maintainer, so their
+# two lines wait here for that edit; the moment it lands the allowance goes unused, the gate
+# reports it, and the entry is deleted.
+RATCHET: Final[dict[str, int]] = {
+    "CLAUDE.md": 1,
+    "README.md": 1,
+    "docs/cookbook.md": 2,
+    "docs/deployment.md": 1,
+    "docs/python-api.md": 1,
+    "docs/quickstart.md": 1,
+}
 
 
 @dataclass(frozen=True)
@@ -287,6 +328,17 @@ def registered_rungs(root: Path = REPOSITORY_ROOT) -> tuple[set[str], set[str]]:
         ast.parse(module.read_text(encoding="utf-8")), "_BUILTIN_RUNGS", "_PLANNED_RUNGS"
     )
     return served, declared - served
+
+
+def registered_processes(root: Path = REPOSITORY_ROOT) -> tuple[set[str], set[str]]:
+    """Return the process surfaces the CLI implements, and the ones it names as unbuilt."""
+    module = root / PROCESSES
+    if not module.is_file():
+        return set(), set()
+    built, planned = _registry_in(
+        ast.parse(module.read_text(encoding="utf-8")), "BUILTIN_PROCESSES", "PLANNED_PROCESSES"
+    )
+    return built, planned - built
 
 
 # CRITICAL: parsed as code, never grepped. This gate's own tests write "@pytest.mark.soak"
@@ -601,6 +653,52 @@ def adapter_findings(root: Path = REPOSITORY_ROOT) -> tuple[list[Finding], int]:
     return findings, mentions
 
 
+def _fenced_lines(body: str) -> list[tuple[int, str]]:
+    """Return every line inside a code fence with its line number, the fence lines dropped."""
+    lines: list[tuple[int, str]] = []
+    for fence in _FENCE.finditer(body):
+        first = body.count(NEWLINE, 0, fence.start()) + 1
+        inner = fence.group(0).split(NEWLINE)[1:-1]
+        lines += [(first + offset, line) for offset, line in enumerate(inner, 1)]
+    return lines
+
+
+def process_findings(root: Path = REPOSITORY_ROOT) -> tuple[list[Finding], int]:
+    """Return a finding per mention of an unbuilt process that does not say it is absent.
+
+    The count is of clauses naming a built process, so a matcher that stopped reading
+    ``fasterrag serve`` is told apart from documents that are clean.
+    """
+    built, planned = registered_processes(root)
+    absent = {name: re.compile(PROCESS_MENTION.format(name=re.escape(name))) for name in planned}
+    present = [re.compile(PROCESS_MENTION.format(name=re.escape(name))) for name in built]
+    findings: list[Finding] = []
+    mentions = 0
+
+    for path in scanned_documents(root):
+        relative = path.relative_to(root).as_posix()
+        body = path.read_text(encoding="utf-8")
+        units = [
+            (line, clause)
+            for line, sentence in _sentences(body)
+            for clause in CLAUSE_BREAK.split(sentence)
+        ]
+        for line, unit in units + _fenced_lines(body):
+            mentions += any(pattern.search(unit) for pattern in present)
+            named = sorted(name for name, pattern in absent.items() if pattern.search(unit))
+            if named and not PROCESS_ABSENCE.search(unit):
+                findings.append(
+                    Finding(
+                        PROCESS_SURFACE,
+                        relative,
+                        f"line {line} names fasterrag {', '.join(named)} without saying it is "
+                        f"absent, but {PROCESSES.as_posix()} does not implement it: "
+                        f"{unit.strip()[:120]}",
+                    )
+                )
+    return findings, mentions
+
+
 def _mapped_paths(body: str) -> list[tuple[int, str, bool]]:
     """Return each tree-diagram entry as its repository path and its pending marker."""
     depths: dict[int, str] = {}
@@ -679,6 +777,7 @@ def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
     known = oracles(root)
     columns, tables = column_findings(root, known)
     prose, named = prose_findings(root, known)
+    processes, process_mentions = process_findings(root)
     built = {name for oracle in known if oracle.name == TIER for name in oracle.built}
     served = {name for oracle in known if oracle.name == RUNG for name in oracle.built}
     declared = {
@@ -778,7 +877,26 @@ def check(root: Path = REPOSITORY_ROOT) -> list[Finding]:
                 "gate reads is automatically false and the rule stopped discriminating",
             )
         ]
-    return adapters + structure + columns + prose
+    if not registered_processes(root)[0]:
+        return [
+            Finding(
+                VACUOUS,
+                PROCESSES.as_posix(),
+                "no process surface registers an implementation, so the process rule decided "
+                "nothing; BUILTIN_PROCESSES is its whole vocabulary",
+            )
+        ]
+    if process_mentions == 0:
+        return [
+            Finding(
+                VACUOUS,
+                "docs",
+                "scanned every document and found no clause naming a built process such as "
+                "'fasterrag serve'; either the documentation stopped naming it or the "
+                "matcher stopped reading how it is written",
+            )
+        ]
+    return adapters + structure + columns + prose + processes
 
 
 def over_ratchet(findings: list[Finding], ratchet: dict[str, int] = RATCHET) -> list[str]:

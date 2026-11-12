@@ -34,7 +34,7 @@ from fasterrag.cli.commands.documents import run_documents
 from fasterrag.cli.commands.infrastructure import run_estimate, run_provision
 from fasterrag.cli.commands.pipeline import run_index, run_ingest, run_query
 from fasterrag.cli.commands.portability import run_export, run_import
-from fasterrag.cli.commands.processes import run_serve
+from fasterrag.cli.commands.processes import BUILTIN_PROCESSES
 from fasterrag.cli.commands.replay import run_replay
 from fasterrag.cli.commands.traces import run_traces
 from fasterrag.cli.output import Console, ExitCode
@@ -62,8 +62,8 @@ _HANDLERS: Final[dict[str, Handler]] = {
     "provision": run_provision,
     "query": run_query,
     "replay": run_replay,
-    "serve": run_serve,
     "status": run_status,
+    **BUILTIN_PROCESSES,
 }
 
 # CRITICAL: `index` dispatches on its own action rather than through this table, because its
