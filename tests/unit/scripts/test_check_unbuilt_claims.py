@@ -711,10 +711,6 @@ def test_the_shipped_ratchet_holds_only_the_stale_worker_sentences() -> None:
     assert RATCHET == {
         "CLAUDE.md": 1,
         "README.md": 1,
-        "docs/cookbook.md": 2,
-        "docs/deployment.md": 1,
-        "docs/python-api.md": 1,
-        "docs/quickstart.md": 1,
     }
 
 

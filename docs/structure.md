@@ -101,7 +101,7 @@ fasterRag/
 │       │   ├── metrics.py        # Metrics catalogue export
 │       │   └── dashboard.py      # Read-only inspection UI (observability ONLY)
 │       └── cli/                  # Terminal entry points
-│           └── main.py           # fasterrag ingest|query|index|provision|status|benchmark|serve|worker
+│           └── main.py           # fasterrag ingest|query|index|provision|status|benchmark|serve
 └── tests/
     ├── unit/                     # Fast, isolated (mirrors src layout)
     ├── contract/                 # Shared adapter contract suite every provider must pass
