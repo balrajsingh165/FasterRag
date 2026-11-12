@@ -1,17 +1,20 @@
 # Sizing preset: ~50M–500M chunks (docs/deployment.md §4).
 #
-# At this scale the API tier is replicated and stateless, workers want dedicated hosts with
-# GPUs, and Qdrant should be a cluster rather than the single container this file starts —
+# At this scale the API tier is replicated, every replica runs the ingestion jobs it accepts
+# (there is no separate worker process to give dedicated GPU hosts yet, TASK-0130), and
+# Qdrant should be a cluster rather than the single container this file starts —
 # set `collection.shard_number` >= 4 and `replication_factor` >= 2 and run it separately.
 # This preset sizes the fasterRag side only.
 #
 #   docker compose -f docker-compose.yml -f deploy/compose.large.yml --profile core up -d
 #
-# Planning defaults, not measurements (docs/benchmarks.md, TASK-0084).
+# Planning defaults, not measurements (docs/benchmarks.md, TASK-0084). Each API replica's
+# limits are what one API replica and one replica of the removed worker service were given
+# between them.
 #
 # CRITICAL: every FASTERRAG_SET below repeats `vector_db.host=qdrant` from the base file.
 # Compose merges `environment` per key, so setting FASTERRAG_SET here replaces the base value
-# rather than extending it, and dropping the host sends both services at their own localhost.
+# rather than extending it, and dropping the host sends the API at its own localhost.
 # Point it at the external cluster this preset assumes as soon as there is one.
 
 services:
@@ -35,17 +38,7 @@ services:
       replicas: 3
       resources:
         limits:
-          cpus: "4"
-          memory: 4G
-    environment:
-      FASTERRAG_SET: vector_db.host=qdrant,app.workers=4
-
-  worker:
-    deploy:
-      replicas: 2
-      resources:
-        limits:
-          cpus: "16"
-          memory: 32G
+          cpus: "20"
+          memory: 36G
     environment:
       FASTERRAG_SET: vector_db.host=qdrant,workers.cpu_pool_size=0,workers.embedding_pool_size=4

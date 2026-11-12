@@ -3,6 +3,10 @@
 # CPU embeddings are fine at this scale, so one embedding worker is enough and the pools
 # stay small enough to leave the machine usable for something else.
 #
+# The pools run inside the API process, because ingestion does; there is no separate worker
+# service to size (TASK-0130). The API's limits are what the API and the removed worker
+# service were given between them.
+#
 #   docker compose -f docker-compose.yml -f deploy/compose.small.yml --profile core up -d
 #
 # These are planning defaults, not measurements. Real numbers come from the benchmark ledger
@@ -10,26 +14,17 @@
 #
 # CRITICAL: every FASTERRAG_SET below repeats `vector_db.host=qdrant` from the base file.
 # Compose merges `environment` per key, so setting FASTERRAG_SET here replaces the base value
-# rather than extending it, and dropping the host sends both services at their own localhost.
+# rather than extending it, and dropping the host sends the API at its own localhost.
 
 services:
   api:
-    environment:
-      FASTERRAG_SET: vector_db.host=qdrant,app.workers=2
-    deploy:
-      resources:
-        limits:
-          cpus: "2"
-          memory: 2G
-
-  worker:
     environment:
       FASTERRAG_SET: vector_db.host=qdrant,workers.cpu_pool_size=4,workers.embedding_pool_size=1
     deploy:
       resources:
         limits:
-          cpus: "2"
-          memory: 4G
+          cpus: "4"
+          memory: 6G
 
   qdrant:
     deploy:

@@ -1,5 +1,6 @@
 """The ``serve`` wrapper: what it refuses, what it hands uvicorn; and the removed ``worker``."""
 
+import re
 import sys
 import types
 from pathlib import Path
@@ -189,6 +190,23 @@ def test_every_removed_command_names_the_task_that_tracks_it() -> None:
 def test_a_value_that_spells_a_removed_command_is_not_mistaken_for_it(argv: list[str]) -> None:
     """Only the command position counts: a collection or a source path may be named anything."""
     assert removed_command(argv) is None
+
+
+def test_no_shipped_compose_service_runs_a_command_the_cli_does_not_have() -> None:
+    """``docker-compose.yml`` ran ``worker`` in a container that only waited."""
+    root = Path(__file__).resolve().parents[3]
+    presets = [root / "deploy" / f"compose.{size}.yml" for size in ("small", "medium", "large")]
+    commands = [
+        (path.name, match.group(1))
+        for path in [root / "docker-compose.yml", *presets]
+        for match in re.finditer(
+            r'^\s*command:\s*\[\s*"([^"]+)"', path.read_text(encoding="utf-8"), re.MULTILINE
+        )
+    ]
+    assert commands
+
+    registered = set(parsers_by_path())
+    assert [(name, command) for name, command in commands if command not in registered] == []
 
 
 @pytest.mark.parametrize(
