@@ -60,12 +60,13 @@ Run the pipeline worker pools (CPU pool + embedding pool + indexer) for the conf
 | `--pools cpu,embed,index` | Restrict which pools this process runs (default: all). |
 | `--cpu-workers N`, `--embed-workers N` | Override `workers.*` sizes. |
 
-## `fasterrag ingest <path|url> [...]`
+## `fasterrag ingest [path|url] [...]`
 
-Submit sources for ingestion (async job; same path as `POST /v1/ingest`).
+Submit sources for ingestion (async job; same path as `POST /v1/ingest`). Give at least one source, or `--resume JOB_ID` and none; with neither it exits `2`.
 
 | Flag | Description |
 |---|---|
+| `--resume JOB_ID` | Run an interrupted job again from its last checkpoint instead of submitting sources (TASK-0436). The job must be one that was settled `failed` with `reason_code: INTERRUPTED` — cancelled by a shutdown, or left `running` by a process that was killed and settled by the next server to start. A job still `running` whose record and document log have both been quiet for `reliability.stale_job_seconds` is settled and then resumed, so a killed `fasterrag ingest` can be continued without a server; one written to more recently is refused, because another process may be working on it. Any other job is refused with `CONFLICT` and exit `1`, so a finished corpus is never re-run by mistake. It prints `resuming        from document N` and then the usual summary. The job's sources come from its record, so passing sources, or `--dry-run`, with `--resume` exits `2`. `--metadata` and `--priority-class` are **not** stored with a job: pass them again if the original run used them, or the remaining documents are indexed without them. `--watch` works as it does for a new job. |
 | `--metadata KEY=VALUE` | Repeatable; merged into chunk metadata. |
 | `--priority-class NAME` | Tiered-embedding routing class (D9). Sets `priority_class` in chunk metadata, which is what `embeddings.tiering.rules[].match` matches on. |
 | `--recursive` | Descend into subdirectories. Without it a directory source contributes only its immediate files. Hidden files and `.git`, `node_modules`, `__pycache__`, and virtualenv directories are skipped either way; files from a directory are ingested in sorted order so the same command produces the same job. |

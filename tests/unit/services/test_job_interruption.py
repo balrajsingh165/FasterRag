@@ -15,10 +15,12 @@ import pytest
 from fasterrag.adapters.embeddings.base import EmbeddingResult
 from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.config.schema import Settings
+from fasterrag.errors import ErrorCode, IngestionError
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.jobs import INTERRUPTED, settle_interrupted
 from fasterrag.services.journal import JobRecord, Journal
 from tests.unit.services.test_ingestion import KeywordLegAdapter, StubEmbedder, settings, threads
+from tests.unit.services.test_job_reaper import left_behind
 
 WAIT_SECONDS = 10
 QUEUE_DEPTH = 10
@@ -230,3 +232,112 @@ async def test_a_record_written_before_the_reason_existed_still_loads(tmp_path: 
     del payload["reason_code"]
 
     assert JobRecord.from_dict(payload).reason_code is None
+
+
+async def interrupted_job(
+    tmp_path: Path, corpus: list[str], *, key: str | None = None
+) -> tuple[IngestionService, HeldEmbedder, JobRecord]:
+    """Run a job until its third document, cancel it there, and let the embedder go."""
+    configured = one_at_a_time()
+    embedder = HeldEmbedder(configured, marker="charlie")
+    service, _ = service_for(tmp_path, configured, embedder)
+    record = await service.accept(corpus, idempotency_key=key)
+    task = asyncio.ensure_future(service.run(record))
+    await asyncio.wait_for(embedder.entered.wait(), WAIT_SECONDS)
+    await cancelled(task)
+    embedder.release.set()
+    return service, embedder, record
+
+
+async def test_replaying_the_key_of_an_interrupted_job_queues_it_to_run_again(
+    tmp_path: Path, corpus: list[str]
+) -> None:
+    """The replay returned the stuck record, and the only route that ran jobs ran ``queued``."""
+    service, _, record = await interrupted_job(tmp_path, corpus, key="nightly-1")
+
+    replayed = await service.accept(corpus, idempotency_key="nightly-1")
+
+    assert replayed.job_id == record.job_id
+    assert (replayed.status, replayed.reason_code, replayed.finished_at) == ("queued", None, None)
+    assert service.journal.resume_index(replayed) == 2
+    assert (await service.journal.load_job(record.job_id)).status == "queued"
+
+
+async def test_replaying_the_key_of_a_finished_job_leaves_it_finished(
+    tmp_path: Path, corpus: list[str]
+) -> None:
+    """Only an interruption is resumed; a replay must still never re-ingest a finished corpus."""
+    configured = one_at_a_time()
+    service, _ = service_for(tmp_path, configured, StubEmbedder(configured))
+    await service.run(await service.accept(corpus, idempotency_key="nightly-1"))
+
+    replayed = await service.accept(corpus, idempotency_key="nightly-1")
+
+    assert replayed.status == "completed"
+
+
+async def test_resuming_by_id_runs_only_what_the_checkpoint_did_not_cover(
+    tmp_path: Path, corpus: list[str]
+) -> None:
+    """No command could resume a job, so the checkpoint was written and never read."""
+    service, embedder, record = await interrupted_job(tmp_path, corpus)
+    embedder.embedded.clear()
+
+    resumed = await service.run(await service.accept_resume(record.job_id))
+
+    assert (resumed.status, resumed.reason_code) == ("completed", None)
+    assert resumed.counts["parsed"] == 2
+    assert not any("alpha" in text or "bravo" in text for text in embedder.embedded)
+
+
+@pytest.mark.parametrize("status", ["queued", "completed", "partial", "failed"])
+async def test_a_job_that_was_not_interrupted_cannot_be_resumed(
+    tmp_path: Path, status: str
+) -> None:
+    """Resuming a finished job would re-run a corpus the caller did not ask to re-run."""
+    configured = one_at_a_time()
+    service, _ = service_for(tmp_path, configured, StubEmbedder(configured))
+    record = await service.journal.create_job("default", [{"type": "path", "value": "corpus/"}])
+    await service.journal.save_job(JobRecord(record.job_id, "default", status=status))
+
+    with pytest.raises(IngestionError) as refused:
+        await service.accept_resume(record.job_id)
+
+    assert refused.value.code is ErrorCode.CONFLICT
+    assert status in refused.value.detail
+    assert (await service.journal.load_job(record.job_id)).status == status
+
+
+async def test_an_unknown_job_cannot_be_resumed(tmp_path: Path) -> None:
+    configured = one_at_a_time()
+    service, _ = service_for(tmp_path, configured, StubEmbedder(configured))
+
+    with pytest.raises(IngestionError) as refused:
+        await service.accept_resume("job_never_existed")
+
+    assert refused.value.code is ErrorCode.NOT_FOUND
+
+
+async def test_a_running_job_that_went_quiet_can_be_resumed(tmp_path: Path) -> None:
+    """A killed process settles nothing, and the CLI has no startup pass to do it later."""
+    configured = one_at_a_time()
+    service, _ = service_for(tmp_path, configured, StubEmbedder(configured))
+    record = left_behind(service.journal, quiet_for=3600)
+
+    ready = await service.accept_resume(record.job_id)
+
+    assert (ready.job_id, ready.status) == (record.job_id, "queued")
+
+
+async def test_a_running_job_still_being_written_cannot_be_resumed(tmp_path: Path) -> None:
+    """Resuming a job another process is running would run one corpus twice at once."""
+    configured = one_at_a_time()
+    service, _ = service_for(tmp_path, configured, StubEmbedder(configured))
+    record = left_behind(service.journal, quiet_for=0)
+
+    with pytest.raises(IngestionError) as refused:
+        await service.accept_resume(record.job_id)
+
+    assert refused.value.code is ErrorCode.CONFLICT
+    assert "stale_job_seconds" in refused.value.detail
+    assert (await service.journal.load_job(record.job_id)).status == "running"

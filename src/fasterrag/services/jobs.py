@@ -50,6 +50,11 @@ caller decides whether to run it again, by replaying its idempotency key or with
 orphan's record still inside the window, and one look would leave it ``running`` until some
 later restart; so when the first look met any record too recent to judge, a second runs
 one window later, by which time an orphan is stale and a live job has written again.
+
+**Running an interrupted job again is always somebody's request.** :func:`resumable` says
+whether a job is one — ``failed`` with the reason ``INTERRUPTED``, nothing else — and
+:func:`requeue` puts it back to ``queued`` with its checkpoint intact, so the run that
+follows starts at ``Journal.resume_index`` instead of at the first document.
 """
 
 from __future__ import annotations
@@ -71,6 +76,8 @@ __all__ = [
     "ReapReport",
     "reap_at_startup",
     "reap_interrupted",
+    "requeue",
+    "resumable",
     "settle_interrupted",
 ]
 
@@ -128,6 +135,22 @@ class DrainReport:
     def in_flight(self) -> int:
         """Return how many jobs were running when the drain began."""
         return self.finished + self.cancelled
+
+
+def resumable(record: JobRecord) -> bool:
+    """Return whether a job was interrupted, and so can be run again from its checkpoint."""
+    return record.status == "failed" and record.reason_code == INTERRUPTED
+
+
+async def requeue(journal: Journal, record: JobRecord) -> JobRecord:
+    """Put an interrupted job back to ``queued``, keeping its checkpoint, and return it."""
+    queued = replace(record, status="queued", reason_code=None, finished_at=None)
+    await journal.save_job(queued)
+    _logger.info(
+        "interrupted ingest job queued to run again",
+        extra={"job_id": queued.job_id, "resume_from": journal.resume_index(queued)},
+    )
+    return queued
 
 
 @dataclass(frozen=True, slots=True)

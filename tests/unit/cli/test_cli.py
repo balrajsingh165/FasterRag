@@ -341,9 +341,14 @@ def test_the_console_omits_the_fix_line_when_there_is_none(
     assert "fix:" not in capsys.readouterr().err
 
 
-def test_ingest_requires_at_least_one_source() -> None:
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(["ingest"])
+def test_ingest_parses_without_a_source_so_that_resume_can_stand_alone() -> None:
+    """``--resume JOB_ID`` takes no source; the command, not the parser, requires one of the two.
+
+    ``tests/unit/cli/test_ingest_resume.py`` holds the usage error for neither being given.
+    """
+    args = build_parser().parse_args(["ingest"])
+
+    assert (args.sources, args.resume) == ([], None)
 
 
 def test_query_requires_a_question() -> None:

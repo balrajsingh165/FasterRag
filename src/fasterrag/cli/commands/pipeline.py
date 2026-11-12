@@ -172,6 +172,22 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
 
     watching = bool(getattr(args, "watch", False)) and _watchable(console)
 
+    resume = getattr(args, "resume", None)
+    if resume:
+        if args.sources or args.dry_run:
+            console.error(
+                "--resume runs the sources the job was submitted with; give it a job id "
+                "and no sources, and leave --dry-run off"
+            )
+            return ExitCode.USAGE
+        return await _resume_ingest(
+            settings, resume, console, metadata=metadata or None, watching=watching
+        )
+
+    if not args.sources:
+        console.error("give at least one path or URL to ingest, or --resume JOB_ID")
+        return ExitCode.USAGE
+
     sources = expand_sources(args.sources, recursive=getattr(args, "recursive", False))
     if not sources:
         console.error(f"no files to ingest under {', '.join(args.sources)}")
@@ -216,8 +232,13 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
     finally:
         await service.close()
 
+    return _report_job(record, console, announce=not watching)
+
+
+def _report_job(record: JobRecord, console: Console, *, announce: bool) -> ExitCode:
+    """Print a settled job's summary and return the exit code its status implies."""
     counts = record.counts
-    if not watching:
+    if announce:
         console.emit(f"job             {record.job_id}")
     console.emit(f"status          {record.status}")
     console.emit(f"indexed         {counts.get('indexed', 0)} chunks")
@@ -225,6 +246,34 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
     console.document({"job_id": record.job_id, "status": record.status, "counts": dict(counts)})
 
     return ExitCode.SUCCESS if record.status != "failed" else ExitCode.FAILURE
+
+
+async def _resume_ingest(
+    settings: Settings,
+    job_id: str,
+    console: Console,
+    *,
+    metadata: dict[str, Any] | None,
+    watching: bool,
+) -> ExitCode:
+    """Run an interrupted job again from its last checkpoint and report how it settled."""
+    journal = create_journal(settings)
+    service = IngestionService(settings, journal=journal, locks=create_lock_store(settings))
+    try:
+        accepted = await service.accept_resume(job_id)
+        console.emit(f"job             {accepted.job_id}")
+        console.emit(f"resuming        from document {journal.resume_index(accepted)}")
+        if watching:
+            record = await _run_watched(service, accepted, journal, console, metadata=metadata)
+        else:
+            record = await service.run(accepted, metadata=metadata)
+    except FasterRagError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
+    finally:
+        await service.close()
+
+    return _report_job(record, console, announce=False)
 
 
 def _build_generation(settings: Settings, adapter: VectorDBAdapter) -> GenerationService:

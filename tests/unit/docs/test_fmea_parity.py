@@ -61,7 +61,9 @@ place and cannot grow silently: adding a row to this table is a visible diff, an
 A row absent from both the citations and this set is a genuine gap, which is the whole point.
 """
 
-EXEMPT_CHAOS_MODULES: Final[frozenset[str]] = frozenset({"conftest.py", "disk_quota_probe.py"})
+EXEMPT_CHAOS_MODULES: Final[frozenset[str]] = frozenset(
+    {"conftest.py", "disk_quota_probe.py", "interrupted_job_server.py"}
+)
 """Files under tests/chaos/ that are not scenarios, so no section of the document owes them one."""
 
 

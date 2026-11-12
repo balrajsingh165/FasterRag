@@ -5,9 +5,7 @@ at it during startup, and nothing did: a job interrupted by the process exiting 
 ``running`` record through every later restart.
 """
 
-import os
 import time
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,20 +15,11 @@ from fastapi.testclient import TestClient
 from fasterrag.api.main import create_app
 from fasterrag.config.schema import Settings
 from fasterrag.services.jobs import INTERRUPTED
-from fasterrag.services.journal import JobRecord, Journal, QuietJobs
+from fasterrag.services.journal import Journal, QuietJobs
 from tests.unit.api.conftest import StubVectorDB
+from tests.unit.services.test_job_reaper import left_behind
 
-SOURCES = [{"type": "path", "value": "corpus/"}]
 WAIT_SECONDS = 10
-
-
-def left_running(journal: Journal, *, quiet_for: float) -> JobRecord:
-    """Leave a ``running`` record on disk, last written ``quiet_for`` seconds ago."""
-    record = replace(journal.create_job_blocking("default", SOURCES), status="running")
-    journal.save_job_blocking(record)
-    written = time.time() - quiet_for
-    os.utime(journal.root / "jobs" / f"{record.job_id}.json", (written, written))
-    return record
 
 
 def wait_for_status(client: TestClient, job_id: str, status: str) -> dict[str, object]:
@@ -47,8 +36,8 @@ def wait_for_status(client: TestClient, job_id: str, status: str) -> dict[str, o
 def test_startup_settles_a_stale_running_job_and_leaves_a_fresh_one_alone(app: FastAPI) -> None:
     """Nothing looked for interrupted jobs at startup, so they stayed ``running`` for good."""
     journal: Journal = app.state.journal
-    stale = left_running(journal, quiet_for=3600)
-    fresh = left_running(journal, quiet_for=1)
+    stale = left_behind(journal, quiet_for=3600)
+    fresh = left_behind(journal, quiet_for=1)
 
     began = time.monotonic()
     with TestClient(app) as client:

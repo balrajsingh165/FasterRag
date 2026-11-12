@@ -8,7 +8,7 @@ assert on are exactly the ones in which a job is still in flight.
 import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 from fastapi import FastAPI, Request
@@ -16,8 +16,9 @@ from fastapi.testclient import TestClient
 
 from fasterrag.api import ingest as ingest_router
 from fasterrag.errors import ErrorCode
+from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.jobs import INTERRUPTED
-from fasterrag.services.journal import JobRecord, Journal
+from fasterrag.services.journal import Checkpoint, JobRecord, Journal
 
 SOURCES = {"sources": [{"type": "path", "value": "corpus/"}]}
 
@@ -59,7 +60,7 @@ class GatedIngestion:
         await self.waiting.wait()
 
 
-class _StubRouter:
+class StubRouter:
     async def close(self) -> None:
         return None
 
@@ -72,7 +73,7 @@ def ingestion(monkeypatch: pytest.MonkeyPatch, app: FastAPI) -> GatedIngestion:
         "build_ingestion",
         lambda settings, adapter, journal, cache, **kwargs: service,
     )
-    monkeypatch.setattr(ingest_router, "build_embedding_router", lambda settings: _StubRouter())
+    monkeypatch.setattr(ingest_router, "build_embedding_router", lambda settings: StubRouter())
     return service
 
 
@@ -167,3 +168,100 @@ def test_a_job_that_was_not_interrupted_reports_no_reason(client: TestClient, ap
     record = journal.create_job_blocking("default", [{"type": "path", "value": "corpus/"}])
 
     assert client.get(f"/v1/ingest/{record.job_id}").json()["reason_code"] is None
+
+
+class RecordingService(IngestionService):
+    """The real service's acceptance, with a run that settles without a pipeline."""
+
+    ran: ClassVar[list[str]] = []
+    metadata: ClassVar[list[dict[str, Any] | None]] = []
+
+    async def run(self, record: JobRecord, *, metadata: dict[str, Any] | None = None) -> JobRecord:
+        RecordingService.ran.append(record.job_id)
+        RecordingService.metadata.append(metadata)
+        settled = replace(record, status="completed", counts={"total": 1, "indexed": 1})
+        await self.journal.save_job(settled)
+        return settled
+
+
+@pytest.fixture
+def real_acceptance(monkeypatch: pytest.MonkeyPatch) -> type[RecordingService]:
+    """Build ingestion with the real ``accept``, which is where a replayed key is decided."""
+    RecordingService.ran = []
+    RecordingService.metadata = []
+
+    def build(settings: Any, adapter: Any, journal: Journal, cache: Any, **kwargs: Any) -> Any:
+        return RecordingService(
+            settings, journal=journal, adapter=adapter, router=cast(Any, StubRouter())
+        )
+
+    monkeypatch.setattr(ingest_router, "build_ingestion", build)
+    monkeypatch.setattr(ingest_router, "build_embedding_router", lambda settings: StubRouter())
+    return RecordingService
+
+
+def interrupt(app: FastAPI, job_id: str) -> None:
+    """Leave a job as a cancelled run would: failed, INTERRUPTED, with a checkpoint."""
+    journal: Journal = app.state.journal
+    record = journal.load_job_blocking(job_id)
+    journal.save_job_blocking(
+        replace(
+            record,
+            status="failed",
+            reason_code=INTERRUPTED,
+            checkpoint=Checkpoint(last_document_index=4, written_at="2026-11-12T00:00:00+00:00"),
+        )
+    )
+
+
+def test_replaying_the_body_key_of_an_interrupted_job_runs_it_again(
+    client: TestClient, app: FastAPI, real_acceptance: type[RecordingService]
+) -> None:
+    """The replay returned the stuck record and started nothing, so the job could never finish."""
+    body = {**SOURCES, "idempotency_key": "nightly-1", "metadata": {"team": "legal"}}
+    job_id = client.post("/v1/ingest", json=body).json()["job_id"]
+    interrupt(app, job_id)
+
+    replayed = client.post("/v1/ingest", json=body)
+
+    settled = client.get(f"/v1/ingest/{job_id}").json()
+    assert replayed.status_code == 202
+    assert replayed.json() == {"job_id": job_id, "status": "queued"}
+    assert real_acceptance.ran == [job_id, job_id]
+    assert real_acceptance.metadata[-1] == {"team": "legal"}
+    assert (settled["status"], settled["reason_code"]) == ("completed", None)
+    assert app.state.journal.load_job_blocking(job_id).checkpoint.last_document_index == 4
+
+
+def test_replaying_the_body_key_of_a_finished_job_runs_nothing(
+    client: TestClient, real_acceptance: type[RecordingService]
+) -> None:
+    """Resuming is for interruptions only: a replay must still never re-ingest a corpus."""
+    body = {**SOURCES, "idempotency_key": "nightly-1"}
+    job_id = client.post("/v1/ingest", json=body).json()["job_id"]
+
+    replayed = client.post("/v1/ingest", json=body)
+
+    assert replayed.json() == {"job_id": job_id, "status": "completed"}
+    assert real_acceptance.ran == [job_id]
+
+
+def test_replaying_the_header_key_of_an_interrupted_job_does_not_run_it_again(
+    client: TestClient, app: FastAPI, real_acceptance: type[RecordingService]
+) -> None:
+    """The documented limit: the header is answered from the stored 202 before the route.
+
+    Changing that is a decision about the idempotency middleware, not about ingestion, so
+    this pins what the reference says rather than what would be convenient.
+    """
+    headers = {"Idempotency-Key": "8e0f3c1a-0000-4000-8000-000000000001"}
+    first = client.post("/v1/ingest", json=SOURCES, headers=headers)
+    job_id = first.json()["job_id"]
+    interrupt(app, job_id)
+
+    replayed = client.post("/v1/ingest", json=SOURCES, headers=headers)
+
+    assert replayed.headers["Idempotent-Replayed"] == "true"
+    assert replayed.json() == first.json()
+    assert real_acceptance.ran == [job_id]
+    assert client.get(f"/v1/ingest/{job_id}").json()["reason_code"] == INTERRUPTED

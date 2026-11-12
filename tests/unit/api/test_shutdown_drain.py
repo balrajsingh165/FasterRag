@@ -10,9 +10,7 @@ client whose context manager blocks until shutdown has finished.
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -27,6 +25,7 @@ from fasterrag.services.jobs import INTERRUPTED
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.traces import TraceStore
 from tests.unit.api.conftest import StubVectorDB
+from tests.unit.api.test_ingest_lifecycle import GatedIngestion, StubRouter
 
 SOURCES = {"sources": [{"type": "path", "value": "corpus/"}]}
 WAIT_SECONDS = 10
@@ -44,36 +43,6 @@ class RecordingResource:
             (await self.journal.load_job(path.stem)).status
             for path in sorted((self.journal.root / "jobs").glob("*.json"))
         ]
-
-
-class GatedIngestion:
-    """Accepts jobs, and runs each one only as far as a gate the test controls."""
-
-    def __init__(self, journal: Journal) -> None:
-        self.journal = journal
-        self.gate = asyncio.Event()
-        self.waiting = asyncio.Event()
-
-    async def accept(self, sources: Any, **kwargs: Any) -> JobRecord:
-        return await self.journal.create_job(
-            kwargs.get("collection") or "default",
-            [dict(source) for source in sources],
-            idempotency_key=kwargs.get("idempotency_key"),
-            tenant=kwargs.get("tenant"),
-        )
-
-    async def run(self, record: JobRecord, **kwargs: Any) -> JobRecord:
-        await self.journal.save_job(replace(record, status="running"))
-        self.waiting.set()
-        await self.gate.wait()
-        settled = replace(record, status="completed", counts={"total": 1, "indexed": 1})
-        await self.journal.save_job(settled)
-        return settled
-
-
-class _StubRouter:
-    async def close(self) -> None:
-        return None
 
 
 class Running:
@@ -123,7 +92,7 @@ async def running(
         "build_ingestion",
         lambda settings, adapter, journal, cache, **kwargs: ingestion,
     )
-    monkeypatch.setattr(ingest_router, "build_embedding_router", lambda settings: _StubRouter())
+    monkeypatch.setattr(ingest_router, "build_embedding_router", lambda settings: StubRouter())
 
     lifespan = app.router.lifespan_context(app)
     await lifespan.__aenter__()

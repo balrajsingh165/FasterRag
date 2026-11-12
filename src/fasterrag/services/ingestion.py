@@ -44,7 +44,7 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger, use_trace_id
-from fasterrag.services.jobs import settle_interrupted
+from fasterrag.services.jobs import requeue, resumable, settle_interrupted
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.lockfile import LockStore, build_lock
 from fasterrag.services.reindex import require_keyword_leg
@@ -103,12 +103,35 @@ class IngestionService:
         typed = [
             typed_source(source) if isinstance(source, str) else dict(source) for source in sources
         ]
-        return await self.journal.create_job(
+        record = await self.journal.create_job(
             target,
             typed,
             idempotency_key=idempotency_key,
             tenant=tenant,
         )
+        if resumable(record):
+            record = await requeue(self.journal, record)
+        return record
+
+    async def accept_resume(self, job_id: str, *, tenant: str | None = None) -> JobRecord:
+        """Return an interrupted job queued to run again from its checkpoint.
+
+        A ``running`` job that has gone quiet is settled first; any job that was not
+        interrupted is refused, so a finished corpus is never re-run by mistake.
+        """
+        record = await self.journal.load_job(job_id, tenant=tenant)
+        stale_seconds = self.settings.reliability.stale_job_seconds
+        if record.status == "running":
+            quiet = await self.journal.quiet_running_jobs(stale_seconds)
+            if any(job.job_id == job_id for job in quiet.running):
+                record = await settle_interrupted(self.journal, record)
+
+        if not resumable(record):
+            raise IngestionError(_not_resumable(record, stale_seconds), code=ErrorCode.CONFLICT)
+
+        _require_pipeline_chunker(self.settings)
+        await require_keyword_leg(record.collection, self.settings, self.adapter)
+        return await requeue(self.journal, record)
 
     async def run(
         self,
@@ -410,6 +433,22 @@ async def _joined(
 
     await queue.close(consumers=pool.size)
     return parse_report, await consumer
+
+
+def _not_resumable(record: JobRecord, stale_seconds: int) -> str:
+    """Say why a job cannot be resumed, and what to do about that job instead."""
+    if record.status == "running":
+        return (
+            f"job {record.job_id} is running and was written to in the last {stale_seconds} "
+            "seconds, so a process may still be working on it. If none is, it can be resumed "
+            "once it has been quiet for reliability.stale_job_seconds"
+        )
+    return (
+        f"job {record.job_id} is {record.status}, not interrupted, so there is nothing to "
+        "resume: only a job settled failed with reason_code INTERRUPTED keeps a checkpoint "
+        "to continue from. Submit its sources again to index what is missing — "
+        "deduplication skips the rest"
+    )
 
 
 def _require_pipeline_chunker(settings: Settings) -> None:

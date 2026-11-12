@@ -140,7 +140,7 @@ Request:
 | `sources[]` | list | yes, ≥ 1 | `type` ∈ `path`, `url`, `inline`; `value` per type. |
 | `metadata` | object | no | Merged into every produced chunk's metadata. |
 | `priority_class` | str | no | Tiered-embedding routing class (D9). Merged into chunk metadata as `priority_class`, which is what `embeddings.tiering.rules[].match` matches on. |
-| `idempotency_key` | str | no | **Deprecated, removed in 1.0** — send the [`Idempotency-Key` header](#idempotency) instead. Still honoured: replaying a key returns the original job and enqueues nothing, scoped to the caller's tenant. A request that uses it gets `Deprecation: true` on the response. |
+| `idempotency_key` | str | no | **Deprecated, removed in 1.0** — send the [`Idempotency-Key` header](#idempotency) instead. Still honoured: replaying a key returns the original job and enqueues nothing, scoped to the caller's tenant — except that replaying the key of a job settled `failed` / `INTERRUPTED` runs that job again from its checkpoint (see [`GET /v1/ingest/{job_id}`](#get-v1ingestjob_id)). A request that uses it gets `Deprecation: true` on the response. |
 
 Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `409 CONFLICT` — the target collection was indexed without the keyword leg `retrieval.hybrid` asks for, and a sparse vector cannot be attached to an existing collection; the detail names the rebuild command and the opt-out (see [troubleshooting.md](troubleshooting.md)). Refused before a job id is issued, so nothing is written · `422` · `429 QUEUE_FULL` · `503 NOT_READY` (retryable) — the server is shutting down and has stopped starting jobs; nothing was recorded, so the same request, with the same `Idempotency-Key`, is safe to send again.
 
@@ -151,6 +151,10 @@ Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `4
 Job status: `{"job_id", "status": "queued|running|completed|failed|partial", "reason_code", "counts": {"total", "parsed", "chunked", "embedded", "indexed", "deduplicated", "dead_lettered"}, "started_at", "finished_at"}`. `404` if unknown.
 
 `reason_code` is `null` except on a job the process stopped working on before it finished, which is settled `failed` with `reason_code: "INTERRUPTED"` (TASK-0436). That pair means *nothing was wrong with the documents*: the job was cancelled, and its checkpoint is kept. `INTERRUPTED` is a reason on a job, not an entry in the error-code table — no request fails with it.
+
+**Running an interrupted job again.** Nothing resumes a job on its own: a starting server settles what an earlier process left `running` and stops there. To continue one from its checkpoint, either run `fasterrag ingest --resume <job_id>` ([cli-reference.md](cli-reference.md)), or send the original `POST /v1/ingest` again with the same `idempotency_key` **body field** — the response is `202` with the same `job_id` and `"status": "queued"`, and the run skips every document the checkpoint already covers. Replaying the key of a job that is not `INTERRUPTED` still returns the job and runs nothing.
+
+**The limit, stated plainly:** this works through the body field only. A request keyed with the `Idempotency-Key` *header* is answered by the idempotency middleware from the stored `202` before it reaches the route, so replaying that header returns the original response with `Idempotent-Replayed: true` and starts nothing, however the job ended. A client that keys ingestion with the header alone resumes with the CLI, or submits the sources again under a new key and lets deduplication skip what is already indexed. Whether the header should resume is a decision about the middleware and has not been made.
 
 ### `GET /v1/ingest/{job_id}/documents?status=dead_lettered`
 

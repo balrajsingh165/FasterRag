@@ -51,7 +51,7 @@ The ingestion pipeline cannot run the semantic chunker yet (TASK-0431): its pars
 
 ### A job has been `running` since the process restarted
 
-Nothing resumes a job after the process that owned it exits (TASK-0436); the record stays `running`. The job did not corrupt anything: a document is remembered as indexed only once every chunk of it is in the vector database, so re-submitting the same sources indexes whatever was missed and deduplicates the rest. An exception *inside* a live process is different — the job is settled `failed` and its documents are in the dead-letter queue.
+A job whose process exited is settled `failed` with `reason_code: INTERRUPTED`, never left `running` and never resumed on its own. A graceful stop settles it on the way down; after a kill, the next server to start settles it once its record has been quiet for `reliability.stale_job_seconds` (default 120), so for up to that long after a restart the job still reads `running`. To continue it from its checkpoint, run `fasterrag ingest --resume <job_id>` or replay the request's `idempotency_key` body field ([api-reference.md](api-reference.md)). The job did not corrupt anything: a document is remembered as indexed only once every chunk of it is in the vector database, so re-submitting the same sources also works — it indexes whatever was missed and deduplicates the rest. An exception *inside* a live process is different — the job is settled `failed` with no `reason_code`, and its documents are in the dead-letter queue.
 
 ### Documents were dead-lettered with `EMBED_PROVIDER_ERROR` and a retry did nothing
 

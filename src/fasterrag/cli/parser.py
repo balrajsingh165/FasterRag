@@ -98,12 +98,18 @@ def _add_ingest(subparsers: argparse._SubParsersAction[argparse.ArgumentParser])
     """Register ``ingest``."""
     parser = subparsers.add_parser("ingest", help="submit sources for ingestion")
     _add_global_flags(parser)
-    parser.add_argument("sources", nargs="+", help="paths or URLs to ingest")
+    parser.add_argument("sources", nargs="*", help="paths or URLs to ingest")
     parser.add_argument(
         "--metadata", action="append", default=[], metavar="KEY=VALUE", help="chunk metadata"
     )
     parser.add_argument("--priority-class", default=None, help="tiered-embedding routing class")
     parser.add_argument("--recursive", action="store_true", help="recurse into directories")
+    parser.add_argument(
+        "--resume",
+        default=None,
+        metavar="JOB_ID",
+        help="run an interrupted job again from its last checkpoint instead of new sources",
+    )
     parser.add_argument(
         "--watch",
         action="store_true",

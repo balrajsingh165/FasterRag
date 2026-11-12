@@ -180,9 +180,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     if getattr(app.state, "journal", None) is None:
         app.state.journal = create_journal(settings)
+
+    await provision_enabled_observability(settings)
+
+    app.state.metric_pusher = create_metric_pusher(settings)
+    if app.state.metric_pusher is not None:
+        app.state.metric_pusher.start()
+
     # CRITICAL: a task, not an awaited call. The pass reads every job record once, which
     # on a journal holding years of jobs is seconds of disk; startup must not wait for it,
-    # and a job it settles is one nothing in this process is running.
+    # and a job it settles is one nothing in this process is running. It is started last,
+    # immediately before the `try`, so no failure above can leave it running unowned.
     reaper = asyncio.create_task(
         reap_at_startup(
             app.state.journal, jobs, stale_seconds=settings.reliability.stale_job_seconds
@@ -190,12 +198,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         name="reap-interrupted-jobs",
     )
     app.state.reaper = reaper
-
-    await provision_enabled_observability(settings)
-
-    app.state.metric_pusher = create_metric_pusher(settings)
-    if app.state.metric_pusher is not None:
-        app.state.metric_pusher.start()
 
     try:
         yield
