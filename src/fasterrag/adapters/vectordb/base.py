@@ -44,6 +44,7 @@ from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 
 __all__ = [
+    "ADAPTER_API_VERSION",
     "COMPARISON_OPERATORS",
     "POINT_ID_PAYLOAD_KEY",
     "CollectionInfo",
@@ -61,6 +62,8 @@ __all__ = [
     "VectorDBAdapter",
     "validate_filter",
 ]
+
+ADAPTER_API_VERSION: Final = "1.0"
 
 Distance = Literal["cosine", "dot", "euclid"]
 Filter = Mapping[str, Any]

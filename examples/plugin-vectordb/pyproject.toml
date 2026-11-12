@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fasterrag-memory-vectordb"
+version = "1.0.0"
+description = "Sample fasterRag plugin: an in-process vector database selected as vector_db.provider: memory."
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = ["fasterrag"]
+
+# The whole registration. After `pip install`, `vector_db.provider: memory` validates and the
+# vector-database factory builds fasterrag_memory_vectordb:MemoryVectorDB.
+[project.entry-points."fasterrag.vectordb"]
+memory = "fasterrag_memory_vectordb:MemoryVectorDB"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fasterrag_memory_vectordb"]

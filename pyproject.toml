@@ -222,6 +222,8 @@ ignore = ["D203", "D213"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG001", "ARG002", "ARG005", "D100", "D101", "D102", "D103", "D104", "D107"]
+"examples/**" = ["ARG002", "T201"]
+"examples/*/tests/**" = ["D102", "D103"]
 "src/fasterrag/config/schema.py" = ["ARG003"]
 "src/fasterrag/cli/parser.py" = ["ARG002"]
 

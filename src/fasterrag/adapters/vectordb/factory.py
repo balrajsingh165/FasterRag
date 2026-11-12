@@ -16,7 +16,8 @@ from importlib import import_module
 from importlib.metadata import EntryPoint, entry_points
 from typing import Final
 
-from fasterrag.adapters.vectordb.base import VectorDBAdapter
+from fasterrag.adapters.plugin_api import require_compatible_api
+from fasterrag.adapters.vectordb.base import ADAPTER_API_VERSION, VectorDBAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ConfigError
 
@@ -84,8 +85,9 @@ def resolve_adapter_class(provider: str) -> type[VectorDBAdapter]:
 
     plugin = _plugin_entry_points().get(provider)
     if plugin is not None:
-        return _require_adapter_class(
-            plugin.load(), f"{ENTRY_POINT_GROUP} entry point {provider!r}"
+        source = f"{ENTRY_POINT_GROUP} entry point {provider!r}"
+        return require_compatible_api(
+            _require_adapter_class(plugin.load(), source), host=ADAPTER_API_VERSION, source=source
         )
 
     if provider in _PLANNED_ADAPTERS:

@@ -33,6 +33,7 @@ from fasterrag.config.schema import Settings
 from fasterrag.errors import ConfigError, EmbedError, ErrorCode
 
 __all__ = [
+    "ADAPTER_API_VERSION",
     "EmbeddingAdapter",
     "EmbeddingResult",
     "classify_provider_failure",
@@ -40,6 +41,8 @@ __all__ = [
     "require_key",
     "sum_reported",
 ]
+
+ADAPTER_API_VERSION: Final = "1.0"
 
 _AUTH_STATUSES: Final[frozenset[int]] = frozenset({401, 403})
 _TIMEOUT_STATUSES: Final[frozenset[int]] = frozenset({408, 504})
