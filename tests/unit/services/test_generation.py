@@ -7,9 +7,10 @@ import pytest
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.llm.base import Completion, LLMAdapter
+from fasterrag.adapters.llm.ollama import OllamaGenerator
 from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
-from fasterrag.core.breaker import reset_shared_breakers
+from fasterrag.core.breaker import reset_shared_breakers, shared_breaker
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.cache.store import MemoryStore
 from fasterrag.core.chunking.models import EstimatingTokenCounter
@@ -24,7 +25,13 @@ from fasterrag.errors import (
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import use_trace_id
 from fasterrag.services.budget import reset_shared_governors
-from fasterrag.services.generation import EXTRACTIVE_MODE, GenerationService, QueryEvent
+from fasterrag.services.generation import (
+    EXTRACTIVE_MODE,
+    FALLBACK_BREAKER,
+    GenerationService,
+    QueryEvent,
+    fallback_settings,
+)
 from fasterrag.services.querying import FULL_MODE, HYBRID_ONLY_MODE, Retrieval
 from fasterrag.services.traces import TraceStore
 
@@ -1055,6 +1062,122 @@ async def test_retries_stop_once_the_breaker_opens() -> None:
     assert service.breaker.is_open is True
 
 
+def with_fallback(
+    error: Exception, *, fallback_error: Exception | None = None
+) -> tuple[GenerationService, ScriptedLLM, ScriptedLLM]:
+    """Return a service whose primary fails with ``error`` and a lent second provider."""
+    service, primary = build(error=error)
+    second = ScriptedLLM(service.settings, text="The fallback says thirty days [^c_a].")
+    second.error = fallback_error
+    service.fallback_llm = second
+    service.owns_fallback = False
+    return service, primary, second
+
+
+async def test_a_provider_outage_falls_back_to_the_second_provider(tmp_path: Path) -> None:
+    """There was no second provider: an outage went straight to the extractive rung."""
+    service, primary, second = with_fallback(GenerationError("status 503", retryable=True))
+    service.traces = TraceStore(tmp_path)
+
+    answer = await service.answer("what is the notice period?")
+
+    assert answer.mode == FULL_MODE
+    assert answer.answer == "The fallback says thirty days [^c_a]."
+    assert len(primary.prompts) == 1 + service.settings.reliability.retries.max_attempts
+    assert len(second.prompts) == 1
+    stored = service.traces.load(answer.trace_id)
+    assert stored is not None
+    roles = [(span.name, span.attributes.get("role")) for span in stored.spans]
+    assert ("generation-failed", "primary") in roles
+    assert roles[-1] == ("generation", "fallback")
+
+
+async def test_a_streamed_outage_falls_back_before_any_token() -> None:
+    service, _, second = with_fallback(GenerationError("status 503", retryable=True))
+
+    events = await collect(service)
+
+    assert [event.data["mode"] for event in events if event.type == "meta"] == [FULL_MODE]
+    assert "".join(e.data["text"] for e in events if e.type == "token").startswith("The fallback")
+    assert len(second.prompts) == 1
+
+
+async def test_the_fallback_is_counted_under_its_own_breaker() -> None:
+    """Counted under the primary's key, the outage that triggers it would also shed it."""
+    service, primary, second = with_fallback(GenerationError("status 503", retryable=True))
+    service.breaker.failure_threshold = 1
+    await service.answer("q")
+    calls = len(primary.prompts)
+
+    answer = await service.answer("q")
+
+    assert service.breaker.is_open is True
+    assert len(primary.prompts) == calls
+    assert answer.mode == FULL_MODE
+    assert len(second.prompts) == 2
+    assert shared_breaker(FALLBACK_BREAKER, service.settings).is_open is False
+
+
+async def test_a_misconfigured_primary_is_reported_rather_than_covered_by_the_fallback() -> None:
+    service, _, second = with_fallback(GenerationError("rejected key", retryable=False))
+
+    with pytest.raises(GenerationError):
+        await service.answer("q")
+
+    assert second.prompts == []
+
+
+async def test_with_both_providers_down_the_retrieved_passages_are_served() -> None:
+    down = GenerationError("status 503", retryable=True)
+    service, _, second = with_fallback(down, fallback_error=down)
+
+    answer = await service.answer("q")
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert len(second.prompts) == 1 + service.settings.reliability.retries.max_attempts
+
+
+def test_the_fallback_block_answers_with_the_primary_s_sampling() -> None:
+    settings = Settings.model_validate(
+        {
+            "llm": {
+                "temperature": 0.4,
+                "max_tokens": 300,
+                "fallback": {"provider": "ollama", "model": "llama3.1:8b"},
+            }
+        }
+    )
+
+    configured = fallback_settings(settings)
+
+    assert configured is not None
+    assert (configured.llm.provider, configured.llm.model) == ("ollama", "llama3.1:8b")
+    assert (configured.llm.temperature, configured.llm.max_tokens) == (0.4, 300)
+    assert configured.llm.api_key_env is None
+    assert configured.llm.fallback is None
+    assert fallback_settings(Settings()) is None
+
+
+async def test_a_configured_fallback_is_built_on_first_need_and_closed_with_the_service() -> None:
+    settings = Settings.model_validate(
+        {"llm": {"fallback": {"provider": "ollama", "model": "llama3.1:8b"}}}
+    )
+    service = GenerationService(
+        settings,
+        ScriptedRetrieval([chunk("c_a", "Either party may terminate.")]),  # type: ignore[arg-type]
+        ScriptedLLM(settings),
+        owns_llm=False,
+    )
+    assert service.fallback_llm is None
+
+    provider = service._fallback()
+
+    assert provider is not None
+    assert isinstance(provider.llm, OllamaGenerator)
+    assert provider.llm.model == "llama3.1:8b"
+    await service.close()
+
+
 async def test_a_misconfigured_provider_never_opens_the_breaker() -> None:
     """A misconfiguration never opens the breaker.
 
@@ -1323,6 +1446,7 @@ class ParityCase:
     primed: bool = False
     tripped: bool = False
     failures: int | None = None
+    fallback: bool = False
 
 
 def _body(observed: Observed) -> dict[str, Any]:
@@ -1369,6 +1493,18 @@ PARITY_CASES: dict[str, ParityCase] = {
             and _span_names(seen)[-1] == "generation"
             and seen.trace is not None
             and seen.trace["spans"][-1][1]["attempts"] == 3
+        ),
+    ),
+    "fallback answered": ParityCase(
+        error=lambda: GenerationError("provider is down", retryable=True),
+        fallback=True,
+        holds=lambda seen: (
+            _body(seen)["mode"] == FULL_MODE
+            and seen.trace is not None
+            and "generation-failed" in _span_names(seen)
+            and seen.trace["spans"][-1] == ("generation", seen.trace["spans"][-1][1])
+            and seen.trace["spans"][-1][1]["role"] == "fallback"
+            and seen.spent > 0
         ),
     ),
     "open breaker": ParityCase(
@@ -1446,6 +1582,7 @@ def _parity_service(case: ParityCase, root: Path) -> tuple[GenerationService, Me
         embedder=ScriptedEmbedder(settings) if cache is not None else None,
         traces=TraceStore(root),
         tenant=PARITY_TENANT,
+        fallback=MeteredLLM(settings, text=case.answer) if case.fallback else None,
     )
     return service, llm
 

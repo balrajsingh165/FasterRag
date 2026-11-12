@@ -111,6 +111,34 @@ def test_openai_compatible_requires_a_base_url() -> None:
         LlmSettings(provider="openai_compatible", api_key_env="CUSTOM_KEY")
 
 
+@pytest.mark.parametrize(
+    ("block", "reason"),
+    [
+        ({"provider": "anthropic", "model": "claude"}, r"api_key_env is required"),
+        ({"provider": "openai_compatible", "model": "m", "api_key_env": "K"}, r"base_url"),
+        ({"provider": "no-such-provider", "model": "m"}, r"not an installed provider"),
+        ({"provider": "ollama", "model": " "}, r"must not be empty"),
+    ],
+)
+def test_a_fallback_provider_is_held_to_the_rules_of_a_provider(
+    block: dict[str, str], reason: str
+) -> None:
+    """A fallback nobody can build would only be discovered during the outage it is for."""
+    with pytest.raises(
+        ValidationError, match=rf"llm\.fallback is not a usable provider: .*{reason}"
+    ):
+        Settings.model_validate({"llm": {"fallback": block}})
+
+
+def test_a_fallback_key_is_a_referenced_variable() -> None:
+    """So startup refuses a fallback whose key is absent, as it does the primary's."""
+    settings = Settings.model_validate(
+        {"llm": {"fallback": {"provider": "anthropic", "model": "c", "api_key_env": "SECOND_KEY"}}}
+    )
+
+    assert settings.referenced_env_vars()["SECOND_KEY"] == "llm.fallback.api_key_env"
+
+
 def test_rule_4_grpc_port_must_differ_from_rest_port() -> None:
     with pytest.raises(ValidationError, match="must differ"):
         VectorDbSettings(port=6333, grpc_port=6333)

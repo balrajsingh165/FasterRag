@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Final
 
 import httpx
@@ -24,9 +25,11 @@ import pytest
 from fasterrag.adapters.llm.base import Completion, LLMAdapter, classify_llm_failure
 from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.config.schema import Settings
+from fasterrag.core.breaker import shared_breaker
 from fasterrag.core.retrieval.models import ScoredChunk
-from fasterrag.services.generation import GenerationService
+from fasterrag.services.generation import FALLBACK_BREAKER, GenerationService
 from fasterrag.services.querying import FULL_MODE, Retrieval
+from fasterrag.services.traces import TraceStore
 
 pytestmark = pytest.mark.chaos
 
@@ -152,10 +155,57 @@ async def test_a_429_storm_on_a_stream_is_retried_before_any_token(waits: list[f
     assert waits == [RETRY_AFTER_SECONDS] * 2
 
 
+class UnreachableLLM(StormingLLM):
+    """A provider whose host refuses every connection, as one that is down does."""
+
+    provider = "unreachable"
+
+    def _admit(self, operation: str) -> None:
+        """Fail every call the way a refused connection reaches the adapter boundary."""
+        self.calls += 1
+        raise classify_llm_failure(
+            ConnectionRefusedError("[Errno 111] Connection refused"),
+            provider=self.provider,
+            operation=operation,
+            key_env=None,
+        )
+
+
+async def test_a_provider_outage_falls_back_to_the_second_provider(
+    waits: list[float], tmp_path: Path
+) -> None:
+    """Scenario: the primary is down for good; ``llm.fallback`` answers before the ladder."""
+    settings = storm_settings()
+    primary = UnreachableLLM(settings, storm=0)
+    second = StormingLLM(settings, storm=0)
+    service = GenerationService(
+        settings,
+        StubRetrieval(),  # type: ignore[arg-type]
+        primary,
+        fallback=second,
+        traces=TraceStore(tmp_path),
+    )
+
+    answer = await service.answer("what is the notice period?")
+
+    assert answer.mode == FULL_MODE
+    assert answer.answer == ANSWER
+    assert primary.calls == 1 + settings.reliability.retries.max_attempts
+    assert second.calls == 1
+    assert len(waits) == settings.reliability.retries.max_attempts
+    assert shared_breaker(FALLBACK_BREAKER, settings).is_open is False
+    stored = service.traces.load(answer.trace_id) if service.traces else None
+    assert stored is not None
+    failed = [span for span in stored.spans if span.name == "generation-failed"]
+    assert [span.attributes["provider"] for span in failed] == ["unreachable"]
+    assert stored.spans[-1].attributes["role"] == "fallback"
+
+
 async def test_every_scenario_defined_in_this_module_is_scripted() -> None:
     """The scenarios this module owns, held by name so deleting one is a visible diff."""
     scenarios = {
         "llm-429-storm": test_a_429_storm_is_retried_and_the_query_is_answered,
+        "llm-outage-fallback": test_a_provider_outage_falls_back_to_the_second_provider,
     }
 
     assert all(inspect.iscoroutinefunction(scenario) for scenario in scenarios.values())

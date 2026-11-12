@@ -65,6 +65,7 @@ llm:
   temperature: 0.1
   max_tokens: 1024
   streaming: true
+  fallback: null
 
 parsing:
   minimum_chars_per_page: 40
@@ -272,6 +273,7 @@ security:
 | `llm.temperature` | float | `0.1` | 0.0–2.0 | Sampling temperature. Low default favors grounded answers. |
 | `llm.max_tokens` | int | `1024` | 1–32768 | Max generated tokens per answer. |
 | `llm.streaming` | bool | `true` | — | Stream tokens via SSE (time-to-first-token). |
+| `llm.fallback` | object\|null | `null` | a block with `provider`, `model`, `api_key_env` and `base_url`, each held to the rule the same key under `llm` is held to | A second generation provider, tried after the first has exhausted `reliability.retries` on a *retryable* failure (rate limit, timeout, 5xx, open breaker) and before the `extractive` rung (TASK-0449). A non-retryable failure — a rejected key, an unknown model — is a misconfiguration and surfaces as it always has rather than being hidden behind the fallback. Sampling (`temperature`) and `max_tokens` are the primary's. The fallback has its own circuit breaker (`fasterrag_circuit_state{provider="llm_fallback"}`) and its own retries; a fallback answer is a full answer (`mode: full`), priced at the fallback's rate, and its trace records which provider served it (`role: fallback` on the `generation` span) and why the primary was passed over (a `generation-failed` span). Its `api_key_env` must be present at startup like any other referenced variable. Example: `fallback: {provider: ollama, model: llama3.1:8b}`. |
 
 ## `parsing`
 

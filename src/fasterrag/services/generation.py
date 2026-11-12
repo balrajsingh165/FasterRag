@@ -64,6 +64,7 @@ from typing import Any, Final
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
 from fasterrag.adapters.llm.base import Completion, LLMAdapter
+from fasterrag.adapters.llm.factory import create_llm_adapter
 from fasterrag.config.schema import GenerationSettings, Settings
 from fasterrag.core.breaker import CircuitBreaker, CircuitOpenError, shared_breaker
 from fasterrag.core.cache.semantic import MISS, CacheHit, SemanticCache
@@ -91,14 +92,19 @@ from fasterrag.workers.embed_pool import backoff_delay
 __all__ = [
     "DEFAULT_CONTEXT_BUDGET_TOKENS",
     "EXTRACTIVE_MODE",
+    "FALLBACK_BREAKER",
     "MAXIMUM_BEST_CANDIDATES",
     "Answer",
     "GenerationService",
     "QueryEvent",
     "extractive_answer",
+    "fallback_settings",
 ]
 
 EXTRACTIVE_MODE: Final = DegradationMode.EXTRACTIVE.value
+
+FALLBACK_BREAKER: Final = "llm_fallback"
+"""The circuit-breaker name ``llm.fallback`` is counted under, apart from the primary's."""
 
 MAXIMUM_BEST_CANDIDATES: Final = 5
 
@@ -214,6 +220,26 @@ def extractive_answer(context: AssembledContext) -> str:
     which is how the tree can say the rung is built (D4, TASK-0394).
     """
     return context.text
+
+
+def fallback_settings(settings: Settings) -> Settings | None:
+    """Return ``settings`` with ``llm`` answered by the ``llm.fallback`` block, or ``None``.
+
+    Sampling and the token ceiling stay the primary's; only who answers changes.
+    """
+    fallback = settings.llm.fallback
+    if fallback is None:
+        return None
+    llm = settings.llm.model_copy(
+        update={
+            "provider": fallback.provider,
+            "model": fallback.model,
+            "api_key_env": fallback.api_key_env,
+            "base_url": fallback.base_url,
+            "fallback": None,
+        }
+    )
+    return settings.model_copy(update={"llm": llm})
 
 
 def _citation_from(payload: Mapping[str, Any]) -> Citation:
@@ -458,12 +484,18 @@ class GenerationService:
         breaker: CircuitBreaker | None = None,
         governor: CostGovernor | None = None,
         owns_llm: bool = True,
+        fallback: LLMAdapter | None = None,
     ) -> None:
-        """Build the service; ``owns_llm=False`` leaves a shared provider open on close."""
+        """Build the service; ``owns_llm=False`` leaves a shared provider open on close.
+
+        A lent ``fallback`` stays the lender's; without one, ``llm.fallback`` is built on need.
+        """
         self.settings = settings
         self.retrieval = retrieval
         self.llm = llm
         self.owns_llm = owns_llm
+        self.fallback_llm = fallback
+        self.owns_fallback = fallback is None
         self.grader = grader or llm
         self.cache = cache
         self.embedder = embedder
@@ -865,12 +897,46 @@ class GenerationService:
                 retryable=exc.retryable,
             )
 
+    def _fallback(self) -> _Provider | None:
+        """Return the ``llm.fallback`` provider, building its adapter on first need.
+
+        Built lazily, so a deployment whose primary never fails never opens a second client.
+        """
+        if self.fallback_llm is None:
+            configured = fallback_settings(self.settings)
+            if configured is None:
+                return None
+            self.fallback_llm = create_llm_adapter(configured)
+        # CRITICAL: its own breaker key. The shared breaker is keyed by name, so a fallback
+        # counted under "llm" would be shed by the very outage it exists to cover.
+        breaker = shared_breaker(FALLBACK_BREAKER, self.settings)
+        return _Provider(self.fallback_llm, breaker, role="fallback")
+
     async def _generate[T](
         self, call: Callable[[LLMAdapter], Awaitable[T]], spans: SpanRecorder | None
     ) -> tuple[_Provider, T, int]:
-        """Generate through the configured provider, retrying what is worth retrying."""
+        """Generate through the primary provider, then ``llm.fallback`` (TASK-0449).
+
+        Only a retryable failure falls back: a misconfigured primary surfaces as itself.
+        """
         primary = _Provider(self.llm, self.breaker)
-        result, attempts = await self._with_retries(primary, call, spans)
+        try:
+            result, attempts = await self._with_retries(primary, call, spans)
+        except FasterRagError as exc:
+            fallback = self._fallback() if exc.retryable else None
+            if fallback is None:
+                raise
+            _logger.warning(
+                "the generation provider is down, trying llm.fallback",
+                extra={
+                    "code": exc.code.value,
+                    "trace_id": exc.trace_id,
+                    "provider": primary.llm.provider,
+                    "fallback": fallback.llm.provider,
+                },
+            )
+            result, attempts = await self._with_retries(fallback, call, spans)
+            return fallback, result, attempts
         return primary, result, attempts
 
     def _degrade(
@@ -1124,6 +1190,8 @@ class GenerationService:
         yield _Completed(answer=answer)
 
     async def close(self) -> None:
-        """Release the generation provider, unless whoever built this service lent it."""
+        """Release the generation providers, except any whoever built this service lent it."""
         if self.owns_llm:
             await self.llm.close()
+        if self.owns_fallback and self.fallback_llm is not None:
+            await self.fallback_llm.close()

@@ -58,6 +58,7 @@ llm:
   temperature: 0.1
   max_tokens: 1024
   streaming: true
+  fallback: null
 
 parsing:
   minimum_chars_per_page: 40
