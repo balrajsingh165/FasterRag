@@ -31,6 +31,7 @@ from fasterrag.services.querying import RetrievalService
 from fasterrag.services.traces import TraceStore
 
 __all__ = [
+    "AcceptingJobs",
     "CurrentCache",
     "CurrentEmbeddings",
     "CurrentJobs",
@@ -38,6 +39,7 @@ __all__ = [
     "CurrentTenant",
     "CurrentVectorDB",
     "JournalDep",
+    "accepting_jobs",
     "current_tenant",
     "get_jobs",
     "get_journal",
@@ -72,6 +74,13 @@ def get_journal(request: Request) -> Journal:
 def get_jobs(request: Request) -> JobRegistry:
     """Return the registry holding every job this process is running."""
     jobs: JobRegistry = request.app.state.jobs
+    return jobs
+
+
+def accepting_jobs(request: Request) -> JobRegistry:
+    """Return the job registry, refusing with 503 while the process is draining."""
+    jobs = get_jobs(request)
+    jobs.require_accepting()
     return jobs
 
 
@@ -120,6 +129,7 @@ CurrentEmbeddings = Annotated[TieringRouter, Depends(shared_embedding_router)]
 CurrentCache = Annotated[SemanticCache, Depends(shared_cache)]
 JournalDep = Annotated[Journal, Depends(get_journal)]
 CurrentJobs = Annotated[JobRegistry, Depends(get_jobs)]
+AcceptingJobs = Annotated[JobRegistry, Depends(accepting_jobs)]
 
 
 def build_retrieval(

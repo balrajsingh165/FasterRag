@@ -6,6 +6,9 @@ process could not enumerate, await, or stop its own jobs (TASK-0436).
 
 import asyncio
 
+import pytest
+
+from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.services.jobs import JobRegistry
 
 
@@ -109,3 +112,76 @@ async def test_a_job_that_raises_is_forgotten_rather_than_left_in_flight() -> No
     await registry.idle()
 
     assert registry.active == frozenset()
+
+
+async def test_a_drain_waits_for_a_job_that_finishes_inside_the_grace_period() -> None:
+    """Shutdown used to wait for nothing."""
+    registry = JobRegistry()
+    gate = asyncio.Event()
+    await registry.submit("job_a", hold(gate, [], "job_a"))
+    asyncio.get_running_loop().call_later(0.05, gate.set)
+
+    report = await registry.drain(grace_seconds=10)
+
+    assert (report.finished, report.cancelled, report.in_flight) == (1, 0, 1)
+    assert registry.active == frozenset()
+
+
+async def test_a_drain_cancels_a_job_that_outlives_the_grace_period() -> None:
+    """A job still running at exit was abandoned mid-write rather than stopped."""
+    registry = JobRegistry()
+    unwound: list[str] = []
+
+    async def stubborn() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.01)
+            unwound.append("job_a")
+
+    await registry.submit("job_a", stubborn())
+    await asyncio.sleep(0)
+
+    report = await registry.drain(grace_seconds=0.05)
+
+    assert (report.finished, report.cancelled) == (0, 1)
+    assert unwound == ["job_a"], "the drain returned before the job finished unwinding"
+    assert registry.active == frozenset()
+
+
+async def test_a_drain_with_nothing_in_flight_returns_at_once() -> None:
+    report = await asyncio.wait_for(JobRegistry().drain(grace_seconds=60), timeout=1)
+
+    assert report.in_flight == 0
+
+
+async def test_a_job_offered_after_the_drain_began_is_refused_as_retryable() -> None:
+    """Accepting it would record a job that nothing was left to run."""
+    registry = JobRegistry()
+    ran: list[str] = []
+    gate = asyncio.Event()
+    gate.set()
+    await registry.drain(grace_seconds=0)
+
+    with pytest.raises(FasterRagError) as refused:
+        await registry.submit("job_a", hold(gate, ran, "job_a"))
+    await asyncio.sleep(0)
+
+    assert refused.value.code is ErrorCode.NOT_READY
+    assert refused.value.retryable is True
+    assert refused.value.status == 503
+    assert registry.accepting is False
+    assert ran == []
+
+
+async def test_a_registry_opened_again_accepts_jobs_again() -> None:
+    registry = JobRegistry()
+    gate = asyncio.Event()
+    gate.set()
+    await registry.drain(grace_seconds=0)
+
+    registry.open()
+    started = await registry.submit("job_a", hold(gate, [], "job_a"))
+    await registry.idle()
+
+    assert started is True

@@ -59,7 +59,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `CIRCUIT_OPEN` | 503 | `ProviderError` | Circuit breaker open for the named provider (`detail` names it, `Retry-After` set). |
 | `PROVISIONING_FAILED` | 500 | `ProvisioningError` | Auto-provisioning step failed; `detail` carries the doctor-style fix-it hint. |
 | `CACHE_ERROR` | 500 | `CacheError` | Cache backend failure (system degrades to cache-off rather than failing queries; surfaced on admin endpoints). |
-| `NOT_READY` | 503 | — | A readiness dependency check failed; returned only by `/readyz`, with a `dependencies[]` extension member naming each check and its state. |
+| `NOT_READY` | 503 | — | A readiness dependency check failed: returned by `/readyz`, with a `dependencies[]` extension member naming each check and its state. Also returned, retryable, by `POST /v1/ingest` and `POST /v1/ingest/{job_id}/retry-dlq` while the server is shutting down and has stopped starting jobs (see [`POST /v1/ingest`](#post-v1ingest)); that refusal carries no `dependencies[]`. |
 | `INTERNAL` | 500 | `FasterRagError` | Anything unclassified. Always carries `trace_id`. Never returned without a problem body. |
 
 ---
@@ -142,7 +142,9 @@ Request:
 | `priority_class` | str | no | Tiered-embedding routing class (D9). Merged into chunk metadata as `priority_class`, which is what `embeddings.tiering.rules[].match` matches on. |
 | `idempotency_key` | str | no | **Deprecated, removed in 1.0** — send the [`Idempotency-Key` header](#idempotency) instead. Still honoured: replaying a key returns the original job and enqueues nothing, scoped to the caller's tenant. A request that uses it gets `Deprecation: true` on the response. |
 
-Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `409 CONFLICT` — the target collection was indexed without the keyword leg `retrieval.hybrid` asks for, and a sparse vector cannot be attached to an existing collection; the detail names the rebuild command and the opt-out (see [troubleshooting.md](troubleshooting.md)). Refused before a job id is issued, so nothing is written · `422` · `429 QUEUE_FULL`.
+Responses: `202 Accepted` `{"job_id": "job_01J8Z3W7", "status": "queued"}` · `409 CONFLICT` — the target collection was indexed without the keyword leg `retrieval.hybrid` asks for, and a sparse vector cannot be attached to an existing collection; the detail names the rebuild command and the opt-out (see [troubleshooting.md](troubleshooting.md)). Refused before a job id is issued, so nothing is written · `422` · `429 QUEUE_FULL` · `503 NOT_READY` (retryable) — the server is shutting down and has stopped starting jobs; nothing was recorded, so the same request, with the same `Idempotency-Key`, is safe to send again.
+
+**Shutdown** (TASK-0436). When the process is asked to stop it refuses new jobs, waits `reliability.shutdown_grace_seconds` for the ones it is running, cancels what remains — each is settled `failed` with `reason_code: "INTERRUPTED"`, its checkpoint kept — and only then closes its adapters. What a client sees depends on the server in front of the application, and this was observed rather than assumed: under uvicorn 0.52.1 (measured 2026-11-12, Windows) the listening socket is closed and idle keep-alive connections are dropped *before* the application's shutdown runs, so a request sent during the drain fails to **connect** and the application sees no request at all. The `503` is therefore what a client gets from a server that still routes requests to an application that is draining; behind uvicorn, treat a refused connection during a deploy the same way — retry.
 
 ### `GET /v1/ingest/{job_id}`
 

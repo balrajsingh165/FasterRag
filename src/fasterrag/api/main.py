@@ -134,6 +134,23 @@ async def provision_enabled_observability(settings: Settings) -> None:
             )
 
 
+async def _drain_jobs(jobs: JobRegistry, grace_seconds: int) -> None:
+    """Stop accepting ingestion, give running jobs the grace period, and report the result."""
+    in_flight = len(jobs.active)
+    if in_flight:
+        _logger.info(
+            "shutdown is waiting for ingestion jobs",
+            extra={"in_flight": in_flight, "grace_seconds": grace_seconds},
+        )
+
+    drained = await jobs.drain(grace_seconds)
+    if drained.in_flight:
+        _logger.info(
+            "ingestion jobs drained before shutdown",
+            extra={"finished": drained.finished, "interrupted": drained.cancelled},
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Start and stop process-wide resources.
@@ -156,6 +173,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if owns_adapter:
         app.state.vector_db = create_vector_db_adapter(settings)
 
+    jobs = cast(JobRegistry, app.state.jobs)
+    jobs.open()
+
     await provision_enabled_observability(settings)
 
     app.state.metric_pusher = create_metric_pusher(settings)
@@ -165,6 +185,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # CRITICAL: jobs are drained before anything below is closed. Every resource this
+        # block releases is one a running job is using, so closing first turns a job that
+        # could have finished, or been settled cleanly, into errors against a closed client.
+        await _drain_jobs(jobs, settings.reliability.shutdown_grace_seconds)
+
         pusher = getattr(app.state, "metric_pusher", None)
         if pusher is not None:
             await pusher.close()

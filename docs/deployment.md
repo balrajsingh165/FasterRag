@@ -66,6 +66,7 @@ Rules of thumb: vector RAM ≈ `vectors × dimensions × 4 bytes` (plus index ov
 - SemVer discipline: patch/minor upgrades are drop-in; majors carry CHANGELOG migration notes.
 - Langfuse/Grafana stacks are upgraded by the provisioner only when the pinned versions in fasterRag change; **`SALT`/`ENCRYPTION_KEY`/`NEXTAUTH_SECRET` are never regenerated** (see [observability.md](observability.md)).
 - Embedding-model upgrades go through D2 zero-downtime reindexing, never in-place mutation.
+- **Stopping the API** (TASK-0436). On a graceful stop the process refuses new ingestion jobs, waits `reliability.shutdown_grace_seconds` (default 20) for running ones, cancels the rest and settles each `failed` / `INTERRUPTED` with its checkpoint kept. Give the process longer than that before it is killed: `docker stop` allows 10 s by default (`stop_grace_period` in Compose, `--time` on the command line) and Kubernetes 30 s (`terminationGracePeriodSeconds`). The compose files in `deploy/` do not set a stop period, so under them the default 20 s wait is cut short at 10 s — raise the period or lower the setting.
 
 ## 6. Revert playbook (rollback discipline)
 

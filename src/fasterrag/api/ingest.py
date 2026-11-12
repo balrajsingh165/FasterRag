@@ -31,7 +31,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query, Request, Response, status
 
 from fasterrag.api.dependencies import (
-    CurrentJobs,
+    AcceptingJobs,
     CurrentSettings,
     CurrentTenant,
     CurrentVectorDB,
@@ -156,7 +156,7 @@ async def start_ingest(
     body: IngestRequest,
     request: Request,
     response: Response,
-    jobs: CurrentJobs,
+    jobs: AcceptingJobs,
     settings: CurrentSettings,
     journal: JournalDep,
     adapter: CurrentVectorDB,
@@ -231,7 +231,7 @@ async def job_documents(
 async def retry_dead_letters(
     job_id: str,
     request: Request,
-    jobs: CurrentJobs,
+    jobs: AcceptingJobs,
     settings: CurrentSettings,
     journal: JournalDep,
     adapter: CurrentVectorDB,

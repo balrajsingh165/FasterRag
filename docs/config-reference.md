@@ -154,6 +154,7 @@ reliability:
     ttl_seconds: 86400
     in_flight_lease_seconds: 900
   degradation_ladder: true
+  shutdown_grace_seconds: 20
 
 traces:
   store: true
@@ -414,6 +415,7 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | `reliability.idempotency.ttl_seconds` | int | `86400` | 1–604800 | How long a completed record stays replayable, and since TASK-0365 how long its file survives: a reclamation pass removes records a minute past this, so the directory holds roughly one window of keyed traffic rather than all of it. Raise it only as far as your clients actually retry. |
 | `reliability.idempotency.in_flight_lease_seconds` | int | `900` | ≥ 1, ≤ `ttl_seconds` | How long an unfinished reservation holds its key before another request may take it over. A worker killed mid-request frees its key on this lease rather than holding it for the full lifetime — which would force the client to invent a new key, the exact duplicate the header exists to prevent. The loader refuses a lease longer than `ttl_seconds`, because an unfinished request outliving a completed one inverts the intent. It is also the reclamation interval (TASK-0365): one host runs at most one pass per lease, so shortening the lease tightens cleanup as well as takeover. |
 | `reliability.degradation_ladder` | bool | `true` | — | D4: graceful fallbacks (reranker down → hybrid-only; vector DB down → semantic-cache-only; LLM down → extractive answers). Every degraded response carries `degraded: true` + `mode`. |
+| `reliability.shutdown_grace_seconds` | int | `20` | 0–3600 | How long a stopping API process waits for the ingestion jobs it is running before cancelling them (TASK-0436). During the wait it starts no new job (`POST /v1/ingest` answers `503 NOT_READY`, retryable); a job that finishes inside the window settles normally, and one that does not is cancelled and settled `failed` with `reason_code: INTERRUPTED`, keeping its checkpoint. Adapters are closed only after every job has settled. **Keep it below whatever kills the process**: `docker stop` sends `SIGKILL` after 10 s by default and Kubernetes after 30 s, and a process killed mid-wait settles nothing — its jobs stay `running` until the next start reaps them. `0` cancels at once. The wait is a floor on shutdown time only when jobs are running, and it is not a ceiling: a cancelled job still has to leave the parse pool, which waits for the documents already being parsed. |
 
 ## `traces`
 
