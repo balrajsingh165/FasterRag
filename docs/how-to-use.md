@@ -10,7 +10,11 @@ Requires **Python 3.12+** (Linux and Windows are both CI-tested). Pick extras fo
 
 | Install | You get |
 |---|---|
-| `pip install fasterrag` | Engine, all document parsers, chunking, Qdrant + pgvector adapters, CLI, REST server |
+| `pip install fasterrag` | Engine, CLI, chunking, BM25 + fusion, the Markdown/text/CSV/JSON parsers. **No web server, no Qdrant client, no PDF/DOCX/HTML parser** (TASK-0444) |
+| `pip install "fasterrag[chroma,huggingface]"` | The local profile (`fasterrag config init --profile local`): embedded Chroma + local embeddings — ingest and retrieve with no running service and no key |
+| `[server]` | + the REST server (`fasterrag serve`: FastAPI, uvicorn) |
+| `[qdrant]` | + the Qdrant adapter — **needed by the canonical `config.yaml`**, which selects Qdrant |
+| `[pdf]` / `[docx]` / `[html]` | + that document parser (a document whose parser is missing is dead-lettered with a detail naming the extra) |
 | `pip install "fasterrag[huggingface]"` | + local embeddings (sentence-transformers; multi-GB runtime — the fully-local starting point) |
 | `[rerank]` | + cross-encoder reranking (note: the default model is large; see §8 first-run) |
 | `[openai]` / `[anthropic]` / `[cohere]` / `[ollama]` | + that hosted/local provider |
@@ -19,7 +23,7 @@ Requires **Python 3.12+** (Linux and Windows are both CI-tested). Pick extras fo
 | `[otel]` | + OTLP export |
 | `[all]` | everything above |
 
-Selecting a provider whose extra is missing fails at startup with a `ConfigError` naming the exact install command — never an import traceback.
+Selecting a provider whose extra is missing fails at startup with a `ConfigError` naming the exact install command — never an import traceback. For the full stack the canonical `config.yaml` describes, served over REST: `pip install "fasterrag[server,qdrant,pdf,docx,html,huggingface,rerank]"`.
 
 ## 2. First five minutes
 

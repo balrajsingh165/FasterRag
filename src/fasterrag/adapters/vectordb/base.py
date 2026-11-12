@@ -45,6 +45,7 @@ from fasterrag.errors import ErrorCode, FasterRagError
 
 __all__ = [
     "COMPARISON_OPERATORS",
+    "POINT_ID_PAYLOAD_KEY",
     "CollectionInfo",
     "CollectionSpec",
     "Distance",
@@ -69,6 +70,11 @@ COMPARISON_OPERATORS: Final[frozenset[str]] = frozenset(
 )
 
 _SET_OPERATORS: Final[frozenset[str]] = frozenset({"$in", "$nin"})
+
+# CRITICAL: the payload key under which an adapter whose backend rewrites point ids (Qdrant
+# stores UUIDs) keeps the original id. It lives here rather than in that adapter so the query
+# service can strip it without importing a vendor client the core install does not carry.
+POINT_ID_PAYLOAD_KEY: Final = "point_id"
 
 
 @dataclass(frozen=True, slots=True)

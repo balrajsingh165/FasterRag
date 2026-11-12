@@ -28,13 +28,20 @@ import os
 from collections.abc import Awaitable, Callable
 from typing import Any, Final
 
-from fasterrag.api.main import CONFIG_PATH_VAR, create_app
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import settings_from
 from fasterrag.config.schema import Settings
-from fasterrag.errors import ConfigError
+from fasterrag.errors import ConfigError, ErrorCode
 
-__all__ = ["BUILTIN_PROCESSES", "PLANNED_PROCESSES", "exposed_without_auth", "run_serve"]
+__all__ = [
+    "BUILTIN_PROCESSES",
+    "PLANNED_PROCESSES",
+    "SERVER_INSTALL_HINT",
+    "exposed_without_auth",
+    "run_serve",
+]
+
+SERVER_INSTALL_HINT: Final = 'pip install "fasterrag[server]"'
 
 
 def exposed_without_auth(host: str, settings: Settings) -> bool:
@@ -55,7 +62,20 @@ async def run_serve(args: argparse.Namespace, console: Console) -> ExitCode:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.USAGE
 
-    import uvicorn
+    # CRITICAL: imported here, not at module top. The CLI module graph imports this file for
+    # every command, and the web server is the `server` extra (TASK-0444): a top-level import
+    # made `fasterrag --help`, `ingest` and `config init` need FastAPI.
+    try:
+        import uvicorn
+
+        from fasterrag.api.main import CONFIG_PATH_VAR, create_app
+    except ModuleNotFoundError as exc:
+        console.problem(
+            ErrorCode.CONFIG_INVALID.value,
+            f"'fasterrag serve' needs the server extra, which is not installed ({exc.name} "
+            f"cannot be imported); install it with: {SERVER_INSTALL_HINT}",
+        )
+        return ExitCode.USAGE
 
     host = args.host or settings.app.host
     port = args.port or settings.app.port

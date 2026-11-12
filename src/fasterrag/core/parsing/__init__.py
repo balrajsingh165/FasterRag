@@ -10,15 +10,21 @@ Two dispatch tables rather than one: PDF and delimited text read thresholds from
 nothing to tune. Giving every parser an ``options`` argument would put a dead parameter in
 five signatures, each one implying a knob that does not exist; the split keeps every
 signature honest about what it reads.
+
+PDF, DOCX and HTML need libraries that ship as the ``pdf``, ``docx`` and ``html`` extras
+(TASK-0444), so their parsers are imported on first use rather than with this package. A
+document whose extra is missing fails as a ``ParseError`` naming the extra to install, which
+dead-letters that one document and leaves the rest of a job untouched.
 """
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 from pathlib import Path
+from types import ModuleType
 from typing import Final, Protocol
 
-from fasterrag.core.parsing.docx import parse_docx
-from fasterrag.core.parsing.html import parse_html
 from fasterrag.core.parsing.markdown import parse_markdown
 from fasterrag.core.parsing.models import (
     Block,
@@ -32,7 +38,6 @@ from fasterrag.core.parsing.options import (
     ParsingOptions,
     create_parsing_options,
 )
-from fasterrag.core.parsing.pdf import parse_pdf
 from fasterrag.core.parsing.plaintext import parse_plaintext
 from fasterrag.core.parsing.tabular import parse_csv, parse_json
 from fasterrag.errors import ErrorCode, IngestionError, ParseError
@@ -75,6 +80,44 @@ class TunedFormatParser(Protocol):
     def __call__(self, data: bytes, *, mime_type: str, options: ParsingOptions) -> ParsedDocument:
         """Parse ``data`` into a structured document under ``options``."""
         ...
+
+
+def _optional_parser(module: str, *, extra: str, packages: tuple[str, ...]) -> ModuleType:
+    """Import a parser whose library ships in an extra, naming the extra when it is absent."""
+    missing = [name for name in packages if importlib.util.find_spec(name) is None]
+    if missing:
+        raise ParseError(
+            f"{extra.upper()} parsing needs the {extra!r} extra, which is not installed "
+            f"({', '.join(missing)} cannot be imported); install it with "
+            f"'pip install \"fasterrag[{extra}]\"'"
+        )
+    return importlib.import_module(module)
+
+
+def parse_pdf(
+    data: bytes,
+    *,
+    mime_type: str = "application/pdf",
+    options: ParsingOptions = DEFAULT_PARSING_OPTIONS,
+) -> ParsedDocument:
+    """Parse a PDF; pdfplumber ships in the ``pdf`` extra and loads on first use."""
+    module = _optional_parser("fasterrag.core.parsing.pdf", extra="pdf", packages=("pdfplumber",))
+    parser: TunedFormatParser = module.parse_pdf
+    return parser(data, mime_type=mime_type, options=options)
+
+
+def parse_docx(data: bytes, *, mime_type: str = _DOCX_MIME) -> ParsedDocument:
+    """Parse a DOCX file; python-docx ships in the ``docx`` extra and loads on first use."""
+    module = _optional_parser("fasterrag.core.parsing.docx", extra="docx", packages=("docx",))
+    parser: FormatParser = module.parse_docx
+    return parser(data, mime_type=mime_type)
+
+
+def parse_html(data: bytes, *, mime_type: str = "text/html") -> ParsedDocument:
+    """Parse HTML; BeautifulSoup and lxml ship in the ``html`` extra and load on first use."""
+    module = _optional_parser("fasterrag.core.parsing.html", extra="html", packages=("bs4", "lxml"))
+    parser: FormatParser = module.parse_html
+    return parser(data, mime_type=mime_type)
 
 
 _PARSERS: Final[dict[str, tuple[FormatParser, str]]] = {

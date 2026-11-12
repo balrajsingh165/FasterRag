@@ -55,7 +55,7 @@ Doctor failures about Docker are acceptable for tiers 0–2 (nothing below tier 
 | `uv lock --check` | lockfile current |
 | `python scripts/check_commit_message.py --range origin/main~20..origin/main` | all pass |
 | `python scripts/check_doc_truth.py` · `check_blockers.py` · `check_openapi_drift.py` · `check_claims.py` · `stamp_release.py --check` | all silent/zero |
-| `python scripts/check_package.py` | `package ok: ...` — builds the wheel, installs it into a clean venv, and imports it as a consumer would *(2026-10-29: 95 s on a Windows dev machine, Python 3.14)* |
+| `python scripts/check_package.py` | `package ok: ...` — builds the wheel, installs it into a clean venv, and imports it as a consumer would *(2026-10-29: 95 s on a Windows dev machine, Python 3.14)*. Since TASK-0444 it then adds `[chroma,huggingface]` and runs the local profile end to end (ingest a Markdown file, answer a `retrieve`, no service, no key); `--skip-local-profile` stops after the core checks |
 | `pytest -q tests/unit/docs tests/unit/scripts` | green — the reference-parity, ledger-integrity, and blockers-numbering gates |
 
 ## Tier 2 — Unit, property, golden (no Docker, no network, no credentials)

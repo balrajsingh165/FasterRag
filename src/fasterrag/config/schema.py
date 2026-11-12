@@ -79,6 +79,8 @@ TokenCounterMode = Literal["auto", "estimate", "model"]
 
 PROVIDERS_REQUIRING_EMBEDDING_KEY: frozenset[str] = frozenset({"openai", "cohere"})
 PROVIDERS_NOT_REQUIRING_LLM_KEY: frozenset[str] = frozenset({"ollama"})
+EMBEDDING_PROVIDERS_WITHOUT_KEY: frozenset[str] = frozenset({"huggingface", "ollama"})
+VECTOR_DB_PROVIDERS_WITHOUT_KEY: frozenset[str] = frozenset({"chroma", "pgvector"})
 
 REDIS_URL_SCHEMES: frozenset[str] = frozenset({"redis", "rediss", "unix"})
 DEFAULT_REDIS_URL: str = "redis://localhost:6379/0"
@@ -928,15 +930,52 @@ class Settings(BaseSettings):
         self._collect_env_vars(self, (), found)
         return found
 
+    def required_env_vars(self) -> dict[str, str]:
+        """Return the referenced variables that a feature this configuration enables reads.
+
+        Cross-field rule 9 requires these, and only these, at startup (TASK-0444).
+        """
+        found: dict[str, str] = {}
+        self._collect_env_vars(self, (), found, skip=self._unread_env_keys())
+        return found
+
+    # CRITICAL: each exemption names a key that NOTHING reads under the stated condition —
+    # never a key that is read later or optionally. `security.api_key_env` is read only by
+    # the auth middleware; `vector_db.api_key_env` by every built-in vector database except
+    # Chroma and pgvector, and by any plugin; `dsn_env` only by pgvector; the two provider
+    # keys only by the providers outside the keyless sets. The LLM key has no condition of its
+    # own: no setting disables generation, so a keyed provider is always in use. Widening this
+    # list moves a missing secret from a startup failure to a failure mid-request.
+    def _unread_env_keys(self) -> frozenset[str]:
+        """Return the dotted ``*_env`` keys that no enabled feature reads."""
+        unread: set[str] = set()
+        if not self.security.auth:
+            unread.add("security.api_key_env")
+        if self.vector_db.provider in VECTOR_DB_PROVIDERS_WITHOUT_KEY:
+            unread.add("vector_db.api_key_env")
+        if self.vector_db.provider != "pgvector":
+            unread.add("vector_db.pgvector.dsn_env")
+        if self.embeddings.provider in EMBEDDING_PROVIDERS_WITHOUT_KEY:
+            unread.add("embeddings.api_key_env")
+        if self.llm.provider in PROVIDERS_NOT_REQUIRING_LLM_KEY:
+            unread.add("llm.api_key_env")
+        return frozenset(unread)
+
     @classmethod
     def _collect_env_vars(
-        cls, model: BaseModel, path: tuple[str, ...], found: dict[str, str]
+        cls,
+        model: BaseModel,
+        path: tuple[str, ...],
+        found: dict[str, str],
+        skip: frozenset[str] = frozenset(),
     ) -> None:
-        """Walk nested sections, recording every populated ``*_env`` field."""
+        """Walk nested sections, recording every populated ``*_env`` field not in ``skip``."""
         for name in type(model).model_fields:
             value = getattr(model, name)
             current = (*path, name)
             if isinstance(value, BaseModel):
-                cls._collect_env_vars(value, current, found)
+                cls._collect_env_vars(value, current, found, skip)
             elif name.endswith("_env") and isinstance(value, str):
-                found.setdefault(value, ".".join(current))
+                dotted = ".".join(current)
+                if dotted not in skip:
+                    found.setdefault(value, dotted)

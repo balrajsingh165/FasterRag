@@ -240,7 +240,7 @@ def _export_env_file(env_file: str | Path | None) -> None:
 def _require_referenced_env_vars(
     settings: Settings, env_file: str | Path | None, *, exported: bool
 ) -> None:
-    """Enforce cross-field rule 9: every referenced environment variable must be set.
+    """Enforce cross-field rule 9: every variable an enabled feature reads must be set.
 
     ``exported`` says whether the dotenv file is already in ``os.environ``; when it is not,
     a variable found only there is reported as missing and told why.
@@ -249,7 +249,7 @@ def _require_referenced_env_vars(
     env_label = str(Path(env_file)) if env_file is not None else str(DEFAULT_ENV_FILE)
 
     missing: list[str] = []
-    for name, config_key in sorted(settings.referenced_env_vars().items()):
+    for name, config_key in sorted(settings.required_env_vars().items()):
         value = os.environ.get(name)
         if value is not None and value.strip():
             continue

@@ -11,8 +11,10 @@ from check_package import (
     _check_cli,
     _check_core_stays_small,
     _check_imports,
+    _check_named_extras,
     _python_in,
     _run,
+    clean_environment,
 )
 
 
@@ -90,3 +92,48 @@ def test_a_failing_command_is_captured_as_text_rather_than_raised() -> None:
     assert completed.returncode == 3
     assert completed.stderr == "broken"
     assert completed.stdout == ""
+
+
+def test_the_clean_environment_drops_the_import_path_and_every_credential() -> None:
+    """Run as `PYTHONPATH=src`, the venv imported the checkout instead of the wheel."""
+    cleaned = clean_environment(
+        {
+            "PATH": "/bin",
+            "PYTHONPATH": "src",
+            "OPENAI_API_KEY": "sk-secret",
+            "PGVECTOR_DSN": "postgresql://user:pw@host/db",
+            "FASTERRAG_CONFIG": "/etc/fasterrag.yaml",
+        }
+    )
+
+    assert cleaned == {"PATH": "/bin"}
+
+
+def test_a_missing_extra_that_is_not_named_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "check_package.NAMED_EXTRAS", (("a thing", "print('no hint here')", "fasterrag[x]"),)
+    )
+
+    problems = _check_named_extras(Path(sys.executable))
+
+    assert len(problems) == 1
+    assert "fasterrag[x]" in problems[0]
+
+
+def test_a_missing_extra_that_is_named_is_silent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "check_package.NAMED_EXTRAS",
+        (("a thing", "print('pip install \"fasterrag[x]\"')", 'pip install "fasterrag[x]"'),),
+    )
+
+    assert _check_named_extras(Path(sys.executable)) == []
+
+
+def test_every_extra_the_slim_core_moved_out_exists_and_is_in_all() -> None:
+    """The error messages name these extras; one missing from pyproject is an install that fails."""
+    manifest = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = manifest["project"]["optional-dependencies"]
+
+    for name in ("server", "qdrant", "pdf", "docx", "html", "chroma", "huggingface"):
+        assert extras[name], name
+        assert set(extras[name]) <= set(extras["all"]), name

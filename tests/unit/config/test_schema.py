@@ -216,6 +216,78 @@ def test_unreferenced_env_vars_are_not_required() -> None:
     assert set(settings.referenced_env_vars()) == {"FASTERRAG_API_KEY"}
 
 
+def test_the_api_key_is_required_only_when_auth_is_on() -> None:
+    """With auth off, nothing reads FASTERRAG_API_KEY, yet a load demanded it (TASK-0444)."""
+    assert "FASTERRAG_API_KEY" not in Settings().required_env_vars()
+
+    secured = Settings.model_validate({"security": {"auth": True}})
+
+    assert secured.required_env_vars()["FASTERRAG_API_KEY"] == "security.api_key_env"
+
+
+@pytest.mark.parametrize("provider", ["chroma", "pgvector"])
+def test_a_vector_database_that_reads_no_key_needs_none(provider: str) -> None:
+    """Chroma and pgvector never read vector_db.api_key_env, yet QDRANT_API_KEY was demanded."""
+    settings = Settings.model_validate(
+        {"vector_db": {"provider": provider, "pgvector": {"dsn_env": "PGVECTOR_DSN"}}}
+    )
+
+    assert "QDRANT_API_KEY" not in settings.required_env_vars()
+
+
+@pytest.mark.parametrize("provider", ["qdrant", "milvus", "weaviate"])
+def test_a_vector_database_that_reads_its_key_still_requires_it(provider: str) -> None:
+    settings = Settings.model_validate({"vector_db": {"provider": provider}})
+
+    assert settings.required_env_vars()["QDRANT_API_KEY"] == "vector_db.api_key_env"
+
+
+def test_the_pgvector_dsn_is_required_only_for_pgvector() -> None:
+    elsewhere = Settings.model_validate({"vector_db": {"pgvector": {"dsn_env": "PGVECTOR_DSN"}}})
+    pgvector = Settings.model_validate(
+        {"vector_db": {"provider": "pgvector", "pgvector": {"dsn_env": "PGVECTOR_DSN"}}}
+    )
+
+    assert "PGVECTOR_DSN" not in elsewhere.required_env_vars()
+    assert pgvector.required_env_vars()["PGVECTOR_DSN"] == "vector_db.pgvector.dsn_env"
+
+
+def test_the_llm_key_stays_required_because_every_configuration_can_generate() -> None:
+    """No setting turns generation off, so a keyed LLM provider is always in use."""
+    assert Settings().required_env_vars()["OPENAI_API_KEY"] == "llm.api_key_env"
+
+
+def test_a_keyless_provider_does_not_require_a_key_it_was_given_a_name_for() -> None:
+    settings = Settings.model_validate(
+        {
+            "embeddings": {"provider": "huggingface", "api_key_env": "HF_KEY"},
+            "llm": {"provider": "ollama", "api_key_env": "OLLAMA_KEY"},
+        }
+    )
+
+    assert {"HF_KEY", "OLLAMA_KEY"}.isdisjoint(settings.required_env_vars())
+
+
+def test_a_keyed_embedding_provider_still_requires_its_key() -> None:
+    settings = Settings.model_validate(
+        {"embeddings": {"provider": "openai", "api_key_env": "OPENAI_EMBED_KEY"}}
+    )
+
+    assert settings.required_env_vars()["OPENAI_EMBED_KEY"] == "embeddings.api_key_env"
+
+
+def test_a_variable_one_unused_key_names_is_still_required_by_a_used_one() -> None:
+    """Two keys may share a variable; skipping the unused one must not hide the other."""
+    settings = Settings.model_validate(
+        {
+            "vector_db": {"provider": "chroma", "api_key_env": "SHARED_KEY"},
+            "llm": {"api_key_env": "SHARED_KEY"},
+        }
+    )
+
+    assert settings.required_env_vars()["SHARED_KEY"] == "llm.api_key_env"
+
+
 def test_the_semantic_cache_accepts_a_disk_backend() -> None:
     """A memory cache dies with each CLI process, so it can never hit across invocations."""
     settings = Settings.model_validate({"cache": {"backend": "disk"}})

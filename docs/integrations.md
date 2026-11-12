@@ -2,6 +2,31 @@
 
 Everything is selected purely through `config.yaml`; secrets by env-var name only; **every integration toggle defaults to `false`**. Each row below carries a **Status**: *shipped* means implemented and tested in this repo today; *specified* means the config surface and behavior are designed but the adapter has not been built (its task is in [todo.md](todo.md)) — selecting a specified provider fails fast with a `ConfigError`, never silently. Conformance for any adapter, in-repo or third-party, means passing the shared adapter contract suite ([testing-strategy.md](testing-strategy.md) §1.5). The entry-point extension contract ([python-api.md](python-api.md)) is **shipped** (TASK-0173 ✅): all three factories resolve registered plugins, and a built-in name always wins so an installed package cannot silently take over a configured provider.
 
+## 0. Which extra each integration needs
+
+`pip install fasterrag` is the library and the CLI: configuration, chunking, BM25 and fusion, the facade, and the Markdown, plain-text, CSV and JSON parsers. Everything below is an extra (`pip install "fasterrag[<extra>]"`; several at once as `"fasterrag[chroma,huggingface]"`). Since TASK-0444 the web server, the Qdrant client and the PDF, DOCX and HTML parsers are extras too. A missing extra is reported by name — a `ConfigError` for a provider, exit `2` for `fasterrag serve`, a dead-lettered `PARSE_FAILED` document for a parser — and never as a bare import traceback.
+
+| Extra | Installs | Needed for |
+|---|---|---|
+| `server` | `fastapi`, `uvicorn[standard]` | `fasterrag serve` (the REST API and the dashboard) |
+| `qdrant` | `qdrant-client` | `vector_db.provider: qdrant` — the canonical `config.yaml` |
+| `chroma` | `chromadb` | `vector_db.provider: chroma`, and the local profile |
+| `pgvector` | `psycopg[binary,pool]`, `pgvector` | `vector_db.provider: pgvector` |
+| `milvus` | `pymilvus` | `vector_db.provider: milvus` |
+| `weaviate` | `weaviate-client` | `vector_db.provider: weaviate` |
+| `huggingface` | `sentence-transformers` | `embeddings.provider: huggingface` — the default, and the local profile |
+| `rerank` | `sentence-transformers` | `retrieval.rerank: true` (the default) |
+| `openai` / `anthropic` / `cohere` / `ollama` | that provider's client | the matching `embeddings.provider` / `llm.provider` |
+| `pdf` | `pdfplumber` | `.pdf` documents |
+| `docx` | `python-docx` | `.docx` documents |
+| `html` | `beautifulsoup4`, `lxml` | `.html`, `.htm`, `.xhtml` documents |
+| `ocr` | `pdfplumber`, `pillow`, `pytesseract` | OCR of scanned PDF pages (also needs the `tesseract` binary) |
+| `redis` | `redis` | `cache.backend: redis`, `security.rate_limit_backend: redis` |
+| `otel` | the OpenTelemetry SDK and OTLP exporter | `observability.otel: true` |
+| `all` | every extra above | — |
+
+The local profile (`fasterrag config init --profile local`) needs `chroma` and `huggingface` and nothing else. The container image installs `server`, `qdrant`, `pdf`, `docx` and `html` ([deployment.md](deployment.md)).
+
 ## 1. Vector databases (`vector_db.provider`)
 
 > **Security note (2026-11-04).** `chromadb` 1.5.9 — the latest release — carries four unfixed advisories (PYSEC-2026-311, -3813, -3814, -3815). All four are in Chroma's HTTP server, which fasterRag never starts; the adapter runs embedded against a local directory. See [security.md](security.md) §6 for the reasoning and its limits. If you run a Chroma server of your own, those advisories apply to it regardless of fasterRag.

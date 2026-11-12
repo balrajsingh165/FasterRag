@@ -5,7 +5,7 @@ import pytest
 from fasterrag.cli.main import main
 from fasterrag.cli.output import ExitCode
 from fasterrag.config.loader import load_settings
-from fasterrag.config.template import canonical_config_text
+from fasterrag.config.template import canonical_config_text, profile_config_text
 
 
 def run(arguments: list[str]) -> int:
@@ -134,3 +134,52 @@ def test_every_variable_the_canonical_config_references_is_in_the_template(
 
     for name in ("OPENAI_API_KEY", "QDRANT_API_KEY", "FASTERRAG_API_KEY"):
         assert f"{name}=" in template, name
+
+
+def test_the_local_profile_loads_with_no_environment_variable_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A first run needed a running Qdrant and three keys; the local profile needs neither."""
+    for name in ("OPENAI_API_KEY", "QDRANT_API_KEY", "FASTERRAG_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    destination = tmp_path / "config.yaml"
+
+    code = run(["config", "init", "--profile", "local", "--path", str(destination)])
+    settings = load_settings(destination, env_file=None)
+
+    assert code == ExitCode.SUCCESS
+    assert settings.required_env_vars() == {}
+    assert settings.vector_db.provider == "chroma"
+    assert settings.embeddings.provider == "huggingface"
+    assert settings.retrieval.rerank is False
+
+
+def test_the_local_profile_is_the_packaged_second_template(tmp_path: Path) -> None:
+    destination = tmp_path / "config.yaml"
+
+    run(["config", "init", "--profile", "local", "--path", str(destination)])
+
+    assert destination.read_text(encoding="utf-8") == profile_config_text("local")
+    assert profile_config_text("local") != canonical_config_text()
+
+
+def test_the_local_profile_writes_no_secrets_template(tmp_path: Path) -> None:
+    """It references no variable, so a template full of keys would only mislead."""
+    run(["config", "init", "--profile", "local", "--path", str(tmp_path / "config.yaml")])
+
+    assert not (tmp_path / ".env.example").exists()
+
+
+def test_the_default_profile_is_still_the_canonical_config(tmp_path: Path) -> None:
+    destination = tmp_path / "config.yaml"
+
+    run(["config", "init", "--profile", "default", "--path", str(destination)])
+
+    assert destination.read_text(encoding="utf-8") == canonical_config_text()
+
+
+def test_an_unknown_profile_is_a_usage_error(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as caught:
+        run(["config", "init", "--profile", "cloud", "--path", str(tmp_path / "config.yaml")])
+
+    assert caught.value.code == ExitCode.USAGE

@@ -22,7 +22,7 @@ from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import overrides_from, settings_from
 from fasterrag.config.schema import Settings
-from fasterrag.config.template import canonical_config_text, env_template_text
+from fasterrag.config.template import env_template_text, profile_config_text
 from fasterrag.errors import ConfigError, FasterRagError
 from fasterrag.services.ci_status import (
     DEFAULT_WORKFLOW_DIR,
@@ -50,8 +50,9 @@ __all__ = [
 
 
 async def run_config_init(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Write the canonical ``config.yaml`` into the current directory."""
+    """Write the ``config.yaml`` the ``--profile`` names (the canonical one by default)."""
     destination = Path(args.path)
+    profile: str = args.profile
 
     if destination.exists() and not args.force:
         console.error(
@@ -62,7 +63,7 @@ async def run_config_init(args: argparse.Namespace, console: Console) -> ExitCod
         return ExitCode.USAGE
 
     try:
-        body = canonical_config_text()
+        body = profile_config_text(profile)
     except ConfigError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.FAILURE
@@ -70,6 +71,14 @@ async def run_config_init(args: argparse.Namespace, console: Console) -> ExitCod
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(body, encoding="utf-8")
     console.emit(f"wrote {destination}")
+
+    if profile == "local":
+        console.emit('next: pip install "fasterrag[chroma,huggingface]", then')
+        console.emit("      'fasterrag ingest <file>'; no service to start, no key to set")
+        console.document(
+            {"written": True, "path": str(destination), "profile": profile, "env_example": None}
+        )
+        return ExitCode.SUCCESS
 
     # CRITICAL: the secrets template is written as `.env.example`, never as `.env`. The
     # loader reads `.env`, so writing there could overwrite an operator's real credentials
@@ -87,6 +96,7 @@ async def run_config_init(args: argparse.Namespace, console: Console) -> ExitCod
         {
             "written": True,
             "path": str(destination),
+            "profile": profile,
             "env_example": str(example) if wrote_example else None,
         }
     )

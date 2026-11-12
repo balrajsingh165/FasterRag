@@ -222,6 +222,19 @@ async def test_a_missing_secret_is_named_without_its_value(
     assert "llm.api_key_env" in check.detail
 
 
+@pytest.mark.usefixtures("healthy_environment")
+async def test_a_variable_no_enabled_feature_reads_is_not_reported_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Doctor failed `secrets` over FASTERRAG_API_KEY with auth off (TASK-0444)."""
+    monkeypatch.delenv("FASTERRAG_API_KEY", raising=False)
+
+    report = await run_doctor(Settings())
+    check = next(item for item in report.checks if item.name == "secrets")
+
+    assert "FASTERRAG_API_KEY" not in check.detail
+
+
 async def test_invalid_config_is_a_failed_check_not_an_exception(tmp_path: Path) -> None:
     config = tmp_path / "config.yaml"
     config.write_text("app:\n  port: 70000\n", encoding="utf-8")

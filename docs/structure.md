@@ -100,7 +100,10 @@ fasterRag/
 │       ├── config/               # Loaders + schema
 │       │   ├── schema.py         # Pydantic v2 models mirroring config-reference.md
 │       │   ├── plugins.py        # Entry-point names by group, read from metadata only
+│       │   ├── template.py       # The packaged config templates `config init` writes
 │       │   └── loader.py         # pydantic-settings YAML source + .env; fail-fast
+│       ├── data/                 # Packaged files; the wheel also force-includes config.yaml here
+│       │   └── config.local.yaml # The local profile: embedded Chroma, local embeddings, no keys
 │       ├── observability/        # Metrics, tracing, dashboard
 │       │   ├── logging.py        # Structured JSON logging + correlation ids
 │       │   ├── otel_export.py    # Span helpers (retrieval/reranker/context/generation)

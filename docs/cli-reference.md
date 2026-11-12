@@ -307,6 +307,7 @@ The file written is byte-identical to the repository's `config.yaml`: it is forc
 |---|---|
 | `--path PATH` | Where to write; defaults to `./config.yaml`. Parent directories are created. |
 | `--force` | Overwrite an existing file. Without it an existing `config.yaml` is never touched — exit 2. |
+| `--profile default\|local` | Which template to write. `default` (the default) is the canonical `config.yaml` described above. `local` writes the **local profile** (TASK-0444): a short file holding only the keys that differ from the defaults — embedded Chroma under `.fasterrag/chroma`, the local `BAAI/bge-small-en-v1.5` embedding model, no reranker, and a local Ollama for generation — so it references **no environment variable** and needs no running service for ingestion and retrieval. It needs `pip install "fasterrag[chroma,huggingface]"`, and writes no `.env.example`, because there is nothing to put in one. The template ships inside the wheel at `fasterrag/data/config.local.yaml`. |
 
 The secrets template is always written as `.env.example`, never as `.env`: the loader reads `.env`, so writing placeholders there could overwrite real credentials, and a file of `change-me` values that startup treats as configured is worse than no file. An existing `.env.example` is left alone.
 
@@ -318,9 +319,18 @@ next: copy .env.example to .env, fill in what config.yaml references,
       then run 'fasterrag doctor'
 ```
 
+```
+$ fasterrag config init --profile local
+wrote config.yaml
+next: pip install "fasterrag[chroma,huggingface]", then
+      'fasterrag ingest <file>'; no service to start, no key to set
+```
+
+Under `--json` the result document is `{"written", "path", "profile", "env_example"}`; `env_example` is `null` when no secrets template was written.
+
 ## `fasterrag config validate`
 
-Validate `config.yaml` + `.env` presence of referenced env vars without starting anything. Exit 0/2. Same fail-fast checks as startup ([config-reference.md](config-reference.md) cross-field rules).
+Validate `config.yaml` + `.env` presence of the env vars an enabled feature reads (rule 9) without starting anything. Exit 0/2. Same fail-fast checks as startup ([config-reference.md](config-reference.md) cross-field rules).
 
 Startup also **refuses to run** under settings the schema accepts but nothing enforces — `security.auth`, `security.multi_tenancy`, and either `cost.*_token_budget`. Enabling one raises `CONFIG_INVALID` naming the slice that will implement it. Reporting a protection the system does not have is the one failure mode worse than an outage.
 

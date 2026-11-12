@@ -272,6 +272,11 @@ jobs:
   # blocker and finding it at tag time is finding it too late. Installing `.[dev]` rather
   # than bare `build` is deliberate: it also fails if `build` is ever dropped from the dev
   # extra, which is the defect that sent a releaser to a tool they did not have.
+  #
+  # Since TASK-0444 the script also adds `[chroma,huggingface]` to that venv and runs the local
+  # profile end to end — ingest a Markdown file, answer a `retrieve`, no service and no key.
+  # That installs torch (from the CPU-only index, not PyPI's CUDA build) and downloads the
+  # embedding model from the Hugging Face Hub, so this job now takes minutes, not seconds.
   packaging:
     runs-on: ubuntu-latest
     steps:

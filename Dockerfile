@@ -5,9 +5,12 @@
 # version-skew bug waiting to be filed.
 #
 # Built in stages so the runtime layer carries no compiler, no build backend, no installer,
-# and no package index cache. The `.[all]` extras are deliberately NOT installed: they pull a
-# multi-gigabyte deep-learning runtime that a hosted-provider deployment never loads. Build
-# with `--build-arg EXTRAS=huggingface` (or `all`) when local models are wanted.
+# and no package index cache. The image always carries BASE_EXTRAS, what a served deployment
+# of the default config.yaml needs: `server` (FastAPI, uvicorn), `qdrant`, and the `pdf`,
+# `docx` and `html` parsers, which were the core install until TASK-0444 made them extras. The
+# `.[all]` extras are deliberately NOT installed: they pull a multi-gigabyte deep-learning
+# runtime that a hosted-provider deployment never loads. Build with
+# `--build-arg EXTRAS=huggingface` (or `all`) when local models are wanted.
 
 # Both base images are pinned by digest, with the tag kept beside each for a human. A tag is a
 # moving target: `python:3.12-slim` is rebuilt for every Debian and CPython patch, so the same
@@ -27,6 +30,7 @@ FROM ghcr.io/astral-sh/uv:0.12.3@sha256:2d890623d310b57771ce840f0da5eed5fc6d657d
 FROM base AS builder
 
 ARG EXTRAS=""
+ARG BASE_EXTRAS="server,qdrant,pdf,docx,html"
 
 # CRITICAL: UV_PYTHON_DOWNLOADS=never. Without it uv may fetch its own interpreter into the
 # builder, and the virtual environment copied into the runtime stage would point at a Python
@@ -49,10 +53,11 @@ WORKDIR /build
 # commit built on two days could ship two different sets of packages.
 #
 # Copied before the source so a source-only change reuses this layer. EXTRAS is a
-# comma-separated list of extras (`huggingface`, `huggingface,redis`, `all`).
+# comma-separated list of extras (`huggingface`, `huggingface,redis`, `all`), installed on top
+# of BASE_EXTRAS.
 COPY pyproject.toml uv.lock ./
 RUN extras=""; \
-    for extra in $(echo "${EXTRAS}" | tr ',' ' '); do extras="${extras} --extra ${extra}"; done; \
+    for extra in $(echo "${BASE_EXTRAS},${EXTRAS}" | tr ',' ' '); do extras="${extras} --extra ${extra}"; done; \
     uv sync --locked --no-dev --no-editable --no-install-project ${extras}
 
 # CRITICAL: .env.example is a build input, not documentation. The wheel target force-includes
@@ -65,7 +70,7 @@ RUN extras=""; \
 COPY README.md .env.example config.yaml ./
 COPY src/ ./src/
 RUN extras=""; \
-    for extra in $(echo "${EXTRAS}" | tr ',' ' '); do extras="${extras} --extra ${extra}"; done; \
+    for extra in $(echo "${BASE_EXTRAS},${EXTRAS}" | tr ',' ' '); do extras="${extras} --extra ${extra}"; done; \
     uv sync --locked --no-dev --no-editable ${extras}
 
 
