@@ -1,8 +1,20 @@
 """Caching: the embedding cache and the semantic response cache.
 
-Two caches with different jobs. The embedding cache is on by default and keyed by exact
-content, so a hit is always correct; the semantic cache is off by default and keyed by
-similarity, so a hit is a judgement call bounded by ``cache.similarity_threshold``.
+Two caches with different jobs. The embedding cache is on by default
+(``embeddings.cache.enabled``) and keyed by the exact text together with everything that
+decides its vector — provider, model, model version, configured dimensions, and whether it
+is embedded as a document or as a query — so a hit is the vector the provider would have
+returned, at the float32 precision the cache packs vectors in. The semantic cache is off by
+default and keyed by similarity, so a hit is a judgement call bounded by
+``cache.similarity_threshold``.
+
+The embedding cache is applied in exactly one place,
+``services.composition.create_embedding_router``, which wraps every adapter of the router
+that the API, the CLI, the facade and the ingestion service all build. Nothing in this
+package applies it, and an adapter constructed directly through
+``adapters.embeddings.create_embedding_adapter`` is not cached. Vectors produced by late
+chunking pass through uncached, because they depend on the whole document rather than on
+the chunk's text (see ``embedding.py``).
 
 Both share one rule, from FMEA row 23: **a cache failure degrades to cache-off**. Every
 backend error is caught, counted, and stepped past. Correctness never depends on a cache
