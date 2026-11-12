@@ -74,6 +74,18 @@ def test_the_removed_app_workers_key_is_refused_by_name_whatever_its_value(value
         Settings.model_validate({"app": {"workers": value}})
 
 
+@pytest.mark.parametrize("value", [True, False])
+def test_the_removed_degradation_ladder_key_is_refused_by_name(value: object) -> None:
+    """``reliability.degradation_ladder`` was validated and read by nothing (TASK-0507)."""
+    with pytest.raises(ValidationError, match=r"reliability\.degradation_ladder was removed"):
+        Settings.model_validate({"reliability": {"degradation_ladder": value}})
+
+
+def test_the_degradation_ladder_setting_is_gone() -> None:
+    """Gone rather than pending: the ladder always ran, whatever the key said."""
+    assert not hasattr(Settings().reliability, "degradation_ladder")
+
+
 def test_the_pipeline_worker_section_is_not_the_removed_key() -> None:
     """``workers.*`` sizes the real pools and must keep loading."""
     settings = Settings.model_validate({"workers": {"cpu_pool_size": 2}})
