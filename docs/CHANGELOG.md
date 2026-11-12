@@ -226,6 +226,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The `cache_only` degradation rung is deferred rather than built (2026-11-13, TASK-0159, ADR-0011).
+
+- **The degradation ladder is the two rungs that ship** (2026-11-13, TASK-0165, ADR-0011). The documentation described a third rung, `cache_only`, that was never built. The ladder is now documented as exactly what runs: `hybrid_only` when the reranker fails and `extractive` when the LLM fails; a vector-database outage is a typed, retryable error. No response ever carried `mode: cache_only`, so clients see no change.
+
+- **Cross-encoder reranking ships off by default** (2026-11-13, TASK-0175, ADR-0010). With `retrieval.rerank: true` as the default, a fresh install's first query downloaded 2.14 GB of model weights and each query then took about a minute on a CPU, while nothing measured what reranking bought. **`retrieval.rerank` now defaults to `false`.** Set `retrieval.rerank: true` to keep the previous behaviour; a deployment that relied on the implicit default stops reranking on upgrade, and its `index.lock` reports a configuration change.
+
 - **The release SBOM is tested** (2026-11-13, TASK-0087). A test now pins that every release rehearsal builds the CycloneDX SBOM from the committed lockfile and that the published release attaches it; the document validates against the CycloneDX 1.5 schema.
 
 - **The branch-protection settings for `main` are written down** (2026-11-13, TASK-0313). `docs/release.md` now lists the exact GitHub ruleset and required checks for `main`, and why the `branch-verdict` job is a visible check rather than a required one.
