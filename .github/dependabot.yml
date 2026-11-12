@@ -1,0 +1,64 @@
+# Dependency-update pull requests (TASK-0496, docs/security.md §6).
+#
+# Three ecosystems, each checked weekly and grouped so a week's routine bumps arrive as one
+# pull request rather than a dozen:
+#
+#   uv              pyproject.toml and uv.lock. Minor and patch releases are grouped; a major
+#                   release arrives on its own, because it is the one that breaks an API.
+#   github-actions  the SHA pins in .github/workflows and the composite actions under
+#                   .github/actions. Dependabot moves the SHA and the version comment beside
+#                   it together, which is what keeps a pin from becoming a way of never
+#                   taking a fix.
+#   docker          the digest-pinned FROM lines in the Dockerfile.
+#
+# Every pull request it opens runs ci.yml like any other branch: the push run and the
+# pull-request run, the whole gate set. A lockfile refresh moves versions the tests depend
+# on, so nothing here is merged on a green dependency audit alone.
+#
+# The subject is `build(deps): ...`, a Conventional Commits line. Dependabot's commit also
+# carries a body and a Signed-off-by trailer, which the `commit-messages` job rejects, so
+# its pull requests are squash-merged under their single-line title (docs/security.md §6).
+version: 2
+
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "build"
+      include: "scope"
+    groups:
+      python-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "build"
+      include: "scope"
+    groups:
+      base-images:
+        patterns:
+          - "*"
