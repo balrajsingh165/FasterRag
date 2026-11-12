@@ -2330,8 +2330,9 @@ Args:
 
     Returns:
         The grading prompt. The context is rendered with the same markers P1 used, so the
-        grader can name the chunk that supports a claim; the answer goes last so the
-        stable context prefix stays cacheable across the P1 and P3 calls of one query.
+        grader can name the chunk that supports a claim. Context and answer are enclosed in
+        tags carrying a boundary of the grading prompt's own (TASK-0446), so neither a
+        passage nor the answer can close its block and address the grader.
 
 ### `parse_verdict`
 
@@ -2372,7 +2373,8 @@ Args:
         texts: The packed chunk texts, in the same order.
 
     Returns:
-        The block placed inside the prompt's ``<context>`` tags.
+        The block placed inside the prompt's ``<context-boundary>`` tags. Markers inside
+        chunk text and sources are made inert and a source is kept to one line (TASK-0446).
 
 ### `resolve_citations`
 
@@ -2685,8 +2687,8 @@ Args:
 
 > Return the retrieval-affecting configuration a trace executed under.
 
-The same subset the index lockfile anchors on, plus the generation settings that change
-    an answer without changing what was retrieved. Replay compares these two snapshots to
+The same subset the index lockfile anchors on, plus the generation settings and the P1/P3
+    prompt template versions, which change an answer without changing what was retrieved. Replay compares these two snapshots to
     explain a difference, so anything omitted here is a difference replay cannot account for.
 
 ### `SpanRecorder`

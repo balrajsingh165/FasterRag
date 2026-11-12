@@ -10,7 +10,10 @@ information rather than noise.
 
 A trace records the **retrieval-affecting configuration** it executed under, not the whole
 file. That subset is what replay varies, and recording ``app.port`` alongside it would make
-every unrelated edit look like a reason an answer changed.
+every unrelated edit look like a reason an answer changed. The P1 and P3 template versions
+are part of that subset (``prompts.*``): a prompt change alters answers without touching
+retrieval, so a replay that could not see it would blame the configuration for it. A trace
+stored before they were recorded replays with both keys reported as changed from ``None``.
 
 Nothing here holds a secret: the snapshot carries provider and model names, never keys, in
 line with invariant 6 of the data model.
@@ -23,6 +26,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from fasterrag.config.schema import Settings
+from fasterrag.core.faithfulness import P3_TEMPLATE_VERSION
+from fasterrag.core.generation import P1_TEMPLATE_VERSION
 from fasterrag.core.retrieval.models import ScoredChunk
 
 __all__ = [
@@ -37,7 +42,7 @@ SPAN_NAMES: tuple[str, ...] = ("retrieval", "reranker", "context-assembly", "gen
 
 
 def config_snapshot(settings: Settings) -> dict[str, Any]:
-    """Return the retrieval-affecting configuration a trace executed under."""
+    """Return the retrieval-affecting configuration and prompt templates a trace ran under."""
     return {
         "chunking": settings.chunking.model_dump(mode="json"),
         "embeddings": {
@@ -52,6 +57,10 @@ def config_snapshot(settings: Settings) -> dict[str, Any]:
             "model": settings.llm.model,
             "temperature": settings.llm.temperature,
             "max_tokens": settings.llm.max_tokens,
+        },
+        "prompts": {
+            "p1_template_version": P1_TEMPLATE_VERSION,
+            "p3_template_version": P3_TEMPLATE_VERSION,
         },
     }
 

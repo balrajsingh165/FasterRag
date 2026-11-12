@@ -4,6 +4,8 @@ from typing import Any
 import pytest
 
 from fasterrag.config.schema import Settings
+from fasterrag.core.faithfulness import P3_TEMPLATE_VERSION
+from fasterrag.core.generation import P1_TEMPLATE_VERSION
 from fasterrag.core.tracing import Span, SpanRecorder, Trace, config_snapshot
 from fasterrag.errors import FasterRagError
 from fasterrag.services.replay import diff_config, diff_retrieval, replay_trace
@@ -98,6 +100,44 @@ def test_an_unrelated_key_is_absent_from_the_snapshot() -> None:
 
     assert "app" not in snapshot
     assert "security" not in snapshot
+
+
+def test_the_snapshot_names_the_prompt_templates_a_trace_ran_under() -> None:
+    """The snapshot carried no template version, so replay could not see a prompt change."""
+    assert config_snapshot(Settings())["prompts"] == {
+        "p1_template_version": P1_TEMPLATE_VERSION,
+        "p3_template_version": P3_TEMPLATE_VERSION,
+    }
+
+
+def test_a_changed_template_is_named_by_the_config_diff() -> None:
+    before = config_snapshot(Settings())
+    before["prompts"] = {**before["prompts"], "p1_template_version": "1.0.0"}
+
+    changes = diff_config(before, config_snapshot(Settings()))
+
+    assert changes == [
+        {"key": "prompts.p1_template_version", "was": "1.0.0", "now": P1_TEMPLATE_VERSION}
+    ]
+
+
+async def test_a_trace_stored_before_templates_were_recorded_replays_as_changed() -> None:
+    from fasterrag.core.retrieval.models import ScoredChunk
+    from fasterrag.services.generation import Answer
+
+    old = {key: value for key, value in config_snapshot(Settings()).items() if key != "prompts"}
+    candidates = [ScoredChunk(chunk_id="c_a", text="body"), ScoredChunk(chunk_id="c_b", text="b")]
+    service = StubGeneration(Answer(answer="thirty days"), candidates)
+
+    result = await replay_trace(trace(config_snapshot=old), Settings(), service)  # type: ignore[arg-type]
+
+    assert result.retrieval.identical is True
+    assert [change["key"] for change in result.config_changes] == [
+        "prompts.p1_template_version",
+        "prompts.p3_template_version",
+    ]
+    assert all(change["was"] is None for change in result.config_changes)
+    assert result.deterministic is False
 
 
 def test_the_snapshot_never_holds_a_secret() -> None:

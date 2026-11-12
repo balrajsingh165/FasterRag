@@ -250,7 +250,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = (
         settings if settings is not None else load_settings(_configured_path(), export_env=True)
     )
-    configure_logging(resolved.app.log_level)
+    configure_logging(resolved.app.log_level, secret_env=resolved.referenced_env_vars())
 
     app = FastAPI(
         title="fasterRag",
