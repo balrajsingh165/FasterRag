@@ -47,9 +47,13 @@ The user-facing inverse of [failure-modes.md](failure-modes.md) (which is engine
 | Ingestion is slow, GPU underutilized | CPU parse/chunk stage is the bottleneck, so embedding workers idle | Raise `workers.cpu_pool_size`; the streaming hand-off is designed so embedding never waits on parsing |
 | Ingestion slow, CPU idle | Embedding is the bottleneck (or a provider is throttling) | Raise `workers.embedding_pool_size` / `embeddings.batch_size`; check for retry-storm logs indicating provider 429s |
 
-### An ingest job is refused with `chunking.strategy is 'semantic'`
+### An ingest job is refused with `chunking.strategy is 'semantic', which needs a local embedding model`
 
-The ingestion pipeline cannot run the semantic chunker yet (TASK-0431): its parse workers have no embedding model. Set `chunking.strategy` to `recursive`, `layout`, `fixed` or `late`. Before 2026-11-11 the job was accepted and every document was dead-lettered with this same error.
+Semantic chunking finds boundaries with an embedding model that each parse worker loads for itself, and only a local model can be loaded there: `embeddings.provider` must be `huggingface`. Any provider reached over the network (`openai`, `cohere`, `ollama`, a plugin) is refused with `CONFIG_INVALID` before the job is recorded. Set `embeddings.provider: huggingface`, or set `chunking.strategy` to `recursive`, `layout`, `fixed` or `late`. Until 2026-11-12 the pipeline refused the semantic strategy for every provider, and before 2026-11-11 it accepted the job and dead-lettered every document.
+
+### A semantic-chunking job is slow to start, or a worker dies at start-up
+
+With `chunking.strategy: semantic`, every parse worker loads its own copy of the embedding model before the first document is handed to the pool, and again in each fresh worker after a parse timeout recycles the pool. Start-up therefore takes one model load, and memory is `workers.cpu_pool_size` times the model's size. A worker killed while loading fails the job with `CHUNK_FAILED`; lower `workers.cpu_pool_size` or choose a smaller model.
 
 ### A job has been `running` since the process restarted
 

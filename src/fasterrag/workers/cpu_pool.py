@@ -37,12 +37,14 @@ file, where the hash of nothing would match every empty file that came after (TA
 
 The semantic strategy needs a sentence embedder, and a pool task receives only the task and
 the settings, so no model object can be handed to a worker. Each worker builds its own, once,
-on first use, cached by model name (TASK-0431) — a local model only, because a hosted
-provider's client cannot be driven from here. Loading a model can take longer than a parse is
-allowed, so before any document is submitted — at pool start and after every recycle — every
-worker loads it: warm-up tasks are sent until each worker has answered one, and no document's
-deadline is running while a model loads. Each worker holds its own copy of the model, so the
-memory it takes is ``workers.cpu_pool_size`` times the model's.
+on first use, cached by model name (TASK-0431) — a local model only, because a provider
+reached over the network cannot be driven from here. Loading a model can take longer than a
+parse is allowed, so before any document is submitted — at pool start and after every
+recycle — every worker loads it: warm-up tasks are sent until each worker process has
+answered one, and no document's deadline is running while a model loads. A worker that never
+takes a warm-up task within ``_WARM_STALL_SECONDS`` is logged and left to load on first use
+rather than hanging the job. Each worker holds its own copy of the model, so the memory it
+takes is ``workers.cpu_pool_size`` times the model's.
 """
 
 from __future__ import annotations
@@ -56,7 +58,7 @@ from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field, replace
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from threading import Lock, get_ident
+from threading import Lock
 from time import perf_counter
 from typing import Final
 
@@ -100,6 +102,9 @@ hung documents would be resubmitted and given a whole new deadline to hang throu
 """
 
 _WARM_RETRY_SECONDS: Final = 0.05
+
+_WARM_STALL_SECONDS: Final = 30.0
+"""How long warm-up waits for a worker that has started no warm-up task before giving up."""
 
 LOCAL_SENTENCE_EMBEDDERS: Final[frozenset[str]] = frozenset({"huggingface"})
 """The ``embeddings.provider`` values whose model a parse worker can load for itself."""
@@ -155,9 +160,10 @@ def require_runnable_chunker(settings: Settings) -> None:
     raise ConfigError(
         "chunking.strategy is 'semantic', which needs a local embedding model: the parse "
         "workers find sentence boundaries with a model each of them loads, and "
-        f"embeddings.provider is {provider!r}, a hosted provider whose client cannot run "
-        "there. Set embeddings.provider to 'huggingface' (a local sentence-transformers "
-        "model), or set chunking.strategy to 'recursive', 'layout', 'fixed' or 'late'"
+        f"embeddings.provider is {provider!r}, a provider reached over the network, whose "
+        "client cannot run there. Set embeddings.provider to 'huggingface' (a local "
+        "sentence-transformers model), or set chunking.strategy to 'recursive', 'layout', "
+        "'fixed' or 'late'"
     )
 
 
@@ -173,10 +179,10 @@ def sentence_embedder(settings: Settings) -> SentenceEmbedder:
     return embedder
 
 
-def _warm_sentence_embedder(settings: Settings) -> tuple[int, int]:
-    """Load this worker's sentence embedder, and return which worker this is."""
+def _warm_sentence_embedder(settings: Settings) -> int:
+    """Load this worker's sentence embedder, and return the process it lives in."""
     sentence_embedder(settings).embed(["warm"])
-    return os.getpid(), get_ident()
+    return os.getpid()
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,27 +380,15 @@ class CpuWorkerPool:
     async def _warm_sentence_embedders(self) -> None:
         """Load the sentence embedder in every worker before any document's deadline runs.
 
-        Warm-up tasks are sent until ``self.size`` distinct workers have answered one, so
-        the executor factory must start as many workers as it is asked for.
+        Threads share their process's embedder, so a thread pool needs one warm-up.
         """
         if self.settings.chunking.strategy != "semantic":
             return
 
-        loop = asyncio.get_running_loop()
         started = perf_counter()
-        warmed: set[tuple[int, int]] = set()
+        expected = self.size if isinstance(self._executor, ProcessPoolExecutor) else 1
         try:
-            while len(warmed) < self.size:
-                replies = await asyncio.gather(
-                    *(
-                        loop.run_in_executor(self._executor, _warm_sentence_embedder, self.settings)
-                        for _ in range(self.size - len(warmed))
-                    )
-                )
-                fresh = set(replies) - warmed
-                warmed |= fresh
-                if not fresh:
-                    await asyncio.sleep(_WARM_RETRY_SECONDS)
+            warmed = await self._warmed_processes(expected)
         except BrokenProcessPool as exc:
             raise IngestionError(
                 "a parse worker died while loading the sentence embedding model "
@@ -404,14 +398,47 @@ class CpuWorkerPool:
                 code=ErrorCode.CHUNK_FAILED,
                 retryable=False,
             ) from exc
-        _logger.info(
-            "loaded the sentence embedding model in every parse worker",
-            extra={
-                "seconds": round(perf_counter() - started, 2),
-                "workers": self.size,
-                "model": self.settings.embeddings.model,
-            },
-        )
+
+        details = {
+            "seconds": round(perf_counter() - started, 2),
+            "workers": warmed,
+            "model": self.settings.embeddings.model,
+        }
+        if warmed < expected:
+            _logger.warning(
+                "not every parse worker loaded the sentence embedding model before the first "
+                "document; one that loads it later does so inside a document's parse deadline",
+                extra={**details, "expected": expected},
+            )
+        else:
+            _logger.info("loaded the sentence embedding model in every parse worker", extra=details)
+
+    async def _warmed_processes(self, expected: int) -> int:
+        """Send warm-up tasks until ``expected`` processes have answered, and return how many did.
+
+        Gives up after ``_WARM_STALL_SECONDS`` in which only already-warm processes answered, so
+        an executor that never starts the workers it was asked for cannot hang the job.
+        """
+        loop = asyncio.get_running_loop()
+        warmed: set[int] = set()
+        stalled_since: float | None = None
+        while len(warmed) < expected:
+            replies = await asyncio.gather(
+                *(
+                    loop.run_in_executor(self._executor, _warm_sentence_embedder, self.settings)
+                    for _ in range(expected - len(warmed))
+                )
+            )
+            fresh = set(replies) - warmed
+            warmed |= fresh
+            if fresh:
+                stalled_since = None
+                continue
+            stalled_since = stalled_since or perf_counter()
+            if perf_counter() - stalled_since > _WARM_STALL_SECONDS:
+                break
+            await asyncio.sleep(_WARM_RETRY_SECONDS)
+        return len(warmed)
 
     async def _warm_token_counter(self) -> None:
         """Load the embedding tokenizer before the first document rather than during it."""

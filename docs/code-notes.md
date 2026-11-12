@@ -4242,14 +4242,6 @@ The two halves are joined by a bounded queue, so each can strand the other: a de
     consumer leaves the producer blocked on a full queue, and a dead producer leaves the
     consumers waiting for a close that never comes. Whichever stops first decides.
 
-### `_require_pipeline_chunker`
-
-> Refuse a job whose chunking strategy the ingestion pipeline cannot run.
-
-Semantic chunking needs an embedding model inside the parse worker, and the pipeline
-    does not provide one (TASK-0431). Refusing here costs one check per job; not refusing
-    dead-letters every document of the corpus with the same configuration error.
-
 ## `src/fasterrag/services/journal.py`
 
 ### `_write_atomically`
