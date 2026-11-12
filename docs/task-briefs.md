@@ -110,47 +110,7 @@ Process-wide singletons (`shared_breaker`, the cross-encoder model cache, `share
 
 ## 1. P0 — blocks a credible public alpha
 
-Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs), then TASK-0437, TASK-0444, TASK-0445.
-
-### TASK-0437 — A journal that survives a crash and two processes
-
-**Goal.** No interleaving of writes and crashes produces a missing or torn job record, and looking up a job by idempotency key does not read every job file.
-
-**Where.** `services/journal.py:143` `_write_atomically(path, payload)` does, in order: compute `path + ".tmp"`; create the parent; **if the live file exists, `os.replace(path, path + ".prev")`** (`:148-149`); write the temporary file; `os.replace(tmp, path)`; on `OSError`, unlink the temporary file and raise `IngestionError(INTERNAL)`. Between the third and fifth step there is no live file, and `load_job_blocking` (`:286`) checks `path.exists()` first (`:289`) and raises `NOT_FOUND` even though `.prev` is intact. Nothing in `src/` calls `fsync` or takes a file lock. Appends (`record_document_blocking` `:379-385`, `remember_content_blocking` `:503-509`) use `open("a")` unlocked and are **not** wrapped, so a raw `OSError` escapes the taxonomy (TASK-0475). `find_by_idempotency_key_blocking` (`:321`) globs and reads every `jobs/*.json`; `known_content_blocking` (`:515`) reads the whole dedup file, once per `process()` (`workers/cpu_pool.py:235`). File layout: `jobs/<id>.json`, `jobs/<id>/documents.jsonl`, `collections/<c>/content-hashes.jsonl` (`:54-58`). The full public surface — `create_job`, `save_job`, `load_job`, `find_by_idempotency_key`, `checkpoint`, `resume_index`, `record_document`, `record_indexed`, `dead_letter`, `documents`, `dead_lettered`, `remember_content`, `known_content`, `document_hashes`, `is_duplicate`, `counts` — is at `:188-550`, with `create_journal(settings, root)` at `:559`.
-
-**Steps.**
-1. **Decide the backend and record it as an ADR.** Either (a) SQLite in WAL mode behind the existing `Journal` interface — one writer, indexed lookups, atomic by construction, in the standard library; or (b) keep files and fix them: write the temporary file, `fsync` it, `os.replace` over the live file (never rename the live file away first), `fsync` the directory where the platform allows, take an advisory lock around appends, and keep an index file for idempotency keys. (a) is the smaller amount of code that can be wrong.
-2. Whichever is chosen, fix the read side first as its own commit: `load_job` must fall back to `.prev` when the live file is missing, not only when it is unreadable.
-3. Make the idempotency lookup indexed, then re-run `scripts/measure_idempotency_reclaim.py` and add a new `BENCH-` entry (do not edit BENCH-0004; ledger entries are append-only).
-4. If the backend changes, write a one-shot migration from the file layout and a test for it. Operators have journals on disk.
-
-**Tests.** A Hypothesis stateful test that interleaves writes, simulated crashes (an injected failure between any two file operations) and reads, asserting a reader never sees a missing or torn record. Keep green: `test_a_torn_write_falls_back_to_the_previous_good_record` (`tests/unit/services/test_journal.py:91`), `test_writes_never_leave_a_temporary_file_behind` (`:127`), `test_a_full_filesystem_becomes_a_typed_error_not_a_raw_oserror` (`:218`), and the class `TestTheAsyncFaceKeepsFileIoOffTheEventLoop` (`:254`). A two-process test (subprocesses appending to one job) for the lock.
-
-**Documents.** [failure-modes.md](failure-modes.md) rows 32 and 33, [reliability.md](reliability.md) §3, [benchmarks.md](benchmarks.md), a new ADR, [disaster-recovery.md](disaster-recovery.md) if the on-disk layout changes.
-
-**Traps.** [api-reference.md](api-reference.md) `:113` states that the idempotency-key scan "will not be indexed; it retires with the field at 1.0 (TASK-0358)". That sentence and this task disagree: read TASK-0358 and resolve it in the same change, in whichever direction the maintainer decides. `tests/unit/test_no_blocking_journal_in_async.py` requires the two-faced method shape on any replacement. Windows cannot `fsync` a directory.
-
-**Done when.** The stateful test passes, the lookup is indexed, and the new ledger entry exists. **Moves:** reliability, performance, architecture.
-
-### TASK-0444 — A first run that needs nothing but `pip`
-
-**Goal.** In a clean virtual environment with no network services, the local profile ingests a Markdown file and answers a `retrieve` call.
-
-**Where.** Mandatory dependencies (`pyproject.toml:32-48`): `beautifulsoup4`, `fastapi`, `httpx`, `lxml`, `markdown-it-py`, `pdfplumber`, `psutil`, `python-docx`, `pydantic`, `pydantic-settings[yaml]`, `python-dotenv`, `pyyaml`, `qdrant-client`, `snowballstemmer`, `uvicorn[standard]`. The default configuration (`config.yaml`) uses Qdrant in Docker mode, a Hugging Face embedder and a reranker — the last two need extras the base install does not include. **Correction to the task entry:** the default configuration demands three environment variables, not two — `QDRANT_API_KEY`, `OPENAI_API_KEY` and `FASTERRAG_API_KEY` — because `config/loader.py:240` `_require_referenced_env_vars` requires every `*_env` field and `security.api_key_env` is a plain `str` (`schema.py:726`), required even with `security.auth: false`. `fasterrag config init` (`cli/commands/diagnostics.py:52`) has only `--path` and `--force`. An embedded Chroma adapter exists (`ChromaSettings`, `schema.py:218`).
-
-**Steps.**
-1. Make an unset `*_env` variable an error only when the feature that reads it is enabled (auth off ⇒ no API key needed; a keyless Qdrant ⇒ no Qdrant key).
-2. Add `--profile local` to `config init`, writing a **second packaged template**: embedded Chroma (or the in-process store from TASK-0464), a small local embedding model, no reranker, no keys.
-3. Slim the core. Move the web server to `[server]`, the Qdrant client to `[qdrant]`, and the parsers to `[pdf]`, `[docx]`, `[html]`; make each import lazy and raise an error that names the extra. Keep `all`.
-4. Extend `scripts/check_package.py` to run the local profile end to end in the clean venv it already builds.
-
-**Tests.** `tests/unit/cli/test_config_init.py` (thirteen tests; `test_the_written_config_actually_loads` sets environment variables with `monkeypatch`). `tests/unit/scripts/test_check_package.py`. Add import-error tests asserting the message names the extra.
-
-**Documents.** [quickstart.md](quickstart.md), [python-api.md](python-api.md) "Installation", `README.md`, [release.md](release.md) §3.
-
-**Traps.** These are the reasons this task is larger than it looks. `facade.py:181`, `:191` and `:214` lazily import `fasterrag.api.dependencies`, which imports `fastapi` — so the library facade needs the web framework; do TASK-0456's `services/composition.py` first. `cli/main.py:36` imports `cli/commands/processes.py`, which imports `fasterrag.api.main` at module top, so the whole CLI needs it too. `core/parsing/__init__.py:20-37` imports every parser eagerly, and `PUBLIC_IMPORTS` in `scripts/check_package.py:19-28` includes `fasterrag.parsing`. The packaged `config.yaml` must stay byte-identical to the repository copy, which is why the local profile is a second template and not an edit. `adapters/embeddings/huggingface.py:35-39` tells the user to `pip install sentence-transformers`, not the extra.
-
-**Done when.** `scripts/check_package.py` proves the local profile in a clean venv. **Moves:** developer experience, packaging.
+Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs), then TASK-0445.
 
 ### TASK-0445 — The first release
 
@@ -176,26 +136,6 @@ Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs
 ## 2. P1 — blocks a beta
 
 Do TASK-0454 early: retrieval, performance and half of testing cannot move without it.
-
-### TASK-0446 — Retrieved text is data, not instructions
-
-**Goal.** A document cannot break out of its context block, forge a citation, or instruct the grader — and a committed adversarial eval set proves it.
-
-**Where.** `core/generation.py`: `P1_TEMPLATE_VERSION = "1.0.0"` (`:39`), `P1_SYSTEM_PROMPT` (`:41-49`, no clause about context being data), `_MARKER` (`:51`), `build_context_block` (`:71-76`, raw chunk text and source), `build_prompt` (`:79-85`, `<context>\n{block}\n</context>\n\nQuestion: {q}`, nothing escaped), `resolve_citations` (`:88-114`, drops markers that name no supplied chunk — but a marker naming a *real* supplied chunk, injected from chunk text, passes). `core/faithfulness.py`: `P3_TEMPLATE_VERSION` (`:43`), `P3_SYSTEM_PROMPT` (`:45-54`), `_OBJECT = \{.*\}` greedy with DOTALL (`:57`), `build_grading_prompt` (`:87`, same raw block), `_extract_object` (`:97`), `parse_verdict` (`:114`).
-
-**Steps.**
-1. Neutralise, in `build_context_block`, the three things chunk text can forge: the closing delimiter, the citation-marker syntax, and a line beginning `Question:`. Prefer a per-request random delimiter over escaping.
-2. Add the data-not-instructions clause to P1 and P3. Bump both template versions.
-3. Replace the greedy pattern with a strict decoder that takes the last complete JSON object.
-4. Commit an adversarial set under `tests/eval/datasets/` — instruction override, delimiter break-out, forged citation, grader manipulation — with a deterministic scripted-LLM unit tier (the prompt contains no unescaped delimiter) and a model-backed eval tier.
-
-**Tests.** Wording asserts at `tests/unit/core/test_generation.py:26-29` and `tests/unit/core/test_faithfulness.py:47-53` will change. Add unit tests per attack on prompt construction and on verdict parsing (`test_a_verdict_wrapped_in_prose_is_parsed`, `:71`, must still pass).
-
-**Documents.** [prompts.md](prompts.md) P1 and P3 (the code blocks duplicate the prompts verbatim), [security.md](security.md).
-
-**Traps.** [prompts.md](prompts.md) `:14` says the template version is part of the trace `config_snapshot`; `core/tracing.py:39-56` does not include it. Add it there in this change, since a prompt change must be visible to replay. The `eval-gate` job measures retrieval only, so nothing committed gates a prompt change today (TASK-0481).
-
-**Done when.** The adversarial set is committed and gated. **Moves:** security, core RAG.
 
 ### TASK-0447 — A sparse leg that works beyond English
 
@@ -359,18 +299,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 
 **Moves:** security.
 
-### TASK-0461 — The facade as a tenant; honest error codes
-
-**Goal.** `tenant=` on `query`, `query_stream` and `retrieve` of both facades; caller errors carry a caller-error code.
-
-**Where.** `facade.py`: `_retrieval()` (`:179`) calls `build_retrieval(settings, vector_db, embeddings)` with no tenant; `_generation_service()` (`:185`) is built once and cached, also with none. The builders accept it: `build_retrieval(..., tenant=None)` (`api/dependencies.py:115`), `build_generation(..., tenant=None)` (`:130`). `RetrievalService._tenant_scoped` (`services/querying.py:165-192`) raises `TENANT_FORBIDDEN` for a missing tenant when scoping is on. `CONFIG_INVALID` is raised for misuse at `facade.py:148`, `:307` and `sync.py:79`, `:109`. The CLI emits `"VECTOR_DB_UNAVAILABLE"` (`cli/commands/processes.py:125`), which is not in `ErrorCode` (`errors.py:49-80`, 29 members).
-
-**Steps.** Thread `tenant` through; because `GenerationService` takes the tenant in its constructor, either pass it per call or stop caching the service. Add `USAGE_ERROR`. Add the CLI's code to the enum or replace it.
-
-**Traps.** Three §0.4 rows: facade parameter, `ErrorCode`, documents.
-
-**Done when.** `tests/unit/docs/test_python_api_parity.py` passes with the new signatures. **Moves:** developer experience, security.
-
 ### TASK-0467 — A disconnected client stops paying for tokens
 
 **Where.** `api/query.py:57-88`: the streaming response relies on the server cancelling the generator; the `finally` closes the service. Nothing checks `request.is_disconnected()`, and no test covers a disconnect.
@@ -378,22 +306,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 **Steps.** Write the test first: a scripted LLM that yields slowly; close the client mid-stream; assert the LLM stream was closed and a partial trace was stored with `aborted: true`. Fix what it finds.
 
 **Moves:** core RAG, reliability.
-
-### TASK-0468 — Defined behaviour at the query edge
-
-**Where.** A query against a missing collection has no service or API test, and the code raised differs by adapter. `QueryRequest` (`api/schemas.py:73-75`) enforces `min_length=1`, so a whitespace-only query passes. The facades and services validate nothing.
-
-**Steps.** One code — `NOT_FOUND` with the collection name — for a missing collection on every adapter (a contract case: `tests/contract/vectordb.py:348` accepts any `FasterRagError` today). Strip and reject blank queries in the service, so REST, CLI and the facade agree.
-
-**Moves:** core RAG, developer experience.
-
-### TASK-0469 — List the documents in a collection
-
-**Where.** The only listing is per job: `GET /v1/ingest/{job_id}/documents` (`api/ingest.py:190`). `Journal.document_hashes` (`journal.py:528`) already maps a collection's documents.
-
-**Steps.** `GET /v1/collections/{name}/documents` (paginated), `fasterrag documents list`, `FasterRag.documents()`. Build it with TASK-0443 so tombstones are honoured from the start.
-
-**Moves:** core RAG.
 
 ### TASK-0471 — Deduplication under concurrency and with the switch off
 
@@ -416,14 +328,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 **Where.** `POST /v1/ingest/{job_id}/retry-dlq` (`api/ingest.py:217-247`) accepts a new job with no idempotency key, so a repeated call starts repeated jobs. `dlq.max_retries` (`schema.py:551`) is only recorded as `attempts` (`cpu_pool.py:370`). Neither `documents.jsonl` nor the dedup file is ever pruned.
 
 **Steps.** Derive the retry job's idempotency key from the source job and its dead-letter set. Enforce `max_retries`. Add `ingestion.journal.retention_days` with a prune pass, alongside the existing trace retention (`services/traces.py:216-220`).
-
-**Moves:** reliability.
-
-### TASK-0475 — Journal appends inside the error taxonomy
-
-**Where.** `journal.py:379-385` and `:503-509` append with no `try`; a full disk raises a raw `OSError`. `tests/chaos/test_chaos.py:341` accepts `(IngestionError, OSError)` — it tolerates the defect.
-
-**Steps.** Wrap both appends like `_write_atomically` does (`:153-165`); tighten the chaos assertion to `IngestionError` only. Do it with or before TASK-0437.
 
 **Moves:** reliability.
 
@@ -491,14 +395,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 
 **Moves:** testing, packaging.
 
-### TASK-0491 — Prove a key never reaches a log
-
-**Where.** Auth logs only the key's name (`api/auth.py:231`, `:343`) and `config show` redacts (`cli/commands/diagnostics.py:140`), but no test asserts the bearer value is absent from logs, traces and problem bodies, and the logging module has no redaction filter.
-
-**Steps.** A test that sends a distinctive key through success, 401, 403, 422 and 500 paths with `caplog` and a trace store, asserting the value appears nowhere. Add a logging filter that masks anything matching a loaded key as defence in depth.
-
-**Moves:** security.
-
 ### TASK-0492 — API keys: hashed, rotatable, expirable
 
 **Where.** `load_keys` (`api/auth.py:146`) reads `secret[:scopes[:tenant]]` entries from one environment variable; `ApiKey` holds the plaintext (`:89-104`); a restart is the only way to change keys.
@@ -522,14 +418,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 **Steps.** `security.cors_allowed_origins` (default empty: no cross-origin access), and `X-Content-Type-Options`, `Referrer-Policy` and `Cache-Control: no-store` on API responses.
 
 **Moves:** security.
-
-### TASK-0497 — The blocking facade in a notebook
-
-**Where.** `sync.py:68-80` refuses to start inside a running event loop (`CONFIG_INVALID`), and its module docstring names "a notebook" as a use. Jupyter always has a running loop. Test: `tests/unit/test_sync_facade.py:72`.
-
-**Steps.** When a loop is running, run the facade's own loop on a dedicated daemon thread and marshal calls with `run_coroutine_threadsafe`. Keep the refusal only for a call made from that thread itself.
-
-**Moves:** developer experience.
 
 ### TASK-0498 — Runnable examples
 
@@ -684,17 +572,17 @@ Use this to choose work by the category you want to move. The bar each category 
 
 | Category | Tasks |
 |---|---|
-| Architecture and design | TASK-0456, TASK-0130, TASK-0457, TASK-0437 |
-| Core RAG functionality | TASK-0449, TASK-0458, TASK-0467, TASK-0468, TASK-0469, TASK-0485 |
+| Architecture and design | TASK-0456, TASK-0130, TASK-0457 |
+| Core RAG functionality | TASK-0449, TASK-0458, TASK-0467, TASK-0485 |
 | Document ingestion and processing | TASK-0459, TASK-0471, TASK-0472, TASK-0462, TASK-0504 |
 | Retrieval and search quality | TASK-0454, TASK-0447, TASK-0448, TASK-0481, TASK-0463, TASK-0480 |
 | Embedding and vector infrastructure | TASK-0451, TASK-0452, TASK-0412, TASK-0352, TASK-0477, TASK-0478, TASK-0464, TASK-0479, TASK-0049 |
 | Advanced RAG capabilities | TASK-0465, TASK-0448, TASK-0482, TASK-0483, TASK-0484, TASK-0463 |
 | Extensibility and modularity | TASK-0486 |
-| Performance and scalability | TASK-0454, TASK-0130, TASK-0437, TASK-0487, TASK-0488, TASK-0407 to TASK-0410 |
-| Reliability and error handling | TASK-0437, TASK-0449, TASK-0474, TASK-0475 |
+| Performance and scalability | TASK-0454, TASK-0130, TASK-0487, TASK-0488, TASK-0407 to TASK-0410 |
+| Reliability and error handling | TASK-0449, TASK-0474 |
 | Testing and quality assurance | TASK-0412, TASK-0454, TASK-0481, TASK-0489, TASK-0490, TASK-0300 |
-| Security | TASK-0339, TASK-0381, TASK-0446, TASK-0460, TASK-0326, TASK-0491, TASK-0492, TASK-0493, TASK-0494, TASK-0495 |
-| Developer experience and APIs | TASK-0444, TASK-0461, TASK-0497, TASK-0498, TASK-0500 |
+| Security | TASK-0339, TASK-0381, TASK-0460, TASK-0326, TASK-0492, TASK-0493, TASK-0494, TASK-0495 |
+| Developer experience and APIs | TASK-0498, TASK-0500 |
 | Documentation | TASK-0499, TASK-0500, TASK-0501, TASK-0486 |
-| Packaging and release readiness | TASK-0445, TASK-0087, TASK-0444, TASK-0502, TASK-0503 |
+| Packaging and release readiness | TASK-0445, TASK-0087, TASK-0502, TASK-0503 |

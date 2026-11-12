@@ -117,16 +117,25 @@ observability only and has no write endpoint
 
 ## Quickstart
 
-**Requirements:** Python 3.12+, and Docker if you want fasterRag to start Qdrant for you.
+**Requirements:** Python 3.12+, and Docker if you want fasterRag to start Qdrant for you. The
+local profile below needs neither Docker nor an API key.
 
 ### 1. Install from source
 
 ```bash
 git clone https://github.com/balrajsingh165/FasterRag.git
 cd FasterRag
-pip install -e ".[all]"        # or pick extras: ".[huggingface,rerank,openai]"
+pip install -e ".[all]"        # or pick extras: ".[server,qdrant,pdf,docx,html,openai]"
 cp .env.example .env           # then fill in the keys your config.yaml references
 ```
+
+The core install is the library and CLI with Markdown, text, CSV and JSON parsing. The web
+server, the Qdrant client and the PDF, DOCX and HTML parsers are the extras `server`, `qdrant`,
+`pdf`, `docx` and `html`; a missing one is named in the error you get.
+
+**No service, no key:** `pip install -e ".[chroma,huggingface]"`, then
+`fasterrag config init --profile local` writes a configuration with embedded Chroma, local
+embeddings and keyless Ollama, and `fasterrag ingest note.md` works straight away.
 
 ### 2. Use the CLI
 
