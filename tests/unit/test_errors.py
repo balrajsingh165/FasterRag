@@ -50,6 +50,8 @@ DOCUMENTED_STATUSES = {
     ErrorCode.CACHE_ERROR: 500,
     ErrorCode.NOT_READY: 503,
     ErrorCode.INTERNAL: 500,
+    ErrorCode.ENCODING_UNREADABLE: 422,
+    ErrorCode.PDF_ENCRYPTED: 422,
 }
 
 DEFAULT_CODES = [

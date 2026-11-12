@@ -62,6 +62,8 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `CACHE_ERROR` | 500 | `CacheError` | Cache backend failure (system degrades to cache-off rather than failing queries; surfaced on admin endpoints). |
 | `NOT_READY` | 503 | — | A readiness dependency check failed: returned by `/readyz`, with a `dependencies[]` extension member naming each check and its state. Also returned, retryable, by `POST /v1/ingest` and `POST /v1/ingest/{job_id}/retry-dlq` while the server is shutting down and has stopped starting jobs (see [`POST /v1/ingest`](#post-v1ingest)); that refusal carries no `dependencies[]`. |
 | `INTERNAL` | 500 | `FasterRagError` | Anything unclassified. Always carries `trace_id`. Never returned without a problem body. |
+| `ENCODING_UNREADABLE` | 422 | `ParseError` | A DLQ reason code only (TASK-0472): no byte-order mark, UTF-8 or Windows-1252 decode read the document, and more than half of the leniently decoded text was replacement characters or control codes — a binary file, or text in an encoding the parser does not know. Refused rather than indexed as noise. Non-retryable: convert the file to UTF-8 and ingest it again. |
+| `PDF_ENCRYPTED` | 422 | `ParseError` | A DLQ reason code only (TASK-0472): the PDF needs a password to open. Before it had its own code it was reported as `PARSE_FAILED`, as though the file were damaged. A PDF encrypted only against editing or printing — an empty user password — is not refused: it opens without one and is parsed. Non-retryable: remove the password and ingest the file again. |
 
 ---
 

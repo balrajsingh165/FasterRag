@@ -46,6 +46,7 @@ and a BOM in front of undecodable bytes — are out of reach of generation regar
 pinned as constructed cases; both survived a mutation run before those were written.
 """
 
+import codecs
 import io
 import json
 from collections.abc import Callable, Sequence
@@ -396,28 +397,57 @@ def test_arbitrary_bytes_parse_without_an_untyped_error(data: bytes) -> None:
             continue
 
 
+def _strict_codec(data: bytes) -> str | None:
+    """Return the codec that reads ``data`` without a guess: its byte-order mark's, or UTF-8."""
+    marks = [
+        (codecs.BOM_UTF32_LE, "utf-32"),
+        (codecs.BOM_UTF32_BE, "utf-32"),
+        (codecs.BOM_UTF8, "utf-8-sig"),
+        (codecs.BOM_UTF16_LE, "utf-16"),
+        (codecs.BOM_UTF16_BE, "utf-16"),
+    ]
+    codec = next((name for mark, name in marks if data.startswith(mark)), "utf-8")
+    try:
+        data.decode(codec)
+    except UnicodeDecodeError:
+        return None
+    return codec
+
+
 @given(data=st.binary(max_size=120))
 @settings(max_examples=150, deadline=None)
-def test_undecodable_bytes_are_flagged_rather_than_failing(data: bytes) -> None:
-    """A mangled encoding must be visible in the flags, never a silent partial parse."""
+@example(data=b"\xff\xfeh\x00i\x00")
+@example(data=b"\x81\x8d\x8f")
+def test_undecodable_bytes_are_flagged_or_refused_never_silent(data: bytes) -> None:
+    """A mangled encoding must be visible in the flags, never a silent partial parse.
+
+    Since TASK-0472 a byte-order mark is believed, so a clean UTF-16 file is not a guess,
+    and a lenient decode that is mostly replacement characters is refused outright.
+    """
+    strict = _strict_codec(data)
+    refusal: ErrorCode | None = None
+    flags: tuple[str, ...] = ()
     try:
-        data.decode("utf-8")
-    except UnicodeDecodeError:
-        decodable = False
+        flags = parse_plaintext(data).flags
+    except ParseError as refused:
+        refusal = refused.code
+
+    if refusal is not None:
+        assert strict is None
+        assert refusal is ErrorCode.ENCODING_UNREADABLE
     else:
-        decodable = True
-
-    flags = parse_plaintext(data).flags
-
-    assert (ParseFlag.ENCODING_FALLBACK.value in flags) is not decodable
+        assert (ParseFlag.ENCODING_FALLBACK.value in flags) is (strict is None)
 
 
 @given(tail=st.binary(max_size=60))
 @settings(max_examples=80, deadline=None)
 def test_the_lenient_decode_strips_the_mark_too(tail: bytes) -> None:
-    """A file can be both BOM'd and mangled, and the fallback is a separate ``decode`` call."""
-    data = b"\xef\xbb\xbf" + tail + b"\xff\xfe"
-    assume(b"".join([tail, b"\xff\xfe"]))
+    """A file can be both BOM'd and mangled, and the fallback is a separate ``decode`` call.
+
+    The readable prefix keeps the mangled share under the refusal threshold, so the
+    mark-stripping is what is being tested rather than the refusal.
+    """
+    data = b"\xef\xbb\xbf" + b"readable text " * 10 + tail + b"\xff\xfe"
 
     document = parse_plaintext(data)
 

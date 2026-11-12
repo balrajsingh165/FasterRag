@@ -14,6 +14,11 @@ Three things make PDF the hardest format and each is handled explicitly:
   document with no extractable text at all fails so it lands in the dead-letter queue
   (``docs/failure-modes.md`` row 2).
 
+* **Encryption.** A PDF that needs a password to open is refused with ``PDF_ENCRYPTED``,
+  its own reason code, rather than reported as corrupt (TASK-0472). One encrypted only
+  against editing — an empty user password, which is how most "protected" PDFs ship —
+  opens and parses like any other.
+
 All four thresholds — the OCR trigger, the OCR resolution, and the two heading rules —
 come from :class:`~fasterrag.core.parsing.options.ParsingOptions`, because what counts as
 a scan and what counts as a heading is a property of the corpus, not of the format.
@@ -28,15 +33,17 @@ from dataclasses import dataclass, field
 from typing import Any, Final
 
 import pdfplumber
+from pdfminer.pdfdocument import PDFEncryptionError, PDFPasswordIncorrect
 
 from fasterrag.core.parsing.models import DocumentBuilder, ParsedDocument, ParseFlag
 from fasterrag.core.parsing.options import DEFAULT_PARSING_OPTIONS, ParsingOptions
-from fasterrag.errors import ParseError
+from fasterrag.errors import ErrorCode, ParseError
 from fasterrag.observability.logging import get_logger
 
 __all__ = ["parse_pdf"]
 
 _MAX_HEADING_LEVEL: Final = 6
+_ENCRYPTION_ERRORS: Final = (PDFPasswordIncorrect, PDFEncryptionError)
 
 _logger = get_logger(__name__)
 
@@ -49,6 +56,12 @@ class _Page:
     tables: list[str] = field(default_factory=list)
     lines: list[tuple[str, float]] = field(default_factory=list)
     ocr_text: str | None = None
+
+
+def _encrypted(exc: BaseException) -> bool:
+    """Return whether a failure to open a PDF was its encryption, however it was wrapped."""
+    causes = (exc, *exc.args, exc.__cause__, exc.__context__)
+    return any(isinstance(cause, _ENCRYPTION_ERRORS) for cause in causes)
 
 
 def _line_size(line: dict[str, Any]) -> float:
@@ -169,6 +182,13 @@ def parse_pdf(
     # on malformed files. A corrupt document must become a typed ParseError so the pipeline
     # dead-letters it and continues; letting an arbitrary exception escape kills the worker.
     except Exception as exc:
+        if _encrypted(exc):
+            raise ParseError(
+                "the PDF is encrypted and needs a password to open; remove the password "
+                "and ingest it again",
+                code=ErrorCode.PDF_ENCRYPTED,
+                retryable=False,
+            ) from exc
         raise ParseError(f"the PDF could not be read: {type(exc).__name__}") from exc
 
     builder.meta(

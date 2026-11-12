@@ -79,6 +79,8 @@ class ErrorCode(StrEnum):
     CACHE_ERROR = "CACHE_ERROR"
     NOT_READY = "NOT_READY"
     INTERNAL = "INTERNAL"
+    ENCODING_UNREADABLE = "ENCODING_UNREADABLE"
+    PDF_ENCRYPTED = "PDF_ENCRYPTED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +153,12 @@ PROBLEM_SPECS: Final[dict[ErrorCode, ProblemSpec]] = {
     ErrorCode.CACHE_ERROR: ProblemSpec(500, "cache-error", "Cache backend failure", False),
     ErrorCode.NOT_READY: ProblemSpec(503, "not-ready", "Service is not ready", True),
     ErrorCode.INTERNAL: ProblemSpec(500, "internal", "Internal error", False),
+    ErrorCode.ENCODING_UNREADABLE: ProblemSpec(
+        422, "encoding-unreadable", "Document text could not be decoded", False
+    ),
+    ErrorCode.PDF_ENCRYPTED: ProblemSpec(
+        422, "pdf-encrypted", "PDF is encrypted with a password", False
+    ),
 }
 
 
