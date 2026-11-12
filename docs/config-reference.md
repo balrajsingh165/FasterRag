@@ -205,6 +205,7 @@ security:
   allowed_archive_roots: []
   allow_unauthenticated: false
   api_key_file: null
+  cors_allowed_origins: []
 ```
 
 ---
@@ -502,6 +503,7 @@ All integration toggles default `false`.
 | `security.allowed_archive_roots` | list[str] | `[]` | paths | Directories `POST /v1/admin/export` may write an archive into and `POST /v1/admin/import` may read one from. **Authorization boundary**: both paths arrive in the request body, so an unconfined export overwrites any file the process can write (`config.yaml`, a web root) and an unconfined import reads any archive on the host. One list covers both verbs because they name the same artifact in the same directory. Paths are resolved before comparison, so `..` and symlinks cannot escape a root. Empty means unconfined, which is refused outright when `security.auth` is on — the same rule as `ingestion.allowed_source_roots`. |
 | `security.allow_unauthenticated` | bool | `false` | — | Lets `fasterrag serve` bind a non-loopback `app.host` (or `--host`), or a non-loopback `observability.dashboard_host`, while `security.auth` is `false`. **Without it such a bind is refused at startup** (TASK-0460, 2026-11-12; until then it was a warning). Set it only when something else stands between the port and the network: a reverse proxy that authenticates, or a container whose port is published on the host's loopback — the shipped compose files set it for exactly that reason through `FASTERRAG_SET`. With it set, `serve` still prints the warning. It has no effect when `auth` is on. |
 | `security.api_key_file` | str\|null | `null` | path | A file of API key entries, one per line (blank lines and `#` comments ignored), in the same grammar as `security.api_key_env`; its keys are loaded **in addition to** the variable's (TASK-0492). **Re-read without a restart**: every request checks the file's modification time and size at most once a second and reloads it when either moved, and on POSIX a `SIGHUP` forces a re-read. Windows has no `SIGHUP`, so there the change of the file is the only trigger. A file that changes into something that does not load — a malformed entry, a short key — is logged as an error and the keys already in force stay in force. Write it with an atomic rename. A missing file at startup refuses to start. `security.auth: true` with this and `api_key_env` both `null` is refused at load. |
+| `security.cors_allowed_origins` | list[str] | `[]` | each `http(s)://host[:port]`, no path, never `*` | Browser origins that may call the API cross-origin (TASK-0494). **Empty — the default — allows none**: a preflight from any origin is refused `400 VALIDATION_FAILED`, and no response carries `Access-Control-Allow-Origin`. A listed origin may send `GET`, `POST` and `DELETE` with `Authorization`, `Content-Type`, `Idempotency-Key` and the tenant header, and may read `Retry-After`; credentials mode is never enabled, because the API authenticates by header, not by cookie. Only browsers enforce CORS — it limits which pages can use a visitor's browser against the API, and is no substitute for `security.auth`. |
 
 ---
 

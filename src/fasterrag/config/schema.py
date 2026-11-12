@@ -130,6 +130,9 @@ def _validate_env_var_name(value: str | None) -> str | None:
     return value
 
 
+_ORIGIN_RE = re.compile(r"^https?://[^/\s*]+$")
+
+
 class Section(BaseModel):
     """Base for every configuration section: unknown keys rejected, values immutable."""
 
@@ -869,6 +872,23 @@ class SecuritySettings(Section):
     # re-read when it changes, which is what makes a key rotatable without a restart
     # (TASK-0492); `config.yaml` still never contains a credential.
     api_key_file: str | None = None
+
+    # CRITICAL: empty means no browser page on another origin may call the API (TASK-0494).
+    # Each entry is an exact `scheme://host[:port]`; `*` is refused because it would open a
+    # credential-bearing control plane to every page on the web.
+    cors_allowed_origins: list[str] = []
+
+    @field_validator("cors_allowed_origins")
+    @classmethod
+    def _check_cors_allowed_origins(cls, value: list[str]) -> list[str]:
+        """Require exact ``scheme://host[:port]`` origins, never ``*`` or a path."""
+        for origin in value:
+            if not _ORIGIN_RE.match(origin):
+                raise ValueError(
+                    f"security.cors_allowed_origins entry {origin!r} is not an origin: write "
+                    f"it as scheme://host[:port] with no path, and never '*'"
+                )
+        return value
 
     @field_validator("rate_limit_redis_url")
     @classmethod

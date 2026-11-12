@@ -203,3 +203,6 @@ security:
   # A file of key entries, one per line, re-read when it changes (and on SIGHUP where the
   # platform has it). A path only -- never key material. null reads no file.
   api_key_file: null
+  # Browser origins allowed to call the API cross-origin, each scheme://host[:port]. Empty
+  # allows none.
+  cors_allowed_origins: []
