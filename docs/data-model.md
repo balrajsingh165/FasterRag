@@ -116,6 +116,17 @@ Drift = any mismatch between this file and live config/corpus. Reported, never s
 | `first_failed_at` / `last_failed_at` | str | Timestamps |
 | `trace_id` | str | Correlates to logs and spans |
 
+### Dedup record and tombstone
+
+One JSON object per line in `<journal>/collections/<collection>/content-hashes.jsonl`. The file is append-only; it is read in order and the order is the meaning.
+
+| Record | Fields | Written |
+|---|---|---|
+| Remembered hash | `content_hash: str`, `document_id: str` | When every chunk of a document is in the vector database |
+| Tombstone | `tombstone: true`, `document_id: str`, `deleted_at: str` | When the document is deleted and a live record of it existed |
+
+A tombstone cancels every hash remembered for its `document_id` **earlier in the file**, and nothing after it: a document ingested again after its tombstone is known again. A hash that a later line assigned to a different document is left with that document. `IndexLock.document_hashes` is derived from the same reading, so a deleted document leaves the lockfile too.
+
 ## Query-side entities
 
 ### ScoredChunk

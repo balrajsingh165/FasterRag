@@ -207,6 +207,91 @@ def test_an_unknown_collection_has_no_hashes(journal: Journal) -> None:
     assert journal.known_content_blocking("never-used") == {}
 
 
+def test_a_forgotten_document_is_no_longer_a_duplicate(journal: Journal) -> None:
+    """The dedup file was append-only, so content removed from a corpus could never return."""
+    journal.remember_content_blocking("default", "hash-1", "d_1")
+
+    assert journal.forget_document_blocking("default", "d_1") is True
+
+    assert journal.is_duplicate_blocking("default", "hash-1") is False
+    assert journal.known_content_blocking("default") == {}
+
+
+def test_a_forgotten_document_leaves_the_lockfile_inputs(journal: Journal) -> None:
+    """The lockfile is built from ``document_hashes``, so it listed documents long deleted."""
+    journal.remember_content_blocking("default", "hash-1", "d_1")
+    journal.remember_content_blocking("default", "hash-2", "d_2")
+
+    journal.forget_document_blocking("default", "d_1")
+
+    assert journal.document_hashes_blocking("default") == {"d_2": "hash-2"}
+
+
+def test_forgetting_takes_every_hash_the_document_was_indexed_under(journal: Journal) -> None:
+    journal.remember_content_blocking("default", "hash-old", "d_1")
+    journal.remember_content_blocking("default", "hash-new", "d_1")
+
+    journal.forget_document_blocking("default", "d_1")
+
+    assert journal.known_content_blocking("default") == {}
+
+
+def test_forgetting_one_document_keeps_another_holding_other_content(journal: Journal) -> None:
+    journal.remember_content_blocking("default", "hash-1", "d_1")
+    journal.remember_content_blocking("default", "hash-2", "d_2")
+
+    journal.forget_document_blocking("default", "d_1")
+
+    assert journal.known_content_blocking("default") == {"hash-2": "d_2"}
+
+
+def test_a_tombstone_is_one_appended_record(journal: Journal, tmp_path: Path) -> None:
+    """The format other tools read: the remembered hash stays, a tombstone follows it."""
+    journal.remember_content_blocking("default", "hash-1", "d_1")
+
+    journal.forget_document_blocking("default", "d_1")
+
+    path = tmp_path / "journal" / "collections" / "default" / "content-hashes.jsonl"
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert lines[0] == {"content_hash": "hash-1", "document_id": "d_1"}
+    assert set(lines[1]) == {"deleted_at", "document_id", "tombstone"}
+    assert lines[1]["document_id"] == "d_1"
+    assert lines[1]["tombstone"] is True
+
+
+def test_a_document_ingested_again_after_its_tombstone_is_known_again(journal: Journal) -> None:
+    """A tombstone ends one life of a document, not every later one."""
+    journal.remember_content_blocking("default", "hash-1", "d_1")
+    journal.forget_document_blocking("default", "d_1")
+
+    journal.remember_content_blocking("default", "hash-1", "d_1")
+
+    assert journal.known_content_blocking("default") == {"hash-1": "d_1"}
+
+
+def test_forgetting_an_unknown_document_writes_nothing(journal: Journal, tmp_path: Path) -> None:
+    """A delete that is retried must not grow the file once per retry."""
+    journal.remember_content_blocking("default", "hash-1", "d_1")
+    journal.forget_document_blocking("default", "d_1")
+    path = tmp_path / "journal" / "collections" / "default" / "content-hashes.jsonl"
+    before = path.read_text(encoding="utf-8")
+
+    assert journal.forget_document_blocking("default", "d_1") is False
+    assert journal.forget_document_blocking("default", "never-ingested") is False
+    assert journal.forget_document_blocking("never-used", "d_1") is False
+
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_tombstone_is_scoped_to_its_collection(journal: Journal) -> None:
+    journal.remember_content_blocking("alpha", "hash-1", "d_1")
+    journal.remember_content_blocking("beta", "hash-1", "d_1")
+
+    journal.forget_document_blocking("alpha", "d_1")
+
+    assert journal.known_content_blocking("beta") == {"hash-1": "d_1"}
+
+
 def test_a_job_record_round_trips_through_its_serialized_form() -> None:
     record = JobRecord(job_id="job_1", collection="default", counts={"indexed": 2})
 
