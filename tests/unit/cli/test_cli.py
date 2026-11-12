@@ -53,7 +53,6 @@ def test_every_documented_command_is_registered() -> None:
 
     assert {
         "serve",
-        "worker",
         "ingest",
         "query",
         "index",

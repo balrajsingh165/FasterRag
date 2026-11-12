@@ -1,8 +1,5 @@
-"""The ``serve`` and ``worker`` wrappers: what they refuse, and what they hand uvicorn."""
+"""The ``serve`` wrapper: what it refuses, what it hands uvicorn; and the removed ``worker``."""
 
-import asyncio
-import json
-import os
 import sys
 import types
 from pathlib import Path
@@ -10,15 +7,14 @@ from typing import Any, ClassVar
 
 import pytest
 
-from fasterrag.adapters.vectordb.base import HealthStatus
 from fasterrag.api.main import CONFIG_PATH_VAR
-from fasterrag.cli.commands import processes
 from fasterrag.cli.commands.processes import exposed_without_auth
 from fasterrag.cli.main import main
 from fasterrag.cli.output import ExitCode
+from fasterrag.cli.parser import REMOVED_COMMANDS, build_parser, removed_command
 from fasterrag.config.schema import Settings
-from fasterrag.errors import FasterRagError
 from tests.unit.cli.conftest import write_config
+from tests.unit.docs.test_cli_flag_parity import parsers_by_path
 
 
 class FakeConfig:
@@ -56,36 +52,6 @@ def uvicorn_stub(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     module.Server = FakeServer  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "uvicorn", module)
     return module
-
-
-class FakeAdapter:
-    """A vector DB whose health the test decides."""
-
-    def __init__(self, healthy: bool = True) -> None:
-        self.status = HealthStatus(healthy=healthy, detail="connection refused")
-
-    async def health(self) -> HealthStatus:
-        return self.status
-
-
-class FakeIngestion:
-    """Stands in for the service that owns the pools."""
-
-    def __init__(self, healthy: bool = True, error: Exception | None = None) -> None:
-        self.adapter = FakeAdapter(healthy)
-        self.error = error
-        self.closed = 0
-
-    async def close(self) -> None:
-        self.closed += 1
-
-
-@pytest.fixture
-def service(monkeypatch: pytest.MonkeyPatch) -> FakeIngestion:
-    built = FakeIngestion()
-    monkeypatch.setattr(processes, "IngestionService", lambda *args, **kwargs: built)
-    monkeypatch.setattr(processes, "create_journal", lambda settings: object())
-    return built
 
 
 def test_serve_refuses_an_invalid_config_before_binding_a_port(
@@ -160,107 +126,69 @@ def test_the_dashboard_is_off_unless_configured_on(
     assert len(FakeConfig.built) == 1
 
 
-def test_worker_refuses_an_invalid_config(bad_config: str) -> None:
-    assert main(["worker", "--config", bad_config]) == ExitCode.USAGE
-
-
-def test_an_unknown_pool_is_named_rather_than_ignored(
-    config: str, service: FakeIngestion, capsys: pytest.CaptureFixture[str]
+def test_the_removed_worker_command_says_why_it_went_and_where_it_is_tracked(
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code = main(["worker", "--config", config, "--pools", "cpu,gpu,quantum"])
+    """``worker`` checked the database, printed "ready" and waited; it ran no pipeline work."""
+    code = main(["worker"])
 
     err = capsys.readouterr().err
     assert code == ExitCode.USAGE
-    assert "gpu, quantum" in err
+    assert "'worker' was removed" in err
+    assert "ingestion runs inside 'fasterrag serve'" in err
+    assert "TASK-0130" in err
 
 
-def test_pool_names_are_trimmed_and_blanks_dropped(
-    config: str, service: FakeIngestion, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["worker", "--pools", "cpu,embed", "--cpu-workers", "4"],
+        ["worker", "--embed-workers", "2", "--json"],
+        ["--quiet", "worker", "--help"],
+        ["--config", "elsewhere.yaml", "worker"],
+    ],
+)
+def test_a_removed_command_explains_itself_whatever_was_typed_around_it(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``--pools cpu, embed`` is what a person types; rejecting " embed" would be pedantry."""
-    with pytest.raises(TimeoutError):
-        asyncio.run(_worker(config, "cpu, embed,"))
+    """Every invocation that used to start the idle process gets the reason, not argparse's."""
+    code = main(argv)
 
-    assert '"pools": [' in capsys.readouterr().out
-
-
-def test_an_unreachable_backend_exits_three_with_a_fix(
-    config: str, service: FakeIngestion, capsys: pytest.CaptureFixture[str]
-) -> None:
-    service.adapter.status = HealthStatus(healthy=False, detail="connection refused")
-
-    code = main(["worker", "--config", config])
-
-    err = capsys.readouterr().err
-    assert code == ExitCode.UNREACHABLE
-    assert "fasterrag provision qdrant" in err
+    captured = capsys.readouterr()
+    assert code == ExitCode.USAGE
+    assert "'worker' was removed" in captured.err
+    assert "unrecognized arguments" not in captured.err
+    assert captured.out == ""
 
 
-def test_an_unreachable_backend_still_closes_the_service(
-    config: str, service: FakeIngestion
-) -> None:
-    service.adapter.status = HealthStatus(healthy=False, detail="connection refused")
+def test_a_removed_command_is_neither_registered_nor_listed_in_help() -> None:
+    """A tombstone in ``--help`` is still a surface that does nothing."""
+    parser = build_parser()
 
-    main(["worker", "--config", config])
-
-    assert service.closed == 1
+    assert "worker" not in parser.format_help()
+    assert not set(REMOVED_COMMANDS) & set(parsers_by_path())
 
 
-def test_a_typed_error_from_the_health_check_maps_to_its_code(
-    config: str, service: FakeIngestion, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def raising() -> HealthStatus:
-        raise FasterRagError("qdrant is not answering", retryable=True)
-
-    monkeypatch.setattr(service.adapter, "health", raising)
-
-    assert main(["worker", "--config", config]) == ExitCode.UNREACHABLE
+def test_every_removed_command_names_the_task_that_tracks_it() -> None:
+    """Without the id the message says what went and not where to follow it."""
+    assert REMOVED_COMMANDS
+    for command, reason in REMOVED_COMMANDS.items():
+        assert "TASK-" in reason, command
 
 
-async def _worker(config: str, pools: str) -> None:
-    """Run the worker until it blocks on its idle wait, then give up on it.
-
-    The happy path never returns by design — it reports the pools it would run and waits to
-    be stopped. The reporting is the part worth asserting, so the wait is cut short.
-    """
-    from fasterrag.cli.output import Console
-    from fasterrag.cli.parser import build_parser
-
-    args = build_parser().parse_args(["worker", "--config", config, "--pools", pools])
-    await asyncio.wait_for(processes.run_worker(args, Console(as_json=True)), timeout=0.5)
-
-
-def test_a_ready_worker_reports_the_pool_sizes_it_would_run(
-    config: str, service: FakeIngestion, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The configured 0 means "auto"; reporting it verbatim claimed no parse workers at all."""
-    with pytest.raises(TimeoutError):
-        asyncio.run(_worker(config, "cpu,embed,index"))
-
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "ready"
-    assert payload["pools"] == ["cpu", "embed", "index"]
-    assert payload["cpu"] == (os.cpu_count() or 1)
-
-
-def test_the_worker_count_overrides_reach_the_report(
-    config: str, service: FakeIngestion, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from fasterrag.cli.output import Console
-    from fasterrag.cli.parser import build_parser
-
-    args = build_parser().parse_args(
-        ["worker", "--config", config, "--cpu-workers", "3", "--embed-workers", "7", "--json"]
-    )
-
-    async def run() -> None:
-        await asyncio.wait_for(processes.run_worker(args, Console(as_json=True)), timeout=0.5)
-
-    with pytest.raises(TimeoutError):
-        asyncio.run(run())
-
-    payload = json.loads(capsys.readouterr().out)
-    assert (payload["cpu"], payload["embed"]) == (3, 7)
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--collection", "worker", "status"],
+        ["ingest", "worker"],
+        ["query", "what does a worker do", "--collection", "worker"],
+        ["--set", "worker", "doctor"],
+        [],
+    ],
+)
+def test_a_value_that_spells_a_removed_command_is_not_mistaken_for_it(argv: list[str]) -> None:
+    """Only the command position counts: a collection or a source path may be named anything."""
+    assert removed_command(argv) is None
 
 
 @pytest.mark.parametrize(

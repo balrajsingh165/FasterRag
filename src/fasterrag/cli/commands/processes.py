@@ -1,10 +1,14 @@
-"""The commands that run a long-lived process: ``serve`` and ``worker``.
+"""The command that runs a long-lived process: ``serve``.
 
-Both block until interrupted, so neither returns a meaningful exit code in normal use — the
-code they do return distinguishes "refused to start" from "ran and was stopped", which is
+It blocks until interrupted, so it returns no meaningful exit code in normal use — the
+code it does return distinguishes "refused to start" from "ran and was stopped", which is
 what a supervisor restarts on.
 
-Configuration is validated *before* either process starts. Failing at startup on a bad
+Ingestion runs inside this process: there is no separate worker process, and the ``worker``
+command that only checked the vector database and waited was removed (TASK-0130 tracks a
+queue-backed one).
+
+Configuration is validated *before* the process starts. Failing at startup on a bad
 config is the fail-fast contract of ``docs/config-reference.md``: a server that boots with
 half-valid configuration fails later, under load, in a way that looks like a runtime bug.
 """
@@ -21,12 +25,9 @@ from fasterrag.api.main import CONFIG_PATH_VAR, create_app
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import settings_from
 from fasterrag.config.schema import Settings
-from fasterrag.errors import ConfigError, FasterRagError
-from fasterrag.services.ingestion import IngestionService
-from fasterrag.services.journal import create_journal
-from fasterrag.workers.cpu_pool import resolve_pool_size
+from fasterrag.errors import ConfigError
 
-__all__ = ["exposed_without_auth", "run_serve", "run_worker"]
+__all__ = ["exposed_without_auth", "run_serve"]
 
 
 def exposed_without_auth(host: str, settings: Settings) -> bool:
@@ -100,48 +101,4 @@ async def run_serve(args: argparse.Namespace, console: Console) -> ExitCode:
     # dashboard displays prompts, responses, and corpus text — content that usually belongs
     # on an internal interface while the API faces callers.
     await asyncio.gather(*(server.serve() for server in servers))
-    return ExitCode.SUCCESS
-
-
-async def run_worker(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Run the pipeline worker pools until interrupted."""
-    try:
-        settings = settings_from(args)
-    except ConfigError as exc:
-        console.problem(exc.code.value, exc.detail)
-        return ExitCode.USAGE
-
-    pools = [pool.strip() for pool in args.pools.split(",") if pool.strip()]
-    unknown = set(pools) - {"cpu", "embed", "index"}
-    if unknown:
-        console.error(f"unknown pool(s): {', '.join(sorted(unknown))}")
-        return ExitCode.USAGE
-
-    service = IngestionService(settings, journal=create_journal(settings))
-    try:
-        health = await service.adapter.health()
-        if not health.healthy:
-            console.problem(
-                "VECTOR_DB_UNAVAILABLE",
-                f"the vector database is not answering: {health.detail}",
-                "start it with 'fasterrag provision qdrant', or check vector_db.host",
-            )
-            return ExitCode.UNREACHABLE
-
-        # CRITICAL: the configured 0 is resolved to the CPU count before it is reported.
-        # `workers.cpu_pool_size: 0` is documented as "auto", and printing the raw 0 told an
-        # operator the process runs no parse workers at all while it was about to start one
-        # per core.
-        cpu = resolve_pool_size(args.cpu_workers or settings.workers.cpu_pool_size)
-        embed = args.embed_workers or settings.workers.embedding_pool_size
-        console.emit(f"worker ready: pools={','.join(pools)} cpu={cpu} embed={embed}")
-        console.document({"pools": pools, "cpu": cpu, "embed": embed, "status": "ready"})
-
-        await asyncio.Event().wait()
-    except FasterRagError as exc:
-        console.problem(exc.code.value, exc.detail)
-        return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
-    finally:
-        await service.close()
-
     return ExitCode.SUCCESS

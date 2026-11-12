@@ -34,11 +34,16 @@ from fasterrag.cli.commands.documents import run_documents
 from fasterrag.cli.commands.infrastructure import run_estimate, run_provision
 from fasterrag.cli.commands.pipeline import run_index, run_ingest, run_query
 from fasterrag.cli.commands.portability import run_export, run_import
-from fasterrag.cli.commands.processes import run_serve, run_worker
+from fasterrag.cli.commands.processes import run_serve
 from fasterrag.cli.commands.replay import run_replay
 from fasterrag.cli.commands.traces import run_traces
 from fasterrag.cli.output import Console, ExitCode
-from fasterrag.cli.parser import PENDING_COMMANDS, build_parser
+from fasterrag.cli.parser import (
+    PENDING_COMMANDS,
+    REMOVED_COMMANDS,
+    build_parser,
+    removed_command,
+)
 from fasterrag.errors import FasterRagError, ProvisioningError
 from fasterrag.observability.logging import configure_logging
 
@@ -59,7 +64,6 @@ _HANDLERS: Final[dict[str, Handler]] = {
     "replay": run_replay,
     "serve": run_serve,
     "status": run_status,
-    "worker": run_worker,
 }
 
 # CRITICAL: `index` dispatches on its own action rather than through this table, because its
@@ -123,6 +127,11 @@ async def _dispatch(args: argparse.Namespace, console: Console) -> ExitCode:
 
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments, run the command, and return a process exit code."""
+    removed = removed_command(sys.argv[1:] if argv is None else argv)
+    if removed is not None:
+        Console().error(f"'{removed}' was removed: {REMOVED_COMMANDS[removed]}")
+        return int(ExitCode.USAGE)
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
