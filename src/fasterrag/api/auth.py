@@ -70,6 +70,13 @@ ALL_SCOPES_TOKEN: Final[str] = "*"
 # per-endpoint volumes and costs, so it is protected like any other surface.
 PUBLIC_PATHS: Final[frozenset[str]] = frozenset({"/healthz", "/readyz", "/openapi.json"})
 
+READINESS_PATH: Final = "/readyz"
+
+# CRITICAL: the request-state key `/readyz` reads to decide whether to show adapter detail.
+# It is set by this middleware alone and only while auth is on; with auth off every caller
+# may already read everything the deployment holds, so the detail is not withheld.
+READINESS_DETAIL: Final = "readiness_detail"
+
 _SCOPE_BY_PREFIX: Final[tuple[tuple[str, str], ...]] = (
     ("/v1/ingest", "ingest"),
     ("/v1/collections", "collections"),
@@ -296,6 +303,11 @@ class AuthMiddleware:
         path = scope.get("path", "")
         needed = required_scope(path, scope.get("method", "GET"))
         if needed is None:
+            if path == READINESS_PATH:
+                scope["state"] = {
+                    **scope.get("state", {}),
+                    READINESS_DETAIL: self._may_read_readiness_detail(scope),
+                }
             await self.app(scope, receive, send)
             return
 
@@ -365,6 +377,18 @@ class AuthMiddleware:
 
         scope["state"] = {**scope.get("state", {}), "api_key": key, "tenant": tenant}
         await self.app(scope, receive, send)
+
+    def _may_read_readiness_detail(self, scope: Scope) -> bool:
+        """Return whether ``/readyz`` may show per-dependency detail to this caller.
+
+        The probe stays public; only an ``admin`` key sees adapter detail (TASK-0460).
+        A wrong key is not refused here, so a probe's status code never depends on it.
+        """
+        presented = _bearer_token(scope)
+        if presented is None or self._registry is None:
+            return False
+        key = self._registry.resolve(presented)
+        return key is not None and key.permits("admin")
 
     async def _refuse(
         self,

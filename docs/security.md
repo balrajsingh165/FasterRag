@@ -49,7 +49,7 @@ Failing it closed alone would only have moved the problem: the operator writing 
 
 **Enforced as ASGI middleware, not a per-route dependency.** A dependency has to be attached to each route, so forgetting one leaves an endpoint silently public. Middleware sees every request, so a newly mounted router is protected by default and a gap must be introduced deliberately. For the same reason an **unmapped path requires `admin`** rather than defaulting to open.
 
-**`/healthz`, `/readyz`, and `/openapi.json` stay unauthenticated.** A load balancer probes them without credentials, and a health check that needs a key reports the service as down whenever the key is wrong — turning a credential mistake into an outage. Neither reveals corpus content. **`/metrics` is not public**: it exposes per-endpoint volumes and costs, so it requires `admin` like any other surface.
+**`/healthz`, `/readyz`, and `/openapi.json` stay unauthenticated.** A load balancer probes them without credentials, and a health check that needs a key reports the service as down whenever the key is wrong — turning a credential mistake into an outage. Neither reveals corpus content. **`/readyz` withholds its detail from anyone but an `admin` key** (TASK-0460, 2026-11-12): the per-dependency report names the vector database's host and port and quotes vendor errors, so an unauthenticated caller gets the status code and `ready` / `NOT_READY` only. A wrong key on `/readyz` is ignored, not refused, so the probe's status code never depends on a credential. **`/metrics` is not public**: it exposes per-endpoint volumes and costs, so it requires `admin` like any other surface.
 
 Auth runs **before** metrics and correlation-id middleware, so a rejected request cannot inflate per-endpoint counters or leave a trace id in the logs of an endpoint it never reached.
 
@@ -317,6 +317,7 @@ An independent audit found the service **open by default twice over**: `security
 
 - **`multi_tenancy` without `auth` is refused at load.** The tenant of a request is resolved by the authentication middleware, so `multi_tenancy: true` with `auth: false` loaded and enforced nothing. It is now a `ConfigError` naming both keys (§3).
 - **The `.env.example` placeholder and short keys are refused at startup.** `change-me` (and `changeme`, `change_me`, any case) is refused by name, and any key under 16 characters (`MINIMUM_KEY_LENGTH`) as guessable. The message names the entry by its 1-based position and never prints the key. **Breaking:** a deployment running with a key under 16 characters no longer starts.
+- **`/readyz` withholds its detail.** It stays unauthenticated and keeps its status code, so the container `HEALTHCHECK` is unaffected; only an `admin` key sees which dependency failed and the adapter's message (§2).
 
 **Still open from the same audit**, each with an entry in [todo.md](todo.md): retrieved text reaches the prompt unescaped (TASK-0446); a key with no tenant may act for any tenant (TASK-0460); tenant scoping of the ingest and query paths remains the opt-in described in §3 (TASK-0339, TASK-0381).
 

@@ -137,3 +137,67 @@ async def test_a_failed_provision_does_not_stop_the_api_serving(
     settings = Settings.model_validate({"observability": {"grafana": True}})
 
     await main.provision_enabled_observability(settings)
+
+
+ADMIN_SECRET = "readiness-admin-key-0001"
+QUERY_SECRET = "readiness-query-key-0001"
+
+
+def secured_app(monkeypatch: pytest.MonkeyPatch, vector_db: StubVectorDB) -> FastAPI:
+    """Return an application with auth on, one admin key and one query key."""
+    from fasterrag.api.main import create_app
+    from fasterrag.config.schema import Settings
+
+    monkeypatch.setenv("FASTERRAG_API_KEY", f"{ADMIN_SECRET}:admin;{QUERY_SECRET}:query")
+    app = create_app(Settings.model_validate({"security": {"auth": True}}))
+    app.state.vector_db = vector_db
+    return app
+
+
+def test_an_unauthenticated_readiness_probe_gets_the_status_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/readyz` handed adapter detail to anyone who could reach it (TASK-0460)."""
+    with TestClient(secured_app(monkeypatch, StubVectorDB())) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+
+
+def test_a_failing_dependency_is_still_a_503_without_a_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The container HEALTHCHECK probes without a key; its status code must keep meaning."""
+    down = StubVectorDB()
+    down.healthy = False
+    down.detail = "connection refused to 10.0.0.7:6333"
+
+    with TestClient(secured_app(monkeypatch, down)) as client:
+        response = client.get("/readyz")
+        wrong_key = client.get("/readyz", headers={"Authorization": "Bearer not-a-key"})
+
+    for answer in (response, wrong_key):
+        assert answer.status_code == 503
+        body = answer.json()
+        assert body["code"] == ErrorCode.NOT_READY.value
+        assert "dependencies" not in body
+        assert "10.0.0.7" not in answer.text
+        assert "vector_db" not in answer.text
+
+
+def test_an_admin_key_sees_every_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    down = StubVectorDB()
+    down.healthy = False
+    down.detail = "connection refused"
+
+    with TestClient(secured_app(monkeypatch, down)) as client:
+        admin = client.get("/readyz", headers={"Authorization": f"Bearer {ADMIN_SECRET}"})
+        query = client.get("/readyz", headers={"Authorization": f"Bearer {QUERY_SECRET}"})
+
+    assert admin.status_code == 503
+    assert {"name": "vector_db", "ready": False, "detail": "connection refused"} in admin.json()[
+        "dependencies"
+    ]
+    assert query.status_code == 503
+    assert "dependencies" not in query.json()

@@ -3,7 +3,8 @@
 ``/healthz`` answers whether the process is alive and checks nothing else.
 ``/readyz`` actually exercises dependencies and returns a problem document listing the
 failing ones, so a sick backend is visible before queries start failing
-(``docs/api-reference.md``, ``docs/reliability.md`` §7).
+(``docs/api-reference.md``, ``docs/reliability.md`` §7). With auth on, which dependency
+failed and why is shown only to an ``admin`` key; everyone else gets the status code alone.
 
 Checks are registered rather than hard-coded: each slice adds the dependency it
 introduces (vector DB health, queue backend, circuit-breaker state), and ``/readyz``
@@ -20,7 +21,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
+from fasterrag.api.auth import READINESS_DETAIL
 from fasterrag.api.problems import problem_response
+from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
 
 __all__ = ["DependencyStatus", "ReadinessCheck", "ReadinessRegistry", "router"]
@@ -63,6 +66,18 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _shows_detail(request: Request) -> bool:
+    """Return whether this caller may see which dependency failed and why.
+
+    With auth on, only an ``admin`` key does: adapter detail names hosts, ports and
+    vendor errors, and the probe itself stays public (TASK-0460).
+    """
+    settings = cast(Settings, request.app.state.settings)
+    if not settings.security.auth:
+        return True
+    return bool(getattr(request.state, READINESS_DETAIL, False))
+
+
 @router.get("/readyz")
 async def readyz(request: Request) -> Response:
     """Report readiness after actually checking every registered dependency."""
@@ -73,6 +88,14 @@ async def readyz(request: Request) -> Response:
     ]
 
     failing = [status.name for status in statuses if not status.ready]
+    if not _shows_detail(request):
+        if failing:
+            return problem_response(
+                FasterRagError("dependencies are not ready", code=ErrorCode.NOT_READY),
+                instance=request.url.path,
+            )
+        return JSONResponse(content={"status": "ready"})
+
     if failing:
         error = FasterRagError(
             f"dependencies are not ready: {', '.join(failing)}",

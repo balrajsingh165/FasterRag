@@ -60,7 +60,7 @@ Every error response is a problem document with a **stable machine-readable `cod
 | `CIRCUIT_OPEN` | 503 | `ProviderError` | Circuit breaker open for the named provider (`detail` names it, `Retry-After` set). |
 | `PROVISIONING_FAILED` | 500 | `ProvisioningError` | Auto-provisioning step failed; `detail` carries the doctor-style fix-it hint. |
 | `CACHE_ERROR` | 500 | `CacheError` | Cache backend failure (system degrades to cache-off rather than failing queries; surfaced on admin endpoints). |
-| `NOT_READY` | 503 | — | A readiness dependency check failed: returned by `/readyz`, with a `dependencies[]` extension member naming each check and its state. Also returned, retryable, by `POST /v1/ingest` and `POST /v1/ingest/{job_id}/retry-dlq` while the server is shutting down and has stopped starting jobs (see [`POST /v1/ingest`](#post-v1ingest)); that refusal carries no `dependencies[]`. |
+| `NOT_READY` | 503 | — | A readiness dependency check failed: returned by `/readyz`, with a `dependencies[]` extension member naming each check and its state (only for an `admin` key, or with auth off). Also returned, retryable, by `POST /v1/ingest` and `POST /v1/ingest/{job_id}/retry-dlq` while the server is shutting down and has stopped starting jobs (see [`POST /v1/ingest`](#post-v1ingest)); that refusal carries no `dependencies[]`. |
 | `INTERNAL` | 500 | `FasterRagError` | Anything unclassified. Always carries `trace_id`. Never returned without a problem body. |
 
 ---
@@ -320,7 +320,7 @@ What it does, in order: writes a tombstone to the ingestion journal so the docum
 | Method + path | Purpose |
 |---|---|
 | `GET /healthz` | Liveness: process is up. Always 200 if the process can answer. No dependency checks. |
-| `GET /readyz` | Readiness: dependencies actually checked (vector DB `health()`, queue backend, config valid, circuit-breaker states). 200 with `{"status": "ready", "dependencies": [...]}` when every check passes; otherwise 503 with a `NOT_READY` problem body whose `dependencies[]` member lists each check and its state. Checks are registered by the slice that introduces the dependency, so the report always reflects what is actually verifiable. |
+| `GET /readyz` | Readiness: dependencies actually checked (vector DB `health()`, queue backend, config valid, circuit-breaker states). 200 with `{"status": "ready", "dependencies": [...]}` when every check passes; otherwise 503 with a `NOT_READY` problem body whose `dependencies[]` member lists each check and its state. Checks are registered by the slice that introduces the dependency, so the report always reflects what is actually verifiable. **Unauthenticated, but the detail is not** (TASK-0460, 2026-11-12): with `security.auth: true` a caller without a key, or with a key lacking `admin`, gets the same status code and only `{"status": "ready"}` or a `NOT_READY` problem whose `detail` is `dependencies are not ready` with no `dependencies[]` member — adapter detail names hosts, ports and vendor errors. An `admin` key gets the full report. A wrong key is not refused here, so a probe's status code never depends on its credential; the container `HEALTHCHECK` keeps working without one. With auth off every caller gets the full report. |
 
 ## Admin & provisioning
 
