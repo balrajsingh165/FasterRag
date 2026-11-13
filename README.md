@@ -29,7 +29,7 @@ through a REST API, a CLI, or a Python package, all driven by one config file.
 ---
 
 > [!IMPORTANT]
-> **Status: beta (`0.1.0b1`).** Install it with `pip install --pre fasterrag`. It is a beta: the
+> **Status: beta (`0.1.0b1`).** Install it with `pip install "fasterrag>=0.1.0b1"`. It is a beta: the
 > interfaces may still change before 1.0, and no performance figure in this repository is citable yet. This
 > project's standing rule is that **a claim without a measurement is a bug**, so this page tells
 > you what works, what is partial, what is not built — and
@@ -124,19 +124,19 @@ Windows; macOS is not tested.
 ### 1. Install
 
 ```bash
-pip install --pre "fasterrag[all]"   # or pick extras: "fasterrag[server,qdrant,pdf,docx,html,openai]"
+pip install "fasterrag[all]>=0.1.0b1"   # or pick extras: "fasterrag[server,qdrant,pdf,docx,html,openai]"
 fasterrag config init               # writes config.yaml and .env.example
 cp .env.example .env                # then fill in the keys your config.yaml references
 ```
 
-`--pre` is needed while fasterRag is in beta: pip skips pre-releases otherwise. To work on the
+The `>=0.1.0b1` lets pip pick the beta; do not use `--pre`, which also pulls pre-releases of every dependency. To work on the
 code instead, clone the repository and run `pip install -e ".[all]"` from the checkout.
 
 The core install is the library and CLI with Markdown, text, CSV and JSON parsing. The web
 server, the Qdrant client and the PDF, DOCX and HTML parsers are the extras `server`, `qdrant`,
 `pdf`, `docx` and `html`; a missing one is named in the error you get.
 
-**No service, no key:** `pip install --pre "fasterrag[chroma,huggingface]"`, then
+**No service, no key:** `pip install "fasterrag[chroma,huggingface]>=0.1.0b1"`, then
 `fasterrag config init --profile local` writes a configuration with embedded Chroma, local
 embeddings and keyless Ollama, and `fasterrag ingest note.md` works straight away.
 

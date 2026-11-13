@@ -41,7 +41,7 @@ hide:
 ```bash
 git clone https://github.com/balrajsingh165/fasterrag
 cd fasterrag
-pip install --pre "fasterrag[all]"
+pip install "fasterrag[all]>=0.1.0b1"
 ```
 
 Python 3.12 or newer. fasterRag is not on PyPI yet, so install from a source checkout. See
