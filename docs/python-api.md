@@ -43,7 +43,7 @@ OCR is optional for a second reason: it additionally requires the `tesseract` ex
 
 - Requires **Python 3.12+**.
 - Versioned by **SemVer 2.0.0**; the public API defined in this document is the compatibility contract — breaking it requires a major version bump and a CHANGELOG entry.
-- Dependencies pinned and hash-locked in the repo (`uv.lock`, gated by `uv lock --check` in CI). Publishing wheels to PyPI at every tagged release is the **intended** release process; **nothing has been published yet** (TASK-0087) and there has been no tagged release.
+- Dependencies pinned and hash-locked in the repo (`uv.lock`, gated by `uv lock --check` in CI). Wheels and the sdist are published to PyPI from every tagged release by `.github/workflows/release.yml`, with PEP 740 attestations and a CycloneDX SBOM on the GitHub release; the first, `0.1.0b1`, was published on 2026-11-13.
 
 ## Quickstart
 

@@ -39,13 +39,11 @@ hide:
 ## Install
 
 ```bash
-git clone https://github.com/balrajsingh165/fasterrag
-cd fasterrag
-pip install -e ".[all]"
+pip install "fasterrag[all]>=0.1.0b1"
 ```
 
-Python 3.12 or newer. The first release has not been published to PyPI yet, so install from a
-source checkout for now. Docker is needed only if you want fasterRag to run the vector database
+Python 3.12 or newer. The first beta, `0.1.0b1`, is on PyPI; name the version as above rather than
+using `--pre`, which also takes pre-releases of every dependency. Docker is needed only if you want fasterRag to run the vector database
 for you.
 
 ## Use it
