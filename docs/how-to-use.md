@@ -1,6 +1,6 @@
 # how-to-use.md — Using fasterRag (Post-Release User Guide)
 
-The end-user manual for the released **`fasterrag`** package. It assumes `pip install fasterrag` works — i.e. a version per [release.md](release.md) has been published. Install it with `pip install --pre "fasterrag[all]"`; `--pre` is needed while fasterRag is in beta.
+The end-user manual for the released **`fasterrag`** package. It assumes `pip install fasterrag` works — i.e. a version per [release.md](release.md) has been published. Install it with `pip install "fasterrag[all]>=0.1.0b1"`; name the version rather than using `--pre`, which also takes pre-releases of every dependency.
 
 Companion docs: [quickstart.md](quickstart.md) is the narrated first walkthrough; [cookbook.md](cookbook.md) has ready-made configs per situation; [troubleshooting.md](troubleshooting.md) is symptom→fix; [config-reference.md](config-reference.md) documents every key. This file is the task-oriented manual you keep open while operating.
 

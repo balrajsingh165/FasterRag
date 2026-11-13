@@ -112,25 +112,6 @@ Process-wide singletons (`shared_breaker`, the cross-encoder model cache, `share
 
 Recommended order inside P0: TASK-0470 (small, and they stop data loss and hangs), then TASK-0445.
 
-### TASK-0445 — The first release
-
-**Goal.** A tagged pre-release exists on PyPI, installed and exercised on a clean machine by the pipeline that published it.
-
-**Where.** Version: `src/fasterrag/__init__.py:10` `__version__ = "0.1.0.dev0"`, read by hatch. Classifier `2 - Pre-Alpha` (`pyproject.toml:22`). Workflows: `ci.yml`, `nightly.yml`, `security.yml` — none publishes. [release.md](release.md) §3 describes a manual, token-based flow (`twine upload`). `scripts/stamp_release.py` keeps the version, the changelog heading, the classifier and three banners coherent; `--check` runs in CI.
-
-**Steps.**
-1. Reconcile the version with the maintainer: the task entry says `v0.1.0a1`; the release documents have decided `0.1.0-beta.1`. `stamp_release._SEMVER` accepts `alpha|beta|rc` labels, so an alpha is stamped as `0.1.0-alpha.1`.
-2. Add `.github/workflows/release.yml`, triggered by a `v*` tag: run the full gate set, build the sdist and wheel, publish through PyPI trusted publishing (OIDC, no stored token), build and push the container image, generate an SBOM and attach it.
-3. Make the image reproducible: install from `uv.lock`, pin the base image by digest (TASK-0496).
-4. After publishing, a job installs the published version in a clean container and runs the local-profile quickstart.
-5. Rewrite [release.md](release.md) §3 to describe the workflow.
-
-**Documents.** [release.md](release.md), [release-readiness.md](release-readiness.md), [CHANGELOG.md](CHANGELOG.md), `README.md` (the "not yet on PyPI" sentence is checked by `stamp_release.py --check` — stamp, do not hand-edit).
-
-**Traps.** Depends on TASK-0087 and on TASK-0444 for the quickstart. The gate in [release.md](release.md) §1 is a confidence score of at least 85 for a beta; the last recorded score is 62. **Publishing is irreversible and outward-facing: it needs the maintainer's explicit instruction, not an agent's judgement.**
-
-**Done when.** The release exists and the post-publish job passes. **Moves:** packaging.
-
 ---
 
 ## 2. P1 — blocks a beta
@@ -441,7 +422,7 @@ These predate the audit and are defined in [todo.md](todo.md). They have no brie
 | TASK-0130 | The queue-backed worker. Decide together with TASK-0440. |
 | TASK-0407 to TASK-0410 | Blocking file I/O on the event loop: the lock store, the trace store, the archive, and the remainder. Pattern to copy: `Journal`'s async face over `*_blocking` twins. |
 | TASK-0300 | 63 surviving mutants from the first mutation run. The nightly `mutation` job runs `scripts/mutation_run.py` with a ratchet (`CEILING`, `:376-383`); some line numbers in the entry have shifted. |
-| TASK-0087, TASK-0084, TASK-0085 | Release mechanics; measurement on reference hardware (blocked on hardware); the disaster-recovery restore drill ([disaster-recovery.md](disaster-recovery.md) §2 is a manual procedure today). |
+| TASK-0084, TASK-0085 | Release mechanics; measurement on reference hardware (blocked on hardware); the disaster-recovery restore drill ([disaster-recovery.md](disaster-recovery.md) §2 is a manual procedure today). |
 | TASK-0079, TASK-0049 | Export/import and the Pinecone adapter — the two open slice items named in `CLAUDE.md`. |
 | TASK-0405, TASK-0406, TASK-0243 | Findings from the load and soak tiers, which no workflow runs (see TASK-0488). |
 | TASK-0354 | The decision on randomised test ordering (see TASK-0490). |
@@ -467,4 +448,4 @@ Use this to choose work by the category you want to move. The bar each category 
 | Security | TASK-0339, TASK-0381, TASK-0460, TASK-0326, TASK-0493, TASK-0495 |
 | Developer experience and APIs | TASK-0500 |
 | Documentation | TASK-0501 |
-| Packaging and release readiness | TASK-0445, TASK-0087, TASK-0502, TASK-0503 |
+| Packaging and release readiness | TASK-0502, TASK-0503 |

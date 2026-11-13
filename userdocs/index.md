@@ -39,13 +39,12 @@ hide:
 ## Install
 
 ```bash
-git clone https://github.com/balrajsingh165/fasterrag
-cd fasterrag
-pip install --pre "fasterrag[all]"
+pip install "fasterrag[all]>=0.1.0b1"
 ```
 
-Python 3.12 or newer. fasterRag is not on PyPI yet, so install from a source checkout. See
-[Installation extras](quickstart.md#install) to install only what you need.
+Python 3.12 or newer. The `>=0.1.0b1` picks the current beta; don't use `--pre`, which also
+pulls pre-release versions of every dependency. See [Installation extras](quickstart.md#install)
+to install only what you need.
 
 ## Example
 
@@ -88,15 +87,25 @@ fasterrag query "What are the payment terms?"
 
 ## What's new
 
-fasterRag is in beta and has not published a release yet. Recent changes that affect you:
+**0.1.0 beta (`0.1.0b1`) — 13 November 2026.** The first published release:
+`pip install "fasterrag>=0.1.0b1"`. It is a beta, so interfaces may change before 1.0, and it
+makes no performance claim: no benchmark figure is citable yet.
 
-- **Smaller core install.** `pip install fasterrag` is now the library and CLI only. The web
-  server and the Qdrant, PDF, DOCX and HTML support are extras: `server`, `qdrant`, `pdf`,
+What changed for you in this release:
+
+- **Smaller core install.** `pip install "fasterrag>=0.1.0b1"` is the library and CLI only. The
+  web server and the Qdrant, PDF, DOCX and HTML support are extras: `server`, `qdrant`, `pdf`,
   `docx`, `html` (all included in `all`).
 - **`fasterrag config init --profile local`** writes a config that needs no API key and no
   running service.
-- **Removed:** the `fasterrag worker` command and the `app.workers` setting. Ingestion runs in
-  the process that receives the job (`fasterrag serve`, `fasterrag ingest` or Python).
+- **Reranking is off by default.** Set `retrieval.rerank: true` to turn the cross-encoder back on;
+  it downloads a 2 GB model and is slow on a CPU.
+- **Safer by default.** An unauthenticated server refuses to bind to a non-loopback address unless
+  you set `security.allow_unauthenticated: true`; API keys must be at least 16 characters.
+- **Anthropic works with current Claude models.** `llm.temperature` defaults to `null`, so no
+  sampling parameter is sent to Claude unless you set one.
+- **Removed:** the `fasterrag worker` command and the `app.workers` and
+  `reliability.degradation_ladder` settings.
 - **Deprecated:** the `idempotency_key` field in `POST /v1/ingest`. Send the `Idempotency-Key`
   header instead; the field is removed in 1.0.
 

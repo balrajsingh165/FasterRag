@@ -5,15 +5,16 @@ same `config.yaml`.
 
 ## Install
 
-fasterRag needs Python 3.12 or newer. It is not on PyPI yet, so install from a checkout:
+fasterRag needs Python 3.12 or newer. Install the beta from PyPI:
 
 ```bash
-git clone https://github.com/balrajsingh165/fasterrag
-cd fasterrag
-pip install --pre "fasterrag[all]"
+pip install "fasterrag[all]>=0.1.0b1"
 ```
 
-`pip install --pre fasterrag` alone gives you the library and the CLI, with Markdown, text, CSV and JSON
+The `>=0.1.0b1` picks the current beta. Don't use `--pre`: it also pulls pre-release versions of
+every dependency, and one of those breaks the CLI.
+
+`pip install "fasterrag>=0.1.0b1"` alone gives you the library and the CLI, with Markdown, text, CSV and JSON
 parsing. Add only the extras you need:
 
 | Extra | Adds |
@@ -28,13 +29,13 @@ parsing. Add only the extras you need:
 | `otel` | OpenTelemetry export |
 | `all` | everything above |
 
-Example: `pip install --pre "fasterrag[server,qdrant,huggingface,rerank,pdf,openai]"`. A missing extra is
+Example: `pip install "fasterrag[server,qdrant,huggingface,rerank,pdf,openai]>=0.1.0b1"`. A missing extra is
 reported by name when you use the feature that needs it.
 
 ## Try it with no service and no key
 
 ```bash
-pip install --pre "fasterrag[chroma,huggingface]"
+pip install "fasterrag[chroma,huggingface]>=0.1.0b1"
 fasterrag config init --profile local
 fasterrag ingest ./notes.md
 ```
@@ -107,7 +108,7 @@ fasterrag provision qdrant
 === "REST"
 
     ```bash
-    pip install --pre "fasterrag[server]"
+    pip install "fasterrag[server]>=0.1.0b1"
     fasterrag serve                  # http://127.0.0.1:8000
 
     curl -X POST localhost:8000/v1/ingest \

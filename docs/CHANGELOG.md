@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- First release, `0.1.0-beta.1`, published 2026-11-13 (TASK-0020).
+
+- `fasterrag 0.1.0b1` is on PyPI, with its container image on GHCR and an SBOM attached to the GitHub release (2026-11-13, TASK-0087).
+
+- The release pipeline published its first release (2026-11-13, TASK-0445).
+
+### Fixed
+
+- **`pip install --pre fasterrag` installed a development version of httpx that breaks the CLI** (2026-11-13, TASK-0556). `--pre` lets pip take pre-releases of every dependency, so it picked `httpx 1.0.dev6`, which removed `httpx.Limits`, and every `fasterrag` command failed at import. The documentation now says `pip install "fasterrag>=0.1.0b1"`, which allows a pre-release of fasterRag only, and `httpx` is capped below 1.0 (from the next release). Found by the post-release install check on Windows; CI's smoke test installed `fasterrag==0.1.0b1` without `--pre` and so could not see it.
+
 ## [0.1.0-beta.1] — 2026-11-13
 
 The first published release, a beta: the interfaces may change before 1.0. Install it with `pip install --pre fasterrag`. **No performance claim is made for this release.** The benchmark ledger holds no citable entry yet — every figure in it was measured on a shared machine, which its own rules forbid citing — so any speed, latency or cost figure in these notes or the documentation is a goal or an indicative observation, not a guarantee. This was the condition under which the beta release gate was set (release.md §1, 2026-11-13).

@@ -29,7 +29,7 @@ through a REST API, a CLI, or a Python package, all driven by one config file.
 ---
 
 > [!IMPORTANT]
-> **Status: beta (`0.1.0b1`).** Install it with `pip install --pre fasterrag`. It is a beta: the
+> **Status: beta (`0.1.0b1`).** Install it with `pip install "fasterrag>=0.1.0b1"`. It is a beta: the
 > interfaces may still change before 1.0, and no performance figure in this repository is citable yet. This
 > project's standing rule is that **a claim without a measurement is a bug**, so this page tells
 > you what works, what is partial, what is not built — and
@@ -124,19 +124,19 @@ Windows; macOS is not tested.
 ### 1. Install
 
 ```bash
-pip install --pre "fasterrag[all]"   # or pick extras: "fasterrag[server,qdrant,pdf,docx,html,openai]"
+pip install "fasterrag[all]>=0.1.0b1"   # or pick extras: "fasterrag[server,qdrant,pdf,docx,html,openai]"
 fasterrag config init               # writes config.yaml and .env.example
 cp .env.example .env                # then fill in the keys your config.yaml references
 ```
 
-`--pre` is needed while fasterRag is in beta: pip skips pre-releases otherwise. To work on the
+The `>=0.1.0b1` lets pip pick the beta; do not use `--pre`, which also pulls pre-releases of every dependency. To work on the
 code instead, clone the repository and run `pip install -e ".[all]"` from the checkout.
 
 The core install is the library and CLI with Markdown, text, CSV and JSON parsing. The web
 server, the Qdrant client and the PDF, DOCX and HTML parsers are the extras `server`, `qdrant`,
 `pdf`, `docx` and `html`; a missing one is named in the error you get.
 
-**No service, no key:** `pip install --pre "fasterrag[chroma,huggingface]"`, then
+**No service, no key:** `pip install "fasterrag[chroma,huggingface]>=0.1.0b1"`, then
 `fasterrag config init --profile local` writes a configuration with embedded Chroma, local
 embeddings and keyless Ollama, and `fasterrag ingest note.md` works straight away.
 
@@ -341,7 +341,7 @@ engineering audit and the path from here are in
 
 | Working | Partial | Not yet |
 |---|---|---|
-| Config loader · CLI · REST API · Python facade (async and sync) · parsing and chunking · ingestion with dedup and a dead-letter queue · hybrid retrieval with RRF · cross-encoder rerank · SSE generation with citations · Qdrant, pgvector, Chroma, Milvus and Weaviate adapters · API-key auth with scopes · rate limiting · circuit breaker · evaluation harness and regression gate · `doctor` · cost estimator · trace store and replay · blue/green re-embedding · OTLP export · read-only dashboard · Docker image and compose profiles | Degradation ladder (`hybrid_only` and `extractive`; a `cache_only` rung was considered and deferred — ADR-0011) · the Milvus and Weaviate contract suites, which pass against real servers on a developer machine but run in no CI job, so nothing re-proves them on a change (TASK-0412) · portability export/import, in progress (TASK-0079) · multi-tenancy, with the caveats recorded in [docs/security.md](docs/security.md) · evaluation datasets, which are small · semantic chunking, which is available as a standalone component and refused by the ingestion pipeline (TASK-0431) | A separate ingestion worker process; ingestion runs inside the process that accepts the job (TASK-0130) · Pinecone adapter (TASK-0049) · PyPI publication (TASK-0087) · citable benchmarks — the [ledger](docs/benchmarks.md) holds only non-citable entries until the isolated-hardware baseline run |
+| Config loader · CLI · REST API · Python facade (async and sync) · parsing and chunking · ingestion with dedup and a dead-letter queue · hybrid retrieval with RRF · cross-encoder rerank · SSE generation with citations · Qdrant, pgvector, Chroma, Milvus and Weaviate adapters · API-key auth with scopes · rate limiting · circuit breaker · evaluation harness and regression gate · `doctor` · cost estimator · trace store and replay · blue/green re-embedding · OTLP export · read-only dashboard · Docker image and compose profiles | Degradation ladder (`hybrid_only` and `extractive`; a `cache_only` rung was considered and deferred — ADR-0011) · the Milvus and Weaviate contract suites, which pass against real servers on a developer machine but run in no CI job, so nothing re-proves them on a change (TASK-0412) · portability export/import, in progress (TASK-0079) · multi-tenancy, with the caveats recorded in [docs/security.md](docs/security.md) · evaluation datasets, which are small · semantic chunking, which runs in the ingestion pipeline with a local embedding model only, and has not yet been run there with a real downloaded model (TASK-0531) | A separate ingestion worker process; ingestion runs inside the process that accepts the job (TASK-0130) · Pinecone adapter (TASK-0049) · citable benchmarks — the [ledger](docs/benchmarks.md) holds only non-citable entries until the isolated-hardware baseline run |
 
 Its goal is to be the fastest, most efficient, and most reliable RAG framework available. That
 is a goal, not a result: no measurement in this repository yet supports a speed claim, and none

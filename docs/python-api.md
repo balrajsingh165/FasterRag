@@ -14,7 +14,7 @@ fasterRag is released as an installable Python package so applications can **imp
 > | `FasterRag.export_archive` / `.import_archive` | **Not yet wrapped on the facade** (TASK-0079). The archive itself **is** built — `services/archive.py`, `services/archive_import.py`, the `export`/`import` CLI commands, and `POST /v1/admin/export` / `/import` all ship, and a Qdrant round trip is verified against a live backend (TASK-0214 ✅). Only the facade methods are missing |
 > | `fasterrag.sync` blocking facade | **Shipped**. Verified end to end against live Qdrant and OpenAI — a one-off manual run, not a committed test, since a unit run must not depend on a credential or spend money (the standing gap is TASK-0205) |
 > | Entry-point plugin groups (`fasterrag.vectordb` / `.embeddings` / `.llm`) | **Shipped**. All three factories resolve registered plugins; a built-in name always wins, so an installed package cannot silently take over a configured provider |
-> | PyPI wheels (`pip install --pre fasterrag`) | Published from `0.1.0b1`; `--pre` is needed while the project is in beta |
+> | PyPI wheels (`pip install "fasterrag>=0.1.0b1"`) | Published from `0.1.0b1`; install with `pip install "fasterrag>=0.1.0b1"` — not `--pre`, which also takes pre-releases of every dependency |
 >
 > Sections describing an unshipped surface are the design contract the remaining work must satisfy, kept here so each one is built to a reviewed spec rather than improvised.
 
@@ -43,7 +43,7 @@ OCR is optional for a second reason: it additionally requires the `tesseract` ex
 
 - Requires **Python 3.12+**.
 - Versioned by **SemVer 2.0.0**; the public API defined in this document is the compatibility contract — breaking it requires a major version bump and a CHANGELOG entry.
-- Dependencies pinned and hash-locked in the repo (`uv.lock`, gated by `uv lock --check` in CI). Publishing wheels to PyPI at every tagged release is the **intended** release process; **nothing has been published yet** (TASK-0087) and there has been no tagged release.
+- Dependencies pinned and hash-locked in the repo (`uv.lock`, gated by `uv lock --check` in CI). Wheels and the sdist are published to PyPI from every tagged release by `.github/workflows/release.yml`, with PEP 740 attestations and a CycloneDX SBOM on the GitHub release; the first, `0.1.0b1`, was published on 2026-11-13.
 
 ## Quickstart
 

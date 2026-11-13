@@ -34,7 +34,7 @@ classifiers = [
 # DOCX and HTML parsers are extras (TASK-0444); each is imported only where it is used, and
 # a missing one fails with an error naming the extra to install.
 dependencies = [
-    "httpx>=0.27",
+    "httpx>=0.27,<1",
     "markdown-it-py>=3.0",
     "psutil>=6.0",
     "pydantic>=2.8",
