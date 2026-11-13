@@ -87,7 +87,7 @@ fasterrag query "What are the payment terms?"
 
 ## What's new
 
-**0.1.0 beta (`0.1.0b1`) — 13 November 2026.** The first published release:
+**0.1.0 beta (`0.1.0b2`) — 13 November 2026.** The first published release (`0.1.0b1`, with a packaging fix in `0.1.0b2`):
 `pip install "fasterrag>=0.1.0b1"`. It is a beta, so interfaces may change before 1.0, and it
 makes no performance claim: no benchmark figure is citable yet.
 

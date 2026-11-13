@@ -7,7 +7,7 @@ names exported here and from documented submodules are stable under SemVer; anyt
 under ``fasterrag._internal`` or absent from ``__all__`` is private.
 """
 
-__version__ = "0.1.0b1"
+__version__ = "0.1.0b2"
 
 # CRITICAL: imported lazily through __getattr__, not at module import. Importing the facade
 # eagerly would pull the adapter factories, the chunking stack, and pydantic-settings into

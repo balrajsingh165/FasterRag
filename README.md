@@ -29,7 +29,7 @@ through a REST API, a CLI, or a Python package, all driven by one config file.
 ---
 
 > [!IMPORTANT]
-> **Status: beta (`0.1.0b1`).** Install it with `pip install "fasterrag>=0.1.0b1"`. It is a beta: the
+> **Status: beta (`0.1.0b2`).** Install it with `pip install "fasterrag>=0.1.0b1"`. It is a beta: the
 > interfaces may still change before 1.0, and no performance figure in this repository is citable yet. This
 > project's standing rule is that **a claim without a measurement is a bug**, so this page tells
 > you what works, what is partial, what is not built — and
