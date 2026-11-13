@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0-beta.2] — 2026-11-13
+
+A packaging fix for `0.1.0-beta.1`, with no change to fasterRag's behaviour: `httpx` is capped below 1.0, so installing with `pip install --pre` no longer pulls a development httpx that breaks the CLI, and the README shown on PyPI now gives the install command that works, `pip install "fasterrag>=0.1.0b1"`. As with `0.1.0-beta.1`, **no performance claim is made**: the benchmark ledger holds no citable entry yet.
+
 ### Changed
 
 - First release, `0.1.0-beta.1`, published 2026-11-13 (TASK-0020).
