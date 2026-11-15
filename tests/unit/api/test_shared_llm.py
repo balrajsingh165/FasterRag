@@ -147,3 +147,34 @@ async def test_a_lent_adapter_outlives_its_service_and_an_owned_one_does_not(
     assert lent.closes == 0
     assert cast(Any, owning.llm) is built[0]
     assert built[0].closes == 1
+
+
+def test_a_configured_fallback_is_built_once_per_application_and_closed_at_shutdown(
+    tmp_path: Path, built: list[CountingLLM]
+) -> None:
+    """``llm.fallback`` was built per service, and so per request on REST (TASK-0546 item 1)."""
+    store = MemoryVectorDB()
+    store.seed("default", "c_acme", ACME_TEXT, "acme")
+    settings = Settings.model_validate(
+        {
+            "retrieval": {"rerank": False},
+            "cache": {"semantic": False},
+            "llm": {"fallback": {"provider": "ollama", "model": "llama3.1:8b"}},
+        }
+    )
+    app = create_app(settings)
+    app.state.vector_db = store
+    app.state.journal = Journal(tmp_path / "journal")
+    app.state.traces = TraceStore(tmp_path / "traces")
+    app.dependency_overrides[deps.shared_embedding_router] = MemoryRouter
+
+    with TestClient(app) as test_client:
+        _ask(test_client, stream=False)
+        _ask(test_client, stream=True)
+        assert len(built) == 2
+        assert app.state.llm_fallback is built[1]
+        assert built[1].settings.llm.model == "llama3.1:8b"
+        assert built[1].closes == 0
+
+    assert built[1].closes == 1
+    assert app.state.llm_fallback is None

@@ -101,6 +101,7 @@ __all__ = [
     "DEFAULT_CONTEXT_BUDGET_TOKENS",
     "EXTRACTIVE_MODE",
     "FALLBACK_BREAKER",
+    "GRADER_BREAKER",
     "MAXIMUM_BEST_CANDIDATES",
     "Answer",
     "GenerationService",
@@ -113,6 +114,9 @@ EXTRACTIVE_MODE: Final = DegradationMode.EXTRACTIVE.value
 
 FALLBACK_BREAKER: Final = "llm_fallback"
 """The circuit-breaker name ``llm.fallback`` is counted under, apart from the primary's."""
+
+GRADER_BREAKER: Final = "llm_grader"
+"""The breaker a grader other than the primary provider is counted under."""
 
 MAXIMUM_BEST_CANDIDATES: Final = 5
 
@@ -793,14 +797,35 @@ class GenerationService:
             metrics.COST.increment(estimated, provider=provider, tenant="none")
 
     async def _grade(
-        self, question: str, answer: str, prepared: _Prepared, timings: dict[str, int]
+        self,
+        question: str,
+        answer: str,
+        prepared: _Prepared,
+        timings: dict[str, int],
+        deadline: _Deadline,
     ) -> FaithfulnessVerdict:
         """Score an answer when D5 is on, recording how long it took."""
         if not self.grounded_or_refuse:
             return UNGRADED
 
+        breaker = (
+            self.breaker
+            if self.grader is self.llm
+            else shared_breaker(GRADER_BREAKER, self.settings)
+        )
+        provider = _Provider(self.grader, breaker, role="grader")
+
+        async def complete(prompt: str, system: str) -> Completion:
+            result, _, admission = await self._with_retries(
+                provider, lambda llm: llm.complete(prompt, system=system), None, deadline
+            )
+            breaker.record_success(admission)
+            return result
+
         started = time.perf_counter()
-        verdict = await grade(self.grader, question, answer, prepared.context, prepared.texts)
+        verdict = await grade(
+            self.grader, question, answer, prepared.context, prepared.texts, complete=complete
+        )
         timings["grade"] = int((time.perf_counter() - started) * 1000)
         if verdict.score is not None:
             metrics.FAITHFULNESS.observe(verdict.score)
@@ -821,7 +846,7 @@ class GenerationService:
         """
         try:
             async with deadline.bounding("grading the answer"):
-                return await self._grade(question, answer, prepared, timings)
+                return await self._grade(question, answer, prepared, timings, deadline)
         except FasterRagError as exc:
             if not _past_deadline(exc):
                 raise
@@ -976,7 +1001,9 @@ class GenerationService:
                 async with deadline.bounding("generating"):
                     return await call(provider.llm), attempt, admission
             except FasterRagError as exc:
-                if not isinstance(exc, CircuitOpenError) and not _past_deadline(exc):
+                if _past_deadline(exc):
+                    provider.breaker.release(admission)
+                elif not isinstance(exc, CircuitOpenError):
                     provider.breaker.record_failure(admission, exc)
                 delay = self._retry_delay(exc, attempt, provider.breaker, deadline)
                 if delay is None:
@@ -1248,7 +1275,9 @@ class GenerationService:
                 )
         except FasterRagError as exc:
             if serving is not None:
-                if not _past_deadline(exc):
+                if _past_deadline(exc):
+                    serving.breaker.release(admission)
+                else:
                     serving.breaker.record_failure(admission, exc)
                 self._record_failure(prepared.spans, began, serving, attempts, exc)
             if sent:

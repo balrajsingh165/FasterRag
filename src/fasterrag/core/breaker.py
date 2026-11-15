@@ -19,7 +19,9 @@ Every state change starts a new generation, so the outcome of a call admitted be
 circuit opened — a late success above all — cannot close a circuit it never tested. In
 half-open exactly one admission is issued; every other caller is refused until it resolves.
 A probe whose caller never reports back (cancelled, crashed) is not waited on forever: its
-lease lapses after ``reset_timeout_ms`` and the next caller becomes the probe.
+lease lapses after ``reset_timeout_ms`` and the next caller becomes the probe. A caller that
+knows its call ended without a verdict — its own deadline cut it off — hands the admission
+back with ``release`` and the next caller probes at once.
 
 **Only retryable failures count.** A 401 is a configuration error that will fail identically
 forever, and opening a breaker on it would turn a permanent misconfiguration into an
@@ -218,6 +220,19 @@ class CircuitBreaker:
             self._failures += 1
             if self._failures >= self.failure_threshold:
                 self._transition(CircuitState.OPEN)
+
+    def release(self, admission: Admission | None) -> None:
+        """Hand back an admission whose call ended with no verdict on the provider.
+
+        A half-open probe cut off by the caller's own deadline frees its slot at once, rather
+        than holding it until the ``reset_timeout_ms`` lease lapses (TASK-0546).
+        """
+        if admission is None:
+            return
+
+        with self._lock:
+            if admission.generation == self._generation and self._state is CircuitState.HALF_OPEN:
+                self._probe_issued_at = None
 
     def reset(self) -> None:
         """Force the breaker closed. For tests and for an operator-driven recovery."""

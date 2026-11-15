@@ -57,6 +57,14 @@ def config_snapshot(settings: Settings) -> dict[str, Any]:
             "model": settings.llm.model,
             "temperature": settings.llm.temperature,
             "max_tokens": settings.llm.max_tokens,
+            "fallback": (
+                {
+                    "provider": settings.llm.fallback.provider,
+                    "model": settings.llm.fallback.model,
+                }
+                if settings.llm.fallback is not None
+                else None
+            ),
         },
         "prompts": {
             "p1_template_version": P1_TEMPLATE_VERSION,

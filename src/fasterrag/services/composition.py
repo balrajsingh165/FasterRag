@@ -79,6 +79,7 @@ def build_generation(
     tenant: str | None = None,
     *,
     llm: LLMAdapter | None = None,
+    fallback: LLMAdapter | None = None,
 ) -> GenerationService:
     """Assemble the query path every entry point uses, so no two of them can diverge.
 
@@ -93,6 +94,7 @@ def build_generation(
         tenant=tenant,
         embedder=router.default,
         owns_llm=llm is None,
+        fallback=fallback,
     )
 
 

@@ -44,6 +44,7 @@ from starlette.types import Receive, Scope, Send
 from fasterrag.api.dependencies import (
     CurrentCache,
     CurrentEmbeddings,
+    CurrentFallbackLLM,
     CurrentLLM,
     CurrentSettings,
     CurrentTenant,
@@ -168,12 +169,20 @@ async def run_query(
     embeddings: CurrentEmbeddings,
     cache: CurrentCache,
     llm: CurrentLLM,
+    fallback: CurrentFallbackLLM,
     request: Request,
     tenant: CurrentTenant,
 ) -> Any:
     """Answer a question, as one JSON body or as a stream of SSE events."""
     service = build_generation(
-        settings, adapter, embeddings, cache, get_trace_store(request), tenant=tenant, llm=llm
+        settings,
+        adapter,
+        embeddings,
+        cache,
+        get_trace_store(request),
+        tenant=tenant,
+        llm=llm,
+        fallback=fallback,
     )
 
     streaming = settings.llm.streaming if body.stream is None else body.stream

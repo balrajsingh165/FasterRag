@@ -1973,3 +1973,34 @@ async def test_a_stream_that_fails_for_good_after_text_stores_its_partial_trace(
     assert stored is not None
     assert stored.response == "The "
     assert stored.result["interrupted"]["retryable"] is False
+
+
+async def test_a_grader_that_fails_once_is_retried_rather_than_skipped() -> None:
+    """Only the P1 call retried, so one 503 from the grader left the answer ungraded (item 3)."""
+    service, _ = build(
+        grounded_or_refuse=True,
+        verdict='{"score": 0.9, "unsupported_claims": []}',
+        grader_error=GenerationError("status 503", retryable=True),
+    )
+    assert isinstance(service.grader, ScriptedLLM)
+    service.grader.failures = 1
+
+    answer = await service.answer("q")
+
+    assert answer.faithfulness == 0.9
+    assert len(service.grader.prompts) == 2
+
+
+async def test_a_half_open_probe_cut_off_by_the_deadline_frees_the_probe_slot() -> None:
+    """A probe past the deadline recorded nothing, so its slot stayed held for a full lease."""
+    service, llm = with_deadline()
+    llm.hang_after = 0
+    service.breaker.failure_threshold = 1
+    service.breaker.record_failure(service.breaker.check(), GenerationError("503"))
+    service.breaker._opened_at -= service.breaker.reset_timeout_ms / 1000 + 1
+
+    answer = await asyncio.wait_for(service.answer("q"), 10)
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert service.breaker.state.name == "HALF_OPEN"
+    assert service.breaker.check() is not None
