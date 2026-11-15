@@ -305,3 +305,33 @@ def test_every_workflow_and_composite_action_pins_its_actions_to_a_commit() -> N
 
     assert len(files) >= 6
     assert [problem for path in files for problem in unpinned_actions(path)] == []
+
+
+def smoke_runs(job: str) -> list[dict[str, str]]:
+    """Return the matrix entries a smoke job runs release_smoke.sh with."""
+    matrix: Any = release()["jobs"][job]["strategy"]["matrix"]["include"]
+    assert isinstance(matrix, list)
+    return [{str(key): str(value).lower() for key, value in entry.items()} for entry in matrix]
+
+
+@pytest.mark.parametrize("job", ["smoke", "post-publish"])
+def test_each_smoke_installs_as_documented_and_again_with_pre(job: str) -> None:
+    """TASK-0556: no smoke used `--pre`, so the 0.1.0b1 install users typed was never tested."""
+    runs = smoke_runs(job)
+    script = release()["jobs"][job]["steps"][-1]["run"]
+
+    assert sorted(run["pip_flags"] for run in runs) == ["", "--pre"]
+    assert [run["local_profile"] for run in runs if run["pip_flags"] == ""] == ["true"]
+    assert 'PIP_FLAGS="${PIP_FLAGS}"' in script
+    assert "LOCAL_PROFILE_PROBE=/probe/local_profile_probe.py" in script
+    assert "scripts/local_profile_probe.py:/probe/local_profile_probe.py:ro" in script
+
+
+def test_the_published_package_is_installed_with_the_command_the_documents_give() -> None:
+    """TASK-0556: the smoke installed `==<version>`; the documents say `>=<version>`."""
+    quickstart = (ROOT / "userdocs" / "quickstart.md").read_text(encoding="utf-8")
+    script = release()["jobs"]["post-publish"]["steps"][-1]["run"]
+
+    assert re.search(r'pip install "fasterrag(\[[a-z,]+\])?>=\d', quickstart)
+    assert 'REQUIREMENT="fasterrag>=${VERSION}"' in script
+    assert 'LOCAL_PROFILE_REQUIREMENT="fasterrag[chroma,huggingface]>=${VERSION}"' in script
