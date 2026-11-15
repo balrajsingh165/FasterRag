@@ -21,16 +21,25 @@ is the application's (``app.state.llm``), lent to each request's service and rel
 lifespan alone (TASK-0466); before that, each query built a provider client and this module
 closed it, so a connection pool was opened and torn down per question. The close stays: a
 service that does own something must still release it when a client disconnects mid-answer.
+
+A client that disconnects stops the generation it was waiting for (TASK-0467). The response
+listens for the disconnect on every ASGI version — Starlette does so only under HTTP 2.3, and
+under 2.4 waits for the next write to fail, which a stalled provider never reaches — and then
+closes the frames, the service's event stream and the provider's stream in turn. The service
+stores the abandoned query's trace marked ``aborted``.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 
+from anyio import create_task_group
+from anyio.abc import TaskGroup
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from fasterrag.api.dependencies import (
     CurrentCache,
@@ -81,7 +90,7 @@ async def _first_event(
 
 async def _stream(
     service: GenerationService, first: QueryEvent | None, events: AsyncIterator[QueryEvent]
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     """Yield the answer as SSE frames, releasing the services whatever happens."""
     try:
         if first is not None:
@@ -109,7 +118,46 @@ async def _stream(
             )
         )
     finally:
+        if isinstance(events, AsyncGenerator):
+            await events.aclose()
         await service.close()
+
+
+class _AnswerStream(StreamingResponse):
+    """An SSE response that stops generating as soon as its client goes away (TASK-0467)."""
+
+    def __init__(self, frames: AsyncGenerator[str, None]) -> None:
+        """Stream ``frames``, keeping hold of them so they are closed however the stream ends."""
+        super().__init__(
+            frames,
+            media_type=SSE_MEDIA_TYPE,
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+        self.frames = frames
+
+    async def _respond(self, send: Send, group: TaskGroup) -> None:
+        """Send every frame, then stop listening for a disconnect that no longer matters."""
+        try:
+            await self.stream_response(send)
+        except OSError as exc:
+            _logger.info(
+                "the client closed the connection during the answer",
+                extra={"error": type(exc).__name__, "trace_id": current_trace_id()},
+            )
+        group.cancel_scope.cancel()
+
+    async def __call__(self, _scope: Scope, receive: Receive, send: Send) -> None:
+        """Stream the answer, cancelling it the moment ``receive`` reports a disconnect."""
+        try:
+            async with create_task_group() as group:
+                group.start_soon(self._respond, send, group)
+                await self.listen_for_disconnect(receive)
+                group.cancel_scope.cancel()
+        finally:
+            # CRITICAL: an explicit close, not left to the garbage collector. A response
+            # cancelled while parked between two frames leaves its generators suspended, and
+            # only closing them reaches the provider's stream and stores the aborted trace.
+            await self.frames.aclose()
 
 
 @router.post("/query")
@@ -142,11 +190,7 @@ async def run_query(
         # refusal propagate to the problem handler with its real status. Handing the
         # generator to `StreamingResponse` untouched would commit a 200 first.
         first = await _first_event(service, events)
-        return StreamingResponse(
-            _stream(service, first, events),
-            media_type=SSE_MEDIA_TYPE,
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        return _AnswerStream(_stream(service, first, events))
 
     try:
         answer = await service.answer(
