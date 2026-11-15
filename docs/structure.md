@@ -113,6 +113,7 @@ fasterRag/
 │       │   └── config.local.yaml # The local profile: embedded Chroma, local embeddings, no keys
 │       ├── observability/        # Metrics, tracing, dashboard
 │       │   ├── logging.py        # Structured JSON logging + correlation ids
+│       │   ├── audit.py          # Audit trail of administrative actions (fasterrag.audit)
 │       │   ├── otel_export.py    # Span helpers (retrieval/reranker/context/generation)
 │       │   ├── metrics.py        # Metrics catalogue export
 │       │   └── dashboard.py      # Read-only inspection UI (observability ONLY)
