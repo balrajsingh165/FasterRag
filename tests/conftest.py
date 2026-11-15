@@ -158,14 +158,22 @@ def _unspent_governors() -> Iterator[None]:
 # embedders are the same: a fake factory would chunk every later semantic test.
 @pytest.fixture(autouse=True)
 def _closed_circuits_and_no_loaded_models() -> Iterator[None]:
-    """Give every test closed shared breakers and empty reranker and sentence-embedder caches."""
+    """Give every test closed shared breakers and empty model and plugin-class caches.
+
+    The plugin cache is imported here, not at module level, because a hook test imports this
+    module in a subprocess that may resolve ``fasterrag`` from another checkout.
+    """
+    from fasterrag.core.plugin_api import reset_loaded_plugins
+
     reset_shared_breakers()
     reset_shared_cross_encoders()
     cpu_pool.reset_shared_sentence_embedders()
+    reset_loaded_plugins()
     yield
     reset_shared_breakers()
     reset_shared_cross_encoders()
     cpu_pool.reset_shared_sentence_embedders()
+    reset_loaded_plugins()
 
 
 @pytest.fixture(autouse=True)

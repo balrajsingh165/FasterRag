@@ -83,8 +83,9 @@ fasterRag/
 │       ├── core/                 # RAG pipeline (pure domain logic)
 │       │   ├── identity.py       # Deterministic document, chunk, and config hashes
 │       │   ├── tenancy.py        # The payload field naming a chunk's owning tenant
-│       │   ├── parsing/          # PDF/HTML/MD/DOCX/OCR parsers, table extraction
-│       │   ├── chunking/         # fixed, recursive, semantic, layout, late, contextual
+│       │   ├── parsing/          # PDF/HTML/MD/DOCX/OCR parsers, table extraction, parser plugins
+│       │   ├── chunking/         # fixed, recursive, semantic, layout, late, contextual, chunker plugins
+│       │   ├── plugin_api.py     # entry-point loading + API version check for every plugin
 │       │   ├── retrieval/        # bm25.py sparse encoding; fusion and filters
 │       │   ├── cache/            # Embedding cache, semantic response cache
 │       │   ├── rerank/           # cross-encoder reranking
@@ -97,7 +98,7 @@ fasterRag/
 │       │   ├── embeddings/       # base, factory, huggingface, openai, cohere, ollama,
 │       │   │                     # tiering (metadata-routed model selection), sync bridge
 │       │   ├── llm/              # base, factory, provider clients (streaming)
-│       │   └── plugin_api.py     # adapter API version check applied to every loaded plugin
+│       │   └── plugin_api.py     # re-exports core/plugin_api.py's version check for the factories
 │       ├── workers/              # Parallel pools
 │       │   ├── cpu_pool.py       # load/parse/chunk workers (CPU-bound)
 │       │   ├── embed_pool.py     # stateful embedding workers (model loaded once)

@@ -127,6 +127,9 @@ ingestion:
   # Directories a `path` source may read from. Empty is unconfined, which is
   # refused outright once security.auth is on -- see docs/security.md.
   allowed_source_roots: []
+  # Suffix -> parser plugin (fasterrag.parsers entry point), e.g. .rtf: acme-rtf.
+  # An installed parser package reads nothing until it is named here.
+  parsers: {}
 
 index:
   lockfile: true

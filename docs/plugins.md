@@ -1,7 +1,8 @@
 # Writing a plugin
 
-A plugin adds a vector database, an embedding provider or an LLM provider to fasterRag without
-forking it. It is an ordinary Python package that subclasses one of the adapter base classes and
+A plugin adds a vector database, an embedding provider, an LLM provider, a chunking strategy or
+a file-format parser to fasterRag without forking it. It is an ordinary Python package that
+subclasses one of the adapter base classes (or implements the chunker or parser shape) and
 registers the subclass under an entry-point group; once it is installed, one line of
 `config.yaml` selects it. This page walks through the whole job using the sample package in the
 repository, `examples/plugin-vectordb/`, which CI installs with pip and runs against the shared
@@ -19,7 +20,12 @@ This page is the procedure.
 | An embedding provider | `fasterrag.embeddings` | `EmbeddingAdapter` | `fasterrag.adapters.embeddings.base` |
 | An LLM provider | `fasterrag.llm` | `LLMAdapter` | `fasterrag.adapters.llm.base` |
 
-Chunkers, parsers and rerankers have no entry-point group yet (TASK-0513).
+| A chunking strategy | `fasterrag.chunkers` | — (implements `Chunker`) | `fasterrag.chunking` |
+| A file-format parser | `fasterrag.parsers` | — (implements `ParserPlugin`) | `fasterrag.parsing` |
+
+Chunkers and parsers are plain classes rather than subclasses; [Chunkers and
+parsers](#chunkers-and-parsers) below gives their shape. Rerankers have no entry-point group yet
+(TASK-0513).
 
 ## 2. Implement the adapter
 
@@ -99,10 +105,72 @@ typo fails at load and lists every name that would have worked. If your plugin n
 credential, read it through the section's `api_key_env` and call `require_key` /
 `require_llm_key` from the base module when the adapter is built.
 
+## Chunkers and parsers
+
+The same steps apply — implement, declare the version, register, select — with these shapes.
+
+**A chunker** is a class constructed as `cls(settings, counter=counter)` — the validated
+`Settings` and the pipeline's `TokenCounter` — whose `split(document)` returns a list of
+`TextChunk` in document order, with `start`/`end` offsets into `document.text` and
+`strategy` set to the registered name. It declares `adapter_api_version` against
+`fasterrag.chunking.CHUNKER_API_VERSION` (`"1.0"`):
+
+```toml
+[project.entry-points."fasterrag.chunkers"]
+sentences = "my_pkg.chunker:SentenceChunker"
+```
+
+```yaml
+chunking:
+  strategy: sentences
+```
+
+`chunking.strategy` is validated like a provider name: a built-in name (`fixed`, `recursive`,
+`semantic`, `layout`, `late`) always wins, and an unknown name stops the load listing the
+built-in and installed chunkers. A chunker reads `chunking.chunk_size` and `chunking.overlap`
+from `settings` if it wants them; it gets no keys of its own. The strategy name is part of the
+chunker hash that chunk ids are derived from, so if your chunker's boundaries change between
+releases, register the new behaviour under a new name or tell operators to reindex.
+
+**A parser** is a class constructed with no arguments whose
+`parse(data, *, filename, options)` returns a `ParsedDocument`, built with
+`fasterrag.parsing.DocumentBuilder` so the block offsets stay consistent. It declares
+`adapter_api_version` against `fasterrag.parsing.PARSER_API_VERSION` (`"1.0"`). The entry-point
+name is the parser's name, not a suffix:
+
+```toml
+[project.entry-points."fasterrag.parsers"]
+acme-rtf = "my_pkg.parser:RtfParser"
+```
+
+```yaml
+ingestion:
+  parsers:
+    .rtf: acme-rtf
+```
+
+**Installing a parser package enables nothing by itself.** A suffix is read by a plugin only
+when `ingestion.parsers` maps it to that plugin's name. A built-in parser is chosen by suffix
+with no configuration, so a package that claimed suffixes on installation could silently
+change how an existing corpus is parsed — for every deployment that happened to have it in
+the environment, and differently on two machines with different packages. Keeping the choice
+in `config.yaml` makes it reviewable and the same everywhere the file is. It also makes the
+replacement of a built-in parser explicit: map `.pdf` to your plugin and it reads PDFs, while
+an operator who did not write that line keeps the built-in one. Keying the entry point by name
+rather than by suffix lets two installed packages offer a parser for the same suffix, with the
+configuration choosing between them.
+
+Both kinds are loaded and their versions checked in the process that accepts the job, before
+any document is handed to the parse workers, so a broken or incompatible plugin refuses the
+job with `CONFIG_INVALID` instead of dead-lettering every document. The workers then load the
+plugin again themselves; it must be importable there, which an installed package always is.
+`tests/unit/test_pipeline_plugins.py` proves the path end to end with a fake distribution.
+
 ## When the interface changes
 
-The names the base modules export, the abstract members of each base class and the group names
-are held by `tests/unit/test_public_surface.py`. Removing a name, or changing what a plugin must
+The names the base modules export, the abstract members of each base class, the group names
+and the chunker and parser API versions are held by `tests/unit/test_public_surface.py`.
+Removing a name, or changing what a plugin must
 implement without moving `ADAPTER_API_VERSION`, fails fasterRag's own build. A major bump means
 existing plugins are refused until their authors re-test and re-declare; a minor bump adds
 members with defaults, and plugins built for an older minor version keep loading.

@@ -69,6 +69,7 @@ OVERRIDES: Final[dict[str, tuple[Any, ...]]] = {
     ),
     "embeddings.dimensions": (DIMENSIONS,),
     "embeddings.provider": ("ollama",),
+    "chunking.strategy": ("fixed",),
 }
 """Mutation units that cannot be expressed as a single leaf edit, keyed by dotted path.
 
@@ -81,6 +82,7 @@ defaults to ``None``, and ``None`` carries no type from which to derive a smalle
 ``embeddings.provider`` stopped being a ``Literal`` when plugins became selectable
 (TASK-0439): it is a string the schema checks against the built-in names and the installed
 entry points, so the generic string edit is refused and another built-in is named instead.
+``chunking.strategy`` followed for the same reason when chunkers became plugins (TASK-0513).
 """
 
 IRRELEVANT: Final[tuple[tuple[str, Any], ...]] = (
