@@ -230,6 +230,7 @@ class IngestionService:
                 executor_factory=self._executor_factory,
                 llm=enricher,
                 trim=indexer.trim,
+                discard=indexer.discard,
             ) as cpu:
                 parse_report, embed_report = await _pipe(
                     cpu.process(

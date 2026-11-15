@@ -80,7 +80,7 @@ from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash,
 from fasterrag.core.parsing import create_parsing_options, parse_bytes
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError, ParseError
 from fasterrag.observability.logging import current_trace_id, get_logger
-from fasterrag.services.journal import DocumentRecord, Journal
+from fasterrag.services.journal import DocumentRecord, Extent, Journal
 from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload, DocumentTask, ParseOutcome
 
@@ -390,12 +390,15 @@ class CpuWorkerPool:
         executor_factory: Callable[[int], Executor] | None = None,
         llm: LLMAdapter | None = None,
         trim: Callable[[str, int], Awaitable[None]] | None = None,
+        discard: Callable[[str, Sequence[str]], Awaitable[None]] | None = None,
     ) -> None:
         """Build the pool without starting any worker."""
         self.settings = settings
         self.journal = journal
         self.llm = llm
         self._trim = trim
+        self._discard = discard
+        self._chunker = chunker_config_hash(settings)
         self.size = resolve_pool_size(settings.workers.cpu_pool_size)
         self._executor_factory = executor_factory or (
             lambda workers: ProcessPoolExecutor(max_workers=workers)
@@ -570,6 +573,9 @@ class CpuWorkerPool:
         if self.journal is not None and self.settings.ingestion.dedup:
             known = await self.journal.known_content(collection)
         indexed_before = frozenset(known.values())
+        extents: dict[str, list[Extent]] = {}
+        if self.journal is not None and job is not None:
+            extents = await self.journal.chunk_extents(collection)
         standalone = ledger is None
         tracker = ledger or IndexLedger(on_progress, start=resume_from)
         parsed = chunked = deduplicated = dead_lettered = empty = 0
@@ -598,6 +604,10 @@ class CpuWorkerPool:
                     async with tracker.journal_lock:
                         if task.document_id in indexed_before:
                             await self._retire(collection, task)
+                        elif task.document_id in extents:
+                            await self._supersede(task.document_id, extents, 0)
+                        if task.document_id in extents:
+                            await self._settle_extent(collection, task.document_id, extents, 0)
                         await self._skip_empty(job, task, outcome)
                     await tracker.settle(task.index)
                     continue
@@ -615,13 +625,19 @@ class CpuWorkerPool:
                     flags[flag] = flags.get(flag, 0) + 1
 
                 payloads = self._addressed(outcome)
+                await self._attempt(job, collection, task.document_id, len(payloads), extents)
                 await tracker.expect(
                     task.document_id,
                     index=task.index,
                     source=task.source,
                     chunks=len(payloads),
                     commit=self._commit(
-                        job, collection, task, outcome, update=task.document_id in indexed_before
+                        job,
+                        collection,
+                        task,
+                        outcome,
+                        extents,
+                        update=task.document_id in indexed_before,
                     ),
                 )
                 for payload in payloads:
@@ -767,23 +783,77 @@ class CpuWorkerPool:
         collection: str,
         task: DocumentTask,
         outcome: ParseOutcome,
+        extents: dict[str, list[Extent]],
         *,
         update: bool = False,
     ) -> Callable[[], Awaitable[None]]:
         """Return the callback that journals this document once it is fully indexed.
 
-        For an ``update`` — a document the journal already held — the chunks past the new
-        length are trimmed first, so a failed trim leaves the document unrecorded (TASK-0443).
+        Stale chunks go first, so a failed delete leaves the document unrecorded; see
+        :meth:`_supersede`, and the trim by index for a document no extent covers (TASK-0443).
         """
 
         async def commit() -> None:
-            if update and self._trim is not None:
-                await self._trim(task.document_id, len(outcome.chunks))
+            document = task.document_id
+            chunks = len(outcome.chunks)
+            unrecorded = not any(extent.settled for extent in extents.get(document, []))
+            await self._supersede(document, extents, chunks)
+            if update and unrecorded and self._trim is not None:
+                await self._trim(document, chunks)
             holder = await self._index_document(job, collection, task, outcome)
             if holder is not None:
                 await self._withdraw(job, collection, task, outcome, holder, update=update)
+                chunks = 0
+            await self._settle_extent(collection, document, extents, chunks)
 
         return commit
+
+    async def _attempt(
+        self,
+        job: str | None,
+        collection: str,
+        document: str,
+        chunks: int,
+        extents: dict[str, list[Extent]],
+    ) -> None:
+        """Record the chunks a document is about to write, before any is written (TASK-0518).
+
+        An ingest that writes some and then fails leaves them findable by the next one.
+        """
+        if self.journal is None or job is None:
+            return
+        entries = extents.setdefault(document, [])
+        if any(extent[:2] == (self._chunker, chunks) for extent in entries):
+            return
+        await self.journal.record_extent(collection, document, self._chunker, chunks, settled=False)
+        entries.append(Extent(self._chunker, chunks, False))
+
+    async def _supersede(
+        self, document: str, extents: dict[str, list[Extent]], chunks: int
+    ) -> None:
+        """Delete, by id, every chunk a recorded extent names that the new version does not.
+
+        That covers a shorter version, an attempt that failed part way and another chunker.
+        """
+        if self._discard is None:
+            return
+        keep = {chunk_id(document, index, self._chunker) for index in range(chunks)}
+        stale = {
+            chunk_id(document, index, extent.chunker)
+            for extent in extents.get(document, [])
+            for index in range(extent.chunks)
+        }
+        if stale - keep:
+            await self._discard(document, sorted(stale - keep))
+
+    async def _settle_extent(
+        self, collection: str, document: str, extents: dict[str, list[Extent]], chunks: int
+    ) -> None:
+        """Record that the document now holds exactly ``chunks`` chunks under this chunker."""
+        if self.journal is None or document not in extents:
+            return
+        await self.journal.record_extent(collection, document, self._chunker, chunks, settled=True)
+        extents[document] = [Extent(self._chunker, chunks, True)]
 
     async def _withdraw(
         self,

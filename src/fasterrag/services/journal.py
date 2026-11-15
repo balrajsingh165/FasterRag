@@ -56,7 +56,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 from fasterrag.config.schema import Settings
 from fasterrag.core.identity import job_id as new_job_id
@@ -74,6 +74,7 @@ __all__ = [
     "Checkpoint",
     "DocumentRecord",
     "DocumentStatus",
+    "Extent",
     "JobRecord",
     "JobStatus",
     "Journal",
@@ -92,6 +93,7 @@ _COLLECTIONS_DIR: Final = "collections"
 _DOCUMENTS_FILE: Final = "documents.jsonl"
 _DEDUP_FILE: Final = "content-hashes.jsonl"
 _BACKENDS_DIR: Final = "backends"
+_EXTENTS_FILE: Final = "chunk-extents.jsonl"
 _BACKEND_SLUG: Final = re.compile(r"[^a-z0-9_-]+")
 _PREVIOUS_SUFFIX: Final = ".prev"
 _TOMBSTONE_KEY: Final = "tombstone"
@@ -497,6 +499,34 @@ def _live_content(lines: Sequence[dict[str, Any]]) -> dict[str, str]:
     return known
 
 
+class Extent(NamedTuple):
+    """A document's chunks ``0..chunks-1`` under one chunker; ``settled`` once all were written."""
+
+    chunker: str
+    chunks: int
+    settled: bool
+
+
+def _live_extents(lines: Sequence[dict[str, Any]]) -> dict[str, list[Extent]]:
+    """Return each document's chunk extents since its last settled one, that one first."""
+    extents: dict[str, list[Extent]] = {}
+    for payload in lines:
+        extent = Extent(str(payload["chunker"]), int(payload["chunks"]), bool(payload["settled"]))
+        if extent.settled:
+            extents[payload["document_id"]] = [extent]
+        else:
+            extents.setdefault(payload["document_id"], []).append(extent)
+    return extents
+
+
+def _extent_line(document: str, chunker: str, chunks: int, *, settled: bool) -> str:
+    """Return the log line recording that a document has, or may have, these chunks."""
+    return json.dumps(
+        {"chunker": chunker, "chunks": chunks, "document_id": document, "settled": settled},
+        sort_keys=True,
+    )
+
+
 def _dedup_line(content: str, document: str) -> str:
     """Return the dedup log line that remembers ``content`` for ``document``."""
     return json.dumps({"content_hash": content, "document_id": document})
@@ -517,6 +547,17 @@ def backend_identity(settings: Settings) -> str:
         location = [vector_db.host, vector_db.port]
     slug = _BACKEND_SLUG.sub("-", vector_db.provider.lower()).strip("-")[:32] or "backend"
     return f"{slug}-{text_hash(json.dumps([vector_db.provider, location]))[:12]}"
+
+
+def _compacted(path: Path, lines: Sequence[dict[str, Any]]) -> list[str]:
+    """Return the lines of a dedup or chunk-extent log that still mean something."""
+    if path.name == _EXTENTS_FILE:
+        return [
+            _extent_line(document, extent.chunker, extent.chunks, settled=extent.settled)
+            for document, extents in _live_extents(lines).items()
+            for extent in extents
+        ]
+    return [_dedup_line(c, d) for c, d in _live_content(lines).items()]
 
 
 def _finished_before(record: JobRecord, cutoff: float) -> bool:
@@ -1127,6 +1168,39 @@ class Journal:
             raise _append_failed(path, exc) from exc
         return None
 
+    def _extents_path(self, collection: str) -> Path:
+        """Return the path of a collection's chunk-extent log, beside its dedup log."""
+        return self._dedup_path(collection).with_name(_EXTENTS_FILE)
+
+    async def chunk_extents(self, collection: str) -> dict[str, list[Extent]]:
+        """Return each document's possible ``(chunker, chunks)`` extents, off the event loop."""
+        return await asyncio.to_thread(self.chunk_extents_blocking, collection)
+
+    def chunk_extents_blocking(self, collection: str) -> dict[str, list[Extent]]:
+        """Return the extents; :meth:`chunk_extents` is this off the loop (TASK-0518).
+
+        The first entry is the last settled one, if any; the rest are attempts since.
+        """
+        return _live_extents(_logged_lines(self._extents_path(collection)))
+
+    async def record_extent(
+        self, collection: str, document: str, chunker: str, chunks: int, *, settled: bool
+    ) -> None:
+        """Record a document's chunk extent, written whatever ``ingestion.dedup`` says."""
+        await asyncio.to_thread(
+            self.record_extent_blocking, collection, document, chunker, chunks, settled=settled
+        )
+
+    def record_extent_blocking(
+        self, collection: str, document: str, chunker: str, chunks: int, *, settled: bool
+    ) -> None:
+        """Record an extent: an attempt before chunks are written, settled once they all are.
+
+        :meth:`record_extent` is this off the event loop.
+        """
+        line = _extent_line(document, chunker, chunks, settled=settled)
+        _append_line(self._extents_path(collection), line, self._tails)
+
     async def forget_document(self, collection: str, document: str) -> bool:
         """Tombstone a document in a collection's dedup index, off the event loop."""
         return await asyncio.to_thread(self.forget_document_blocking, collection, document)
@@ -1199,6 +1273,8 @@ class Journal:
         logs = [
             *collections.glob(f"*/{_DEDUP_FILE}"),
             *collections.glob(f"*/{_BACKENDS_DIR}/*/{_DEDUP_FILE}"),
+            *collections.glob(f"*/{_EXTENTS_FILE}"),
+            *collections.glob(f"*/{_BACKENDS_DIR}/*/{_EXTENTS_FILE}"),
         ]
         for path in sorted(logs):
             try:
@@ -1284,16 +1360,16 @@ class Journal:
         append lock, so no line appended meanwhile is lost.
         """
         lines = _logged_lines(path)
-        if len(lines) <= len(_live_content(lines)):
+        if len(lines) <= len(_compacted(path, lines)):
             return 0
         try:
             with _exclusive(path):
                 lines = _logged_lines(path)
-                live = _live_content(lines)
+                live = _compacted(path, lines)
                 dropped = len(lines) - len(live)
                 if dropped <= 0:
                     return 0
-                text = "".join(_dedup_line(c, d) + "\n" for c, d in live.items())
+                text = "".join(line + "\n" for line in live)
                 _write_atomically(path, text, keep_previous=False)
                 self._tails.pop(path, None)
         except OSError as exc:

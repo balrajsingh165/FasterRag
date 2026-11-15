@@ -20,7 +20,7 @@ import pytest
 from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.adapters.vectordb.base import Point, PointSelector, UpsertResult
 from fasterrag.config.schema import Settings
-from fasterrag.core.identity import document_id
+from fasterrag.core.identity import chunk_id, chunker_config_hash, document_id
 from fasterrag.errors import FasterRagError, RetrievalError
 from fasterrag.services.documents import DocumentService
 from fasterrag.services.ingestion import IngestionService
@@ -52,8 +52,15 @@ class OrderedAdapter(MemoryAdapter):
         return await super().upsert(points)
 
     async def delete(self, selector: PointSelector) -> None:
-        self.operations.append(("delete", str((selector.filters or {}).get("document_id"))))
+        named = {str(point.payload["document_id"]) for point in self.selected(selector)}
+        document = (selector.filters or {}).get("document_id") or ",".join(sorted(named))
+        self.operations.append(("delete", str(document)))
         await super().delete(selector)
+
+    def selected(self, selector: PointSelector) -> list[Point]:
+        """Return the points a selector by id names."""
+        wanted = set(selector.point_ids or ())
+        return [point for point in self.points if point.point_id in wanted]
 
 
 def build(
@@ -136,16 +143,19 @@ async def test_the_tail_is_trimmed_only_after_the_new_chunks_are_written(
     """Trimming first would open a window in which the document has no chunks at all."""
     service, adapter = build(tmp_path)
     document = document_id(str(contract))
-    await ingest(service, contract)
+    before = (await ingest(service, contract))["chunked"]
     adapter.operations.clear()
 
     contract.write_text(SHORT, encoding="utf-8")
     counts = await ingest(service, contract)
 
     assert adapter.operations == [("upsert", document)] * counts["chunked"] + [("delete", document)]
+    chunker = chunker_config_hash(service.settings)
     assert adapter.selectors[-1] == PointSelector(
         collection=COLLECTION,
-        filters={"document_id": document, "chunk_index": {"$gte": counts["chunked"]}},
+        point_ids=sorted(
+            chunk_id(document, index, chunker) for index in range(counts["chunked"], before)
+        ),
     )
 
 

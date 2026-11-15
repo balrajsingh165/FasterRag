@@ -117,6 +117,19 @@ Drift = any mismatch between this file and live config/corpus. Reported, never s
 | `first_failed_at` / `last_failed_at` | str | Timestamps |
 | `trace_id` | str | Correlates to logs and spans |
 
+### Chunk extent
+
+One JSON object per line in `<journal>/collections/<collection>/backends/<backend>/chunk-extents.jsonl` (beside the dedup file; TASK-0518), written whatever `ingestion.dedup` says, never for a job run without a journal.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `document_id` | str | The document |
+| `chunker` | str | `chunker_config_hash` of the configuration that chunked it — with the document id and the chunk index, what a chunk id is derived from |
+| `chunks` | int | How many chunks, so the ids are `chunk_id(document_id, 0..chunks-1, chunker)` |
+| `settled` | bool | `false`: written before the chunks, so they may be in the index whether or not the ingest finished. `true`: every chunk of this version is written and every older one deleted |
+
+A document may hold any chunk an extent names from its last settled line onward. Committing a new version deletes, by id, every such chunk the new version does not name, then appends a settled line; a document that became empty settles at `0`. The retention pass compacts the file to those lines.
+
 ### Dedup record and tombstone
 
 One JSON object per line in `<journal>/collections/<collection>/backends/<backend>/content-hashes.jsonl`. The file is append-only; it is read in order and the order is the meaning.
