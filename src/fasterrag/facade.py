@@ -362,9 +362,10 @@ class FasterRag:
         )
 
     async def drop_collection(self, name: str) -> bool:
-        """Drop a collection, returning whether it existed."""
+        """Drop a collection and its dedup record, returning whether it existed."""
         self._require_started()
-        return await self.vector_db.drop_collection(name)
+        service = build_documents(self.settings, self.vector_db, self.journal, self.cache)
+        return await service.drop_collection(name)
 
     async def delete_document(
         self,

@@ -77,7 +77,7 @@ from fasterrag.config.schema import Settings
 from fasterrag.core.chunking import SentenceEmbedder, create_chunker, create_token_counter
 from fasterrag.core.confinement import resolved_within
 from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
-from fasterrag.core.journaling import DocumentJournal, DocumentRecord
+from fasterrag.core.journaling import DeletionWatch, DocumentJournal, DocumentRecord
 from fasterrag.core.parsing import create_parsing_options, parse_bytes
 from fasterrag.core.tracing import StageClock
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError, ParseError
@@ -584,6 +584,9 @@ class CpuWorkerPool:
                 retryable=False,
             )
 
+        watch = None
+        if self.journal is not None and job is not None:
+            watch = await self.journal.watch_deletions(collection)
         known: dict[str, str] = {}
         if self.journal is not None and self.settings.ingestion.dedup:
             known = await self.journal.known_content(collection)
@@ -616,7 +619,7 @@ class CpuWorkerPool:
                     empty += 1
                     async with tracker.journal_lock:
                         if task.document_id in indexed_before:
-                            await self._retire(collection, task)
+                            await self._retire(collection, task, indexed_before)
                         await self._skip_empty(job, task, outcome)
                     await tracker.settle(task.index)
                     continue
@@ -640,7 +643,12 @@ class CpuWorkerPool:
                     source=task.source,
                     chunks=len(payloads),
                     commit=self._commit(
-                        job, collection, task, outcome, update=task.document_id in indexed_before
+                        job,
+                        collection,
+                        task,
+                        outcome,
+                        update=task.document_id in indexed_before,
+                        watch=watch,
                     ),
                 )
                 for payload in payloads:
@@ -787,6 +795,7 @@ class CpuWorkerPool:
         outcome: ParseOutcome,
         *,
         update: bool = False,
+        watch: DeletionWatch | None = None,
     ) -> Callable[[], Awaitable[None]]:
         """Return the callback that journals this document once it is fully indexed.
 
@@ -797,7 +806,9 @@ class CpuWorkerPool:
         async def commit() -> None:
             if update and self._trim is not None:
                 await self._trim(task.document_id, len(outcome.chunks))
-            await self._index_document(job, collection, task, outcome)
+            kept = await self._index_document(job, collection, task, outcome, watch)
+            if not kept and self._trim is not None:
+                await self._trim(task.document_id, 0)
 
         return commit
 
@@ -840,7 +851,9 @@ class CpuWorkerPool:
 
         await self.journal.record_document(job, self._outcome(task, status, digest))
 
-    async def _retire(self, collection: str, task: DocumentTask) -> None:
+    async def _retire(
+        self, collection: str, task: DocumentTask, indexed_before: frozenset[str]
+    ) -> None:
         """Remove the chunks and the dedup record of an indexed document that is now empty.
 
         Its whole previous version is the stale tail; the chunks go first, so a failed trim
@@ -851,7 +864,7 @@ class CpuWorkerPool:
 
         await self._trim(task.document_id, 0)
         if self.journal is not None:
-            await self.journal.forget_document(collection, task.document_id)
+            await self.journal.forget_document(collection, task.document_id, known=indexed_before)
 
     async def _skip_empty(self, job: str | None, task: DocumentTask, outcome: ParseOutcome) -> None:
         """Record a document that parsed to nothing as skipped, with the reason."""
@@ -870,21 +883,27 @@ class CpuWorkerPool:
         await self.journal.record_document(job, record)
 
     async def _index_document(
-        self, job: str | None, collection: str, task: DocumentTask, outcome: ParseOutcome
-    ) -> None:
-        """Record an indexed document and remember its content hash, in one thread hop.
+        self,
+        job: str | None,
+        collection: str,
+        task: DocumentTask,
+        outcome: ParseOutcome,
+        watch: DeletionWatch | None = None,
+    ) -> bool:
+        """Record an indexed document and remember its hash, in one thread hop (BENCH-0006).
 
-        One hop rather than two: this runs once per document, and the handoff costs more
-        than either append does (``docs/benchmarks.md`` BENCH-0006).
+        Returns False when the document was deleted after ``watch`` was taken; it is then
+        recorded skipped and its chunks must be removed (TASK-0519).
         """
         if self.journal is None or job is None:
-            return
+            return True
 
-        await self.journal.record_indexed(
+        return await self.journal.record_indexed(
             job,
             collection,
             self._outcome(task, "indexed", outcome.content_hash),
             dedup=self.settings.ingestion.dedup,
+            watch=watch,
         )
 
     def _outcome(

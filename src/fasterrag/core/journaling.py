@@ -13,12 +13,13 @@ re-exported from ``services.journal``, as the same objects, so imports from ther
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Collection
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from fasterrag.errors import ErrorCode
 
-__all__ = ["DocumentJournal", "DocumentRecord", "DocumentStatus"]
+__all__ = ["DeletionWatch", "DocumentJournal", "DocumentRecord", "DocumentStatus"]
 
 DocumentStatus = str
 
@@ -58,9 +59,15 @@ class DocumentJournal(Protocol):
         """Append a document outcome to the job's log."""
 
     async def record_indexed(
-        self, job: str, collection: str, record: DocumentRecord, *, dedup: bool
-    ) -> None:
-        """Log a parsed document and, when ``dedup`` is set, remember its content hash."""
+        self,
+        job: str,
+        collection: str,
+        record: DocumentRecord,
+        *,
+        dedup: bool,
+        watch: DeletionWatch | None = None,
+    ) -> bool:
+        """Log a parsed document unless deleted since ``watch``; return whether it was kept."""
 
     async def dead_letter(
         self,
@@ -76,5 +83,21 @@ class DocumentJournal(Protocol):
     ) -> DocumentRecord:
         """Record a document that failed its retries, and return the entry written."""
 
-    async def forget_document(self, collection: str, document: str) -> bool:
+    async def forget_document(
+        self, collection: str, document: str, *, known: Collection[str] | None = None
+    ) -> bool:
         """Tombstone a document in the collection's dedup index; return whether it was live."""
+
+    async def watch_deletions(self, collection: str) -> DeletionWatch:
+        """Mark where a job starts watching the collection's deletes."""
+
+
+@dataclass(slots=True)
+class DeletionWatch:
+    """How far a job has read a collection's deletion log, and what it has seen deleted.
+
+    Taken before the job loads its dedup map, so every delete after that is seen at commit.
+    """
+
+    offset: int = 0
+    deleted: set[str] = field(default_factory=set)

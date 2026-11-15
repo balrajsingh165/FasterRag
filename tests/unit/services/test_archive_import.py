@@ -35,6 +35,7 @@ from fasterrag.services.archive_import import (
     open_archive,
     supported_major,
 )
+from fasterrag.services.journal import Journal
 from fasterrag.services.lockfile import LockStore, build_lock
 from tests.support.archive import member_bytes
 
@@ -1844,3 +1845,75 @@ def test_a_manifest_that_contradicts_the_archived_lockfile_is_refused(tmp_path: 
 
     with pytest.raises(VerificationError, match=r"embedding\.model 'm' != 'other'"):
         open_archive(archive)
+
+
+def hashed(tmp_path: Path) -> Path:
+    """Return an archive of two documents, one of them without a content hash."""
+    return make(
+        tmp_path,
+        documents=[
+            {"document_id": "d_1", "content_hash": "hash-1"},
+            {"document_id": "d_2"},
+        ],
+        chunks=[
+            {"chunk_id": "c_1", "document_id": "d_1", "text": "one", "metadata": {}},
+            {"chunk_id": "c_2", "document_id": "d_2", "text": "two", "metadata": {}},
+        ],
+        vectors=[
+            {"chunk_id": "c_1", "vector": [0.1, 0.2]},
+            {"chunk_id": "c_2", "vector": [0.3, 0.4]},
+        ],
+    )
+
+
+async def test_an_import_records_its_documents_for_deduplication_and_the_listing(
+    tmp_path: Path,
+) -> None:
+    """An imported collection listed no documents, and re-ingesting re-embedded all (TASK-0538)."""
+    journal = Journal(tmp_path / "journal")
+
+    await import_archive(
+        copy_settings(),
+        RecordingAdapter(),  # type: ignore[arg-type]
+        open_archive(hashed(tmp_path)),
+        collection="restored",
+        lock_root=tmp_path,
+        journal=journal,
+    )
+
+    assert await journal.document_hashes("restored") == {"d_1": "hash-1"}
+
+
+async def test_an_import_with_deduplication_off_records_nothing(tmp_path: Path) -> None:
+    """Ingestion writes no dedup record with the switch off, so an import does not either."""
+    journal = Journal(tmp_path / "journal")
+    settings = Settings.model_validate(
+        {"embeddings": {"model": "m"}, "ingestion": {"dedup": False}}
+    )
+
+    await import_archive(
+        settings,
+        RecordingAdapter(),  # type: ignore[arg-type]
+        open_archive(hashed(tmp_path)),
+        collection="restored",
+        lock_root=tmp_path,
+        journal=journal,
+    )
+
+    assert await journal.document_hashes("restored") == {}
+
+
+async def test_a_failed_import_records_no_document(tmp_path: Path) -> None:
+    journal = Journal(tmp_path / "journal")
+
+    with pytest.raises(FasterRagError):
+        await import_archive(
+            copy_settings(),
+            RecordingAdapter(fail_after=0),  # type: ignore[arg-type]
+            open_archive(hashed(tmp_path)),
+            collection="restored",
+            lock_root=tmp_path,
+            journal=journal,
+        )
+
+    assert await journal.document_hashes("restored") == {}
