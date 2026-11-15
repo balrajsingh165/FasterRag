@@ -13,7 +13,9 @@ replaces any loaded credential value — every variable whose name ends in ``_KE
 ``_TOKEN``, ``_SECRET``, ``_PASSWORD`` or ``_DSN``, plus every variable the configuration
 names in a ``*_env`` field — with ``[redacted]`` in the message, the extra fields and the
 exception text. It reads values from the environment at the moment a record is written, so
-it holds no copy of any secret, and it logs nothing about what it masked.
+it holds no copy of any secret, and it logs nothing about what it masked. A process that
+installs the handler before it has read its configuration — the CLI — adds the configuration's
+names afterwards with :func:`mask_secret_env` (TASK-0541).
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ __all__ = [
     "configure_logging",
     "current_trace_id",
     "get_logger",
+    "mask_secret_env",
     "new_trace_id",
     "use_trace_id",
 ]
@@ -256,6 +259,20 @@ def configure_logging(level: str = "info", *, secret_env: Iterable[str] = ()) ->
             root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(level_no)
+
+
+def mask_secret_env(names: Iterable[str]) -> None:
+    """Teach the installed handler's masking filter more variable names to mask.
+
+    The CLI installs its handler before it loads configuration (TASK-0541).
+    """
+    extra = frozenset(names)
+    for handler in logging.getLogger().handlers:
+        if handler.get_name() != _HANDLER_NAME:
+            continue
+        for existing in handler.filters:
+            if isinstance(existing, SecretMaskingFilter):
+                existing.secret_env = existing.secret_env | extra
 
 
 def get_logger(name: str) -> logging.Logger:

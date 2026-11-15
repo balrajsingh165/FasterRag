@@ -30,8 +30,10 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response, status
 
+from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.api.dependencies import (
     AcceptingJobs,
+    CurrentActor,
     CurrentSettings,
     CurrentTenant,
     CurrentVectorDB,
@@ -39,11 +41,13 @@ from fasterrag.api.dependencies import (
 )
 from fasterrag.api.schemas import IngestRequest, Source
 from fasterrag.api.traces import get_trace_store
+from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.observability.audit import audited
 from fasterrag.observability.logging import current_trace_id, get_logger, use_trace_id
 from fasterrag.services.composition import build_ingestion, create_embedding_router
 from fasterrag.services.ingestion import plan_dead_letter_retry
-from fasterrag.services.jobs import settle_interrupted
+from fasterrag.services.jobs import JobRegistry, settle_interrupted
 from fasterrag.services.journal import JobRecord, Journal
 from fasterrag.services.reindex import require_keyword_leg
 
@@ -248,12 +252,31 @@ async def retry_dead_letters(
     journal: JournalDep,
     adapter: CurrentVectorDB,
     tenant: CurrentTenant,
+    actor: CurrentActor,
 ) -> dict[str, Any]:
     """Re-ingest a job's dead-lettered documents as a new job, behind the same preflight.
 
     A new job rather than a mutation of the old one, keyed so that repeating the call returns
     that job instead of starting another (TASK-0474).
     """
+    with audited("ingest.retry_dlq", job_id, actor) as entry:
+        retried = await _retry_dead_letters(
+            job_id, request, jobs, settings, journal, adapter, tenant
+        )
+        entry.detail["retried"] = retried["retried"]
+        return retried
+
+
+async def _retry_dead_letters(
+    job_id: str,
+    request: Request,
+    jobs: JobRegistry,
+    settings: Settings,
+    journal: Journal,
+    adapter: VectorDBAdapter,
+    tenant: str | None,
+) -> dict[str, Any]:
+    """Plan the retry and submit it as a new job."""
     plan = await plan_dead_letter_retry(
         journal, job_id, tenant=tenant, max_retries=settings.ingestion.dlq.max_retries
     )

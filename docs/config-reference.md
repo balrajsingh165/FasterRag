@@ -11,6 +11,8 @@ Conventions used below:
 ## Complete example (all defaults shown; secrets referenced by env-var name only)
 
 ```yaml
+schema_version: 1
+
 app:
   host: 127.0.0.1
   port: 8000
@@ -214,9 +216,32 @@ security:
   allow_unauthenticated: false
   api_key_file: null
   cors_allowed_origins: []
+  audit_log_file: null
 ```
 
 ---
+
+## `schema_version`
+
+| Name | Type | Default | Allowed values / validation | Description |
+|---|---|---|---|---|
+| `schema_version` | int | `1` | a whole number ≥ 1; must be the version this release reads | The layout of this file (TASK-0502). It is checked before any other key, so a file written for a different release is refused with an error that says what to change instead of failing on whichever renamed key it reaches first. A file without it is read as version `1`, the layout 0.1.0b1 and 0.1.0b2 wrote, so those files load unchanged. See [Upgrading](#upgrading). |
+
+## Upgrading
+
+Every release states the configuration layout it reads as `schema_version`; this release reads **1**. When a release changes the layout it raises the number and records one migration step — exactly what to rename, move or delete — in `CONFIG_MIGRATIONS` (`src/fasterrag/config/loader.py`) and in the table below. Steps are never edited or removed, so a file several releases old is upgraded through each one in turn.
+
+What the loader does with the `schema_version` it finds:
+
+- **Missing** — read as `1`. Every configuration written by 0.1.0b1 or 0.1.0b2 is version 1 and loads without change; add `schema_version: 1` at the top when you next edit it.
+- **Equal to this release's** — loads.
+- **Higher** — refused with `CONFIG_INVALID`: the file was written by a newer release. The error names the command, `pip install --upgrade fasterrag`, or rewrite the file for this release's version.
+- **Lower** — refused with `CONFIG_INVALID`, listing every step between the file's version and this release's in order (`1 -> 2: …`), then `set schema_version: N`. Apply the steps by hand; nothing rewrites your file.
+- **Not a whole number ≥ 1** — refused with `CONFIG_INVALID`.
+
+| From | To | Release | What to change |
+|---|---|---|---|
+| — | 1 | 0.1.0b1 | The first versioned layout. Nothing to change. |
 
 ## `app`
 
@@ -520,6 +545,7 @@ All integration toggles default `false`.
 | `security.allow_unauthenticated` | bool | `false` | — | Lets `fasterrag serve` bind a non-loopback `app.host` (or `--host`), or a non-loopback `observability.dashboard_host`, while `security.auth` is `false`. **Without it such a bind is refused at startup** (TASK-0460, 2026-11-12; until then it was a warning). Set it only when something else stands between the port and the network: a reverse proxy that authenticates, or a container whose port is published on the host's loopback — the shipped compose files set it for exactly that reason through `FASTERRAG_SET`. With it set, `serve` still prints the warning. It has no effect when `auth` is on. |
 | `security.api_key_file` | str\|null | `null` | path | A file of API key entries, one per line (blank lines and `#` comments ignored), in the same grammar as `security.api_key_env`; its keys are loaded **in addition to** the variable's (TASK-0492). **Re-read without a restart**: every request checks the file's modification time and size at most once a second and reloads it when either moved, and on POSIX a `SIGHUP` forces a re-read. Windows has no `SIGHUP`, so there the change of the file is the only trigger. A file that changes into something that does not load — a malformed entry, a short key — is logged as an error and the keys already in force stay in force. Write it with an atomic rename. A missing file at startup refuses to start. `security.auth: true` with this and `api_key_env` both `null` is refused at load. |
 | `security.cors_allowed_origins` | list[str] | `[]` | each `http(s)://host[:port]`, no path, never `*` | Browser origins that may call the API cross-origin (TASK-0494). **Empty — the default — allows none**: a preflight from any origin is refused `400 VALIDATION_FAILED`, and no response carries `Access-Control-Allow-Origin`. A listed origin may send `GET`, `POST` and `DELETE` with `Authorization`, `Content-Type`, `Idempotency-Key` and the tenant header, and may read `Retry-After`; credentials mode is never enabled, because the API authenticates by header, not by cookie. Only browsers enforce CORS — it limits which pages can use a visitor's browser against the API, and is no substitute for `security.auth`. |
+| `security.audit_log_file` | str\|null | `null` | a writable file path, or null | Also append the audit trail (TASK-0493) to this file, one JSON object per line. The trail is also written to the normal log under the `fasterrag.audit` logger at INFO, which the API's default `app.log_level: info` shows and a CLI command shows only with `--verbose`; the file receives every record whatever the log level, so it is the trail to keep, ship to a SIEM and retain. The parent directory is created, and the file is opened when the API starts or a CLI command loads configuration, so a path that cannot be written stops startup naming this key. Records name the key by its name and the first 12 hex digits of its SHA-256 digest, never the key itself ([security.md](security.md) §2). |
 
 ---
 

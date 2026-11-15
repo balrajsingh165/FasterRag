@@ -32,6 +32,7 @@ from fasterrag.core.cache import create_semantic_store
 from fasterrag.core.cache.semantic import MISS, SemanticCache
 from fasterrag.core.rerank import CrossEncoderReranker
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError
+from fasterrag.observability.audit import audited, cli_actor
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.backfill import (
     BackfillProgress,
@@ -597,7 +598,11 @@ async def _index_delete(
         console.error(f"deleting {args.name!r} destroys its vectors; pass --force to confirm")
         return ExitCode.USAGE
 
-    dropped = await DocumentService(adapter, create_journal(settings)).drop_collection(args.name)
+    with audited("collection.drop", args.name, cli_actor()) as entry:
+        dropped = await DocumentService(adapter, create_journal(settings)).drop_collection(
+            args.name
+        )
+        entry.detail["dropped"] = dropped
     console.emit(f"{'deleted' if dropped else 'no such collection:'} {args.name}")
     console.document({"name": args.name, "deleted": dropped})
     return ExitCode.SUCCESS

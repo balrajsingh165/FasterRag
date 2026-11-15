@@ -15,7 +15,7 @@ from __future__ import annotations
 import ipaddress
 import platform
 import re
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
@@ -32,6 +32,7 @@ from fasterrag.config.plugins import (
 )
 
 __all__ = [
+    "CONFIG_SCHEMA_VERSION",
     "AppSettings",
     "AutopilotSettings",
     "CacheSettings",
@@ -56,6 +57,8 @@ __all__ = [
     "VectorDbSettings",
     "WorkersSettings",
 ]
+
+CONFIG_SCHEMA_VERSION: Final = 1
 
 _ENV_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HOSTNAME_RE = re.compile(
@@ -941,6 +944,8 @@ class SecuritySettings(Section):
     # credential-bearing control plane to every page on the web.
     cors_allowed_origins: list[str] = []
 
+    audit_log_file: Annotated[str | None, Field(min_length=1)] = None
+
     @field_validator("cors_allowed_origins")
     @classmethod
     def _check_cors_allowed_origins(cls, value: list[str]) -> list[str]:
@@ -1012,6 +1017,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(extra="forbid", frozen=True)
 
+    schema_version: int = CONFIG_SCHEMA_VERSION
     app: AppSettings = AppSettings()
     vector_db: VectorDbSettings = VectorDbSettings()
     embeddings: EmbeddingsSettings = EmbeddingsSettings()
@@ -1043,6 +1049,18 @@ class Settings(BaseSettings):
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Restrict configuration to the values passed in from the YAML source."""
         return (init_settings,)
+
+    @field_validator("schema_version")
+    @classmethod
+    def _check_schema_version(cls, value: int) -> int:
+        """Refuse a layout other than this release's; the loader names the upgrade (TASK-0502)."""
+        if value != CONFIG_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version {value} is not the layout this release reads "
+                f"({CONFIG_SCHEMA_VERSION}); load the file with load_settings, which names "
+                "the upgrade, or see docs/config-reference.md, 'Upgrading'"
+            )
+        return value
 
     def referenced_env_vars(self) -> dict[str, str]:
         """Return every environment variable this configuration references.

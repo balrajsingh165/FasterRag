@@ -18,6 +18,7 @@ import argparse
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import settings_from
 from fasterrag.errors import ConfigError, FasterRagError, ProvisioningError
+from fasterrag.observability.audit import audited, cli_actor
 from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.provision_registry import provision_tool, stop_tool, tool_status
 from fasterrag.services.source_expansion import expand_sources
@@ -40,7 +41,12 @@ async def run_provision(args: argparse.Namespace, console: Console) -> ExitCode:
     verb = tool_status if args.status else stop_tool if args.down else provision_tool
 
     try:
-        result = await verb(args.tool, settings)
+        if args.status:
+            result = await verb(args.tool, settings)
+        else:
+            action = "provision.down" if args.down else "provision.up"
+            with audited(action, args.tool, cli_actor()):
+                result = await verb(args.tool, settings)
     except ProvisioningError as exc:
         console.problem(exc.code.value, exc.detail, exc.fix)
         console.document({"tool": args.tool, "status": "failed", "detail": exc.detail})

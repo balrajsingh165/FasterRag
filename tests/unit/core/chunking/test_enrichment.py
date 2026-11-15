@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Any
 
 import pytest
@@ -113,7 +114,7 @@ async def test_the_document_leads_the_prompt() -> None:
 
     await enrich_chunks([chunk()], DOCUMENT, llm, settings())  # type: ignore[arg-type]
 
-    assert llm.prompts[0].startswith("<document>")
+    assert llm.prompts[0].startswith("<document-")
 
 
 async def test_the_token_target_follows_configuration() -> None:
@@ -158,8 +159,10 @@ def test_a_very_large_document_is_truncated() -> None:
 def test_the_prompt_carries_both_parts() -> None:
     prompt = build_enrichment_prompt("the doc", "the chunk")
 
-    assert "<document>\nthe doc\n</document>" in prompt
-    assert "<chunk>\nthe chunk\n</chunk>" in prompt
+    assert re.fullmatch(
+        r"<document-([0-9a-f]{16})>\nthe doc\n</document-\1>\n\n<chunk-\1>\nthe chunk\n</chunk-\1>",
+        prompt,
+    )
 
 
 def test_the_system_prompt_forbids_a_preamble() -> None:

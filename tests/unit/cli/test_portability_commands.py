@@ -441,3 +441,32 @@ def test_a_failed_import_releases_the_staging_directory(
 
     assert code == ExitCode.FAILURE
     assert [reader.staging.exists() for reader in staged] == [False]
+
+
+def audit_trail(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str]]:
+    """Return ``(action, outcome)`` for every audit record written (TASK-0493)."""
+    return [
+        (vars(record)["action"], vars(record)["outcome"])
+        for record in caplog.records
+        if record.name == "fasterrag.audit"
+    ]
+
+
+def test_an_export_and_an_import_each_leave_one_audit_record(
+    config: str,
+    tmp_path: Path,
+    adapter: Closeable,
+    locks: FakeLocks,
+    exporting: Recorder,
+    importing: Recorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Nothing recorded who moved a collection out of or into a deployment."""
+    caplog.set_level("INFO", logger="fasterrag.audit")
+    main(["export", "--config", config, "--out", str(tmp_path / "a.fragx")])
+    main(["import", "--config", config, str(tmp_path / "a.fragx")])
+
+    assert audit_trail(caplog) == [
+        ("archive.export", "succeeded"),
+        ("archive.import", "succeeded"),
+    ]

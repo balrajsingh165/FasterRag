@@ -182,3 +182,20 @@ def test_what_the_command_built_is_closed_even_when_it_fails(
 
 def test_an_invalid_config_is_a_usage_error(bad_config: str) -> None:
     assert main(["--config", bad_config, "documents", "delete", "d_1"]) == ExitCode.USAGE
+
+
+def test_a_document_delete_leaves_one_audit_record_naming_the_user(
+    config: str, wired: ClosingAdapter, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Nothing recorded who deleted a document (TASK-0493)."""
+    caplog.set_level("INFO", logger="fasterrag.audit")
+
+    main(["--config", config, "documents", "delete", "d_1", "--tenant", "acme"])
+
+    records = [record for record in caplog.records if record.name == "fasterrag.audit"]
+    assert [(vars(r)["action"], vars(r)["target"], vars(r)["outcome"]) for r in records] == [
+        ("document.delete", "default/d_1", "succeeded")
+    ]
+    assert vars(records[0])["tenant"] == "acme"
+    assert vars(records[0])["actor_user"]
+    assert vars(records[0])["detail"] == {"known": True}

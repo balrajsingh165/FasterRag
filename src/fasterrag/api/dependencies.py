@@ -20,6 +20,7 @@ from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache.semantic import SemanticCache
+from fasterrag.observability.audit import KEY_ID_LENGTH, Actor
 from fasterrag.services import composition
 from fasterrag.services.composition import create_embedding_router, create_semantic_cache
 from fasterrag.services.jobs import JobRegistry
@@ -27,6 +28,7 @@ from fasterrag.services.journal import Journal, create_journal
 
 __all__ = [
     "AcceptingJobs",
+    "CurrentActor",
     "CurrentCache",
     "CurrentEmbeddings",
     "CurrentJobs",
@@ -36,6 +38,7 @@ __all__ = [
     "CurrentVectorDB",
     "JournalDep",
     "accepting_jobs",
+    "current_actor",
     "current_tenant",
     "get_jobs",
     "get_journal",
@@ -118,7 +121,21 @@ def current_tenant(request: Request) -> str | None:
     return str(tenant) if tenant else None
 
 
+def current_actor(request: Request) -> Actor:
+    """Return who is calling, for the audit trail: the key's name and digest prefix, never it.
+
+    With authentication off there is no key, and the actor carries the tenant alone.
+    """
+    state = request.scope.get("state", {})
+    key = state.get("api_key")
+    tenant = current_tenant(request)
+    if key is None:
+        return Actor(via="api", tenant=tenant)
+    return Actor(via="api", key=str(key.name), key_id=key.identity[:KEY_ID_LENGTH], tenant=tenant)
+
+
 CurrentTenant = Annotated[str | None, Depends(current_tenant)]
+CurrentActor = Annotated[Actor, Depends(current_actor)]
 CurrentSettings = Annotated[Settings, Depends(get_settings)]
 CurrentVectorDB = Annotated[VectorDBAdapter, Depends(get_vector_db)]
 CurrentEmbeddings = Annotated[TieringRouter, Depends(shared_embedding_router)]

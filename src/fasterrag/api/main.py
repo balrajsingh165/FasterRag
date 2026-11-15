@@ -37,6 +37,7 @@ from fasterrag.api.problems import install_exception_handlers, problem_response
 from fasterrag.config.loader import DEFAULT_CONFIG_PATH, load_settings
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.observability.audit import configure_audit_file
 from fasterrag.observability.logging import configure_logging, get_logger, use_trace_id
 from fasterrag.services.jobs import JobRegistry, reap_at_startup
 from fasterrag.services.journal import create_journal
@@ -315,6 +316,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings if settings is not None else load_settings(_configured_path(), export_env=True)
     )
     configure_logging(resolved.app.log_level, secret_env=resolved.referenced_env_vars())
+    configure_audit_file(
+        resolved.security.audit_log_file, secret_env=resolved.referenced_env_vars()
+    )
 
     app = FastAPI(
         title="fasterRag",

@@ -27,6 +27,10 @@ Every interpolated value is HTML-escaped: a trace carries user-supplied query te
 
 It still has no transport security of its own — put it behind the same reverse proxy as the API ([deployment.md](deployment.md)).
 
+## 1a. Audit trail of administrative actions
+
+Every administrative action — a dropped collection, a deleted document, a backup or restore, provisioning, an archive export or import, a dead-letter retry — writes one JSON line under the `fasterrag.audit` logger at INFO, naming the key by its name and digest prefix (never the key), the tenant, the action, the target, the outcome and the trace id. Set `security.audit_log_file` to keep the trail in a file of its own regardless of `app.log_level`. Field list and coverage: [security.md](security.md) §2.
+
 ## 2. Metrics catalogue
 
 | Metric | Type | Labels | Description |
