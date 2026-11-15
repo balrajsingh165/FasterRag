@@ -21,6 +21,7 @@ fasterRag/
 │   ├── scripts/                  # Release decisions, release smoke test, dependency licence check
 │   └── workflows/
 │       ├── ci.yml                # Blocking gates: ruff, ruff format, mypy --strict, pytest
+│       ├── weekly.yml            # Short soak and load smoke (behaviour checks, not measurements)
 │       └── release.yml           # v* tag: gates, build, SBOM, PyPI (trusted publishing), GHCR, GitHub release
 ├── docs/                         # ALL documentation lives here (rule: only CLAUDE.md stays at root)
 │   ├── quickstart.md  scope.md  structure.md  flow.md  architecture.md

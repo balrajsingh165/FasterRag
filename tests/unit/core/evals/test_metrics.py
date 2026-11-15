@@ -2,7 +2,13 @@ import math
 
 import pytest
 
-from fasterrag.core.evals.metrics import dcg, ndcg_at_k, recall_at_k, reciprocal_rank
+from fasterrag.core.evals.metrics import (
+    dcg,
+    ndcg_at_k,
+    precision_at_k,
+    recall_at_k,
+    reciprocal_rank,
+)
 
 
 def test_recall_counts_hits_against_the_ground_truth() -> None:
@@ -76,3 +82,22 @@ def test_ndcg_does_not_penalize_a_window_smaller_than_the_ground_truth() -> None
 
 def test_ndcg_never_exceeds_one() -> None:
     assert ndcg_at_k([True, True, True], total_relevant=1) <= 1.0
+
+
+def test_precision_is_the_share_of_the_window_that_is_relevant() -> None:
+    """There was no precision at all: a window padded with noise scored like a clean one."""
+    assert precision_at_k([True, False, True, False], k=4) == pytest.approx(0.5)
+    assert precision_at_k([True, True], k=2) == pytest.approx(1.0)
+
+
+def test_precision_counts_a_short_result_list_against_the_whole_window() -> None:
+    """A retriever returning two results for k=5 has three empty slots, not a smaller k."""
+    assert precision_at_k([True, True], k=5) == pytest.approx(0.4)
+
+
+def test_precision_only_counts_inside_the_window() -> None:
+    assert precision_at_k([False, True, True], k=1) == 0.0
+
+
+def test_precision_of_an_empty_window_is_zero() -> None:
+    assert precision_at_k([True], k=0) == 0.0

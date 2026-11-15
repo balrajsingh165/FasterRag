@@ -245,3 +245,16 @@ def test_blank_lines_are_ignored(tmp_path: Path) -> None:
     path.write_text(f"\n{line}\n\n", encoding="utf-8")
 
     assert len(load_golden_set(path)) == 1
+
+
+async def test_precision_is_reported_beside_recall() -> None:
+    """Recall alone cannot see a window padded with irrelevant chunks; precision can."""
+    golden = [record(chunks=("c_a",))]
+    retriever = ScriptedRetriever({"what is the notice period": ["c_a", "c_x", "c_y", "c_z"]})
+
+    report = await evaluate(golden, retriever, k=4)
+
+    assert report.recall_at_k == pytest.approx(1.0)
+    assert report.precision_at_k == pytest.approx(0.25)
+    assert report.per_query[0].precision == pytest.approx(0.25)
+    assert report.as_dict()["precision_at_k"] == 0.25
