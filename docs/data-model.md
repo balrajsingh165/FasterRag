@@ -35,7 +35,7 @@ The source unit as ingested. One document produces many chunks.
 | `parse_flags` | list[str] | Quality signals, e.g. `low_text_yield`, `tables_detected`, `ocr_applied` |
 | `metadata` | object | User metadata from ingest merged with extracted document metadata (title, author, dates) |
 | `tenant` | str\|null | Set when `security.multi_tenancy: true` |
-| `status` | str | `indexed` \| `deduplicated` \| `skipped` \| `dead_lettered` \| `pending`. `skipped` means the document parsed and produced no chunk (reason code `EMPTY_DOCUMENT`): nothing of it is in the index and its content hash is not kept for deduplication |
+| `status` | str | `indexed` \| `deduplicated` \| `skipped` \| `dead_lettered` \| `pending`. `skipped` means the document parsed and produced no chunk (reason code `EMPTY_DOCUMENT`), or was deleted while the job ran (reason code `DELETED_DURING_INGEST`, TASK-0519): nothing of it is in the index and its content hash is not kept for deduplication |
 
 ## Chunk
 
@@ -81,7 +81,7 @@ The reproducibility contract of an index (D1). Written atomically (write-temp-th
 |---|---|---|
 | `lock_version` | str | SemVer of the lockfile format |
 | `collection` | str | Collection name |
-| `config_hash` | str | Hash of the retrieval-affecting config subset (chunking, embeddings, retrieval) — **not** the whole file, so unrelated edits don't false-positive |
+| `config_hash` | str | Hash of the retrieval-affecting config subset (chunking, embeddings, retrieval) — **not** the whole file, so unrelated edits don't false-positive. `retrieval.verify_lock` is left out (TASK-0549); a lock written by 0.1.0b1/b2, which hashed it, is still matched |
 | `embedding_model` / `embedding_model_version` / `dimensions` | str / str / int | What produced the vectors |
 | `chunker_strategy` / `chunker_version` / `chunk_size` / `overlap` | str / str / int / int | How chunks were produced |
 | `contextual_enrichment` | bool | Whether chunks carry a context prefix |
@@ -117,14 +117,35 @@ Drift = any mismatch between this file and live config/corpus. Reported, never s
 | `first_failed_at` / `last_failed_at` | str | Timestamps |
 | `trace_id` | str | Correlates to logs and spans |
 
+### Chunk extent
+
+One JSON object per line in `<journal>/collections/<collection>/backends/<backend>/chunk-extents.jsonl` (beside the dedup file; TASK-0518), written whatever `ingestion.dedup` says, never for a job run without a journal.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `document_id` | str | The document |
+| `chunker` | str | `chunker_config_hash` of the configuration that chunked it — with the document id and the chunk index, what a chunk id is derived from |
+| `chunks` | int | How many chunks, so the ids are `chunk_id(document_id, 0..chunks-1, chunker)` |
+| `settled` | bool | `false`: written before the chunks, so they may be in the index whether or not the ingest finished. `true`: every chunk of this version is written and every older one deleted |
+
+A document may hold any chunk an extent names from its last settled line onward. Committing a new version deletes, by id, every such chunk the new version does not name, then appends a settled line; a document that became empty settles at `0`. The retention pass compacts the file to those lines.
+
 ### Dedup record and tombstone
 
-One JSON object per line in `<journal>/collections/<collection>/content-hashes.jsonl`. The file is append-only; it is read in order and the order is the meaning.
+One JSON object per line in `<journal>/collections/<collection>/backends/<backend>/content-hashes.jsonl`. The file is append-only; it is read in order and the order is the meaning.
+
+**One file per vector database** (TASK-0550). `<backend>` is `services/journal.py::backend_identity`: the provider name and a 12-character hash of where it lives — `vector_db.host` and `vector_db.port`, or `vector_db.chroma.path` for Chroma, or `vector_db.pgvector.dsn_env` and `db_schema` for pgvector (the variable's name, never the DSN). Switching `vector_db.provider`, or pointing it at another server, therefore starts with nothing known, and a re-ingest indexes every file into the new store; switching back finds the first file again. A file written by a release before 0.1.0b3 sits at `<journal>/collections/<collection>/content-hashes.jsonl` and is moved, under its lock, to the first backend that reads it — the one the configuration names when the upgraded release first runs. If the configuration had already been switched before upgrading, that file is attributed to the new backend: ingest once with `--set ingestion.dedup=false` to fill it.
 
 | Record | Fields | Written |
 |---|---|---|
 | Remembered hash | `content_hash: str`, `document_id: str` | When every chunk of a document is in the vector database |
 | Tombstone | `tombstone: true`, `document_id: str`, `deleted_at: str` | When the document is deleted and a live record of it existed |
+
+Dropping a collection through fasterrag (`DELETE /v1/collections/{name}`, `fasterrag index delete`, `FasterRag.drop_collection`) removes this file (TASK-0519).
+
+### Deletion log
+
+One JSON object per line in `<journal>/collections/<collection>/deletions.jsonl`, `{"document_id": str, "deleted_at": str}`, appended by every document delete — including a repeated one and one for a document the dedup record never held — under the lock on `deletions.jsonl.lock`, which the delete holds until the chunks are removed (TASK-0519). An ingest job records the file's length under the same lock before it loads the dedup record, and each commit reads only what was appended since, under the lock again: a document listed there is recorded `skipped` with reason `DELETED_DURING_INGEST`, is not remembered, and has the chunks this job wrote removed. The file is never compacted; it grows by one short line per delete.
 
 A tombstone cancels the hash remembered for its `document_id` **earlier in the file**, and nothing after it: a document ingested again after its tombstone is known again. A later remembered hash for the same `document_id` replaces the earlier one in the same way, so a document holds one hash at a time — the version the index holds. A hash that a later line assigned to a different document is left with that document. `IndexLock.document_hashes` is derived from the same reading, so a deleted document leaves the lockfile too.
 
@@ -163,7 +184,7 @@ What retrieval returns internally and what `--show-chunks` / `include_chunks` ex
 | `citations` | list[Citation] | Mandatory and non-empty whenever `answer` is non-null and `generation.citations: true` |
 | `chunks` | list[ScoredChunk]\|null | Present only when explicitly requested |
 | `usage` | `{prompt_tokens, completion_tokens, estimated_cost_usd}` | `estimated_cost_usd` is a **list-price estimate, nullable by design** (TASK-0260 ✅): a model with no recorded rate reports `null` rather than `0.0`, because a zero would read as "this query was free" and that is a fabricated bill. A local provider reports a genuine `0.0`. Also counted into `fasterrag_cost_usd_total`, but emitted per response too — a caller holding one answer cannot read a process-wide counter. |
-| `timings_ms` | object | Per stage: `embed`, `retrieve`, `fuse`, `rerank`, `assemble`, `generate`, `total` |
+| `timings_ms` | object | Whole milliseconds per stage that ran: `retrieve`, `assemble`, `generate`; `cache` when the question was embedded for a semantic-cache lookup; `grade` when the answer was graded. A cache hit carries `cache` only; there is no `total` ([api-reference.md](api-reference.md)) |
 | `degraded` | bool | True whenever `mode != "full"` |
 | `mode` | str | `full` \| `hybrid_only` \| `extractive` (D4, [ADR-0011](adr/ADR-0011-degradation-ladder-scope.md)) |
 | `faithfulness` | float\|null | 0–1 grounding score |
@@ -185,8 +206,9 @@ Persisted for every query when `traces.store: true`; the substrate for replay (D
 | `prompt` | str | Exact assembled prompt sent to the LLM |
 | `response` | str | Exact response received |
 | `result` | QueryResult | The returned result, minus `chunks` |
-| `spans` | list[Span] | `retrieval`, `reranker`, `context-assembly`, `generation` — each `{name, start_ms, end_ms, attributes}` |
+| `spans` | list[Span] | `retrieval`, `reranker`, `context-assembly`, `generation`, and the retrieval legs `query-embedding`, `dense-search`, `keyword-search`, `fusion` (TASK-0487) — each `{name, start_ms, end_ms, attributes}`; an ingest trace's are listed in [observability.md](observability.md) §3 |
 | `created_at` | str | Retained for `traces.retention_days` |
+| `kind` | str | `query`, or `ingest` for a settled ingest job's stage timings (TASK-0487), whose `query` is empty and whose `result` holds `job_id`, `status` and `counts`. A trace stored before the field existed reads as `query` |
 
 ## Invariants (asserted by tests)
 

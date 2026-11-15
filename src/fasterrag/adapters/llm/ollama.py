@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+from fasterrag.adapters.embeddings.ollama import close_ollama_client
 from fasterrag.adapters.llm.base import (
     Completion,
     LLMAdapter,
@@ -71,7 +72,9 @@ class OllamaGenerator(LLMAdapter):
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         """Generate a whole answer."""
         try:
-            response = await self._connected().chat(**self._request(prompt, system, stream=False))
+            response = await self._bounded(
+                self._connected().chat(**self._request(prompt, system, stream=False))
+            )
         except ConfigError:
             raise
         # CRITICAL: the catch stays broad because the SDK raises a deep hierarchy of
@@ -116,8 +119,10 @@ class OllamaGenerator(LLMAdapter):
         return HealthStatus(healthy=True, detail=f"{self.provider} reachable")
 
     async def close(self) -> None:
-        """Release the client."""
-        self._client = None
+        """Close the client and its connection pool."""
+        if self._client is not None:
+            client, self._client = self._client, None
+            await close_ollama_client(client)
 
 
 def _text_of(response: Any) -> str:

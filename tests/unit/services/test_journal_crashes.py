@@ -21,6 +21,7 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -285,8 +286,50 @@ class JournalUnderCrashes(RuleBasedStateMachine):
 TestJournalUnderCrashes = JournalUnderCrashes.TestCase
 
 
+def busy_replace(source: Any, target: Any) -> None:
+    """Stand in for ``os.replace`` onto a file another handle never lets go of."""
+    raise PermissionError(errno.EACCES, "Access is denied", str(target))
+
+
+@pytest.mark.parametrize("windows", [True, False])
+def test_a_rewrite_still_busy_after_the_retries_is_typed_by_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool
+) -> None:
+    """A Windows file busy past the retry window was reported INTERNAL, not a retryable 503."""
+    journal = Journal(tmp_path / "journal")
+    record = journal.create_job_blocking("default", SOURCES)
+    journal.save_job_blocking(at(record, 1))
+    monkeypatch.setattr(journal_module, "_BUSY_IS_TRANSIENT", windows)
+    monkeypatch.setattr(journal_module, "_BUSY_DELAYS", (0.0,))
+    monkeypatch.setattr(os, "replace", busy_replace)
+
+    with pytest.raises(IngestionError) as raised:
+        journal.save_job_blocking(at(record, 2))
+
+    assert raised.value.code is (ErrorCode.NOT_READY if windows else ErrorCode.INTERNAL)
+    assert raised.value.retryable is windows
+    monkeypatch.undo()
+    assert seen_index(journal, record.job_id) == 1
+    assert list(journal.root.rglob("*.tmp")) == []
+
+
+def patiently[T](operation: Callable[[], T]) -> T:
+    """Run ``operation`` again for as long as the journal answers a typed, retryable busy."""
+    for _ in range(200):
+        try:
+            return operation()
+        except IngestionError as exc:
+            if exc.code is not ErrorCode.NOT_READY or not exc.retryable:
+                raise
+    return operation()
+
+
 def test_two_writers_and_a_reader_never_see_a_missing_record(tmp_path: Path) -> None:
-    """Two writers shared one fixed temporary name, and a reader could fall between renames."""
+    """Two writers shared one fixed temporary name, and a reader could fall between renames.
+
+    A file busy past the retry window is a typed, retryable ``NOT_READY``, which both sides
+    retry; anything else, a missing record above all, fails. Timing decides only the retries.
+    """
     journal = Journal(tmp_path / "journal")
     record = journal.create_job_blocking("default", SOURCES)
     journal.save_job_blocking(at(record, 0))
@@ -296,7 +339,7 @@ def test_two_writers_and_a_reader_never_see_a_missing_record(tmp_path: Path) -> 
     def write(offset: int) -> None:
         try:
             for index in range(offset, offset + 40):
-                journal.save_job_blocking(at(record, index))
+                patiently(partial(journal.save_job_blocking, at(record, index)))
         except BaseException as exc:
             failures.append(exc)
             raise
@@ -304,7 +347,7 @@ def test_two_writers_and_a_reader_never_see_a_missing_record(tmp_path: Path) -> 
     def read() -> None:
         try:
             while not stop.is_set():
-                assert seen_index(journal, record.job_id) is not None
+                assert patiently(partial(seen_index, journal, record.job_id)) is not None
         except BaseException as exc:
             failures.append(exc)
             raise

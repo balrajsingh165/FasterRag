@@ -73,14 +73,28 @@ from time import perf_counter
 from typing import Final
 
 from fasterrag.adapters.llm.base import LLMAdapter
+from fasterrag.config.plugins import BUILTIN_CHUNKING_STRATEGIES
 from fasterrag.config.schema import Settings
-from fasterrag.core.chunking import SentenceEmbedder, create_chunker, create_token_counter
+from fasterrag.core.chunking import (
+    SentenceEmbedder,
+    create_chunker,
+    create_token_counter,
+    resolve_chunker_class,
+)
 from fasterrag.core.confinement import resolved_within
 from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
-from fasterrag.core.parsing import create_parsing_options, parse_bytes
+from fasterrag.core.journaling import (
+    DeletionWatch,
+    DocumentJournal,
+    DocumentRecord,
+    Extent,
+    IndexOutcome,
+)
+from fasterrag.core.parsing import create_parsing_options, parse_bytes, resolve_parser_class
+from fasterrag.core.tracing import StageClock
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError, ParseError
 from fasterrag.observability.logging import current_trace_id, get_logger
-from fasterrag.services.journal import DocumentRecord, Journal
+from fasterrag.observability.metrics import observe_stage
 from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload, DocumentTask, ParseOutcome
 
@@ -164,7 +178,14 @@ def reset_shared_sentence_embedders() -> None:
 
 
 def require_runnable_chunker(settings: Settings) -> None:
-    """Refuse a chunking strategy the parse workers cannot run with these settings."""
+    """Refuse a chunking strategy, or a configured parser, the parse workers cannot run.
+
+    Plugins are loaded here, in the parent, so a broken one stops the job before any document.
+    """
+    if settings.chunking.strategy not in BUILTIN_CHUNKING_STRATEGIES:
+        resolve_chunker_class(settings.chunking.strategy)
+    for name in settings.ingestion.parsers.values():
+        resolve_parser_class(name)
     provider = settings.embeddings.provider
     if settings.chunking.strategy != "semantic" or provider in LOCAL_SENTENCE_EMBEDDERS:
         return
@@ -224,6 +245,7 @@ def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
 
 def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
     """Do the work of :func:`parse_and_chunk`, raising whatever the parsers raise."""
+    started = perf_counter()
     limit = settings.ingestion.max_document_mb * _MEGABYTE
     if task.location is None:
         _confine(task.source, settings)
@@ -233,8 +255,10 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
         filename=Path(task.readable).name,
         max_bytes=limit,
         options=create_parsing_options(settings),
+        parsers=settings.ingestion.parsers,
     )
 
+    parsed = perf_counter()
     embedder = sentence_embedder(settings) if settings.chunking.strategy == "semantic" else None
     chunker = create_chunker(settings, embedder=embedder)
     chunker_hash = chunker_config_hash(settings)
@@ -252,6 +276,7 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
         )
         for chunk in chunker.split(document)
     ]
+    chunked = perf_counter()
 
     return ParseOutcome(
         task=task,
@@ -265,7 +290,20 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
             if settings.chunking.contextual_enrichment or settings.chunking.strategy == "late"
             else ""
         ),
+        parse_seconds=parsed - started,
+        chunk_seconds=chunked - parsed,
     )
+
+
+def _time_outcome(stages: StageClock, outcome: ParseOutcome) -> None:
+    """Count a returned document's parse and chunk times, ending as it arrived here.
+
+    The worker's clock is not this process's, so the intervals are placed back from now.
+    """
+    arrived = stages.elapsed_ms
+    chunking = arrived - outcome.chunk_seconds * 1000
+    stages.interval("parse", chunking - outcome.parse_seconds * 1000, chunking)
+    stages.interval("chunk", chunking, arrived)
 
 
 def _confine(source: str, settings: Settings) -> None:
@@ -386,22 +424,26 @@ class CpuWorkerPool:
         self,
         settings: Settings,
         *,
-        journal: Journal | None = None,
+        journal: DocumentJournal | None = None,
         executor_factory: Callable[[int], Executor] | None = None,
         llm: LLMAdapter | None = None,
         trim: Callable[[str, int], Awaitable[None]] | None = None,
+        discard: Callable[[str, Sequence[str]], Awaitable[None]] | None = None,
     ) -> None:
         """Build the pool without starting any worker."""
         self.settings = settings
         self.journal = journal
         self.llm = llm
         self._trim = trim
+        self._discard = discard
+        self._chunker = chunker_config_hash(settings)
         self.size = resolve_pool_size(settings.workers.cpu_pool_size)
         self._executor_factory = executor_factory or (
             lambda workers: ProcessPoolExecutor(max_workers=workers)
         )
         self._executor: Executor | None = None
         self._stranded = False
+        self.late_duplicates = 0
 
     async def __aenter__(self) -> CpuWorkerPool:
         """Start the worker processes and pay the tokenizer load up front."""
@@ -556,8 +598,9 @@ class CpuWorkerPool:
         resume_from: int = 0,
         on_progress: Callable[[int], Awaitable[None]] | None = None,
         ledger: IndexLedger | None = None,
+        stages: StageClock | None = None,
     ) -> PoolReport:
-        """Parse and chunk every task, streaming chunks into ``sink``."""
+        """Parse and chunk every task, streaming chunks into ``sink``, timing both stages."""
         if self._executor is None:
             raise IngestionError(
                 "the cpu worker pool is not running; use it as an async context manager",
@@ -565,10 +608,16 @@ class CpuWorkerPool:
                 retryable=False,
             )
 
+        watch = None
+        if self.journal is not None and job is not None:
+            watch = await self.journal.watch_deletions(collection)
         known: dict[str, str] = {}
         if self.journal is not None and self.settings.ingestion.dedup:
             known = await self.journal.known_content(collection)
         indexed_before = frozenset(known.values())
+        extents: dict[str, list[Extent]] = {}
+        if self.journal is not None and job is not None:
+            extents = await self.journal.chunk_extents(collection)
         standalone = ledger is None
         tracker = ledger or IndexLedger(on_progress, start=resume_from)
         parsed = chunked = deduplicated = dead_lettered = empty = 0
@@ -589,6 +638,7 @@ class CpuWorkerPool:
                     continue
 
                 outcome = result
+                _time_outcome(stages or StageClock(observe=observe_stage), outcome)
                 if not outcome.chunks:
                     # CRITICAL: before the dedup check, and never through the ledger's
                     # commit. "indexed" is a statement about the vector database, and the
@@ -596,7 +646,11 @@ class CpuWorkerPool:
                     empty += 1
                     async with tracker.journal_lock:
                         if task.document_id in indexed_before:
-                            await self._retire(collection, task)
+                            await self._retire(collection, task, indexed_before)
+                        elif task.document_id in extents:
+                            await self._supersede(task.document_id, extents, 0)
+                        if task.document_id in extents:
+                            await self._settle_extent(collection, task.document_id, extents, 0)
                         await self._skip_empty(job, task, outcome)
                     await tracker.settle(task.index)
                     continue
@@ -614,13 +668,20 @@ class CpuWorkerPool:
                     flags[flag] = flags.get(flag, 0) + 1
 
                 payloads = self._addressed(outcome)
+                await self._attempt(job, collection, task.document_id, len(payloads), extents)
                 await tracker.expect(
                     task.document_id,
                     index=task.index,
                     source=task.source,
                     chunks=len(payloads),
                     commit=self._commit(
-                        job, collection, task, outcome, update=task.document_id in indexed_before
+                        job,
+                        collection,
+                        task,
+                        outcome,
+                        extents,
+                        update=task.document_id in indexed_before,
+                        watch=watch,
                     ),
                 )
                 for payload in payloads:
@@ -628,7 +689,8 @@ class CpuWorkerPool:
 
                 parsed += 1
                 chunked += len(outcome.chunks)
-                known[outcome.content_hash] = task.document_id
+                if self.settings.ingestion.dedup:
+                    known[outcome.content_hash] = task.document_id
                 if standalone:
                     await tracker.written(payloads)
         finally:
@@ -765,21 +827,106 @@ class CpuWorkerPool:
         collection: str,
         task: DocumentTask,
         outcome: ParseOutcome,
+        extents: dict[str, list[Extent]],
         *,
         update: bool = False,
+        watch: DeletionWatch | None = None,
     ) -> Callable[[], Awaitable[None]]:
         """Return the callback that journals this document once it is fully indexed.
 
-        For an ``update`` — a document the journal already held — the chunks past the new
-        length are trimmed first, so a failed trim leaves the document unrecorded (TASK-0443).
+        Stale chunks go first, so a failed delete leaves the document unrecorded; see
+        :meth:`_supersede`, and the trim by index for a document no extent covers (TASK-0443).
         """
 
         async def commit() -> None:
-            if update and self._trim is not None:
-                await self._trim(task.document_id, len(outcome.chunks))
-            await self._index_document(job, collection, task, outcome)
+            document = task.document_id
+            chunks = len(outcome.chunks)
+            unrecorded = not any(extent.settled for extent in extents.get(document, []))
+            await self._supersede(document, extents, chunks)
+            if update and unrecorded and self._trim is not None:
+                await self._trim(document, chunks)
+            recorded = await self._index_document(job, collection, task, outcome, watch)
+            if recorded.deleted and self._trim is not None:
+                await self._trim(document, 0)
+            if recorded.holder is not None:
+                await self._withdraw(job, collection, task, outcome, recorded.holder, update=update)
+            await self._settle_extent(
+                collection, document, extents, chunks if recorded.indexed else 0
+            )
 
         return commit
+
+    async def _attempt(
+        self,
+        job: str | None,
+        collection: str,
+        document: str,
+        chunks: int,
+        extents: dict[str, list[Extent]],
+    ) -> None:
+        """Record the chunks a document is about to write, before any is written (TASK-0518).
+
+        An ingest that writes some and then fails leaves them findable by the next one.
+        """
+        if self.journal is None or job is None:
+            return
+        entries = extents.setdefault(document, [])
+        if any(extent[:2] == (self._chunker, chunks) for extent in entries):
+            return
+        await self.journal.record_extent(collection, document, self._chunker, chunks, settled=False)
+        entries.append(Extent(self._chunker, chunks, False))
+
+    async def _supersede(
+        self, document: str, extents: dict[str, list[Extent]], chunks: int
+    ) -> None:
+        """Delete, by id, every chunk a recorded extent names that the new version does not.
+
+        That covers a shorter version, an attempt that failed part way and another chunker.
+        """
+        if self._discard is None:
+            return
+        keep = {chunk_id(document, index, self._chunker) for index in range(chunks)}
+        stale = {
+            chunk_id(document, index, extent.chunker)
+            for extent in extents.get(document, [])
+            for index in range(extent.chunks)
+        }
+        if stale - keep:
+            await self._discard(document, sorted(stale - keep))
+
+    async def _settle_extent(
+        self, collection: str, document: str, extents: dict[str, list[Extent]], chunks: int
+    ) -> None:
+        """Record that the document now holds exactly ``chunks`` chunks under this chunker."""
+        if self.journal is None or document not in extents:
+            return
+        await self.journal.record_extent(collection, document, self._chunker, chunks, settled=True)
+        extents[document] = [Extent(self._chunker, chunks, True)]
+
+    async def _withdraw(
+        self,
+        job: str | None,
+        collection: str,
+        task: DocumentTask,
+        outcome: ParseOutcome,
+        holder: str,
+        *,
+        update: bool,
+    ) -> None:
+        """Undo a document another job indexed the same content as first: a late duplicate.
+
+        Its chunks just written are deleted and it is recorded ``deduplicated`` (TASK-0471).
+        """
+        self.late_duplicates += 1
+        _logger.info(
+            "document deduplicated at commit: another job indexed the same content first",
+            extra={"document_id": task.document_id, "holder": holder, "job_id": job},
+        )
+        if self._trim is not None:
+            await self._trim(task.document_id, 0)
+        if update and self.journal is not None:
+            await self.journal.forget_document(collection, task.document_id)
+        await self._record(job, task, "deduplicated", outcome.content_hash)
 
     def _addressed(self, outcome: ParseOutcome) -> list[ChunkPayload]:
         """Return the outcome's chunks, carrying the document text late chunking needs."""
@@ -820,7 +967,9 @@ class CpuWorkerPool:
 
         await self.journal.record_document(job, self._outcome(task, status, digest))
 
-    async def _retire(self, collection: str, task: DocumentTask) -> None:
+    async def _retire(
+        self, collection: str, task: DocumentTask, indexed_before: frozenset[str]
+    ) -> None:
         """Remove the chunks and the dedup record of an indexed document that is now empty.
 
         Its whole previous version is the stale tail; the chunks go first, so a failed trim
@@ -831,7 +980,7 @@ class CpuWorkerPool:
 
         await self._trim(task.document_id, 0)
         if self.journal is not None:
-            await self.journal.forget_document(collection, task.document_id)
+            await self.journal.forget_document(collection, task.document_id, known=indexed_before)
 
     async def _skip_empty(self, job: str | None, task: DocumentTask, outcome: ParseOutcome) -> None:
         """Record a document that parsed to nothing as skipped, with the reason."""
@@ -850,21 +999,26 @@ class CpuWorkerPool:
         await self.journal.record_document(job, record)
 
     async def _index_document(
-        self, job: str | None, collection: str, task: DocumentTask, outcome: ParseOutcome
-    ) -> None:
-        """Record an indexed document and remember its content hash, in one thread hop.
+        self,
+        job: str | None,
+        collection: str,
+        task: DocumentTask,
+        outcome: ParseOutcome,
+        watch: DeletionWatch | None = None,
+    ) -> IndexOutcome:
+        """Claim the hash and record the document indexed, in one thread hop (BENCH-0006).
 
-        One hop rather than two: this runs once per document, and the handoff costs more
-        than either append does (``docs/benchmarks.md`` BENCH-0006).
+        Deleted after ``watch`` (TASK-0519) or a late duplicate (TASK-0471): its chunks go.
         """
         if self.journal is None or job is None:
-            return
+            return IndexOutcome()
 
-        await self.journal.record_indexed(
+        return await self.journal.record_indexed(
             job,
             collection,
             self._outcome(task, "indexed", outcome.content_hash),
             dedup=self.settings.ingestion.dedup,
+            watch=watch,
         )
 
     def _outcome(

@@ -18,9 +18,11 @@ from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import settings_from
 from fasterrag.errors import ConfigError, FasterRagError
+from fasterrag.observability.audit import audited, cli_actor
 from fasterrag.services.archive import export_archive
 from fasterrag.services.archive_import import import_archive, open_archive
 from fasterrag.services.composition import create_embedding_router
+from fasterrag.services.journal import create_journal
 from fasterrag.services.lockfile import create_lock_store
 
 __all__ = ["run_export", "run_import"]
@@ -40,14 +42,17 @@ async def run_export(args: argparse.Namespace, console: Console) -> ExitCode:
 
     adapter = create_vector_db_adapter(settings)
     try:
-        counts = await export_archive(
-            settings,
-            adapter,
-            collection=collection,
-            destination=Path(args.out),
-            include_vectors=args.include_vectors,
-            lock=lock,
-        )
+        with audited("archive.export", collection, cli_actor()) as entry:
+            entry.detail["out"] = args.out
+            counts = await export_archive(
+                settings,
+                adapter,
+                collection=collection,
+                destination=Path(args.out),
+                include_vectors=args.include_vectors,
+                lock=lock,
+            )
+            entry.detail.update(counts.as_dict())
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
@@ -88,14 +93,18 @@ async def run_import(args: argparse.Namespace, console: Console) -> ExitCode:
         router = create_embedding_router(settings) if args.reembed else None
 
         try:
-            counts = await import_archive(
-                settings,
-                adapter,
-                reader,
-                collection=target,
-                reembed=args.reembed,
-                router=router,
-            )
+            with audited("archive.import", args.archive, cli_actor()) as entry:
+                entry.detail["collection"] = target
+                counts = await import_archive(
+                    settings,
+                    adapter,
+                    reader,
+                    collection=target,
+                    reembed=args.reembed,
+                    router=router,
+                    journal=create_journal(settings),
+                )
+                entry.detail.update(counts.as_dict())
         except FasterRagError as exc:
             console.problem(exc.code.value, exc.detail)
             return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE

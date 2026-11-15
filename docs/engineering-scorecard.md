@@ -2,7 +2,7 @@
 
 > **Who this is for.** Any contributor, human or AI, who is about to change this repository and wants the change to make the system more trustworthy and not merely larger. It states the rubric the project is scored against, the evidence behind the current score, what a score of 90 in each category would require, and the working rules for getting there. It is deliberately long: it is meant to be sufficient on its own, so that someone who has read nothing else can pick a task, do it correctly, and prove it.
 >
-> **Status of the numbers.** The scores are one auditor's judgement against a written rubric, derived on 2026-11-11 from reading the source and running the unit tier. They are not measurements, they are not a benchmark-ledger entry, and nothing here may be quoted as a performance claim ([benchmarks.md](benchmarks.md) is the only place those live). Re-derive them whenever a P0 task below closes; a stale score is the same defect as a stale count.
+> **Status of the numbers.** The scores are one auditor's judgement against a written rubric, derived on 2026-11-11 from reading the source and running the unit tier, and last re-derived on 2026-11-16 (§3, fourth column). They are not measurements, they are not a benchmark-ledger entry, and nothing here may be quoted as a performance claim ([benchmarks.md](benchmarks.md) is the only place those live). Re-derive them whenever a P0 task below closes; a stale score is the same defect as a stale count.
 >
 > **Not published.** This file is excluded from the documentation site for the reason [todo.md](todo.md) is: it describes unfixed weaknesses in enough detail to act on.
 >
@@ -43,29 +43,54 @@ Scoring rules, applied without exception:
 
 ## 3. Where the system stands
 
-Three columns: the audit as first derived on commit `03a11f2`; the re-score after the fixes that landed the same day (TASK-0427 to TASK-0435); and the re-score after the first batch of P0 tasks closed on 2026-11-12. A column moved only where a defect was closed *and* a test now proves it.
+Four columns: the audit as first derived on commit `03a11f2`; the re-score after the fixes that landed the same day (TASK-0427 to TASK-0435); the re-score after the first batch of P0 tasks closed on 2026-11-12; and the re-score of 2026-11-16 on `develop` at `d9fdb90`, after the P0/P1 closes of 2026-11-13 and wave 7 (2026-11-15). A column moved only where a defect was closed *and* a test now proves it. The 2026-11-16 column is the live one; the earlier three are kept as history.
 
-| Category | Weight | Audit | After same-day fixes | After the first P0 batch | What holds it down now |
-|---|---|---|---|---|---|
-| Architecture and design | 10% | 52 | 58 | 60 | Import cycles; query services and the LLM client still built per request; the idle `worker` command and `app.workers` still present; two-thirds of `services/` is peripheral |
-| Core RAG functionality | 12% | 58 | 62 | 71 | Single-turn only; no LLM retry or fallback; no document listing; a degraded answer's trace id resolves to nothing |
-| Document ingestion and processing | 8% | 52 | 60 | 68 | Semantic chunking refused in the pipeline; HTML, URL and inline-source parsing defects; seven formats; stale chunks survive when dedup is off |
-| Retrieval and search quality | 10% | 45 | 45 | 45 | English-only sparse leg; no threshold, diversity or query transformation; quality unmeasured |
-| Embedding and vector infrastructure | 7% | 58 | 60 | 67 | Two adapters unproven in CI; heavy adapter duplication with real drift; the new disk cache write on the embedding path is unmeasured |
-| Advanced RAG capabilities | 7% | 15 | 15 | 15 | Nothing beyond a refuse-gate, replay and a regression gate |
-| Extensibility and modularity | 8% | 50 | 51 | 66 | Provider plugins are selectable; chunkers, parsers and rerankers still have no plugin point; no sample plugin or author's guide |
-| Performance and scalability | 8% | 18 | 24 | 27 | No queue, one process, O(N) journal scans, and no citable number of any kind |
-| Reliability and error handling | 7% | 42 | 58 | 59 | Capped at 59 by scoring rule 5 while the journal can lose acknowledged state: its writes are not `fsync`ed and have a window with no live record (TASK-0437). Also: half-open breaker admits a stampede; no LLM retry or request deadline; Redis clients without timeouts |
-| Testing and quality assurance | 7% | 66 | 68 | 74 | Two vector adapters skip their contract suite in CI; eval sets cannot discriminate and nothing evaluates the answer; one Python version in CI |
-| Security | 5% | 55 | 64 | 65 | Tenant scoping of ingest and query is opt-in and incomplete; prompt injection unmitigated; keys plaintext and unrotatable |
-| Developer experience and APIs | 5% | 58 | 62 | 66 | No zero-infrastructure start; heavy first run; facade cannot query as a tenant; the CLI may misread streamed answers |
-| Documentation | 3% | 55 | 62 | 65 | Some documents still describe process surfaces that do nothing; no code block is executed by a test |
-| Packaging and release readiness | 3% | 35 | 35 | 35 | No tag, no release, no publish pipeline, heavy mandatory dependencies |
-| **Weighted total** | 100% | **47** | **52** | **56** | |
+| Category | Weight | Audit | After same-day fixes | After the first P0 batch | **2026-11-16** | What holds it down now (2026-11-16) |
+|---|---|---|---|---|---|---|
+| Architecture and design | 10% | 52 | 58 | 60 | **76** | Runtime package still ships non-product code — `services/ci_status.py`, provisioning that shells out to Docker (TASK-0457); the CLI builds `GenerationService` by hand twice beside `services/composition.py` (TASK-0530); no queue-backed worker (TASK-0130) |
+| Core RAG functionality | 12% | 58 | 62 | 71 | **78** | Two of the five bar lines unmet: single-turn only, and the answer prompt is a constant with no template key and no structured output (TASK-0458) |
+| Document ingestion and processing | 8% | 52 | 60 | 68 | **78** | Seven text formats and no conversion adapter (TASK-0462); remaining parser and chunk-id items (TASK-0459); semantic chunking never run with a real model (TASK-0531); the deletion log is per collection while the dedup record is per backend (TASK-0562, read from code, unverified) |
+| Retrieval and search quality | 10% | 45 | 45 | 45 | **45** | Unchanged bar: English-only sparse leg, no relevance floor, diversity or query transformation, quality unmeasured (TASK-0454, TASK-0447, TASK-0448, TASK-0463). New: the default `chunk_size` (768) exceeds what the default embedder reads (512), so chunk tails are never embedded (TASK-0558) |
+| Embedding and vector infrastructure | 7% | 58 | 60 | 67 | **72** | Milvus and Weaviate still skip their contract suite in CI (TASK-0412, TASK-0352); adapter duplication (TASK-0451); pgvector filtered under-return unverified (TASK-0452); flat-AND filters only (TASK-0464); Pinecone (TASK-0049); TASK-0558 above |
+| Advanced RAG capabilities | 7% | 15 | 15 | 15 | **15** | Unchanged: nothing beyond a refuse-gate, replay and a regression gate (TASK-0465) |
+| Extensibility and modularity | 8% | 50 | 51 | 66 | **80** | Five of the bar's six plugin kinds are proven by a test; rerankers still have none (TASK-0513) |
+| Performance and scalability | 8% | 18 | 24 | 27 | **32** | No citable number of any kind (TASK-0454, TASK-0084); no queue and one process (TASK-0130); the nightly query suite and the weekly soak/load workflow exist but have never run on a schedule — `weekly.yml` is not yet on `main` |
+| Reliability and error handling | 7% | 42 | 58 | 59 | **77** | Rule-5 cap lifted: the durable journal is proven by a crash-injection state machine and by the real full-disk chaos cases CI must run (TASK-0437, TASK-0535). Held down by blocking I/O still on the event loop (TASK-0407 to TASK-0410, TASK-0559), the `Idempotency-Key` resume decision (TASK-0526), an unbounded journal by default (TASK-0547), a Redis floor that admits no-timeout clients (TASK-0532) |
+| Testing and quality assurance | 7% | 66 | 68 | 74 | **80** | Milvus and Weaviate unproven in CI (TASK-0412); eval sets cannot discriminate (TASK-0454); 63 surviving mutants (TASK-0300); the new nightly answer-quality gate and the weekly soak have never run on a schedule; a job-interruption test fails on Python 3.14, which `requires-python` admits and CI never runs (TASK-0563) |
+| Security | 5% | 55 | 64 | 65 | **72** | Not closed by default: tenant-scoped retrieval is opt-in and ingest ignores `scoped_name` (TASK-0339, TASK-0381, TASK-0379, TASK-0421); control-plane findings (TASK-0460); no throttle before authentication (TASK-0326); threat model is three bullets (TASK-0495) |
+| Developer experience and APIs | 5% | 58 | 62 | 66 | **80** | The CLI cannot retrieve as a tenant (TASK-0380); an interrupted job cannot be resumed through `Idempotency-Key` (TASK-0526); the shipped default chunk size does not fit the shipped default embedder (TASK-0558) |
+| Documentation | 3% | 55 | 62 | 65 | **77** | No link checking, no versioned docs (TASK-0501); stale statements still open (TASK-0401, TASK-0402, TASK-0405, TASK-0422); this re-score found one more by hand (a CHANGELOG line still saying the `verify_lock` default "stays `warn`", corrected in the same commit) |
+| Packaging and release readiness | 3% | 35 | 35 | 35 | **76** | Two tagged pre-releases exist (`v0.1.0-beta.1`, `v0.1.0-beta.2`) published by `release.yml`. Held down by: beta.1 shipped broken under `pip install --pre` (TASK-0556, fixed after), branch protection off (TASK-0098), twenty licence exceptions undecided (TASK-0527), release-workflow edges (TASK-0528), lock/dev/CI resolutions that disagree (TASK-0398), no CODEOWNERS (TASK-0503) |
+| **Weighted total** | 100% | **47** | **52** | **56** | **66** | |
 
 The arithmetic for the second column, so it can be re-done by hand: 5.80 + 7.44 + 4.80 + 4.50 + 4.20 + 1.05 + 4.08 + 1.92 + 4.06 + 4.76 + 3.20 + 3.10 + 1.86 + 1.05 = 51.82.
 
 The arithmetic for the third column: 6.00 + 8.52 + 5.44 + 4.50 + 4.69 + 1.05 + 5.28 + 2.16 + 4.13 + 5.18 + 3.25 + 3.30 + 1.95 + 1.05 = 56.50. It was derived on 2026-11-12, after nine P0 tasks closed (TASK-0436, TASK-0438, TASK-0439, TASK-0441, TASK-0442, TASK-0443, TASK-0455, TASK-0470, TASK-0473), each with a test that failed before the fix and CI green on the merged tree. **It was scored by the same auditor who coordinated the changes**, which is the weakest form of re-scoring: treat it as an estimate until someone who did not write the changes re-derives it. Retrieval, advanced RAG and packaging did not move, because nothing that closed touches them; performance moved only for the wired embedding cache, and still has no citable number.
+
+The arithmetic for the fourth column: 7.60 + 9.36 + 6.24 + 4.50 + 5.04 + 1.05 + 6.40 + 2.56 + 5.39 + 5.60 + 3.60 + 4.00 + 2.31 + 2.28 = **65.93**. Derived on 2026-11-16 at `d9fdb90` on a clean tree, by an agent that did not write the wave-7 changes but is run by the same coordinator that directed them — still not the independent re-derivation 1.0 requires. Evidence was taken from the code and the tests, not from the ledger text: `scripts/check_layering.py` exits 0 with an empty exception table; a spot-check of 43 named test modules covering the journal crash machine, reaper and drain, the real process pool, plugin selection and the sample plugin, disconnect, document update and delete, stale chunks, delete-during-ingest, dedup races and backends, the query lock, breaker, Redis timeouts, prompt injection, key leaks, key rotation, audit routes, response headers, the sync facade, facade tenancy, degradation, query edges, stage timings, dead-letter retry, journal retention, faithfulness evaluation, hostile documents and the whole `tests/unit/docs` tier was run on this machine (result in [release-readiness.md](release-readiness.md) §1.4); the HTML parser defect TASK-0459 names (text directly inside `<div>`, nested `<li><p>` emitted twice) no longer reproduces; and CI on `d9fdb90` was read job by job. **Not credited:** the weekly soak and load workflow and the nightly query and answer-quality gates (TASK-0488, TASK-0481), because none has run on a schedule — `weekly.yml` is not on `main`, so GitHub cannot schedule it — and every line in a row that rests only on the ledger's word. Retrieval and advanced RAG did not move because nothing in their bars closed.
+
+### 3.1 What remains to reach 90, ranked by points (2026-11-16)
+
+At 66 the gap is 24 points. Each line is the category's distance to 90 times its weight — the most closing every listed task could buy — and the existing tasks that close it. Every item has a task; the one defect this re-score found without one is filed as TASK-0563.
+
+| Rank | Category | Points to 90 | What closes it |
+|---|---|---|---|
+| 1 | Advanced RAG capabilities | 5.25 | A maintainer decision on what to build (TASK-0465), then TASK-0482, TASK-0483, TASK-0484 — each gated on the eval set of TASK-0454 |
+| 2 | Performance and scalability | 4.64 | Citable entries at 100k and 1M chunks on isolated hardware (TASK-0454, TASK-0084); a queue-backed worker (TASK-0130); the cache-write cost (TASK-0516); host-paired nightly (TASK-0387 to TASK-0390); traces off the event loop (TASK-0408) |
+| 3 | Retrieval and search quality | 4.50 | TASK-0454 first, then TASK-0447 (multilingual sparse leg), TASK-0448 (floor, diversity, query transformation), TASK-0463 (parent-child), TASK-0558, TASK-0480, TASK-0485 |
+| 4 | Core RAG functionality | 1.44 | TASK-0458 (history, prompt template, structured output, hosted rerankers) |
+| 5 | Architecture and design | 1.40 | TASK-0457, TASK-0530, TASK-0130; and close TASK-0456, whose gate now has an empty exception table |
+| 6 | Embedding and vector infrastructure | 1.26 | TASK-0412 and TASK-0352, TASK-0451, TASK-0452, TASK-0464, TASK-0049, TASK-0479, TASK-0558 |
+| 7 | Ingestion | 0.96 | TASK-0462, TASK-0459, TASK-0531, TASK-0562 |
+| 8 | Reliability | 0.91 | TASK-0407 to TASK-0410, TASK-0559, TASK-0526, TASK-0547, TASK-0532, TASK-0533; chaos recovery times (TASK-0136) |
+| 9 | Security | 0.90 | TASK-0339 and TASK-0381 (maintainer decision pending), TASK-0379, TASK-0421, TASK-0460, TASK-0326, TASK-0495, TASK-0411 |
+| 10 | Extensibility | 0.80 | Reranker plugins (TASK-0513) |
+| 11 | Testing | 0.70 | TASK-0412, TASK-0454, TASK-0300, TASK-0563; one scheduled run each of `weekly.yml` and the new nightly gates after `develop` merges |
+| 12 | Developer experience | 0.50 | TASK-0380, TASK-0526, TASK-0558 |
+| 13 | Packaging | 0.42 | TASK-0098, TASK-0527, TASK-0528, TASK-0398, TASK-0503 |
+| 14 | Documentation | 0.39 | TASK-0501, TASK-0401, TASK-0402, TASK-0405, TASK-0422 |
+
+**What this says.** The top three rows hold 14.4 of the 24 points and none of them moves without the measurement instrument of TASK-0454 and isolated hardware (TASK-0084). Closing every *other* open task is worth about 9.7 points and reaches the mid 70s. The arithmetic in [engineering-audit.md](engineering-audit.md) §8 still holds: 90 needs advanced RAG near 75 on measured evidence, which is a maintainer decision (TASK-0465), not a coding session.
 
 **Read this honestly.** Five points in a day came from fixing defects that were each a few dozen lines once understood. The remaining thirty-eight are not like that. Roughly: closing every P0 task in [todo.md](todo.md) reaches the low 60s; P1 reaches the mid 70s; the last fifteen points are measurement, breadth and time.
 

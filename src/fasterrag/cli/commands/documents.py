@@ -21,6 +21,7 @@ from fasterrag.cli.output import Console, ExitCode
 from fasterrag.core.cache import create_semantic_store
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.errors import FasterRagError
+from fasterrag.observability.audit import audited, cli_actor
 from fasterrag.services.documents import DocumentDeletion, DocumentListing, DocumentService
 from fasterrag.services.journal import create_journal
 from fasterrag.services.lockfile import create_lock_store
@@ -47,9 +48,11 @@ async def run_documents(args: argparse.Namespace, console: Console) -> ExitCode:
                 console,
             )
         else:
-            _report_deletion(
-                await service.delete(collection, args.document_id, tenant=args.tenant), console
-            )
+            target = f"{collection}/{args.document_id}"
+            with audited("document.delete", target, cli_actor(args.tenant)) as entry:
+                deletion = await service.delete(collection, args.document_id, tenant=args.tenant)
+                entry.detail["known"] = deletion.known
+            _report_deletion(deletion, console)
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
         console.document({"error": exc.code.value, "detail": exc.detail})

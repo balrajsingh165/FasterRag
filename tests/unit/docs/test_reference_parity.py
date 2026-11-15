@@ -22,7 +22,7 @@ DOCS = Path(__file__).resolve().parents[3] / "docs"
 
 # Dotted names, allowing digits — `bm25_k1` is a real setting, and a pattern that assumed
 # letters-and-underscores silently skipped three rows when this check was first written.
-_DOTTED = re.compile(r"^\|\s*`([a-z0-9_]+(?:\.[a-z0-9_]+)+)`\s*\|", re.M)
+_DOTTED = re.compile(r"^\|\s*`([a-z0-9_]+(?:\.[a-z0-9_]+)+|schema_version)`\s*\|", re.M)
 _HEADING = re.compile(r"^## `fasterrag ([^`<]+)", re.M)
 
 

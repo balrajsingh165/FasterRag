@@ -2,7 +2,9 @@
 
 Requests are batched to ``embeddings.batch_size`` and every call carries the configured
 ``reliability.timeouts.embeddings_ms``, so no provider call is unbounded. Retries are the
-worker pool's job; this adapter only classifies failures.
+worker pool's job; this adapter only classifies failures. ``embeddings.base_url``, when set,
+replaces the API endpoint (an OpenAI-compatible gateway, say); unset, the client applies its
+own rule, ``OPENAI_BASE_URL`` and otherwise OpenAI's API.
 """
 
 from __future__ import annotations
@@ -65,6 +67,7 @@ class OpenAIEmbedder(EmbeddingAdapter):
 
             self._client = AsyncOpenAI(
                 api_key=require_key(self.config.api_key_env, self.provider),
+                base_url=self.config.base_url,
                 timeout=self._timeout,
                 max_retries=0,
             )

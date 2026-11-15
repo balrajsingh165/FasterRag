@@ -39,6 +39,7 @@ from fasterrag.config.schema import Settings
 from fasterrag.core.identity import (
     IDENTITY_VERSION,
     chunker_config_hash,
+    legacy_retrieval_config_hashes,
     retrieval_config_hash,
 )
 from fasterrag.errors import ErrorCode, RetrievalError
@@ -230,7 +231,9 @@ def detect_drift(
     details: list[dict[str, Any]] = []
 
     _compare("identity_version", lock.identity_version, IDENTITY_VERSION, fields, details)
-    _compare("config_hash", lock.config_hash, retrieval_config_hash(settings), fields, details)
+    live_hash = retrieval_config_hash(settings)
+    if lock.config_hash not in legacy_retrieval_config_hashes(settings):
+        _compare("config_hash", lock.config_hash, live_hash, fields, details)
     _compare("chunker_strategy", lock.chunker_strategy, settings.chunking.strategy, fields, details)
     _compare("chunk_size", lock.chunk_size, settings.chunking.chunk_size, fields, details)
     _compare("overlap", lock.overlap, settings.chunking.overlap, fields, details)

@@ -135,13 +135,18 @@ def suffix_for_media_type(media_type: str | None) -> str | None:
     return _MEDIA_TYPE_SUFFIXES.get(essence)
 
 
-def _fetched_suffix(uri: str, content_type: str | None) -> str:
+def _supported_suffixes(settings: Settings) -> frozenset[str]:
+    """Return the built-in suffixes plus those ``ingestion.parsers`` gives to a plugin."""
+    return SUPPORTED_SUFFIXES | frozenset(settings.ingestion.parsers)
+
+
+def _fetched_suffix(uri: str, content_type: str | None, supported: frozenset[str]) -> str:
     """Choose a fetched document's suffix from its ``Content-Type`` and its URL path."""
     declared = suffix_for_media_type(content_type)
     named = _extension_for(uri)
     if declared is not None and declared != _GENERIC_SUFFIX:
         return declared
-    if named in SUPPORTED_SUFFIXES:
+    if named in supported:
         return named
     return declared or named
 
@@ -151,15 +156,15 @@ def _signature(data: bytes) -> str | None:
     return next((suffix for magic, suffix in _SIGNATURES if data.startswith(magic)), None)
 
 
-def _declared_suffix(entry: Mapping[str, Any]) -> str | None:
+def _declared_suffix(entry: Mapping[str, Any], supported: frozenset[str]) -> str | None:
     """Return the suffix an inline source's ``filename`` or ``media_type`` names."""
     filename = entry.get("filename")
     if filename:
         suffix = Path(str(filename)).suffix.lower()
-        if suffix not in SUPPORTED_SUFFIXES:
+        if suffix not in supported:
             raise IngestionError(
                 f"inline filename {filename!r} has no suffix a parser reads; supported: "
-                f"{', '.join(sorted(SUPPORTED_SUFFIXES))}",
+                f"{', '.join(sorted(supported))}",
                 code=ErrorCode.VALIDATION_FAILED,
                 retryable=False,
             )
@@ -491,9 +496,9 @@ async def resolve_sources(
         if kind == "url":
             uri = value
             data, content_type = await _fetch(value, limit)
-            suffix = _fetched_suffix(value, content_type)
+            suffix = _fetched_suffix(value, content_type, _supported_suffixes(settings))
         else:
-            declared = _declared_suffix(entry)
+            declared = _declared_suffix(entry, _supported_suffixes(settings))
             data = _decode_inline(value, binary=declared in _BINARY_SUFFIXES)
             suffix = declared or _signature(data) or _GENERIC_SUFFIX
             # CRITICAL: the canonical URI hashes the *content*, not the position in the

@@ -66,7 +66,7 @@ import hashlib
 import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -101,6 +101,7 @@ __all__ = [
     "DEFAULT_CONTEXT_BUDGET_TOKENS",
     "EXTRACTIVE_MODE",
     "FALLBACK_BREAKER",
+    "GRADER_BREAKER",
     "MAXIMUM_BEST_CANDIDATES",
     "Answer",
     "GenerationService",
@@ -113,6 +114,9 @@ EXTRACTIVE_MODE: Final = DegradationMode.EXTRACTIVE.value
 
 FALLBACK_BREAKER: Final = "llm_fallback"
 """The circuit-breaker name ``llm.fallback`` is counted under, apart from the primary's."""
+
+GRADER_BREAKER: Final = "llm_grader"
+"""The breaker a grader other than the primary provider is counted under."""
 
 MAXIMUM_BEST_CANDIDATES: Final = 5
 
@@ -365,6 +369,17 @@ class _Interrupted:
 
 type _Stage = _Started | _Delta | _Degraded | _Completed | _Refused | _Interrupted
 
+_SETTLED: Final = (_Degraded, _Completed, _Refused, _Interrupted)
+"""The stages yielded only after the query's trace is stored."""
+
+
+@dataclass(slots=True)
+class _Progress:
+    """How far one query got, so a query abandoned part-way still leaves its trace."""
+
+    prepared: _Prepared | None = None
+    parts: list[str] = field(default_factory=list)
+
 
 @dataclass(frozen=True, slots=True)
 class _Provider:
@@ -602,19 +617,31 @@ class GenerationService:
         canonical = json.dumps(scoped, sort_keys=True, default=str, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
 
-    async def _cache_vector(self, question: str) -> list[float] | None:
+    async def _cache_vector(self, question: str, spans: SpanRecorder) -> list[float] | None:
         """Return the question's vector for cache use, or ``None`` if caching is off."""
         if not self.caching or self.embedder is None:
             return None
 
         try:
-            return await self.embedder.embed_query(question)
+            started = spans.elapsed_ms
+            vector = await self.embedder.embed_query(question)
+            span = spans.record("query-embedding", started)
+            metrics.observe_stage("embed_query", span.duration_ms / 1000)
+            return vector
         except FasterRagError as exc:
             _logger.warning(
                 "could not embed the question for the semantic cache; skipping the lookup",
                 extra={"code": exc.code.value, "trace_id": exc.trace_id},
             )
             return None
+
+    def _retrieval_vector(self, vector: list[float] | None) -> list[float] | None:
+        """Return the cache's vector for retrieval to reuse, when both embed alike (TASK-0515).
+
+        Only a vector from the adapter retrieval itself would call is reusable.
+        """
+        router = getattr(self.retrieval, "router", None)
+        return vector if router is not None and router.default is self.embedder else None
 
     async def _prepare(
         self,
@@ -624,6 +651,7 @@ class GenerationService:
         top_k: int | None,
         filters: Mapping[str, Any] | None,
         recorder: SpanRecorder | None = None,
+        vector: list[float] | None = None,
     ) -> _Prepared:
         """Retrieve and assemble everything generation and grading both need."""
         spans = recorder or SpanRecorder()
@@ -631,7 +659,12 @@ class GenerationService:
         retrieval_started = spans.elapsed_ms
         started = time.perf_counter()
         retrieved = await self.retrieval.search(
-            question, collection=collection, top_k=top_k, filters=filters
+            question,
+            collection=collection,
+            top_k=top_k,
+            filters=filters,
+            vector=vector,
+            recorder=spans,
         )
         retrieve_ms = int((time.perf_counter() - started) * 1000)
         spans.record(
@@ -641,17 +674,6 @@ class GenerationService:
             mode=retrieved.mode,
             hybrid=self.settings.retrieval.hybrid,
         )
-
-        # CRITICAL: reranking is reported as its own span only when it actually ran. A
-        # zero-duration span for a skipped stage is indistinguishable from a stage that ran
-        # instantly, and D4's whole point is telling those apart.
-        if self.settings.retrieval.rerank and retrieved.mode == FULL_MODE:
-            spans.record(
-                "reranker",
-                retrieval_started,
-                model=self.settings.retrieval.reranker_model,
-                reranked=sum(1 for chunk in retrieved.chunks if chunk.rerank_score is not None),
-            )
 
         assemble_started = spans.elapsed_ms
         started = time.perf_counter()
@@ -695,6 +717,7 @@ class GenerationService:
         prepared: _Prepared,
         response: str,
         answer: Answer,
+        marks: Mapping[str, Any] | None = None,
     ) -> None:
         """Persist everything this query did, for later inspection and replay (D8).
 
@@ -715,11 +738,30 @@ class GenerationService:
                 retrieved=[record_chunk(chunk) for chunk in prepared.chunks],
                 prompt=prepared.prompt,
                 response=response,
-                result=answer.as_dict(),
+                result={**answer.as_dict(), **(marks or {})},
                 spans=prepared.spans.spans if prepared.spans else [],
                 created_at=now(),
             )
         )
+
+    def _store_partial(
+        self,
+        question: str,
+        collection: str | None,
+        filters: Mapping[str, Any] | None,
+        prepared: _Prepared,
+        text: str,
+        **marks: Any,
+    ) -> None:
+        """Store the trace of an answer that stopped part-way, marked with why it stopped."""
+        partial = Answer(
+            answer=text,
+            mode=prepared.mode,
+            trace_id=current_trace_id(),
+            timings_ms=prepared.timings,
+            evidence_dropped=prepared.context.dropped_budget,
+        )
+        self._store_trace(question, collection, filters, prepared, text, partial, marks)
 
     def _charge_budget(self, prepared: _Prepared) -> None:
         """Refuse the call when it cannot fit inside the configured token budgets (D9)."""
@@ -762,15 +804,39 @@ class GenerationService:
             metrics.COST.increment(estimated, provider=provider, tenant="none")
 
     async def _grade(
-        self, question: str, answer: str, prepared: _Prepared, timings: dict[str, int]
+        self,
+        question: str,
+        answer: str,
+        prepared: _Prepared,
+        timings: dict[str, int],
+        deadline: _Deadline,
     ) -> FaithfulnessVerdict:
         """Score an answer when D5 is on, recording how long it took."""
         if not self.grounded_or_refuse:
             return UNGRADED
 
+        breaker = (
+            self.breaker
+            if self.grader is self.llm
+            else shared_breaker(GRADER_BREAKER, self.settings)
+        )
+        provider = _Provider(self.grader, breaker, role="grader")
+
+        async def complete(prompt: str, system: str) -> Completion:
+            result, _, admission = await self._with_retries(
+                provider, lambda llm: llm.complete(prompt, system=system), None, deadline
+            )
+            breaker.record_success(admission)
+            return result
+
         started = time.perf_counter()
-        verdict = await grade(self.grader, question, answer, prepared.context, prepared.texts)
+        grading_started = prepared.spans.elapsed_ms if prepared.spans is not None else 0.0
+        verdict = await grade(
+            self.grader, question, answer, prepared.context, prepared.texts, complete=complete
+        )
         timings["grade"] = int((time.perf_counter() - started) * 1000)
+        if prepared.spans is not None:
+            prepared.spans.record("grading", grading_started, score=verdict.score)
         if verdict.score is not None:
             metrics.FAITHFULNESS.observe(verdict.score)
         return verdict
@@ -790,7 +856,7 @@ class GenerationService:
         """
         try:
             async with deadline.bounding("grading the answer"):
-                return await self._grade(question, answer, prepared, timings)
+                return await self._grade(question, answer, prepared, timings, deadline)
         except FasterRagError as exc:
             if not _past_deadline(exc):
                 raise
@@ -873,12 +939,18 @@ class GenerationService:
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[QueryEvent]:
-        """Answer a question as a stream of events in the documented order."""
-        async for stage in self._pipeline(
-            question, collection=collection, top_k=top_k, filters=filters, streaming=True
-        ):
-            for event in _events(stage):
-                yield event
+        """Answer a question as a stream of events in the documented order.
+
+        Closing this stream closes the pipeline, and with it the provider's stream (TASK-0467).
+        """
+        async with aclosing(
+            self._pipeline(
+                question, collection=collection, top_k=top_k, filters=filters, streaming=True
+            )
+        ) as stages:
+            async for stage in stages:
+                for event in _events(stage):
+                    yield event
 
     def _streamed_completion(self, llm: LLMAdapter, prompt: str, text: str) -> Completion:
         """Describe a finished stream the way ``complete`` describes a whole call.
@@ -939,7 +1011,9 @@ class GenerationService:
                 async with deadline.bounding("generating"):
                     return await call(provider.llm), attempt, admission
             except FasterRagError as exc:
-                if not isinstance(exc, CircuitOpenError) and not _past_deadline(exc):
+                if _past_deadline(exc):
+                    provider.breaker.release(admission)
+                elif not isinstance(exc, CircuitOpenError):
                     provider.breaker.record_failure(admission, exc)
                 delay = self._retry_delay(exc, attempt, provider.breaker, deadline)
                 if delay is None:
@@ -1064,7 +1138,53 @@ class GenerationService:
         top_k: int | None,
         filters: Mapping[str, Any] | None,
         streaming: bool,
-    ) -> AsyncIterator[_Stage]:
+    ) -> AsyncGenerator[_Stage, None]:
+        """Run one query, storing an ``aborted`` trace if its consumer leaves early (TASK-0467).
+
+        A client that disconnects arrives here as a cancellation or a closed generator.
+        """
+        progress = _Progress()
+        settled = False
+        async with aclosing(
+            self._run(
+                question,
+                collection=collection,
+                top_k=top_k,
+                filters=filters,
+                streaming=streaming,
+                progress=progress,
+            )
+        ) as stages:
+            try:
+                async for stage in stages:
+                    settled = isinstance(stage, _SETTLED)
+                    yield stage
+            except (GeneratorExit, asyncio.CancelledError):
+                if progress.prepared is not None and not settled:
+                    _logger.info(
+                        "the caller went away before the answer was finished",
+                        extra={"trace_id": current_trace_id(), "sent": len(progress.parts)},
+                    )
+                    self._store_partial(
+                        question,
+                        collection,
+                        filters,
+                        progress.prepared,
+                        "".join(progress.parts),
+                        aborted=True,
+                    )
+                raise
+
+    async def _run(
+        self,
+        question: str,
+        *,
+        collection: str | None,
+        top_k: int | None,
+        filters: Mapping[str, Any] | None,
+        streaming: bool,
+        progress: _Progress,
+    ) -> AsyncGenerator[_Stage, None]:
         """Run one query, yielding each stage as it concludes (TASK-0438).
 
         The only place a query is executed. ``answer()`` collects these stages and
@@ -1074,9 +1194,11 @@ class GenerationService:
         trace_id = current_trace_id()
         deadline = _Deadline.starting_now(self.settings.reliability.request_deadline_ms)
         started = time.perf_counter()
+        spans = SpanRecorder()
         async with deadline.bounding("looking up the semantic cache"):
-            vector = await self._cache_vector(question)
+            vector = await self._cache_vector(question, spans)
             cache_ms = int((time.perf_counter() - started) * 1000)
+            lookup_started = spans.elapsed_ms
             hit = (
                 await self.cache.lookup(
                     vector,
@@ -1086,6 +1208,8 @@ class GenerationService:
                 if vector is not None and self.cache is not None
                 else None
             )
+            if vector is not None:
+                spans.record("semantic-cache", lookup_started, hit=hit is not None)
 
         if hit is not None:
             cached = _cached_answer(hit, trace_id, cache_ms)
@@ -1096,9 +1220,15 @@ class GenerationService:
 
         async with deadline.bounding("retrieving"):
             prepared = await self._prepare(
-                question, collection=collection, top_k=top_k, filters=filters
+                question,
+                collection=collection,
+                top_k=top_k,
+                filters=filters,
+                recorder=spans,
+                vector=self._retrieval_vector(vector),
             )
         timings = prepared.timings
+        progress.prepared = prepared
         if vector is not None:
             timings["cache"] = cache_ms
 
@@ -1120,7 +1250,7 @@ class GenerationService:
         # graded before a caller sees any of it.
         held = not streaming or self.grounded_or_refuse
         sent = False
-        parts: list[str] = []
+        parts = progress.parts
         started = time.perf_counter()
         admission: Admission | None = None
         serving: _Provider | None = None
@@ -1164,9 +1294,24 @@ class GenerationService:
                 )
         except FasterRagError as exc:
             if serving is not None:
-                if not _past_deadline(exc):
+                if _past_deadline(exc):
+                    serving.breaker.release(admission)
+                else:
                     serving.breaker.record_failure(admission, exc)
                 self._record_failure(prepared.spans, began, serving, attempts, exc)
+            if sent:
+                self._store_partial(
+                    question,
+                    collection,
+                    filters,
+                    prepared,
+                    "".join(parts),
+                    interrupted={
+                        "code": exc.code.value,
+                        "detail": exc.detail,
+                        "retryable": exc.retryable,
+                    },
+                )
             # CRITICAL: only a retryable failure is a rung on the degradation ladder. A
             # rejected key, an unknown model, or a missing provider extra will never succeed
             # on a retry, so degrading one would answer every query extractively forever

@@ -5,6 +5,9 @@ everywhere rather than only on the commands that remembered to thread it through
 calling ``load_settings(args.config)`` directly would silently ignore the flag, and an
 override that is accepted on the command line and then does nothing is worse than one that
 is rejected.
+
+It is also where the CLI's log handler learns the configuration's credential names: the handler
+is installed before any configuration is read, so it masks by the name rule until then.
 """
 
 from __future__ import annotations
@@ -13,6 +16,8 @@ import argparse
 
 from fasterrag.config.loader import load_settings
 from fasterrag.config.schema import Settings
+from fasterrag.observability.audit import configure_audit_file
+from fasterrag.observability.logging import mask_secret_env
 
 __all__ = ["overrides_from", "settings_from"]
 
@@ -31,9 +36,14 @@ def settings_from(
     ``export_env`` is on because a command is about to build adapters that resolve their
     credentials from ``os.environ``; only a command that builds nothing turns it off.
     """
-    return load_settings(
+    settings = load_settings(
         args.config,
         require_env=require_env,
         overrides=overrides_from(args),
         export_env=export_env,
     )
+    mask_secret_env(settings.referenced_env_vars())
+    configure_audit_file(
+        settings.security.audit_log_file, secret_env=settings.referenced_env_vars()
+    )
+    return settings

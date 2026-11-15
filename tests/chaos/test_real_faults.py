@@ -322,6 +322,7 @@ def disk_quota() -> Iterator[Mapping[str, Any]]:
         asyncio.run(run_docker(["rm", "--force", DISK_CONTAINER], timeout=DOCKER_TIMEOUT_SECONDS))
 
 
+@pytest.mark.must_run
 def test_the_probe_really_ran_out_of_space(disk_quota: Mapping[str, Any]) -> None:
     """The fault is real: the filesystem reports zero free bytes, not a mocked failure."""
     assert disk_quota["filled_bytes"] > 0
@@ -329,6 +330,7 @@ def test_the_probe_really_ran_out_of_space(disk_quota: Mapping[str, Any]) -> Non
     assert disk_quota["baseline"]["loaded"] is True
 
 
+@pytest.mark.must_run
 def test_a_genuinely_full_filesystem_halts_the_journal_loudly(
     disk_quota: Mapping[str, Any],
 ) -> None:
@@ -339,6 +341,7 @@ def test_a_genuinely_full_filesystem_halts_the_journal_loudly(
     assert "No space left on device" in failure["detail"]
 
 
+@pytest.mark.must_run
 def test_a_genuinely_full_filesystem_does_not_corrupt_the_checkpoint(
     disk_quota: Mapping[str, Any],
 ) -> None:
@@ -351,12 +354,14 @@ def test_a_genuinely_full_filesystem_does_not_corrupt_the_checkpoint(
     assert surviving["checkpoint"] is not None
 
 
+@pytest.mark.must_run
 def test_the_journal_writes_again_once_space_is_freed(disk_quota: Mapping[str, Any]) -> None:
     """Recovery is nothing more than freeing space; the job is still there to resume."""
     assert disk_quota["create_after_free"]["ok"] is True
     assert disk_quota["reload_after_free"]["loaded"] is True
 
 
+@pytest.mark.must_run
 def test_the_journal_types_a_full_disk_without_losing_the_errno(
     disk_quota: Mapping[str, Any],
 ) -> None:

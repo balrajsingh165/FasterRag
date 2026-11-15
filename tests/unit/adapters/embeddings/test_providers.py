@@ -108,3 +108,35 @@ def test_a_dimension_override_is_reported() -> None:
     adapter = create_embedding_adapter(settings_for("openai", dimensions=256))
 
     assert adapter.dimensions == 256
+
+
+def test_embeddings_base_url_points_the_openai_embedder_at_a_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """There was no way to send embeddings to an OpenAI-compatible endpoint (TASK-0511)."""
+    if importlib.util.find_spec("openai") is None:
+        pytest.skip('the openai client library is not installed; pip install "fasterrag[openai]"')
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-key")
+    settings = settings_for("openai", base_url="http://gateway.internal:8000/v1")
+
+    client = OpenAIEmbedder(settings)._connected()
+
+    assert str(client.base_url) == "http://gateway.internal:8000/v1/"
+
+
+def test_an_unset_embeddings_base_url_leaves_the_openai_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if importlib.util.find_spec("openai") is None:
+        pytest.skip('the openai client library is not installed; pip install "fasterrag[openai]"')
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-key")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    client = OpenAIEmbedder(settings_for("openai"))._connected()
+
+    assert str(client.base_url) == "https://api.openai.com/v1/"
+
+
+def test_embeddings_base_url_must_be_an_absolute_url() -> None:
+    with pytest.raises(ValueError, match="absolute http"):
+        settings_for("ollama", base_url="embeddings.internal:11434")

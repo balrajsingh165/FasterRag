@@ -38,8 +38,9 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Query, Response, status
 
 from fasterrag.adapters.embeddings.base import EmbeddingAdapter
-from fasterrag.adapters.vectordb.base import CollectionSpec
+from fasterrag.adapters.vectordb.base import CollectionSpec, VectorDBAdapter
 from fasterrag.api.dependencies import (
+    CurrentActor,
     CurrentCache,
     CurrentSettings,
     CurrentTenant,
@@ -47,7 +48,9 @@ from fasterrag.api.dependencies import (
     JournalDep,
 )
 from fasterrag.api.schemas import CollectionRequest
+from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, FasterRagError
+from fasterrag.observability.audit import audited
 from fasterrag.services.composition import build_documents, create_embedding_router
 from fasterrag.services.documents import DEFAULT_PAGE_SIZE, MAXIMUM_PAGE_SIZE
 from fasterrag.services.reindex import require_keyword_leg
@@ -97,12 +100,24 @@ async def create_collection(
     settings: CurrentSettings,
     adapter: CurrentVectorDB,
     tenant: CurrentTenant,
+    actor: CurrentActor,
 ) -> dict[str, Any]:
     """Create a collection sized from the configured embedding model.
 
     Reads the collection back afterwards, so the reported keyword leg is the one the
     backend actually added and a backend that added none is a 409 rather than a 201.
     """
+    with audited("collection.create", body.name, actor):
+        return await _create_collection(body, settings, adapter, tenant)
+
+
+async def _create_collection(
+    body: CollectionRequest,
+    settings: Settings,
+    adapter: VectorDBAdapter,
+    tenant: str | None,
+) -> dict[str, Any]:
+    """Create the collection and report what the backend built."""
     configured = settings.vector_db.collection
     embedding_router = create_embedding_router(settings)
     try:
@@ -147,26 +162,32 @@ async def get_collection(
 @router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_collection(
     name: str,
+    settings: CurrentSettings,
     adapter: CurrentVectorDB,
+    journal: JournalDep,
+    cache: CurrentCache,
     tenant: CurrentTenant,
+    actor: CurrentActor,
     force: Annotated[bool, Query()] = False,
 ) -> Response:
-    """Drop a collection and everything in it.
+    """Drop a collection and everything in it, its dedup record included (TASK-0519).
 
     Refuses without ``?force=true``. The vectors do not come back, and a DELETE that a proxy
     or a retry could replay is not something to make easy.
     """
-    if not force:
-        raise FasterRagError(
-            f"deleting {name!r} destroys its vectors; repeat the request with ?force=true",
-            code=ErrorCode.VALIDATION_FAILED,
-            retryable=False,
-        )
+    with audited("collection.drop", name, actor):
+        if not force:
+            raise FasterRagError(
+                f"deleting {name!r} destroys its vectors; repeat the request with ?force=true",
+                code=ErrorCode.VALIDATION_FAILED,
+                retryable=False,
+            )
 
-    if not await adapter.drop_collection(scoped_name(name, tenant)):
-        raise FasterRagError(
-            f"no collection named {name!r}", code=ErrorCode.NOT_FOUND, retryable=False
-        )
+        service = build_documents(settings, adapter, journal, cache)
+        if not await service.drop_collection(scoped_name(name, tenant)):
+            raise FasterRagError(
+                f"no collection named {name!r}", code=ErrorCode.NOT_FOUND, retryable=False
+            )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -202,14 +223,17 @@ async def delete_document(
     journal: JournalDep,
     cache: CurrentCache,
     tenant: CurrentTenant,
+    actor: CurrentActor,
 ) -> dict[str, Any]:
     """Delete one document's chunks from a collection, and every record it was indexed.
 
     Idempotent: a document nothing holds is a 200 with ``known: false``, because the
     backend cannot say whether a filter matched anything. A missing collection is a 404.
     """
-    service = build_documents(settings, adapter, journal, cache)
-    deletion = await service.delete(
-        scoped_name(name, tenant), document_id, tenant=tenant, display=name
-    )
+    with audited("document.delete", f"{name}/{document_id}", actor) as entry:
+        service = build_documents(settings, adapter, journal, cache)
+        deletion = await service.delete(
+            scoped_name(name, tenant), document_id, tenant=tenant, display=name
+        )
+        entry.detail["known"] = deletion.known
     return deletion.as_dict()

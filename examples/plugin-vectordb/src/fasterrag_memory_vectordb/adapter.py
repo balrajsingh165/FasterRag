@@ -9,7 +9,7 @@ the typed errors from ``fasterrag.errors``. The package registers the class unde
 The store holds everything in dictionaries, so it lives and dies with its process. It is still
 a faithful implementation of the contract — cosine, dot and Euclidean scoring, pushed-down
 filters, a BM25 keyword leg whose IDF comes from the live collection, aliases and snapshots —
-because the point of the example is that it passes ``tests/contract/vectordb.py`` unmodified.
+because the point of the example is that it passes ``fasterrag.testing.vectordb`` unmodified.
 """
 
 from __future__ import annotations

@@ -60,12 +60,7 @@ def _readable(text: str) -> str:
 
 
 def decode(data: bytes, builder: DocumentBuilder) -> str:
-    """Decode bytes by byte-order mark, then UTF-8, then Windows-1252, flagging any guess.
-
-    Raises:
-        ParseError: ``ENCODING_UNREADABLE`` when no codec reads it and the lenient result
-            is mostly replacement characters.
-    """
+    """Decode bytes by byte-order mark, then UTF-8, then Windows-1252, flagging any guess."""
     for mark, codec in _BYTE_ORDER_MARKS:
         if data.startswith(mark):
             try:

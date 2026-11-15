@@ -56,7 +56,12 @@ from fasterrag.services.composition import (
 from fasterrag.services.doctor import DoctorReport
 from fasterrag.services.documents import DEFAULT_PAGE_SIZE, DocumentDeletion, DocumentListing
 from fasterrag.services.estimation import Estimate, estimate_sources, require_estimator
-from fasterrag.services.generation import Answer, GenerationService, QueryEvent
+from fasterrag.services.generation import (
+    Answer,
+    GenerationService,
+    QueryEvent,
+    fallback_settings,
+)
 from fasterrag.services.journal import JobRecord, Journal, create_journal
 from fasterrag.services.lockfile import IndexLock, create_lock_store
 from fasterrag.services.querying import RetrievalService
@@ -83,6 +88,7 @@ class FasterRag:
         self._cache: SemanticCache | None = None
         self._journal: Journal | None = None
         self._llm: LLMAdapter | None = None
+        self._fallback: LLMAdapter | None = None
 
     @classmethod
     def from_config(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> Self:
@@ -132,6 +138,9 @@ class FasterRag:
         if self._llm is not None:
             await self._close_quietly(self._llm.close(), "llm")
             self._llm = None
+        if self._fallback is not None:
+            await self._close_quietly(self._fallback.close(), "llm_fallback")
+            self._fallback = None
         if self._cache is not None:
             await self._close_quietly(self._cache.close(), "cache")
             self._cache = None
@@ -207,6 +216,15 @@ class FasterRag:
             self._llm = create_llm_adapter(self.settings)
         return self._llm
 
+    def _shared_fallback(self) -> LLMAdapter | None:
+        """Return this instance's ``llm.fallback`` adapter, or ``None`` when none is configured."""
+        configured = fallback_settings(self.settings)
+        if configured is None:
+            return None
+        if self._fallback is None:
+            self._fallback = create_llm_adapter(configured)
+        return self._fallback
+
     def _generation_service(self, tenant: str | None = None) -> GenerationService:
         """Build one query's generation service for ``tenant``, lending it the shared LLM.
 
@@ -222,6 +240,7 @@ class FasterRag:
             traces=create_trace_store(self.settings),
             tenant=tenant,
             llm=self._shared_llm(),
+            fallback=self._shared_fallback(),
         )
 
     async def ingest(
@@ -239,7 +258,7 @@ class FasterRag:
         A directory is replaced by the files inside it, as ``fasterrag ingest`` does;
         ``recursive`` descends into subdirectories.
         """
-        from fasterrag.cli.sources import expand_sources
+        from fasterrag.services.source_expansion import expand_sources
 
         self._require_started()
         expanded = expand_sources(sources, recursive=recursive)
@@ -249,8 +268,15 @@ class FasterRag:
                 "visible files. Pass recursive=True to descend into subdirectories",
                 code=ErrorCode.VALIDATION_FAILED,
             )
+        from fasterrag.services.traces import create_trace_store
+
         service = build_ingestion(
-            self.settings, self.vector_db, self.journal, self.cache, router=self.embeddings
+            self.settings,
+            self.vector_db,
+            self.journal,
+            self.cache,
+            router=self.embeddings,
+            traces=create_trace_store(self.settings),
         )
         return await service.ingest(
             expanded,
@@ -355,9 +381,10 @@ class FasterRag:
         )
 
     async def drop_collection(self, name: str) -> bool:
-        """Drop a collection, returning whether it existed."""
+        """Drop a collection and its dedup record, returning whether it existed."""
         self._require_started()
-        return await self.vector_db.drop_collection(name)
+        service = build_documents(self.settings, self.vector_db, self.journal, self.cache)
+        return await service.drop_collection(name)
 
     async def delete_document(
         self,

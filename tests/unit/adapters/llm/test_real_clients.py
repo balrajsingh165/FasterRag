@@ -40,6 +40,7 @@ from tests.unit.adapters.recordings import (
     json_reply,
     ndjson_reply,
     parsed,
+    record_closes,
     refusing_connections,
     require_library,
     sse_reply,
@@ -64,6 +65,12 @@ def cohere_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Require the library and supply a placeholder credential; nothing is sent anywhere."""
     require_library("cohere")
     monkeypatch.setenv(KEY_ENV, "recorded-not-a-key")
+
+
+@pytest.fixture
+def closed_clients(monkeypatch: pytest.MonkeyPatch) -> list[httpx.AsyncClient]:
+    """Record every HTTP client whose connection pool is closed, then close it for real."""
+    return record_closes(monkeypatch)
 
 
 @pytest.fixture
@@ -347,3 +354,81 @@ async def test_the_fake_ollama_parts_have_the_shape_the_real_client_yields(
     real = [part async for part in stream]
 
     assert_same_shape(real, parsed(OLLAMA_CHAT_STREAM))
+
+
+@pytest.mark.usefixtures("cohere_key")
+async def test_a_cohere_stream_that_ends_in_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``finish_reason: ERROR`` ended the stream silently, as if the answer were complete."""
+    events = copy.deepcopy(COHERE_CHAT_STREAM)
+    events[-1]["delta"]["finish_reason"] = "ERROR"
+    Replay(monkeypatch, {"/v2/chat": sse_reply(events)})
+    pieces: list[str] = []
+
+    async def drain() -> None:
+        async for piece in CohereGenerator(cohere_settings()).stream("the question"):
+            pieces.append(piece)
+
+    with pytest.raises(GenerationError) as caught:
+        await drain()
+
+    assert pieces == ["forty", "-one pounds"]
+    assert caught.value.code is ErrorCode.GENERATION_FAILED
+    assert caught.value.retryable is True
+    assert "ERROR" in caught.value.detail
+
+
+@pytest.mark.usefixtures("cohere_key")
+async def test_a_cohere_stream_that_timed_out_raises_a_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = copy.deepcopy(COHERE_CHAT_STREAM)
+    events[-1]["delta"]["finish_reason"] = "TIMEOUT"
+    Replay(monkeypatch, {"/v2/chat": sse_reply(events)})
+
+    with pytest.raises(GenerationError) as caught:
+        _ = [piece async for piece in CohereGenerator(cohere_settings()).stream("the question")]
+
+    assert caught.value.code is ErrorCode.GENERATION_TIMEOUT
+    assert caught.value.retryable is True
+
+
+@pytest.mark.usefixtures("cohere_key")
+async def test_a_whole_cohere_reply_that_ended_in_error_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Replay(monkeypatch, {"/v2/chat": json_reply({**COHERE_CHAT, "finish_reason": "ERROR"})})
+
+    with pytest.raises(GenerationError) as caught:
+        await CohereGenerator(cohere_settings()).complete("the question")
+
+    assert caught.value.retryable is True
+
+
+@pytest.mark.usefixtures("cohere_key")
+async def test_closing_the_cohere_generator_closes_its_connection_pool(
+    monkeypatch: pytest.MonkeyPatch, closed_clients: list[httpx.AsyncClient]
+) -> None:
+    """``close()`` dropped the client and left its pooled connections open."""
+    Replay(monkeypatch, {"/v2/chat": json_reply(COHERE_CHAT)})
+    adapter = CohereGenerator(cohere_settings())
+    await adapter.complete("the question")
+
+    await adapter.close()
+
+    assert len(closed_clients) == 1
+    assert closed_clients[0].is_closed
+
+
+@pytest.mark.usefixtures("ollama_library")
+async def test_closing_the_ollama_generator_closes_its_connection_pool(
+    monkeypatch: pytest.MonkeyPatch, closed_clients: list[httpx.AsyncClient]
+) -> None:
+    """``close()`` dropped the client and left its pooled connections open."""
+    Replay(monkeypatch, {"/api/chat": json_reply(OLLAMA_CHAT)})
+    adapter = OllamaGenerator(ollama_settings())
+    await adapter.complete("the question")
+
+    await adapter.close()
+
+    assert len(closed_clients) == 1
+    assert closed_clients[0].is_closed

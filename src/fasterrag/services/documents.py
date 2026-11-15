@@ -26,10 +26,11 @@ point ids. The other order strands the opposite state — chunks gone, hash stil
 **A delete is idempotent, and "not found" is not something it can know.** The adapter
 contract's ``delete`` returns nothing and no adapter can count what a filter matched without
 a scan, so whether any chunk existed is not observable here. The journal is the only record,
-and it is not the index: with ``ingestion.dedup`` off, or after an archive import, it holds
-nothing for documents that are indexed. The vector delete is therefore always issued, and
-:attr:`DocumentDeletion.known` reports the one thing that *is* known — whether the journal
-held a live record. Deleting a document nobody ingested succeeds and says ``known: false``.
+and it is not the index: with ``ingestion.dedup`` off, or for an archived document that
+carried no content hash, it holds nothing for documents that are indexed. The vector
+delete is therefore always issued, and :attr:`DocumentDeletion.known` reports the one
+thing that *is* known — whether the journal held a live record. Deleting a document nobody
+ingested succeeds and says ``known: false``.
 
 **Tenancy.** A document id is a digest of the source path and the tenant
 (``core.identity.document_id``), so it is derivable by anyone who can guess a path; holding
@@ -41,13 +42,24 @@ tombstone is *not* tenant-checked, because the dedup record carries no tenant to
 against; under collection-name scoping the journal is already per tenant, and the worst a
 foreign tombstone does is make its owner's next ingest re-embed one document.
 
+**A delete and a running ingest are ordered** (TASK-0519). The tombstone and the vector
+delete run under the collection's deletion lock, which every commit of an ingest job also
+takes; a job that started before the delete finds the document in the deletion log at
+commit, records it ``skipped`` with reason ``DELETED_DURING_INGEST`` and removes the chunks
+it wrote. A delete therefore wins over every job already running and over none started
+after it. Dropping a collection (:meth:`DocumentService.drop_collection`) also removes its
+dedup record, without which a re-created collection reported every re-ingested document
+``deduplicated``.
+
 **Listing reads the same record** (TASK-0469). A collection's documents are listed from the
 journal's dedup index, the record a delete tombstones, so a deleted document disappears from
 the listing in the same step that lets it be ingested again. The cost of that choice is the
 same caveat ``known`` carries: the listing is what the journal remembers, not a scan of the
-index, so with ``ingestion.dedup`` off, or after an archive import, it is empty for documents
-that are indexed. A scan would be honest about those and would read every point of a
-collection per page, which is the wrong price for a listing on a very large corpus.
+index, so with ``ingestion.dedup`` off it is empty for documents that are indexed. A scan
+would be honest about those and would read every point of a collection per page, which is
+the wrong price for a listing on a very large corpus. The listing is kept, and the gap that
+was cheap to close is closed: an archive import records each document it brings in that
+carries a content hash, as ingestion does (TASK-0538).
 """
 
 from __future__ import annotations
@@ -201,17 +213,22 @@ class DocumentService:
             )
 
         shown = display or collection
-        known = await self.journal.forget_document(collection, document_id)
-        try:
-            await self.adapter.delete(
-                PointSelector(collection=collection, filters=document_filter(document_id, tenant))
-            )
-        except FasterRagError as exc:
-            if exc.code is not ErrorCode.NOT_FOUND:
-                raise
-            raise FasterRagError(
-                f"no collection named {shown!r}", code=ErrorCode.NOT_FOUND, retryable=False
-            ) from exc
+
+        async def remove() -> None:
+            try:
+                await self.adapter.delete(
+                    PointSelector(
+                        collection=collection, filters=document_filter(document_id, tenant)
+                    )
+                )
+            except FasterRagError as exc:
+                if exc.code is not ErrorCode.NOT_FOUND:
+                    raise
+                raise FasterRagError(
+                    f"no collection named {shown!r}", code=ErrorCode.NOT_FOUND, retryable=False
+                ) from exc
+
+        known = await self.journal.delete_document(collection, document_id, remove)
 
         await self._drop_from_lock(collection, document_id)
         if self.cache is not None:
@@ -232,6 +249,17 @@ class DocumentService:
             known=known,
             deleted_at=datetime.now(tz=UTC).isoformat(),
         )
+
+    async def drop_collection(self, collection: str) -> bool:
+        """Drop a collection and forget its dedup record, returning whether it existed.
+
+        The record goes first and goes even when the backend has no such collection, so
+        a collection dropped by an earlier version can be cleared by dropping it again.
+        """
+        await self.journal.forget_collection(collection)
+        dropped = await self.adapter.drop_collection(collection)
+        _logger.info("collection dropped", extra={"collection": collection, "existed": dropped})
+        return dropped
 
     async def list_documents(
         self,

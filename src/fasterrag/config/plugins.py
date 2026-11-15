@@ -33,6 +33,13 @@ installed distributions (2026-11-12, this repository's development environment, 
 machine), and validation reaches it only for a name that is not built in. A cache would
 have to be invalidated whenever ``sys.path`` changes, which is exactly what installing a
 plugin does.
+
+**Chunkers and parsers (TASK-0513).** ``chunking.strategy`` is validated the same way, against
+``BUILTIN_CHUNKING_STRATEGIES`` and the ``fasterrag.chunkers`` group. Parsers differ: a
+built-in parser is chosen by file suffix, not by name, so ``ingestion.parsers`` maps a suffix
+to a name that only an installed ``fasterrag.parsers`` entry point can satisfy. Installing a
+parser package therefore enables nothing by itself: an operator who did not name it keeps
+the corpus parsed exactly as before.
 """
 
 from __future__ import annotations
@@ -42,11 +49,14 @@ from importlib.metadata import entry_points
 from typing import Final
 
 __all__ = [
+    "BUILTIN_CHUNKING_STRATEGIES",
     "BUILTIN_EMBEDDING_PROVIDERS",
     "BUILTIN_LLM_PROVIDERS",
     "BUILTIN_VECTOR_DB_PROVIDERS",
+    "CHUNKERS_GROUP",
     "EMBEDDINGS_GROUP",
     "LLM_GROUP",
+    "PARSERS_GROUP",
     "PLANNED_VECTOR_DB_PROVIDERS",
     "VECTOR_DB_GROUP",
     "registered_names",
@@ -56,6 +66,8 @@ __all__ = [
 VECTOR_DB_GROUP: Final = "fasterrag.vectordb"
 EMBEDDINGS_GROUP: Final = "fasterrag.embeddings"
 LLM_GROUP: Final = "fasterrag.llm"
+CHUNKERS_GROUP: Final = "fasterrag.chunkers"
+PARSERS_GROUP: Final = "fasterrag.parsers"
 
 BUILTIN_VECTOR_DB_PROVIDERS: Final[frozenset[str]] = frozenset(
     {"qdrant", "pgvector", "chroma", "milvus", "weaviate"}
@@ -65,6 +77,10 @@ BUILTIN_EMBEDDING_PROVIDERS: Final[frozenset[str]] = frozenset(
 )
 BUILTIN_LLM_PROVIDERS: Final[frozenset[str]] = frozenset(
     {"openai", "openai_compatible", "anthropic", "cohere", "ollama"}
+)
+
+BUILTIN_CHUNKING_STRATEGIES: Final[frozenset[str]] = frozenset(
+    {"fixed", "recursive", "semantic", "layout", "late"}
 )
 
 PLANNED_VECTOR_DB_PROVIDERS: Final[dict[str, str]] = {"pinecone": "TASK-0049"}
@@ -81,11 +97,12 @@ def require_selectable(
     builtin: frozenset[str],
     group: str,
     planned: Mapping[str, str] | None = None,
+    kind: str = "provider",
 ) -> str:
     """Return ``value`` when it names a built-in or an installed plugin, else refuse it.
 
-    ``planned`` maps a specified-but-unbuilt name to the task that builds it, so the
-    refusal can say the name is known and where its adapter is tracked.
+    ``planned`` maps a specified-but-unbuilt name to the task that builds it, and ``kind``
+    names what is being selected (``provider``, ``chunker``) in the refusal.
     """
     if value in builtin:
         return value
@@ -98,21 +115,22 @@ def require_selectable(
     if task is not None:
         raise ValueError(
             f"{value!r} is specified but its adapter is not built yet ({task}); "
-            f"{_alternatives(builtin, installed, group)}. Use one of those, or install a "
+            f"{_alternatives(builtin, installed, group, kind)}. Use one of those, or install a "
             f"package that registers {value!r} under that group"
         )
 
     raise ValueError(
-        f"{value!r} is not an installed provider; {_alternatives(builtin, installed, group)}. "
+        f"{value!r} is not an installed {kind}; "
+        f"{_alternatives(builtin, installed, group, kind)}. "
         f"Install the package that registers {value!r} under that group, or use one of "
         "the names listed"
     )
 
 
-def _alternatives(builtin: frozenset[str], installed: frozenset[str], group: str) -> str:
-    """Name every provider that would have been accepted, built-in and plugin apart."""
+def _alternatives(builtin: frozenset[str], installed: frozenset[str], group: str, kind: str) -> str:
+    """Name every value that would have been accepted, built-in and plugin apart."""
     plugins = ", ".join(sorted(installed - builtin)) or "none"
     return (
-        f"built-in providers: {', '.join(sorted(builtin))}; plugins installed under the "
+        f"built-in {kind}s: {', '.join(sorted(builtin))}; plugins installed under the "
         f"{group!r} entry-point group: {plugins}"
     )

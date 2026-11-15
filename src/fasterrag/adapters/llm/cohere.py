@@ -17,6 +17,11 @@ normalised here so nothing downstream needs to know the vendor:
   differ. The adapter reports the billed figure, because that is what the invoice is
   charged on, and falls back to ``tokens`` only when no billed figure is stated — the same
   choice ``adapters/embeddings/cohere.py`` makes for the embedding side.
+
+A ``finish_reason`` of ``ERROR`` or ``TIMEOUT`` means Cohere stopped generating because it
+failed, and the text so far is not an answer. Both raise a typed ``GenerationError`` —
+``TIMEOUT`` as ``GENERATION_TIMEOUT`` — on a whole reply and at the end of a stream, where
+it used to end silently as if the answer were complete (TASK-0512).
 """
 
 from __future__ import annotations
@@ -32,7 +37,7 @@ from fasterrag.adapters.llm.base import (
     require_llm_key,
 )
 from fasterrag.adapters.vectordb.base import HealthStatus
-from fasterrag.errors import ConfigError, GenerationError
+from fasterrag.errors import ConfigError, ErrorCode, GenerationError
 
 __all__ = ["CohereGenerator"]
 
@@ -77,7 +82,7 @@ class CohereGenerator(LLMAdapter):
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         """Generate a whole answer."""
         try:
-            response = await self._connected().chat(**self._request(prompt, system))
+            response = await self._bounded(self._connected().chat(**self._request(prompt, system)))
         except ConfigError:
             raise
         # CRITICAL: the catch stays broad because the SDK raises a deep hierarchy of
@@ -91,22 +96,26 @@ class CohereGenerator(LLMAdapter):
                 key_env=self.config.api_key_env,
             ) from exc
 
+        finish_reason = _finish_reason_of(response)
+        _raise_on_failed_finish(finish_reason, "complete")
         return Completion(
             text=_text_of(response),
             model=self.config.model,
             prompt_tokens=_usage_of(response, "input_tokens"),
             completion_tokens=_usage_of(response, "output_tokens"),
-            finish_reason=_finish_reason_of(response),
+            finish_reason=finish_reason,
         )
 
     async def stream(self, prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
         """Yield answer text as it arrives."""
+        finish_reason: str | None = None
         try:
             events = self._connected().chat_stream(**self._request(prompt, system))
             async for event in events:
                 text = _delta_text_of(event)
                 if text:
                     yield text
+                finish_reason = _stream_finish_reason_of(event) or finish_reason
         except ConfigError:
             raise
         # CRITICAL: see complete(); a mid-stream vendor error must reach the caller as a
@@ -115,6 +124,7 @@ class CohereGenerator(LLMAdapter):
             raise classify_llm_failure(
                 exc, provider=self.provider, operation="stream", key_env=self.config.api_key_env
             ) from exc
+        _raise_on_failed_finish(finish_reason, "stream")
 
     async def health(self) -> HealthStatus:
         """Report reachability with a minimal generation."""
@@ -125,8 +135,10 @@ class CohereGenerator(LLMAdapter):
         return HealthStatus(healthy=True, detail=f"{self.provider} reachable")
 
     async def close(self) -> None:
-        """Release the client."""
-        self._client = None
+        """Close the client and its connection pool."""
+        if self._client is not None:
+            client, self._client = self._client, None
+            await client.__aexit__(None, None, None)
 
 
 def _text_of(response: Any) -> str:
@@ -151,6 +163,29 @@ def _finish_reason_of(response: Any) -> str | None:
     """Return the finish reason in the lower case every other provider uses."""
     reason = getattr(response, "finish_reason", None)
     return reason.lower() if isinstance(reason, str) else None
+
+
+def _stream_finish_reason_of(event: Any) -> str | None:
+    """Return the lower-cased finish reason a ``message-end`` event carries, or None."""
+    if getattr(event, "type", None) != "message-end":
+        return None
+    reason = getattr(getattr(event, "delta", None), "finish_reason", None)
+    return reason.lower() if isinstance(reason, str) else None
+
+
+def _raise_on_failed_finish(finish_reason: str | None, operation: str) -> None:
+    """Raise when Cohere says it stopped because generation failed, not because it finished."""
+    if finish_reason == "error":
+        raise GenerationError(
+            f"cohere ended the reply with finish_reason ERROR during {operation}",
+            retryable=True,
+        )
+    if finish_reason == "timeout":
+        raise GenerationError(
+            f"cohere ended the reply with finish_reason TIMEOUT during {operation}",
+            code=ErrorCode.GENERATION_TIMEOUT,
+            retryable=True,
+        )
 
 
 def _usage_of(response: Any, field: str) -> int:

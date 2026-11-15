@@ -54,9 +54,9 @@ Backend swap = config change + D2 zero-downtime reindex (or D11 vector copy wher
 | Provider | Value | Secret (env var) | Local? | Notes |
 |---|---|---|---|---|
 | HuggingFace / sentence-transformers | `huggingface` | — | ✅ | Default; runs on CPU/GPU in the embedding pool; no data leaves the host. |
-| OpenAI | `openai` | `OPENAI_API_KEY` | ❌ | Batched API calls; prompt caching honored where offered. |
-| Cohere | `cohere` | `COHERE_API_KEY` | ❌ | Batched, through the v1 `embed` call. |
-| Ollama (local server) | `ollama` | — | ✅ | One request per batch on `/api/embed`, so the server must serve that route; the adapter does not fall back to the superseded per-text `/api/embeddings`. Needs `ollama>=0.4`. There is no `embeddings.base_url`: the server is `llm.base_url` when `llm.provider` is also `ollama`, and otherwise the client's own default — the `OLLAMA_HOST` environment variable, else `http://127.0.0.1:11434`. `embeddings.dimensions` is not sent to the server. |
+| OpenAI | `openai` | `OPENAI_API_KEY` | ❌ | Batched API calls; prompt caching honored where offered. `embeddings.base_url` overrides the endpoint, for an OpenAI-compatible embeddings gateway. |
+| Cohere | `cohere` | `COHERE_API_KEY` | ❌ | Batched, through the v1 `embed` call. The client library's own retries are switched off per request, so the worker pool's retry policy is the only one. `embeddings.base_url` overrides the endpoint. |
+| Ollama (local server) | `ollama` | — | ✅ | One request per batch on `/api/embed`, so the server must serve that route; the adapter does not fall back to the superseded per-text `/api/embeddings`. Needs `ollama>=0.4`. The server is `embeddings.base_url` when set; otherwise `llm.base_url` when `llm.provider` is also `ollama`, and otherwise the client's own default — the `OLLAMA_HOST` environment variable, else `http://127.0.0.1:11434`. `embeddings.dimensions` is sent as the request's `dimensions`, which needs `ollama>=0.5.4`; with an older client a set dimension is refused with a `ConfigError` rather than ignored. |
 
 **Tiered embedding** (`embeddings.tiering`): route document classes to different models — cheap models for high-volume/low-priority classes, higher-cost models where retrieval precision matters:
 
@@ -83,7 +83,7 @@ All five LLM providers below are **shipped**, with streaming.
 |---|---|---|---|---|
 | OpenAI | `openai` | `OPENAI_API_KEY` | ✅ | |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | ✅ | e.g. `model: claude-opus-5`; provider prompt caching used for shared prefixes. |
-| Cohere | `cohere` | `COHERE_API_KEY` | ✅ | The v2 chat API, through `cohere.AsyncClientV2`. Needs `cohere>=5.8`. Token counts are the billed units, falling back to the consumed tokens when the reply states no bill. |
+| Cohere | `cohere` | `COHERE_API_KEY` | ✅ | The v2 chat API, through `cohere.AsyncClientV2`. Needs `cohere>=7.0.5`, the first release whose `AsyncClientV2` accepts `max_retries`. Token counts are the billed units, falling back to the consumed tokens when the reply states no bill. |
 | Ollama (local) | `ollama` | — | ✅ | Fully local generation; `llm.base_url` names the server, else `OLLAMA_HOST`, else `http://127.0.0.1:11434`. Needs `ollama>=0.4`. |
 | Any OpenAI-compatible endpoint | `openai_compatible` | per endpoint | ✅ | `llm.base_url` required — covers vLLM, LM Studio, llama.cpp servers, TGI, and most hosted gateways. |
 
@@ -132,7 +132,7 @@ The tests that would have caught each are `tests/unit/adapters/llm/test_real_cli
 
 `cohere` and `ollama` are in the `dev` extra so these run in CI rather than skip, and one test per library in each module is marked `must_run` ([testing-strategy.md](testing-strategy.md) §3.2). Without the library a test skips, naming the extra to install.
 
-**What this does not prove.** The bodies were written from each vendor's API reference, not captured from a live server, so a server that has drifted from its reference is still invisible here; only the billed probes in §3a can see that, and they have never run. The lower bounds in `pyproject.toml` come from replaying the same recordings through older releases: `cohere` 5.6.2 fails and 5.8.0 passes; `ollama` 0.3.3 fails and 0.4.0 passes.
+**What this does not prove.** The bodies were written from each vendor's API reference, not captured from a live server, so a server that has drifted from its reference is still invisible here; only the billed probes in §3a can see that, and they have never run. The lower bounds in `pyproject.toml` come from replaying the same recordings through older releases: `cohere` 5.6.2 fails and 5.8.0 passes, and since the generator turned the SDK's own retries off (TASK-0449) 7.0.4 fails and 7.0.5 passes; `ollama` 0.3.3 fails and 0.4.0 passes.
 
 ## 4. Rerankers (`retrieval.reranker_model`)
 

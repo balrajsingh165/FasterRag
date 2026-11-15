@@ -59,11 +59,21 @@
 # (rebuild-playbook T12) this repository treats as a bug: a red baseline kills every mutant
 # for free and would otherwise report a perfect score.
 #
-# WHAT THIS JOB MEASURES, stated so that no reader has to infer it (TASK-0323): the INGEST
-# suite only — parse and chunk over tests/eval/datasets/handbook/corpus. Not retrieval, not
-# embedding, not indexing, not generation. docs/performance.md §3.7 says the same thing in
-# the same words, and the ledger rules in docs/benchmarks.md still refuse every number this
-# job produces, for the isolation reason above.
+# WHAT THIS JOB MEASURES, stated so that no reader has to infer it (TASK-0323, revised by
+# TASK-0488): the INGEST suite — parse and chunk over tests/eval/datasets/handbook/corpus —
+# and the QUERY suite — one question answered end to end against the handbook collection in
+# a service-container Qdrant, with real embeddings and the offline scripted LLM from
+# examples/scripted-llm. The query numbers therefore time embedding, retrieval, fusion and
+# assembly, and a generation step that costs nothing; they are not a model's latency.
+# docs/performance.md §3.7 says the same, and the ledger rules in docs/benchmarks.md still
+# refuse every number this job produces, for the isolation reason above.
+#
+# It also GATES GENERATION QUALITY (TASK-0481): `benchmark --suite eval --faithfulness`
+# answers every answerable golden query through the same scripted LLM, which also grades
+# each answer against its context deterministically, and judges the result against
+# tests/eval/datasets/handbook/generation-baseline.json. That gate catches a pipeline or
+# prompt change that stops the evidence reaching the answer; it cannot judge a real model's
+# wording, which needs a provider key this runner does not hold.
 #
 # TASK-0323 re-audited every place this file could report success without measuring, on the
 # principle that a nightly that cannot fail is not a nightly. What it changed: the unused
@@ -105,8 +115,17 @@ jobs:
     # bound on a hang, not a budget: GitHub's default is 360 minutes, and a job that can burn
     # six hours before anyone is told is a job whose failure is invisible for six hours.
     timeout-minutes: 30
-    # TASK-0323: the Qdrant service block that stood here is GONE, and this is the record of
-    # why. TASK-0314 added it after finding that every benchmark this job ever ran died on an
+    # TASK-0488 restored the Qdrant service, WITH the steps that contact it — the condition
+    # the record below set. The credential question it describes is answered without a key:
+    # the query suite and the generation gate answer through the offline scripted LLM.
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.18.1
+        ports:
+          - 6333:6333
+          - 6334:6334
+    # TASK-0323: the Qdrant service block that stood here was removed, and this is the record
+    # of why. TASK-0314 added it after finding that every benchmark this job ever ran died on an
     # unreachable Qdrant — but the fix that landed with it, `--suite ingest`, measures parse
     # and chunk through `estimate_sources`, which constructs no vector-db adapter and opens
     # no socket. `pytest -m eval` below is the same marker ci.yml's `models` job runs
@@ -129,6 +148,18 @@ jobs:
       FASTERRAG_API_KEY: ci-placeholder
       QDRANT_API_KEY: ci-placeholder
       OPENAI_API_KEY: ci-placeholder
+      # Every step that touches the handbook collection loads the same config with the same
+      # pins, which are ci.yml eval-gate's plus the scripted LLM: a collection built under one
+      # chunking and queried under another would measure the mismatch.
+      PINS: >-
+        --config artifacts/config.yaml
+        --set vector_db.mode=external
+        --set chunking.token_counter=estimate
+        --set retrieval.top_k=5
+        --set retrieval.rerank=false
+        --set eval.regression_gate=true
+        --set llm.provider=scripted
+        --set llm.model=scripted
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -140,7 +171,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,rerank,huggingface]"
+          pip install -e ".[dev,rerank,huggingface,qdrant]" ./examples/scripted-llm
 
       # `-rs` is not cosmetic. pytest exits 0 when every selected test SKIPS, so this step
       # can be green having verified nothing — the vacuity class (rebuild-playbook T12) that
@@ -150,6 +181,55 @@ jobs:
       # skipped everything is legible on the run page instead of being inferred later.
       - name: Retrieval eval harness
         run: pytest -m eval -q -rs
+
+      - name: Write the config every later step loads
+        run: |
+          mkdir -p artifacts
+          fasterrag config init --path artifacts/config.yaml
+
+      # The image declares no HEALTHCHECK, so GitHub cannot wait on the service.
+      - name: Wait for Qdrant
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -sf http://localhost:6333/readyz > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Qdrant did not become ready within 120 seconds"
+          exit 1
+
+      - name: Build the handbook collection
+        run: fasterrag $PINS ingest tests/eval/datasets/handbook/corpus --collection handbook
+
+      # TASK-0481. The verdict is read from the document, not the exit code: exit 5 is also
+      # what a retrieval-gate refusal returns, and the two need different answers. Both
+      # `regressed` and `not-comparable` fail the night, for the reason the comparison below
+      # gives: a gate that compared nothing has ruled nothing out.
+      - name: Generation gate (faithfulness and citations, scripted LLM)
+        if: ${{ !cancelled() }}
+        run: |
+          set +e
+          fasterrag $PINS --json benchmark --suite eval --faithfulness \
+            --dataset tests/eval/datasets/handbook --collection handbook > artifacts/generation.json
+          code=$?
+          set -e
+          cat artifacts/generation.json
+          read_gate="import json;g=(json.load(open('artifacts/generation.json')).get('generation_gate') or {})"
+          verdict=$(python -c "${read_gate};print(g.get('verdict','crashed'))" || echo crashed)
+          case "${verdict}" in
+            within-tolerance)
+              echo "generation quality held against tests/eval/datasets/handbook/generation-baseline.json" ;;
+            regressed)
+              echo "::error::generation quality fell beyond the recorded tolerance: a change stopped the retrieved evidence reaching the answer, or its citation. The failures are in the document above"
+              exit 1 ;;
+            not-comparable)
+              echo "::error::the generation gate compared nothing, so no regression was ruled out; the obstacles above say why. Re-record with --record-generation-baseline only after reading the scores"
+              exit 1 ;;
+            *)
+              echo "::error::fasterrag benchmark --suite eval --faithfulness exited ${code} without a generation verdict"
+              exit 1 ;;
+          esac
 
       # `continue-on-error` stays, and TASK-0323 re-audited it rather than inheriting it. It
       # is safe here for one specific reason: the step that follows reads the document and
@@ -162,6 +242,10 @@ jobs:
       # step is how a benchmark that could not run for 83 days read as a success: the first
       # keeps the job moving, the second hid the failure from the step as well, so nothing
       # anywhere was marked red. One of them was always one too many (TASK-0314).
+      #
+      # TASK-0488: `--suite all` again, and the paragraph below is the record of why it was
+      # ever `ingest`. The scripted LLM answers the query suite offline, so `all` now reaches
+      # both suites; `--query` is pinned so the series measures one question night over night.
       #
       # `--suite ingest` rather than the default `all`: the query suite answers a question
       # through the configured LLM, which config.yaml sets to openai/gpt-4o-mini against a
@@ -176,20 +260,17 @@ jobs:
       # when it does not, so the recorded token count — and with it the `dataset` field the
       # comparison refuses to compare across — would depend on the runner's cache state.
       #
-      # `vector_db.mode=external` is NOT a backend this step reaches — the ingest suite
-      # builds no adapter at all. It is here so the loaded config never names the
-      # docker-managed mode, which is the mode whose provisioning path this job has no
-      # business entering. Said plainly rather than left to look like a connection.
+      # `vector_db.mode=external` points the query suite at the service-container Qdrant
+      # above (TASK-0488); the ingest suite still builds no adapter. It also keeps the loaded
+      # config out of the docker-managed mode, whose provisioning path this job has no
+      # business entering.
       - name: Benchmark suite
         if: ${{ !cancelled() }}
         continue-on-error: true
         run: |
-          mkdir -p artifacts
-          fasterrag config init --path artifacts/config.yaml
-          fasterrag --config artifacts/config.yaml \
-            --set vector_db.mode=external \
-            --set chunking.token_counter=estimate \
-            --json benchmark --suite ingest \
+          fasterrag $PINS --json benchmark --suite all \
+            --collection handbook \
+            --query "How many days of annual leave do employees accrue?" \
             --sources tests/eval/datasets/handbook/corpus > artifacts/benchmark.json
 
       # The redirect above creates artifacts/benchmark.json whether or not the command
@@ -223,12 +304,13 @@ jobs:
           raw = document.get("suites") if isinstance(document, dict) else None
           entries = raw if isinstance(raw, list) else []
           suites = {e.get("suite"): e for e in entries if isinstance(e, dict)}
-          ingest = suites.get("ingest")
-          if ingest is None:
-              refuse(f"{path} records {sorted(k for k in suites if k)} and not the ingest suite")
-          if not ingest.get("median"):
-              refuse("the ingest suite recorded no warmed median, so it measured nothing")
-          print(f"ingest suite measured: {ingest['median']}")
+          for name in ("ingest", "query"):
+              suite = suites.get(name)
+              if suite is None:
+                  refuse(f"{path} records {sorted(k for k in suites if k)} and not the {name} suite")
+              if not suite.get("median"):
+                  refuse(f"the {name} suite recorded no warmed median, so it measured nothing")
+              print(f"{name} suite measured: {suite['median']}")
           PY
 
       # The newest completed run of this workflow other than this one. Empty on the very
@@ -283,6 +365,12 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # TASK-0488: the query suite is REQUIRED, so a night that stops measuring it is not
+      # comparable rather than one table row shorter, and every night's warmed medians are
+      # appended to series.jsonl, carried forward from the previous artifact (the newest 60
+      # nights). The job summary prints the query p50 over the latest nights. The FIRST
+      # night after this change is expected red: the previous night has no query suite.
+      #
       # Expect a red night when GitHub rolls the runner image: the comparison refuses a
       # baseline taken on a different machine, and its fingerprint carries the kernel
       # string. That is the rule working — a number from another machine measures the
@@ -383,6 +471,11 @@ jobs:
             --previous previous/benchmark.json \
             --current artifacts/benchmark.json \
             --tolerance 1.25 \
+            --require-suite ingest \
+            --require-suite query \
+            --series previous/series.jsonl \
+            --series-out artifacts/series.jsonl \
+            --run-label "${GITHUB_RUN_ID}" \
             --json-out artifacts/comparison.json \
             --summary "$GITHUB_STEP_SUMMARY"
           verdict=$?

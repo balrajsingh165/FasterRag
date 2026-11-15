@@ -78,6 +78,8 @@ That is D3 behaving exactly as designed: deduplication is what makes an at-least
 
 **Restore from a snapshot** ([§2](#2-restore-drill-write-once-execute-for-real-tick-in-todomd)) is the supported path. If you must rebuild from source instead, clear the journal entries for that collection first so the documents are seen as new.
 
+**Since TASK-0519 a drop through fasterrag clears them.** `fasterrag index delete NAME --force`, `DELETE /v1/collections/{name}?force=true` and `FasterRag.drop_collection` remove the collection's dedup record along with it, so the trap is left only for an index lost some other way — a backend wiped, a collection dropped from the vector database's own console, or one dropped by `0.1.0b2` or earlier. Running the same drop again clears the record even though the collection is already gone.
+
 The trap is about a collection that was **dropped**. A single document removed with `fasterrag documents delete` (or `DELETE /v1/collections/{name}/documents/{document_id}`) is not caught by it: the delete writes a tombstone into the same journal file, the document's hash stops counting, and the next ingest of that source indexes it again.
 
 Observed on 2026-08-03 while verifying the library facade: a run whose worker pool died mid-ingest recorded its documents in the journal before failing, and the retry reported `completed` with `indexed: 0` — correct, and initially indistinguishable from a retrieval bug.

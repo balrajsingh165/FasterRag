@@ -92,6 +92,7 @@ def app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, retrieval: SwitchableRe
         traces: TraceStore | None = None,
         tenant: str | None = None,
         llm: LLMAdapter | None = None,
+        fallback: LLMAdapter | None = None,
     ) -> GenerationService:
         assert llm is not None
         return GenerationService(

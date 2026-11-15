@@ -20,13 +20,16 @@ from fasterrag.adapters.llm.base import LLMAdapter
 from fasterrag.adapters.vectordb.base import VectorDBAdapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache.semantic import SemanticCache
+from fasterrag.observability.audit import KEY_ID_LENGTH, Actor
 from fasterrag.services import composition
 from fasterrag.services.composition import create_embedding_router, create_semantic_cache
+from fasterrag.services.generation import fallback_settings
 from fasterrag.services.jobs import JobRegistry
 from fasterrag.services.journal import Journal, create_journal
 
 __all__ = [
     "AcceptingJobs",
+    "CurrentActor",
     "CurrentCache",
     "CurrentEmbeddings",
     "CurrentJobs",
@@ -36,6 +39,7 @@ __all__ = [
     "CurrentVectorDB",
     "JournalDep",
     "accepting_jobs",
+    "current_actor",
     "current_tenant",
     "get_jobs",
     "get_journal",
@@ -43,6 +47,7 @@ __all__ = [
     "get_vector_db",
     "shared_cache",
     "shared_embedding_router",
+    "shared_fallback_llm",
     "shared_llm",
 ]
 
@@ -108,6 +113,21 @@ def shared_llm(request: Request) -> LLMAdapter:
     return llm
 
 
+def shared_fallback_llm(request: Request) -> LLMAdapter | None:
+    """Return the application's ``llm.fallback`` adapter, or ``None`` when none is configured.
+
+    Lent like the primary (TASK-0546); building one opens no connection until it is called.
+    """
+    configured = fallback_settings(request.app.state.settings)
+    if configured is None:
+        return None
+    llm: LLMAdapter | None = getattr(request.app.state, "llm_fallback", None)
+    if llm is None:
+        llm = composition.create_llm_adapter(configured)
+        request.app.state.llm_fallback = llm
+    return llm
+
+
 def current_tenant(request: Request) -> str | None:
     """Return the tenant the auth middleware resolved for this request.
 
@@ -118,12 +138,27 @@ def current_tenant(request: Request) -> str | None:
     return str(tenant) if tenant else None
 
 
+def current_actor(request: Request) -> Actor:
+    """Return who is calling, for the audit trail: the key's name and digest prefix, never it.
+
+    With authentication off there is no key, and the actor carries the tenant alone.
+    """
+    state = request.scope.get("state", {})
+    key = state.get("api_key")
+    tenant = current_tenant(request)
+    if key is None:
+        return Actor(via="api", tenant=tenant)
+    return Actor(via="api", key=str(key.name), key_id=key.identity[:KEY_ID_LENGTH], tenant=tenant)
+
+
 CurrentTenant = Annotated[str | None, Depends(current_tenant)]
+CurrentActor = Annotated[Actor, Depends(current_actor)]
 CurrentSettings = Annotated[Settings, Depends(get_settings)]
 CurrentVectorDB = Annotated[VectorDBAdapter, Depends(get_vector_db)]
 CurrentEmbeddings = Annotated[TieringRouter, Depends(shared_embedding_router)]
 CurrentCache = Annotated[SemanticCache, Depends(shared_cache)]
 CurrentLLM = Annotated[LLMAdapter, Depends(shared_llm)]
+CurrentFallbackLLM = Annotated[LLMAdapter | None, Depends(shared_fallback_llm)]
 JournalDep = Annotated[Journal, Depends(get_journal)]
 CurrentJobs = Annotated[JobRegistry, Depends(get_jobs)]
 AcceptingJobs = Annotated[JobRegistry, Depends(accepting_jobs)]

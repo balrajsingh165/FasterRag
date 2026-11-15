@@ -11,6 +11,8 @@ Conventions used below:
 ## Complete example (all defaults shown; secrets referenced by env-var name only)
 
 ```yaml
+schema_version: 1
+
 app:
   host: 127.0.0.1
   port: 8000
@@ -48,6 +50,7 @@ embeddings:
   api_key_env: null
   batch_size: 64
   dimensions: null
+  base_url: null
   cache:
     enabled: true
     backend: disk
@@ -95,7 +98,7 @@ retrieval:
   rerank: false
   reranker_model: BAAI/bge-reranker-v2-m3
   rerank_top_n: 100
-  verify_lock: warn
+  verify_lock: refuse
 
 generation:
   grounded_or_refuse: false
@@ -134,6 +137,9 @@ ingestion:
   # Directories a `path` source may read from. Empty is unconfined, which is
   # refused outright once security.auth is on -- see docs/security.md.
   allowed_source_roots: []
+  # Suffix -> parser plugin (fasterrag.parsers entry point), e.g. .rtf: acme-rtf.
+  # An installed parser package reads nothing until it is named here.
+  parsers: {}
 
 index:
   lockfile: true
@@ -213,9 +219,32 @@ security:
   allow_unauthenticated: false
   api_key_file: null
   cors_allowed_origins: []
+  audit_log_file: null
 ```
 
 ---
+
+## `schema_version`
+
+| Name | Type | Default | Allowed values / validation | Description |
+|---|---|---|---|---|
+| `schema_version` | int | `1` | a whole number ≥ 1; must be the version this release reads | The layout of this file (TASK-0502). It is checked before any other key, so a file written for a different release is refused with an error that says what to change instead of failing on whichever renamed key it reaches first. A file without it is read as version `1`, the layout 0.1.0b1 and 0.1.0b2 wrote, so those files load unchanged. See [Upgrading](#upgrading). |
+
+## Upgrading
+
+Every release states the configuration layout it reads as `schema_version`; this release reads **1**. When a release changes the layout it raises the number and records one migration step — exactly what to rename, move or delete — in `CONFIG_MIGRATIONS` (`src/fasterrag/config/loader.py`) and in the table below. Steps are never edited or removed, so a file several releases old is upgraded through each one in turn.
+
+What the loader does with the `schema_version` it finds:
+
+- **Missing** — read as `1`. Every configuration written by 0.1.0b1 or 0.1.0b2 is version 1 and loads without change; add `schema_version: 1` at the top when you next edit it.
+- **Equal to this release's** — loads.
+- **Higher** — refused with `CONFIG_INVALID`: the file was written by a newer release. The error names the command, `pip install --upgrade fasterrag`, or rewrite the file for this release's version.
+- **Lower** — refused with `CONFIG_INVALID`, listing every step between the file's version and this release's in order (`1 -> 2: …`), then `set schema_version: N`. Apply the steps by hand; nothing rewrites your file.
+- **Not a whole number ≥ 1** — refused with `CONFIG_INVALID`.
+
+| From | To | Release | What to change |
+|---|---|---|---|
+| — | 1 | 0.1.0b1 | The first versioned layout. Nothing to change. |
 
 ## `app`
 
@@ -265,6 +294,7 @@ security:
 | `embeddings.api_key_env` | str\|null | `null` | valid env-var name or null | Env var holding the provider key (e.g. `OPENAI_API_KEY`, `COHERE_API_KEY`). Required (non-null) when provider is `openai` or `cohere`. A plugin provider is asked for nothing here: the default is already `null`, and a plugin that needs a key enforces that itself when it is built. |
 | `embeddings.batch_size` | int | `64` | 1–2048 | Texts per embedding request. Batched embedding is far cheaper than one-at-a-time calls. |
 | `embeddings.dimensions` | int\|null | `null` | ≥ 8 when set | Output dimensionality; `null` = the model's native size, which is the right setting unless you have a reason. Behaviour differs by provider, because shortening a vector is only lossless for a model trained for it (Matryoshka representation learning). **Hosted providers that support it** (OpenAI `text-embedding-3-*`) receive the value as an API parameter and shorten server-side — verified against the live API: `text-embedding-3-small` returns 1536 natively and exactly 256 when asked (TASK-0207). **Local `huggingface` models** cannot be shortened, so a value that disagrees with what the model emits is refused at load time with an error naming both sizes — rather than left to fail later as a rejected upsert against a collection already created at the wrong width. Must match the collection's vector size. |
+| `embeddings.base_url` | str\|null | `null` | absolute `http://` or `https://` URL when set | The embedding server or API endpoint, separate from `llm.base_url` (TASK-0511). `ollama`: the server embeddings are sent to, so an Ollama LLM on one server and Ollama embeddings on another can be expressed. `openai`: the API endpoint, for an OpenAI-compatible embeddings gateway. `cohere`: the API endpoint. `huggingface` runs the model in-process and does not read it. `null` keeps the behaviour from before the key existed: `ollama` uses `llm.base_url` when `llm.provider` is also `ollama`, otherwise the `OLLAMA_HOST` environment variable, else `http://127.0.0.1:11434`; `openai` and `cohere` use their client library's default (`OPENAI_BASE_URL` / `CO_API_URL`, else the vendor's API). A tiering rule that routes to another provider inherits this value, as it inherits `api_key_env`. Not part of the index lock's `config_hash` and not part of the eval comparability fingerprint: it moves where vectors are computed, not which model computes them. |
 | `embeddings.cache.enabled` | bool | `true` | — | Embedding cache keyed by provider, model, model version, `embeddings.dimensions`, input type (document or query) and the content hash of the text, so changing any of them can never be answered with a vector produced under the old value. When `true`, every embedding adapter the API, the CLI, the facade and the ingestion service use is wrapped by the cache, so a text already embedded is not sent to the provider again; when `false`, every call reaches the provider. Vectors from late chunking (`chunking.strategy: late`) are never cached. A cache failure is logged and stepped past — the text is embedded directly. |
 | `embeddings.cache.max_entries` | int | `10000` | ≥ 1 | Entry ceiling for the embedding cache. Raise when reingesting a large corpus repeatedly, which is exactly when the cache pays for itself. |
 | `embeddings.cache.backend` | str | `disk` | one of `memory`, `disk`, `redis` | Where embedding-cache entries live. `disk` survives a restart on one host and writes one file per entry under `.fasterrag/cache/embedding/` in the working directory; `redis` is the only backend several workers or replicas can share, so a vector one of them paid for is not re-embedded by the next. |
@@ -279,7 +309,7 @@ security:
 | `llm.provider` | str | `openai` | a built-in (`openai`, `anthropic`, `cohere`, `ollama`, `openai_compatible`) or a name registered under the `fasterrag.llm` entry-point group | LLM adapter selection. `openai_compatible` targets any endpoint speaking the OpenAI API shape (set `base_url`). Any other name stops the load, naming what is installed. |
 | `llm.model` | str | `gpt-4o-mini` | non-empty | Generation model ID understood by the selected provider (e.g. `claude-opus-5` for provider `anthropic`). |
 | `llm.api_key_env` | str\|null | `OPENAI_API_KEY` | valid env-var name or null | Env var holding the provider key. Among the built-in providers, null is allowed only for `ollama`. **For a plugin provider this key must be written** — a variable name, or `null` for a plugin that needs none — because the default names OpenAI's key and a plugin is never handed it implicitly (cross-field rule 3). |
-| `llm.base_url` | str\|null | `null` | valid URL when set | Endpoint override (required for `openai_compatible`, optional for `ollama`). When `llm.provider` is `ollama` this is also the server the `ollama` **embedding** provider uses — there is no `embeddings.base_url`. When the LLM is any other provider the Ollama embedder ignores it and uses the `OLLAMA_HOST` environment variable, else `http://127.0.0.1:11434`; before TASK-0441 it read this key whatever the LLM was, and so sent embedding requests to an `openai_compatible` gateway. |
+| `llm.base_url` | str\|null | `null` | valid URL when set | Endpoint override (required for `openai_compatible`, optional for `ollama`). When `llm.provider` is `ollama` this is also the server the `ollama` **embedding** provider uses, unless `embeddings.base_url` names another. When the LLM is any other provider the Ollama embedder ignores it and uses the `OLLAMA_HOST` environment variable, else `http://127.0.0.1:11434`; before TASK-0441 it read this key whatever the LLM was, and so sent embedding requests to an `openai_compatible` gateway. |
 | `llm.temperature` | float\|null | `null` | 0.0–2.0, or `null` | Sampling temperature. `null` sends `0.1` to OpenAI, OpenAI-compatible, Cohere and Ollama — a low value favours grounded answers — and sends **no** temperature to Anthropic, whose current models refuse a non-default sampling parameter with a 400. Set a number only for a model that accepts one. |
 | `llm.max_tokens` | int | `1024` | 1–32768 | Max generated tokens per answer. |
 | `llm.streaming` | bool | `true` | — | Stream tokens via SSE (time-to-first-token). |
@@ -301,7 +331,7 @@ Thresholds the parsers apply before chunking sees anything. They are corpus-depe
 
 | Name | Type | Default | Allowed values / validation | Description |
 |---|---|---|---|---|
-| `chunking.strategy` | str | `recursive` | one of `fixed`, `recursive`, `semantic`, `layout`, `late` | Chunking strategy (see [architecture.md](architecture.md) §5). `late` requires a local `embeddings.provider` for its pooling pass and falls back to ordinary embedding on a hosted one. `semantic` finds boundaries with the embedding model, which each parse worker loads for itself: it needs `embeddings.provider: huggingface`, and with any other provider the job is refused with `CONFIG_INVALID` before it is recorded. **Each worker holds its own copy of the model, so memory is `workers.cpu_pool_size` times the model's size**; the model is loaded in every worker before the first document, so start-up takes one model load. |
+| `chunking.strategy` | str | `recursive` | one of `fixed`, `recursive`, `semantic`, `layout`, `late`, or a name registered under the `fasterrag.chunkers` entry-point group | Chunking strategy (see [architecture.md](architecture.md) §5). A chunker plugin is selected by its registered name (TASK-0513, [plugins.md](plugins.md)); a built-in name always wins, and an unknown name stops the load listing the built-in and installed chunkers. `late` requires a local `embeddings.provider` for its pooling pass and falls back to ordinary embedding on a hosted one. `semantic` finds boundaries with the embedding model, which each parse worker loads for itself: it needs `embeddings.provider: huggingface`, and with any other provider the job is refused with `CONFIG_INVALID` before it is recorded. **Each worker holds its own copy of the model, so memory is `workers.cpu_pool_size` times the model's size**; the model is loaded in every worker before the first document, so start-up takes one model load. |
 | `chunking.chunk_size` | int | `768` | 64–2500; warning logged above 1024 | Target chunk size in tokens. **The default and the bounds are configurable engineering choices, not measured optima — tune them against your own corpus with the eval harness ([testing-strategy.md](testing-strategy.md)).** Rationale for the shipped values: a chunk longer than the embedding model's maximum sequence length is silently truncated at embed time, so the default is kept modest and the warning above 1024 exists to prompt you to check `chunk_size` against the sequence limit of the model you configured; the 2500 ceiling is a guardrail against pathological values, not a measured quality threshold. The ~2,500-token *"context cliff"* of [references.md](references.md) R3 is **not** a chunk-size limit — it is a limit on the total retrieved context handed to the generator — and an earlier "~512–1024 practical working range" attributed to that source has been withdrawn, because the study swept chunk sizes of 50–500 only and recommended 150–300 (TASK-0247). R3 is a single January 2026 preprint on one setup (Natural Questions, SPLADE retrieval, Ministral-8B-Instruct-2410), and its authors note the drop-off point is model-dependent: treat it as directional, not settled. |
 | `chunking.overlap` | int | `64` | 0 ≤ overlap < `chunk_size` | Token overlap between adjacent chunks: each chunk repeats the trailing tokens of its predecessor, so a sentence cut by a boundary is still present whole in one of the two. **Unresolved tension, stated openly:** the one chunking study this repository cites, [references.md](references.md) R3, ships **0% overlap** as its Table 1 default and reports "no measurable benefit" from overlap while it raises cost and complexity — on a single January 2026 preprint's single setup, with a model-dependent caveat from its own authors. The shipped default of 64 predates that source and rests on no measurement of ours either, so neither value is evidence-backed here. Whether the default should change is a maintainer decision to be settled against your own corpus with the eval harness ([testing-strategy.md](testing-strategy.md)); set `overlap: 0` to follow R3 today. |
 | `chunking.token_counter` | str | `auto` | one of `auto`, `estimate`, `model` | How `chunk_size` and `overlap` are counted. `auto` loads the embedding model's own tokenizer when the provider ships a local one and estimates otherwise; `estimate` forces the `chars_per_token` ratio; `model` forces the real tokenizer for any provider, which requires the matching tokenizer in the local Hugging Face cache and falls back to the estimate with a logged warning when it is absent. Loading never reaches the network. |
@@ -324,7 +354,7 @@ Thresholds the parsers apply before chunking sees anything. They are corpus-depe
 | `retrieval.rerank` | bool | `false` | — | Cross-encoder reranking of fused candidates. **Off by default** ([ADR-0010](adr/ADR-0010-reranker-off-by-default.md)): BENCH-0003 (indicative, not citable) measured the shipped `reranker_model` at 17–25× a small cross-encoder's per-query latency (55.7–86.9 s per query CPU-only at `rerank_top_n: 100`) behind a one-time 2.14 GB download, while the committed golden sets cannot measure what it buys (TASK-0297). Set `true` (and install the `rerank` extra) to opt in, then measure the effect on your own corpus. |
 | `retrieval.reranker_model` | str | `BAAI/bge-reranker-v2-m3` | non-empty when `rerank: true` | Cross-encoder model ID. |
 | `retrieval.rerank_top_n` | int | `100` | 10–1000; ≥ `top_k` | Candidates retrieved per leg and fed to the reranker (retrieve top 100–1000 → rerank → truncate to `top_k`). |
-| `retrieval.verify_lock` | str | `warn` | `off` \| `warn` \| `refuse` | What a query does when the collection's `index.lock` names a different embedding model, model version or dimension count than the configured default embedder — vectors from two embedding spaces, which return confident and wrong results. Checked on the first query per collection and process; a verified collection is not read again. `refuse` fails the query with `409 INDEX_DRIFT` naming `fasterrag index reembed`; `warn` serves it and logs the same message once; `off` skips the check. A collection with no lockfile, or `index.lockfile: false`, is served unchecked. Chunker drift is not checked here: it changes how the stored text was cut, not what the vectors mean, and `index lock verify` reports it. **The default is `warn` for one release and becomes `refuse` after it** (TASK-0477), so an existing deployment that has been querying a drifted index learns of it before it starts failing. Adding this key moves `retrieval_config_hash`, so `index lock verify` reports `config_hash` drift on every lock written before it until the collection is next ingested. |
+| `retrieval.verify_lock` | str | `refuse` | `off` \| `warn` \| `refuse` | What a query does when the collection's `index.lock` names a different embedding model, model version or dimension count than the configured default embedder — vectors from two embedding spaces, which return confident and wrong results. Checked on the first query per collection and process; a verified collection is not read again. `refuse` fails the query with `409 INDEX_DRIFT` naming `fasterrag index reembed`; `warn` serves it and logs the same message once; `off` skips the check. A collection with no lockfile, or `index.lockfile: false`, is served unchecked. Chunker drift is not checked here: it changes how the stored text was cut, not what the vectors mean, and `index lock verify` reports it. **The default is `refuse` since 2026-11-15** (TASK-0560). 0.1.0b1 and 0.1.0b2 shipped `warn`, so a deployment that has been querying a drifted index learned of it from the log first; set `warn` to keep that behaviour while the collection is rebuilt. The key is not part of `retrieval_config_hash` (TASK-0549): it decides whether a query is answered, never how results rank, so moving it never reports `config_hash` drift. 0.1.0b1 and 0.1.0b2 did hash it; a lock either of them wrote is still accepted, whichever mode it was written under, by `legacy_retrieval_config_hashes` in `core/identity.py`. |
 
 ## `generation`
 
@@ -406,6 +436,7 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 | `ingestion.max_document_mb` | int | `100` | 1–1024 | Input size limit per document (security + stability). |
 | `ingestion.parse_timeout_seconds` | float | `600` | ≥ 0 (0 = no limit) | Time limit per document for loading, parsing and chunking, counted from the moment the document is handed to the worker pool. A document still being parsed when it expires is dead-lettered with reason `PARSE_TIMEOUT` and the job continues. A running process-pool task cannot be cancelled, so the pool is recycled: its workers are killed, a new pool is started, and the documents that were in flight beside the overdue one are parsed again from the start with a fresh limit (one that was itself within 50 ms of its own limit is dead-lettered with it). Set it above the slowest legitimate document — OCR of a long scan is the usual candidate — because a document that needs longer can never be ingested while the limit stands. `0` restores the unbounded wait, in which one hung parser stalls its job for ever. |
 | `ingestion.allowed_source_roots` | list[str] | `[]` | paths | Directories a `path` source may be read from. **Authorization boundary**: a `path` source names a file on the server, so an unconfined one lets any caller with the `ingest` scope read `.env` or an SSH key back out through a query. Paths are resolved before comparison, so `..` and symlinks cannot escape a root. A path written inside a root that a symbolic link makes resolve outside it is refused by the parse worker, as one dead-lettered document with `SOURCE_LINK_ESCAPES`, rather than failing the whole job (TASK-0504); a path written outside every root still refuses the job. Empty means unconfined, which is refused outright when `security.auth` is on — so forgetting it breaks a served deployment loudly instead of exposing it quietly. |
+| `ingestion.parsers` | dict[str, str] | `{}` | keys: lower-case file suffixes (`.rtf`); values: names registered under the `fasterrag.parsers` entry-point group | Parser plugins, by suffix (TASK-0513). A file whose suffix is a key is parsed by the plugin of that name instead of by a built-in parser; a built-in suffix may be listed, which is how a built-in parser is replaced. **An installed parser package reads nothing until it is named here**, so installing one never changes how an existing corpus is parsed. Validation reads entry-point metadata without importing the plugin: a name no installed package registers stops the load. The plugin itself is imported and its declared `adapter_api_version` checked against the parser API (`"1.0"`) before a job's first document, so a broken one refuses the job with `CONFIG_INVALID` rather than dead-lettering every document. Changing the mapping does not re-parse documents already indexed — their content hash is unchanged, so deduplication skips them; reindex to apply it. See [plugins.md](plugins.md). |
 
 ## `index`
 
@@ -422,7 +453,7 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 |---|---|---|---|---|
 | `reliability.timeouts.vector_db_ms` | int | `5000` | ≥ 100 | Timeout for every vector-DB call. Every external interaction MUST have an explicit timeout. |
 | `reliability.timeouts.embeddings_ms` | int | `30000` | ≥ 100 | Timeout per embedding batch call. |
-| `reliability.timeouts.llm_ms` | int | `120000` | ≥ 1000 | Timeout per LLM call (streaming: per-connection). |
+| `reliability.timeouts.llm_ms` | int | `120000` | ≥ 1000 | Timeout per LLM call. A whole-answer call is bounded end to end, so a provider that keeps sending a byte inside every read window is still cut off (TASK-0548); a stream is bounded by the client library per connection and per read, and as a whole by `reliability.request_deadline_ms`. A provider's first call also builds its client, whose imports are not counted. |
 | `reliability.timeouts.redis_ms` | int | `1000` | ≥ 10 | Socket and connect timeout for every Redis client — the `redis` cache backends and the `redis` rate limiter — so one Redis call waits at most this long for a connection and at most this long for a reply. A Redis that accepts connections and never answers then degrades exactly as a stopped one does: the cache misses, and the limiter serves the request unthrottled with a `WARNING` (TASK-0453). |
 | `reliability.timeouts.rerank_ms` | int | `30000` | ≥ 100 | How long one rerank may take before the query is served the fused order instead, flagged `hybrid_only` (D4, TASK-0449). Applied by `RetrievalService` around any reranker, a plugin's included. Scoring runs in a worker thread that cannot be cancelled, so a timed-out rerank keeps its thread until the model returns; `CrossEncoderReranker` therefore holds at most four scoring calls at once, and while all four are still running every further query degrades at once rather than queueing behind them. The first query after start also loads the model, which a cold cache can take minutes to download: that query degrades and the load carries on in the background. The default is a bound on a hang, not a measured latency. |
 | `reliability.retries.max_attempts` | int | `3` | 0–10 | Retries on errors flagged `retryable` only. |
@@ -459,15 +490,16 @@ Ingestion and query paths use **separate pools and queues** (bulkheads) — an i
 
 ### Which models carry a price
 
-Costing is a lookup in the dated list-price tables in `services/estimation.py`, keyed by **provider *and* model** — a rate is never applied across providers, because the same model name behind a different vendor is a different bill. Priced today:
+Costing is a lookup in the dated list-price tables in `services/estimation.py`, keyed by **provider *and* model** — a rate is never applied across providers, because the same model name behind a different vendor is a different bill. Priced today; `tests/unit/docs/test_model_prices.py` fails when `config.yaml`, a packaged template, `docs/` or `userdocs/` names an OpenAI, Anthropic or Cohere model id these tables do not price (TASK-0554):
 
 | Provider | Priced models | Checked |
 |---|---|---|
-| `openai` (embeddings) | `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002` | 2026-08-09 |
-| `openai` (generation) | the GPT-5.x, GPT-4.1, GPT-4o, GPT-4, GPT-3.5-turbo and o-series chat models | 2026-08-09 |
+| `openai` (embeddings) | `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002` | 2026-11-15 |
+| `openai` (generation) | the GPT-6, GPT-6.1, GPT-5.x, GPT-4.1, GPT-4o and o3 chat models on the current pricing page | 2026-11-15 |
+| `openai` (generation, no longer listed) | `gpt-4.1-nano`, `gpt-4o-2024-05-13`, `o1`, `o1-pro`, `o3-mini`, `o4-mini`, `gpt-4-turbo-2024-04-09`, `gpt-4-0613` and the GPT-3.5-turbo ids, at the rate last published | 2026-08-09 |
 | `anthropic` | the Claude Fable/Mythos 5–5.2, Opus 5.5, Opus 5, Opus 4.5–4.8, Sonnet 5.5, Sonnet 5, Sonnet 4.5/4.6, Haiku 5.5 and Haiku 4.5 ids, alias and dated forms | 2026-11-03 |
-| `cohere` (embeddings) | `embed-english-v3.0`, `embed-multilingual-v3.0`, `embed-english-light-v3.0` | 2026-07-30 |
-| `cohere` (generation) | `command-r-plus-08-2024` | 2026-08-09 |
+| `cohere` (embeddings) | `embed-english-v3.0`, `embed-multilingual-v3.0`, `embed-english-light-v3.0` — re-checked 2026-08-09 and 2026-11-15, when the pricing page stated no per-token embed rate, so the rate keeps its original date | 2026-07-30 |
+| `cohere` (generation) | `command-r-plus-08-2024` | 2026-11-15 |
 | `huggingface`, `ollama` | **every** model — locally served, so zero is the recorded price, not a missing one | — |
 
 Anything else — `openai_compatible` gateways, Cohere's Command A / R7B lineup (published as instance-hour rates, which cannot be converted to a per-token rate without a throughput measurement fasterRag does not have), a model released after the dates above — is **deliberately unpriced**: it contributes nothing to `fasterrag_cost_usd_total` and is counted instead by `fasterrag_unpriced_tokens_total` ([observability.md](observability.md)). A wrong price produces a confident wrong bill, which is worse than a visible gap.
@@ -495,7 +527,7 @@ All integration toggles default `false`.
 |---|---|---|---|---|
 | `observability.dashboard` | bool | `false` | — | Self-hosted **read-only** inspection dashboard (cache stats, tokens, costs, latencies, full LLM I/O history). Never controls the RAG. |
 | `observability.dashboard_port` | int | `8080` | 1–65535 | Dashboard bind port. |
-| `observability.otel` | bool | `false` | — | OTLP export of the four RAG spans *and* the metric catalogue to `otel_endpoint`. Spans preserve the fasterRag trace id, so one id works in the API, the logs, and your trace viewer; metrics are pushed every 60s and read the same registry `/metrics` renders. Needs `pip install fasterrag[otel]`; without it the toggle warns and queries keep serving. |
+| `observability.otel` | bool | `false` | — | OTLP export of the query and ingest spans *and* the metric catalogue to `otel_endpoint`. Spans preserve the fasterRag trace id, so one id works in the API, the logs, and your trace viewer; metrics are pushed every 60s and read the same registry `/metrics` renders. Needs `pip install fasterrag[otel]`; without it the toggle warns and queries keep serving. |
 | `observability.otel_endpoint` | str\|null | `null` | valid URL when `otel: true` | The collector's OTLP/HTTP endpoint, taken as a **base URL**: `/v1/traces` and `/v1/metrics` are derived from it, exactly as the OpenTelemetry specification treats `OTEL_EXPORTER_OTLP_ENDPOINT`. Set it to `http://collector:4318`, not to a signal path — one setting feeds both exporters and no single signal path can serve both. A value that already ends in `/v1/traces`, `/v1/metrics`, or `/v1/logs` has that path replaced rather than appended to, so configurations written against earlier docs keep working. |
 | `observability.langfuse` | bool | `false` | — | Flipping to `true` auto-provisions self-hosted Langfuse v3 (Docker Compose stack), performs all configuration incl. headless bootstrap, and returns the running URL `http://<host>:3000`. **No application-code changes at toggle time.** Gated by `fasterrag doctor`. See [observability.md](observability.md). |
 | `observability.grafana` | bool | `false` | — | Flipping to `true` auto-provisions Grafana via provisioning-as-code (datasources + dashboards read at startup; UI read-only for provisioned resources). No manual clicks; no code changes. Gated by `fasterrag doctor`. |
@@ -518,6 +550,7 @@ All integration toggles default `false`.
 | `security.allow_unauthenticated` | bool | `false` | — | Lets `fasterrag serve` bind a non-loopback `app.host` (or `--host`), or a non-loopback `observability.dashboard_host`, while `security.auth` is `false`. **Without it such a bind is refused at startup** (TASK-0460, 2026-11-12; until then it was a warning). Set it only when something else stands between the port and the network: a reverse proxy that authenticates, or a container whose port is published on the host's loopback — the shipped compose files set it for exactly that reason through `FASTERRAG_SET`. With it set, `serve` still prints the warning. It has no effect when `auth` is on. |
 | `security.api_key_file` | str\|null | `null` | path | A file of API key entries, one per line (blank lines and `#` comments ignored), in the same grammar as `security.api_key_env`; its keys are loaded **in addition to** the variable's (TASK-0492). **Re-read without a restart**: every request checks the file's modification time and size at most once a second and reloads it when either moved, and on POSIX a `SIGHUP` forces a re-read. Windows has no `SIGHUP`, so there the change of the file is the only trigger. A file that changes into something that does not load — a malformed entry, a short key — is logged as an error and the keys already in force stay in force. Write it with an atomic rename. A missing file at startup refuses to start. `security.auth: true` with this and `api_key_env` both `null` is refused at load. |
 | `security.cors_allowed_origins` | list[str] | `[]` | each `http(s)://host[:port]`, no path, never `*` | Browser origins that may call the API cross-origin (TASK-0494). **Empty — the default — allows none**: a preflight from any origin is refused `400 VALIDATION_FAILED`, and no response carries `Access-Control-Allow-Origin`. A listed origin may send `GET`, `POST` and `DELETE` with `Authorization`, `Content-Type`, `Idempotency-Key` and the tenant header, and may read `Retry-After`; credentials mode is never enabled, because the API authenticates by header, not by cookie. Only browsers enforce CORS — it limits which pages can use a visitor's browser against the API, and is no substitute for `security.auth`. |
+| `security.audit_log_file` | str\|null | `null` | a writable file path, or null | Also append the audit trail (TASK-0493) to this file, one JSON object per line. The trail is also written to the normal log under the `fasterrag.audit` logger at INFO, which the API's default `app.log_level: info` shows and a CLI command shows only with `--verbose`; the file receives every record whatever the log level, so it is the trail to keep, ship to a SIEM and retain. The parent directory is created, and the file is opened when the API starts or a CLI command loads configuration, so a path that cannot be written stops startup naming this key. Records name the key by its name and the first 12 hex digits of its SHA-256 digest, never the key itself ([security.md](security.md) §2). |
 
 ---
 

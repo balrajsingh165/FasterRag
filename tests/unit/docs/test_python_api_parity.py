@@ -42,6 +42,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from fasterrag.config.plugins import CHUNKERS_GROUP, PARSERS_GROUP
 from fasterrag.config.schema import Settings
 from fasterrag.facade import FasterRag
 from fasterrag.sync import FasterRag as SyncFasterRag
@@ -531,7 +532,7 @@ def test_every_public_export_is_documented() -> None:
 
 def test_every_documented_module_path_exists() -> None:
     """Every ``fasterrag.x.y`` in backticks is a module or an attribute of one."""
-    groups = set(real_plugin_groups())
+    groups = set(real_plugin_groups()) | {CHUNKERS_GROUP, PARSERS_GROUP}
     broken: list[str] = []
     for token in sorted(backticked(doc_text())):
         if not _DOTTED_PATH.match(token) or token in groups:

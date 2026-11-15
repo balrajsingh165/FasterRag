@@ -21,6 +21,7 @@ fasterRag/
 │   ├── scripts/                  # Release decisions, release smoke test, dependency licence check
 │   └── workflows/
 │       ├── ci.yml                # Blocking gates: ruff, ruff format, mypy --strict, pytest
+│       ├── weekly.yml            # Short soak and load smoke (behaviour checks, not measurements)
 │       └── release.yml           # v* tag: gates, build, SBOM, PyPI (trusted publishing), GHCR, GitHub release
 ├── docs/                         # ALL documentation lives here (rule: only CLAUDE.md stays at root)
 │   ├── quickstart.md  scope.md  structure.md  flow.md  architecture.md
@@ -56,7 +57,7 @@ fasterRag/
 ├── userdocs/                     # Source of the published site (mkdocs.yml docs_dir): a short user guide linking back to docs/
 ├── examples/                     # Runnable scripts, each executed by CI's `examples` job
 │   ├── README.md                 # What each shows, and how CI runs them without a model or a key
-│   ├── plugin-vectordb/          # Sample installable plugin; passes tests/contract/vectordb.py
+│   ├── plugin-vectordb/          # Sample installable plugin; passes fasterrag.testing.vectordb
 │   └── scripted-llm/             # Offline stand-in LLM selected by config for the generation examples
 ├── src/
 │   └── fasterrag/
@@ -74,6 +75,7 @@ fasterRag/
 │       │   ├── doctor.py         # D10 preflight checks; gates provisioning
 │       │   ├── journal.py        # D3 checkpoints, dedup, DLQ; async over *_blocking twins
 │       │   ├── estimation.py     # D9 preflight token counts and projected cost
+│       │   ├── source_expansion.py # Directory arguments expanded into files (CLI and facade)
 │       │   ├── composition.py    # Composition root: the service builders the API, CLI, facade and eval harness share
 │       │   ├── embedding_router.py # The embedding router every entry point uses, cached when configured
 │       │   ├── ingestion.py      # Job lifecycle: run both pools, checkpoint, settle
@@ -83,8 +85,12 @@ fasterRag/
 │       ├── core/                 # RAG pipeline (pure domain logic)
 │       │   ├── identity.py       # Deterministic document, chunk, and config hashes
 │       │   ├── tenancy.py        # The payload field naming a chunk's owning tenant
-│       │   ├── parsing/          # PDF/HTML/MD/DOCX/OCR parsers, table extraction
-│       │   ├── chunking/         # fixed, recursive, semantic, layout, late, contextual
+│       │   ├── budget.py         # D9 runtime cost governor (token budgets)
+│       │   ├── pricing.py        # Published list prices; price_for / price_generation
+│       │   ├── journaling.py     # DocumentRecord + the DocumentJournal protocol parse workers use
+│       │   ├── parsing/          # PDF/HTML/MD/DOCX/OCR parsers, table extraction, parser plugins
+│       │   ├── chunking/         # fixed, recursive, semantic, layout, late, contextual, chunker plugins
+│       │   ├── plugin_api.py     # entry-point loading + API version check for every plugin
 │       │   ├── retrieval/        # bm25.py sparse encoding; fusion and filters
 │       │   ├── cache/            # Embedding cache, semantic response cache
 │       │   ├── rerank/           # cross-encoder reranking
@@ -97,7 +103,8 @@ fasterRag/
 │       │   ├── embeddings/       # base, factory, huggingface, openai, cohere, ollama,
 │       │   │                     # tiering (metadata-routed model selection), sync bridge
 │       │   ├── llm/              # base, factory, provider clients (streaming)
-│       │   └── plugin_api.py     # adapter API version check applied to every loaded plugin
+│       │   └── plugin_api.py     # re-exports core/plugin_api.py's version check for the factories
+│       ├── testing/              # Adapter contract suite for plugin authors (the `testing` extra)
 │       ├── workers/              # Parallel pools
 │       │   ├── cpu_pool.py       # load/parse/chunk workers (CPU-bound)
 │       │   ├── embed_pool.py     # stateful embedding workers (model loaded once)
@@ -113,6 +120,8 @@ fasterRag/
 │       │   └── config.local.yaml # The local profile: embedded Chroma, local embeddings, no keys
 │       ├── observability/        # Metrics, tracing, dashboard
 │       │   ├── logging.py        # Structured JSON logging + correlation ids
+│       │   ├── audit.py          # Audit trail of administrative actions (fasterrag.audit)
+│       │   ├── trace_view.py     # Read-only trace protocols the exporters are typed against
 │       │   ├── otel_export.py    # Span helpers (retrieval/reranker/context/generation)
 │       │   ├── metrics.py        # Metrics catalogue export
 │       │   └── dashboard.py      # Read-only inspection UI (observability ONLY)
@@ -134,7 +143,8 @@ fasterRag/
 |---|---|
 | `api/` | HTTP surface only. Routers validate requests (Pydantic), call one service function, shape the response. **No business logic in routers.** |
 | `services/` | Use-case orchestration. Compose core pipeline pieces and adapters into ingestion, querying, collection, provisioning, and diagnostic workflows. Own transactions/job state. |
-| `tests/contract/` | The shared adapter contract suite. Vendor-neutral by construction: a subclass supplies the adapter and collection fixtures, so third-party providers registered through entry points run the identical suite. |
+| `tests/contract/` | Re-exports the shared adapter contract suite from `src/fasterrag/testing/` (TASK-0551), so every built-in adapter's contract test keeps its import path while running exactly what a third-party plugin runs. |
+| `src/fasterrag/testing/` | The shared adapter contract suite, shipped in the wheel so a plugin author can run it from an installed fasterrag (`pip install "fasterrag[testing]"`). Vendor-neutral by construction: a subclass supplies the adapter and collection fixtures, so third-party providers registered through entry points run the identical suite. Nothing else in the package imports it, so the core install never needs pytest. |
 | `core/` | The RAG pipeline itself — parsing, chunking, retrieval, rerank, context assembly, generation. Pure domain logic; depends on adapter *interfaces*, never concrete vendors. |
 | `adapters/` | All vendor code (vector DBs, embedding providers, LLM providers). Each adapter implements a base interface; a factory instantiates the concrete one from config. Vendor types never leak past this boundary. |
 | `workers/` | Parallel execution: CPU pool for parse/chunk, stateful embedding pool, bounded queues, batch indexer. Owns backpressure and retry policy. |
@@ -149,11 +159,17 @@ fasterRag/
 
 Imports point one way. A module may import its own layer and any layer listed after it, never one listed before it:
 
-`cli/` → `api/` | the facade | the dashboard → `services/` → `workers/` → `adapters/` → `core/` → `observability/` → `config/` → `errors.py`
+`cli/` → `api/` | the facade | the dashboard → *http* → `services/` → `workers/` → `adapters/` → `core/` → *interfaces* → `observability/` → `config/` → `errors.py` → *logging*
 
 The three in the second position are siblings and may not import each other: the facade is `__init__.py`, `facade.py`, `sync.py` and the re-export modules beside them, and the dashboard is `observability/dashboard.py`, a second web application rather than instrumentation. `cli/` sits above them because the terminal is what starts the API and the dashboard.
 
-`scripts/check_layering.py` enforces this in CI's `quality` job and in the unit tier, reading every import statement at any depth — a function-level import is how the facade used to reach into `api/` unseen. **The tree does not satisfy the rule yet** (TASK-0456): the imports that break it are listed by name in that script's `EXCEPTIONS` table, each with the step that removes it, and the gate fails on any import not in the table and on any entry the tree no longer needs. Whether `core/` may name the adapter base interfaces — which the table below says it does, and which the order above does not allow — is the open decision in that task.
+The three layers in italics are single modules carved out of a package (TASK-0529):
+
+- *http* is `api/auth.py` and `api/problems.py` — the authentication middleware and the problem+json responses both web applications serve, so the dashboard uses them without importing its sibling.
+- *interfaces* is `adapters/vectordb/base.py`, `adapters/embeddings/base.py` and `adapters/llm/base.py`. `core/` may name an abstract adapter it is handed, never a concrete adapter or a factory; the three base modules import only `config`, `errors` and each other.
+- *logging* is `observability/logging.py`, which imports nothing from the package, so the configuration loader and the error base class can log and read the trace id.
+
+`scripts/check_layering.py` enforces this in CI's `quality` job and in the unit tier, reading every import statement at any depth — a function-level import is how the facade used to reach into `api/` unseen. Its `EXCEPTIONS` table is **empty** since TASK-0529: the gate fails on any import against the order above, and an entry may never be added to make a new import pass — move the code, or move the interface it needs down a layer. The gate reads module names, not package initialisers: importing `adapters/llm/base.py` still runs `adapters/llm/__init__.py`, which loads the concrete adapters, so the *interfaces* rule holds for the source and not yet for what the interpreter loads.
 
 ## Separation-of-concerns rationale
 

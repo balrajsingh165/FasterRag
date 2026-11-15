@@ -10,6 +10,10 @@ requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 dependencies = ["fasterrag"]
 
+# The contract suite ships in fasterrag itself (fasterrag.testing); its extra brings pytest.
+[project.optional-dependencies]
+test = ["fasterrag[testing]"]
+
 # The whole registration. After `pip install`, `vector_db.provider: memory` validates and the
 # vector-database factory builds fasterrag_memory_vectordb:MemoryVectorDB.
 [project.entry-points."fasterrag.vectordb"]
@@ -17,3 +21,9 @@ memory = "fasterrag_memory_vectordb:MemoryVectorDB"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fasterrag_memory_vectordb"]
+
+# The contract cases are coroutines, run by pytest-asyncio.
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

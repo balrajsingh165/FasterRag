@@ -96,6 +96,10 @@ class ParseOutcome:
     # costs roughly one extra copy of the document through IPC, which is the price of the
     # feature working at all.
     """
+    parse_seconds: float = 0.0
+    """How long the worker spent reading and parsing the document (TASK-0487)."""
+    chunk_seconds: float = 0.0
+    """How long the worker spent chunking the parsed document (TASK-0487)."""
 
 
 @dataclass(frozen=True, slots=True)

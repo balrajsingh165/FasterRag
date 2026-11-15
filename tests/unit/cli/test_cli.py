@@ -375,3 +375,36 @@ def test_index_requires_a_subcommand() -> None:
 def test_config_requires_a_subcommand() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["config"])
+
+
+@pytest.mark.parametrize(
+    ("flags", "action"),
+    [([], "provision.up"), (["--down"], "provision.down"), (["--status"], None)],
+)
+def test_provisioning_is_audited_and_a_status_report_is_not(
+    config: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    flags: list[str],
+    action: str | None,
+) -> None:
+    """Nothing recorded who started or stopped a managed tool (TASK-0493)."""
+    from fasterrag.cli.commands import infrastructure
+    from fasterrag.config.schema import Settings
+    from fasterrag.services.provisioning import ProvisionResult
+
+    async def done(tool: str, settings: Settings) -> ProvisionResult:
+        return ProvisionResult(tool=tool, status="running")
+
+    for name in ("provision_tool", "stop_tool", "tool_status"):
+        monkeypatch.setattr(infrastructure, name, done)
+    caplog.set_level("INFO", logger="fasterrag.audit")
+
+    run(["provision", "--config", config, "qdrant", *flags])
+
+    audited = [
+        (vars(record)["action"], vars(record)["target"], vars(record)["outcome"])
+        for record in caplog.records
+        if record.name == "fasterrag.audit"
+    ]
+    assert audited == ([(action, "qdrant", "succeeded")] if action else [])

@@ -158,14 +158,22 @@ def _unspent_governors() -> Iterator[None]:
 # embedders are the same: a fake factory would chunk every later semantic test.
 @pytest.fixture(autouse=True)
 def _closed_circuits_and_no_loaded_models() -> Iterator[None]:
-    """Give every test closed shared breakers and empty reranker and sentence-embedder caches."""
+    """Give every test closed shared breakers and empty model and plugin-class caches.
+
+    The plugin cache is imported here, not at module level, because a hook test imports this
+    module in a subprocess that may resolve ``fasterrag`` from another checkout.
+    """
+    from fasterrag.core.plugin_api import reset_loaded_plugins
+
     reset_shared_breakers()
     reset_shared_cross_encoders()
     cpu_pool.reset_shared_sentence_embedders()
+    reset_loaded_plugins()
     yield
     reset_shared_breakers()
     reset_shared_cross_encoders()
     cpu_pool.reset_shared_sentence_embedders()
+    reset_loaded_plugins()
 
 
 @pytest.fixture(autouse=True)
@@ -199,6 +207,28 @@ def _an_embedding_cache_of_its_own(tmp_path_factory: pytest.TempPathFactory) -> 
         yield
     finally:
         setattr(cache_package, "EMBEDDING_CACHE_ROOT", original)  # noqa: B010
+
+
+_lock_roots = itertools.count()
+
+
+# CRITICAL: the index lock store defaults to `.fasterrag/locks` under the working directory,
+# which for a test run is the checkout. Tests that ingest without changing directory left
+# `default.lock.json` there, and once `retrieval.verify_lock` defaulted to `refuse`
+# (TASK-0560) every later query test was refused as drifted against a lock a stub embedder
+# never wrote. Patched by hand, not through `monkeypatch`, as the embedding cache root is.
+@pytest.fixture(autouse=True)
+def _an_index_lock_root_of_its_own(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Point the default index lock store at an empty directory for this test alone."""
+    from fasterrag.services import lockfile
+
+    original = lockfile.DEFAULT_LOCK_ROOT
+    root = tmp_path_factory.getbasetemp() / "index-locks" / str(next(_lock_roots))
+    setattr(lockfile, "DEFAULT_LOCK_ROOT", root)  # noqa: B010
+    try:
+        yield
+    finally:
+        setattr(lockfile, "DEFAULT_LOCK_ROOT", original)  # noqa: B010
 
 
 MUST_RUN_MARKER: Final = "must_run"

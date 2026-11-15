@@ -53,6 +53,19 @@ EXPORTS: dict[str, frozenset[str]] = {
             "sum_reported",
         }
     ),
+    "fasterrag.chunking": frozenset(
+        {"CHUNKERS_GROUP", "CHUNKER_API_VERSION", "Chunker", "TextChunk", "TokenCounter"}
+    ),
+    "fasterrag.parsing": frozenset(
+        {
+            "DocumentBuilder",
+            "PARSERS_GROUP",
+            "PARSER_API_VERSION",
+            "ParsedDocument",
+            "ParserPlugin",
+            "ParsingOptions",
+        }
+    ),
     "fasterrag.adapters.llm.base": frozenset(
         {
             "ADAPTER_API_VERSION",
@@ -110,6 +123,11 @@ CONTRACTS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
     ),
 }
 
+PIPELINE_PLUGINS: dict[str, tuple[str, str, str, str]] = {
+    "fasterrag.chunking": ("CHUNKER_API_VERSION", "1.0", "CHUNKERS_GROUP", "fasterrag.chunkers"),
+    "fasterrag.parsing": ("PARSER_API_VERSION", "1.0", "PARSERS_GROUP", "fasterrag.parsers"),
+}
+
 ENTRY_POINT_GROUPS: dict[str, str] = {
     "fasterrag.adapters.vectordb.factory": "fasterrag.vectordb",
     "fasterrag.adapters.embeddings.factory": "fasterrag.embeddings",
@@ -145,6 +163,19 @@ def test_what_a_plugin_must_implement_matches_the_version_it_is_told_to_target(
 
     assert version == module.ADAPTER_API_VERSION
     assert frozenset(getattr(module, class_name).__abstractmethods__) == members
+
+
+@pytest.mark.parametrize(("module_name", "snapshot"), sorted(PIPELINE_PLUGINS.items()))
+def test_the_chunker_and_parser_plugin_versions_and_groups_are_unchanged(
+    module_name: str, snapshot: tuple[str, str, str, str]
+) -> None:
+    """A chunker or parser plugin targets these; moving one silently orphans or breaks it."""
+    module = import_module(module_name)
+    version_name, version, group_name, group = snapshot
+
+    assert {version_name, group_name} <= set(module.__all__)
+    assert getattr(module, version_name) == version
+    assert getattr(module, group_name) == group
 
 
 @pytest.mark.parametrize(("module_name", "group"), sorted(ENTRY_POINT_GROUPS.items()))

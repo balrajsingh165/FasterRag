@@ -27,6 +27,12 @@ on. That list is now empty — every setting on it has been claimed by the slice
 enforces it — so the check is gone rather than kept as a no-op. The rule it embodied
 still holds: a new key ships with the code that reads it, or with a guard here.
 
+**Every file states the layout it follows** (TASK-0502). ``schema_version`` is checked before
+anything else is validated: a file without it is version 1, the layout 0.1.0b1 and 0.1.0b2
+wrote, so those files load unchanged; a file from a newer release is refused with the upgrade
+to install; an older one is refused with every recorded :class:`ConfigMigration` between its
+version and this release's, in order, so the error says exactly what to change.
+
 ``SET_ENV_VAR`` is the environment-variable form of ``--set``, named after the flag so the
 two read as one mechanism reached two ways.
 """
@@ -37,22 +43,25 @@ import os
 from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 from dotenv import dotenv_values
 from pydantic import ValidationError
 from pydantic_settings import YamlConfigSettingsSource
 from yaml import YAMLError, safe_load
 
-from fasterrag.config.schema import Settings
+from fasterrag.config.schema import CONFIG_SCHEMA_VERSION, Settings
 from fasterrag.errors import ConfigError
 from fasterrag.observability.logging import get_logger
 
 __all__ = [
+    "CONFIG_MIGRATIONS",
     "DEFAULT_CONFIG_PATH",
     "DEFAULT_ENV_FILE",
     "ENV_OVERRIDE_VAR",
+    "ConfigMigration",
     "apply_overrides",
+    "check_schema_version",
     "env_overrides",
     "load_settings",
 ]
@@ -65,6 +74,21 @@ ENV_OVERRIDE_VAR: Final = "FASTERRAG_SET"
 _CHUNK_SIZE_WARN_ABOVE: Final = 1024
 
 _logger = get_logger(__name__)
+
+_UNVERSIONED_SCHEMA: Final = 1
+
+
+class ConfigMigration(NamedTuple):
+    """One step from ``from_version`` to the next: exactly what an operator changes."""
+
+    from_version: int
+    instructions: str
+
+
+# CRITICAL: append one entry per schema_version bump, never edit or drop one. A file several
+# releases old is upgraded through every step from its version, so a missing or reworded
+# step leaves its owner with an error that no longer says what to change.
+CONFIG_MIGRATIONS: Final[tuple[ConfigMigration, ...]] = ()
 
 
 def load_settings(
@@ -89,6 +113,7 @@ def load_settings(
     combined = [*env_overrides(), *(overrides or ())]
     if combined:
         raw = apply_overrides(raw, combined)
+    check_schema_version(raw, config_path)
     settings = _validate(raw, config_path)
 
     # CRITICAL: the export happens before the check and never after it. The check's whole
@@ -107,6 +132,53 @@ def load_settings(
 
     _warn_about_risky_settings(settings)
     return settings
+
+
+def check_schema_version(
+    raw: dict[str, Any],
+    config_path: Path,
+    *,
+    current: int = CONFIG_SCHEMA_VERSION,
+    migrations: Sequence[ConfigMigration] = CONFIG_MIGRATIONS,
+) -> None:
+    """Refuse a file whose ``schema_version`` is not ``current``, naming the way to it.
+
+    A file without the key is version 1, the layout the first public releases wrote.
+    """
+    declared = raw.get("schema_version", _UNVERSIONED_SCHEMA)
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
+        raise ConfigError(
+            f"{config_path} has an invalid schema_version: it must be a whole number of at "
+            f"least 1, and this release writes schema_version: {current}"
+        )
+    if declared == current:
+        return
+    if declared > current:
+        raise ConfigError(
+            f"{config_path} declares schema_version {declared}, but this release of "
+            f"fasterrag reads schema_version {current}: the file was written by a newer "
+            "release. Run 'pip install --upgrade fasterrag' to the release that wrote it, or "
+            f"rewrite the file for schema_version {current} (docs/config-reference.md, "
+            "'Upgrading')"
+        )
+
+    steps = {step.from_version: step.instructions for step in migrations}
+    lines: list[str] = []
+    for version in range(declared, current):
+        if version not in steps:
+            raise ConfigError(
+                f"{config_path} declares schema_version {declared}, and this release reads "
+                f"schema_version {current}, but no upgrade from schema_version {version} is "
+                "recorded; regenerate the file with 'fasterrag config init' and re-apply "
+                "your changes"
+            )
+        lines.append(f"  - {version} -> {version + 1}: {steps[version]}")
+    listed = "\n".join(lines)
+    raise ConfigError(
+        f"{config_path} declares schema_version {declared}, and this release reads "
+        f"schema_version {current}. Upgrade the file in this order:\n{listed}\n"
+        f"then set schema_version: {current} (docs/config-reference.md, 'Upgrading')"
+    )
 
 
 def env_overrides() -> list[str]:

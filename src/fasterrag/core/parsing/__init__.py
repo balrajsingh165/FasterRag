@@ -15,16 +15,26 @@ PDF, DOCX and HTML need libraries that ship as the ``pdf``, ``docx`` and ``html`
 (TASK-0444), so their parsers are imported on first use rather than with this package. A
 document whose extra is missing fails as a ``ParseError`` naming the extra to install, which
 dead-letters that one document and leaves the rest of a job untouched.
+
+A format can also come from a plugin (TASK-0513): a class registered under the
+``fasterrag.parsers`` entry-point group, which ``parse_bytes`` uses for a suffix only when
+``parsers`` (``ingestion.parsers`` in the pipeline) maps that suffix to the plugin's name.
+Installing a package therefore changes nothing until configuration names it, and naming a
+built-in suffix is the explicit way to replace a built-in parser. The class is constructed
+with no arguments, must define :meth:`ParserPlugin.parse`, and declares
+``adapter_api_version`` compatible with :data:`PARSER_API_VERSION`.
 """
 
 from __future__ import annotations
 
 import importlib
 import importlib.util
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import Final, Protocol
 
+from fasterrag.config.plugins import PARSERS_GROUP
 from fasterrag.core.parsing.markdown import parse_markdown
 from fasterrag.core.parsing.models import (
     Block,
@@ -40,16 +50,20 @@ from fasterrag.core.parsing.options import (
 )
 from fasterrag.core.parsing.plaintext import parse_plaintext
 from fasterrag.core.parsing.tabular import parse_csv, parse_json
+from fasterrag.core.plugin_api import load_plugin_class
 from fasterrag.errors import ErrorCode, IngestionError, ParseError
 
 __all__ = [
     "DEFAULT_PARSING_OPTIONS",
+    "PARSERS_GROUP",
+    "PARSER_API_VERSION",
     "SUPPORTED_SUFFIXES",
     "Block",
     "BlockKind",
     "DocumentBuilder",
     "ParseFlag",
     "ParsedDocument",
+    "ParserPlugin",
     "ParsingOptions",
     "create_parsing_options",
     "parse_bytes",
@@ -61,7 +75,10 @@ __all__ = [
     "parse_markdown",
     "parse_pdf",
     "parse_plaintext",
+    "resolve_parser_class",
 ]
+
+PARSER_API_VERSION: Final = "1.0"
 
 _DOCX_MIME: Final = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -80,6 +97,21 @@ class TunedFormatParser(Protocol):
     def __call__(self, data: bytes, *, mime_type: str, options: ParsingOptions) -> ParsedDocument:
         """Parse ``data`` into a structured document under ``options``."""
         ...
+
+
+class ParserPlugin(Protocol):
+    """What an instance of a class a ``fasterrag.parsers`` entry point names provides."""
+
+    def parse(self, data: bytes, *, filename: str, options: ParsingOptions) -> ParsedDocument:
+        """Parse ``data``, read from ``filename``, into a structured document."""
+        ...
+
+
+def resolve_parser_class(name: str) -> type:
+    """Return the plugin class registered as ``name`` under ``fasterrag.parsers``."""
+    return load_plugin_class(
+        PARSERS_GROUP, name, host=PARSER_API_VERSION, interface="parser", members=("parse",)
+    )
 
 
 def _optional_parser(module: str, *, extra: str, packages: tuple[str, ...]) -> ModuleType:
@@ -148,8 +180,12 @@ def parse_bytes(
     filename: str,
     max_bytes: int | None = None,
     options: ParsingOptions | None = None,
+    parsers: Mapping[str, str] | None = None,
 ) -> ParsedDocument:
-    """Parse in-memory content, choosing the parser from ``filename``."""
+    """Parse in-memory content, choosing the parser from ``filename``.
+
+    ``parsers`` maps a suffix to a ``fasterrag.parsers`` plugin, which then reads it.
+    """
     if max_bytes is not None and len(data) > max_bytes:
         raise IngestionError(
             f"{filename} is {len(data)} bytes, above the configured limit of {max_bytes}",
@@ -157,6 +193,15 @@ def parse_bytes(
         )
 
     suffix = Path(filename).suffix.lower()
+    configured = (parsers or {}).get(suffix)
+    if configured is not None:
+        plugin: ParserPlugin = resolve_parser_class(configured)()
+        return plugin.parse(
+            data,
+            filename=filename,
+            options=options if options is not None else DEFAULT_PARSING_OPTIONS,
+        )
+
     tuned = _TUNED_PARSERS.get(suffix)
     if tuned is not None:
         tuned_parser, tuned_mime_type = tuned
@@ -182,6 +227,7 @@ def parse_document(
     *,
     max_bytes: int | None = None,
     options: ParsingOptions | None = None,
+    parsers: Mapping[str, str] | None = None,
 ) -> ParsedDocument:
     """Read and parse a file from disk."""
     path = Path(source)
@@ -212,4 +258,6 @@ def parse_document(
     except OSError as exc:
         raise ParseError(f"{path} could not be read: {exc.strerror}") from exc
 
-    return parse_bytes(data, filename=path.name, max_bytes=max_bytes, options=options)
+    return parse_bytes(
+        data, filename=path.name, max_bytes=max_bytes, options=options, parsers=parsers
+    )

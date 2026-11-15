@@ -4,8 +4,10 @@ Two environments. The first is the bare core install: every documented import wo
 console script runs, the packaged config.yaml is the repository's, nothing an extra provides
 is present, and each extra that is missing is named when it is needed. The second adds only
 the extras the local profile needs and runs it end to end: `config init --profile local`,
-ingest a Markdown file, answer a `retrieve` call, with no network service and no API key
-(TASK-0444). See docs/verification.md for why this cannot be a plain pytest module.
+ingest a Markdown note of several chunks, and retrieve the one chunk that answers a
+question, with no network service and no API key (TASK-0444, TASK-0542). That run is
+`scripts/local_profile_probe.py`, the same file the release smoke test runs. See
+docs/verification.md for why this cannot be a plain pytest module.
 """
 
 from __future__ import annotations
@@ -45,9 +47,15 @@ EXTRA_ONLY_MODULES: Final = (
     "docx",
     "bs4",
     "lxml",
+    "pytest",
 )
 
 NAMED_EXTRAS: Final = (
+    (
+        "the adapter contract suite",
+        "try:\n    import fasterrag.testing\nexcept ImportError as exc:\n    print(exc)\n",
+        'pip install "fasterrag[testing]"',
+    ),
     (
         "a PDF document",
         "from fasterrag.errors import ParseError\n"
@@ -80,37 +88,7 @@ LOCAL_PROFILE_ABSENT: Final = ("fastapi", "qdrant_client", "pdfplumber", "docx",
 # because a local version label sorts higher. `--torch-index ""` turns it off.
 TORCH_CPU_INDEX: Final = "https://download.pytorch.org/whl/cpu"
 
-LOCAL_PROFILE_SCRIPT: Final = """
-import asyncio
-import pathlib
-import subprocess
-import sys
-
-import fasterrag
-from fasterrag import FasterRag
-
-assert "site-packages" in fasterrag.__file__, fasterrag.__file__
-console = pathlib.Path(sys.argv[1])
-subprocess.run([str(console), "config", "init", "--profile", "local"], check=True)
-pathlib.Path("note.md").write_text(
-    "# Lighthouses\\n\\nA Fresnel lens lets a lighthouse beam carry for many miles.\\n\\n"
-    "## Bread\\n\\nSourdough rises because wild yeast and lactic acid bacteria ferment it.\\n",
-    encoding="utf-8",
-)
-subprocess.run([str(console), "ingest", "note.md"], check=True)
-
-
-async def retrieve() -> None:
-    async with FasterRag.from_config("config.yaml") as rag:
-        chunks = await rag.retrieve("What makes sourdough rise?", top_k=1)
-    assert chunks, "retrieve returned no chunk"
-    assert "yeast" in chunks[0].text, chunks[0].text
-    assert chunks[0].dense_rank == 1, chunks[0]
-    print(f"retrieved: {' '.join(chunks[0].text.split())[:90]!r}")
-
-
-asyncio.run(retrieve())
-"""
+LOCAL_PROFILE_PROBE: Final = REPOSITORY_ROOT / "scripts" / "local_profile_probe.py"
 
 _SCRUBBED_VARIABLES: Final = frozenset({"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"})
 
@@ -286,7 +264,7 @@ def _check_local_profile(
     directory.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     ran = _run(
-        [str(interpreter), "-c", LOCAL_PROFILE_SCRIPT, str(_console_in(interpreter))],
+        [str(interpreter), "-I", str(LOCAL_PROFILE_PROBE), str(_console_in(interpreter))],
         cwd=directory,
     )
     if ran.returncode != 0:

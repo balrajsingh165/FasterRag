@@ -179,6 +179,7 @@ byte-identical.
    and is not cross-checked at all. This is what gives the embedding identity a row to
    disagree with, the way the counts and the vector widths already have one (TASK-0329).
 10. **Lockfile**: the imported collection writes a fresh `index.lock` (model, dimensions, and the archive's per-document content hashes); the archive's own lock is retained beside it as `<collection>.source.lock.json` for provenance.
+11. **The dedup record** (TASK-0538): with `ingestion.dedup` on, once every chunk is written the import appends one line per document that has a `content_hash` to the target's dedup record in the ingestion journal — the record ingestion writes and the document listing reads. A failed import writes none. A document row without a `content_hash` is not recorded and is not listed.
 
 ## Tenancy
 

@@ -68,7 +68,9 @@ OVERRIDES: Final[dict[str, tuple[Any, ...]]] = {
         },
     ),
     "embeddings.dimensions": (DIMENSIONS,),
+    "embeddings.base_url": ("http://embeddings.internal:11434",),
     "embeddings.provider": ("ollama",),
+    "chunking.strategy": ("fixed",),
 }
 """Mutation units that cannot be expressed as a single leaf edit, keyed by dotted path.
 
@@ -77,16 +79,19 @@ A path listed here is mutated as a whole and is never descended into.
 ``embeddings.tiering`` cannot be enabled on its own: cross-field rule 8 requires a rule
 list alongside the toggle, so the two move together, and the second candidate moves the
 rules alone, which is legal while the feature stays disabled. ``embeddings.dimensions``
-defaults to ``None``, and ``None`` carries no type from which to derive a smaller edit.
+defaults to ``None``, and ``None`` carries no type from which to derive a smaller edit;
+``embeddings.base_url`` likewise, and it must be a URL.
 ``embeddings.provider`` stopped being a ``Literal`` when plugins became selectable
 (TASK-0439): it is a string the schema checks against the built-in names and the installed
 entry points, so the generic string edit is refused and another built-in is named instead.
+``chunking.strategy`` followed for the same reason when chunkers became plugins (TASK-0513).
 """
 
 IRRELEVANT: Final[tuple[tuple[str, Any], ...]] = (
     ("app.port", 9999),
     ("app.log_level", "debug"),
     ("embeddings.batch_size", 128),
+    ("embeddings.base_url", "http://embeddings.internal:11434"),
     ("embeddings.cache.enabled", False),
     ("embeddings.cache.backend", "memory"),
     ("embeddings.cache.max_entries", 50),

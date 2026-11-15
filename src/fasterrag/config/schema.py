@@ -15,23 +15,28 @@ from __future__ import annotations
 import ipaddress
 import platform
 import re
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from fasterrag.config.plugins import (
+    BUILTIN_CHUNKING_STRATEGIES,
     BUILTIN_EMBEDDING_PROVIDERS,
     BUILTIN_LLM_PROVIDERS,
     BUILTIN_VECTOR_DB_PROVIDERS,
+    CHUNKERS_GROUP,
     EMBEDDINGS_GROUP,
     LLM_GROUP,
+    PARSERS_GROUP,
     PLANNED_VECTOR_DB_PROVIDERS,
     VECTOR_DB_GROUP,
+    registered_names,
     require_selectable,
 )
 
 __all__ = [
+    "CONFIG_SCHEMA_VERSION",
     "AppSettings",
     "AutopilotSettings",
     "CacheSettings",
@@ -57,6 +62,8 @@ __all__ = [
     "WorkersSettings",
 ]
 
+CONFIG_SCHEMA_VERSION: Final = 1
+
 _ENV_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HOSTNAME_RE = re.compile(
     r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
@@ -65,6 +72,7 @@ _COLLECTION_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _PG_IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _DOCKER_VOLUME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 _HTTP_HEADER_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+_FILE_SUFFIX_RE = re.compile(r"^\.[a-z0-9][a-z0-9_+-]*$")
 _PATH_LIKE_RE = re.compile(r"^(~|\.{1,2}[\\/]|[A-Za-z]:[\\/])|[\\/]")
 
 _REMOVED_APP_WORKERS = (
@@ -81,7 +89,6 @@ _REMOVED_DEGRADATION_LADDER = (
     "(docs/reliability.md)"
 )
 
-ChunkStrategy = Literal["fixed", "recursive", "semantic", "layout", "late"]
 TokenCounterMode = Literal["auto", "estimate", "model"]
 
 PROVIDERS_REQUIRING_EMBEDDING_KEY: frozenset[str] = frozenset({"openai", "cohere"})
@@ -136,6 +143,15 @@ def _validate_env_var_name(value: str | None) -> str | None:
             "must be an environment variable NAME such as 'OPENAI_API_KEY', not a secret "
             "value; config.yaml never contains credentials"
         )
+    return value
+
+
+def _validate_base_url(value: str | None) -> str | None:
+    """Require an absolute HTTP(S) URL when an endpoint override is set."""
+    if value is None:
+        return None
+    if not value.startswith(("http://", "https://")):
+        raise ValueError(f"{value!r} must be an absolute http:// or https:// URL")
     return value
 
 
@@ -435,6 +451,7 @@ class EmbeddingsSettings(Section):
     api_key_env: str | None = None
     batch_size: Annotated[int, Field(ge=1, le=2048)] = 64
     dimensions: Annotated[int, Field(ge=8)] | None = None
+    base_url: str | None = None
     cache: EmbeddingCacheSettings = EmbeddingCacheSettings()
     tiering: TieringSettings = TieringSettings()
 
@@ -459,6 +476,12 @@ class EmbeddingsSettings(Section):
     def _check_api_key_env(cls, value: str | None) -> str | None:
         """Require an environment-variable name, never a key value."""
         return _validate_env_var_name(value)
+
+    @field_validator("base_url")
+    @classmethod
+    def _check_base_url(cls, value: str | None) -> str | None:
+        """Require an absolute HTTP(S) URL when an endpoint override is set."""
+        return _validate_base_url(value)
 
     @model_validator(mode="after")
     def _check_key_required(self) -> Self:
@@ -575,7 +598,7 @@ class ParsingSettings(Section):
 class ChunkingSettings(Section):
     """Chunking strategy, sizing, and contextual enrichment."""
 
-    strategy: ChunkStrategy = "recursive"
+    strategy: str = "recursive"
     chunk_size: Annotated[int, Field(ge=64, le=2500)] = 768
     overlap: Annotated[int, Field(ge=0)] = 64
     token_counter: TokenCounterMode = "auto"
@@ -583,6 +606,14 @@ class ChunkingSettings(Section):
     semantic_percentile: Annotated[float, Field(ge=0.50, le=0.99)] = 0.95
     contextual_enrichment: bool = False
     context_tokens: Annotated[int, Field(ge=25, le=150)] = 75
+
+    @field_validator("strategy")
+    @classmethod
+    def _check_strategy(cls, value: str) -> str:
+        """Require a built-in strategy or one an installed ``fasterrag.chunkers`` plugin names."""
+        return require_selectable(
+            value, builtin=BUILTIN_CHUNKING_STRATEGIES, group=CHUNKERS_GROUP, kind="chunker"
+        )
 
     @model_validator(mode="after")
     def _check_overlap(self) -> Self:
@@ -608,7 +639,7 @@ class RetrievalSettings(Section):
     rerank: bool = False
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_top_n: Annotated[int, Field(ge=10, le=1000)] = 100
-    verify_lock: Literal["off", "warn", "refuse"] = "warn"
+    verify_lock: Literal["off", "warn", "refuse"] = "refuse"
 
     @model_validator(mode="after")
     def _check_retrieval_rules(self) -> Self:
@@ -702,6 +733,28 @@ class IngestionSettings(Section):
     # `security.auth` is on. Leaving it empty therefore cannot silently expose a served
     # deployment; it can only break one loudly, at the request, naming this setting.
     allowed_source_roots: list[str] = []
+    parsers: dict[str, str] = {}
+
+    @field_validator("parsers")
+    @classmethod
+    def _check_parsers(cls, value: dict[str, str]) -> dict[str, str]:
+        """Require lower-case suffix keys naming installed ``fasterrag.parsers`` plugins."""
+        for suffix in value:
+            if not _FILE_SUFFIX_RE.match(suffix):
+                raise ValueError(
+                    f"ingestion.parsers key {suffix!r} is not a lower-case file suffix such "
+                    "as '.rtf'; a key no file name can end in would enable nothing"
+                )
+        installed = registered_names(PARSERS_GROUP) if value else frozenset()
+        for suffix, name in value.items():
+            if name not in installed:
+                raise ValueError(
+                    f"ingestion.parsers maps {suffix!r} to {name!r}, which no installed package "
+                    f"registers under the {PARSERS_GROUP!r} entry-point group (installed: "
+                    f"{', '.join(sorted(installed)) or 'none'}); install the package that "
+                    "provides it, or remove the line"
+                )
+        return value
 
 
 class ReindexSettings(Section):
@@ -925,6 +978,8 @@ class SecuritySettings(Section):
     # credential-bearing control plane to every page on the web.
     cors_allowed_origins: list[str] = []
 
+    audit_log_file: Annotated[str | None, Field(min_length=1)] = None
+
     @field_validator("cors_allowed_origins")
     @classmethod
     def _check_cors_allowed_origins(cls, value: list[str]) -> list[str]:
@@ -996,6 +1051,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(extra="forbid", frozen=True)
 
+    schema_version: int = CONFIG_SCHEMA_VERSION
     app: AppSettings = AppSettings()
     vector_db: VectorDbSettings = VectorDbSettings()
     embeddings: EmbeddingsSettings = EmbeddingsSettings()
@@ -1027,6 +1083,18 @@ class Settings(BaseSettings):
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Restrict configuration to the values passed in from the YAML source."""
         return (init_settings,)
+
+    @field_validator("schema_version")
+    @classmethod
+    def _check_schema_version(cls, value: int) -> int:
+        """Refuse a layout other than this release's; the loader names the upgrade (TASK-0502)."""
+        if value != CONFIG_SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version {value} is not the layout this release reads "
+                f"({CONFIG_SCHEMA_VERSION}); load the file with load_settings, which names "
+                "the upgrade, or see docs/config-reference.md, 'Upgrading'"
+            )
+        return value
 
     def referenced_env_vars(self) -> dict[str, str]:
         """Return every environment variable this configuration references.

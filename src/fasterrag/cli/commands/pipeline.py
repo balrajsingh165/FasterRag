@@ -27,12 +27,12 @@ from fasterrag.adapters.vectordb.base import CollectionSpec, Distance, VectorDBA
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import settings_from
-from fasterrag.cli.sources import expand_sources
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache import create_semantic_store
 from fasterrag.core.cache.semantic import MISS, SemanticCache
 from fasterrag.core.rerank import CrossEncoderReranker
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError
+from fasterrag.observability.audit import audited, cli_actor
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.backfill import (
     BackfillProgress,
@@ -44,6 +44,7 @@ from fasterrag.services.backfill import (
     inventory_untagged,
 )
 from fasterrag.services.composition import create_embedding_router
+from fasterrag.services.documents import DocumentService
 from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.evaluation import run_eval
 from fasterrag.services.generation import GenerationService
@@ -53,6 +54,7 @@ from fasterrag.services.lockfile import create_lock_store, detect_drift
 from fasterrag.services.querying import RetrievalService
 from fasterrag.services.regression import GateResult
 from fasterrag.services.reindex import plan_reindex, require_keyword_leg, retire, rollback, swap
+from fasterrag.services.source_expansion import expand_sources
 from fasterrag.services.traces import create_trace_store
 
 __all__ = ["run_index", "run_ingest", "run_query"]
@@ -212,7 +214,12 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
         return ExitCode.SUCCESS
 
     journal = create_journal(settings)
-    service = IngestionService(settings, journal=journal, locks=create_lock_store(settings))
+    service = IngestionService(
+        settings,
+        journal=journal,
+        locks=create_lock_store(settings),
+        traces=create_trace_store(settings),
+    )
     try:
         if watching:
             accepted = await service.accept(sources, collection=args.collection)
@@ -584,14 +591,18 @@ async def _index_create(
 
 
 async def _index_delete(
-    args: argparse.Namespace, adapter: VectorDBAdapter, console: Console
+    args: argparse.Namespace, settings: Settings, adapter: VectorDBAdapter, console: Console
 ) -> ExitCode:
-    """Drop a collection, requiring ``--force`` because the data does not come back."""
+    """Drop a collection and its dedup record, requiring ``--force``: the data does not return."""
     if not args.force:
         console.error(f"deleting {args.name!r} destroys its vectors; pass --force to confirm")
         return ExitCode.USAGE
 
-    dropped = await adapter.drop_collection(args.name)
+    with audited("collection.drop", args.name, cli_actor()) as entry:
+        dropped = await DocumentService(adapter, create_journal(settings)).drop_collection(
+            args.name
+        )
+        entry.detail["dropped"] = dropped
     console.emit(f"{'deleted' if dropped else 'no such collection:'} {args.name}")
     console.document({"name": args.name, "deleted": dropped})
     return ExitCode.SUCCESS
@@ -744,7 +755,7 @@ async def run_index(args: argparse.Namespace, console: Console) -> ExitCode:
             return await _index_rollback(args, adapter, console)
         if args.action == "create":
             return await _index_create(args, settings, adapter, console)
-        return await _index_delete(args, adapter, console)
+        return await _index_delete(args, settings, adapter, console)
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
         console.document({"error": exc.code.value, "detail": exc.detail})

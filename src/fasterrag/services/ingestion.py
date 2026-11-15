@@ -43,15 +43,17 @@ from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.core.identity import text_hash
+from fasterrag.core.tracing import SpanRecorder, StageClock, Trace
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError
 from fasterrag.observability import metrics
-from fasterrag.observability.logging import get_logger, use_trace_id
+from fasterrag.observability.logging import current_trace_id, get_logger, use_trace_id
 from fasterrag.services.embedding_router import create_embedding_router
 from fasterrag.services.jobs import prune_when_due, requeue, resumable, settle_interrupted
 from fasterrag.services.journal import DocumentRecord, JobRecord, Journal
 from fasterrag.services.lockfile import LockStore, build_lock
 from fasterrag.services.reindex import require_keyword_leg
 from fasterrag.services.sources import resolve_sources, typed_source
+from fasterrag.services.traces import TraceStore
 from fasterrag.workers.cpu_pool import CpuWorkerPool, PoolReport, require_runnable_chunker
 from fasterrag.workers.embed_pool import EmbeddingWorkerPool, EmbedReport
 from fasterrag.workers.indexer import Indexer
@@ -78,14 +80,16 @@ class IngestionService:
         cache: SemanticCache | None = None,
         locks: LockStore | None = None,
         executor_factory: Callable[[int], Executor] | None = None,
+        traces: TraceStore | None = None,
     ) -> None:
-        """Build the service."""
+        """Build the service; with ``traces``, each settled job stores an ingest trace."""
         self.settings = settings
         self.journal = journal
         self.adapter = adapter or create_vector_db_adapter(settings)
         self.router = router or create_embedding_router(settings)
         self.cache = cache
         self.locks = locks
+        self.traces = traces
         self._executor_factory = executor_factory
 
     async def accept(
@@ -188,7 +192,11 @@ class IngestionService:
 
     async def _run(self, record: JobRecord, metadata: dict[str, Any] | None) -> JobRecord:
         """Resolve, parse, embed and index a job, then settle its record."""
+        created_at = _finished_at()
+        spans = SpanRecorder()
+        stages = StageClock(spans, observe=metrics.observe_stage)
         resolved = await resolve_sources(record.sources, self.settings)
+        setup_started = spans.record("resolve", 0.0).end_ms
         enricher = None
         try:
             tasks = CpuWorkerPool.tasks_for(
@@ -206,7 +214,12 @@ class IngestionService:
 
             indexer = Indexer(self.settings, self.adapter, collection=record.collection)
             pool = EmbeddingWorkerPool(
-                self.settings, self.router, indexer, tenant=record.tenant, ledger=ledger
+                self.settings,
+                self.router,
+                indexer,
+                tenant=record.tenant,
+                ledger=ledger,
+                stages=stages,
             )
             queue: BoundedQueue[ChunkPayload] = BoundedQueue(self.settings.workers.queue_depth)
             started = time.monotonic()
@@ -230,7 +243,9 @@ class IngestionService:
                 executor_factory=self._executor_factory,
                 llm=enricher,
                 trim=indexer.trim,
+                discard=indexer.discard,
             ) as cpu:
+                pipeline_started = spans.record("setup", setup_started).end_ms
                 parse_report, embed_report = await _pipe(
                     cpu.process(
                         tasks,
@@ -239,10 +254,12 @@ class IngestionService:
                         collection=record.collection,
                         resume_from=resume_from,
                         ledger=ledger,
+                        stages=stages,
                     ),
                     pool,
                     queue,
                 )
+                settle_started = spans.record("pipeline", pipeline_started).end_ms
         finally:
             if enricher is not None:
                 await enricher.close()
@@ -259,13 +276,14 @@ class IngestionService:
                 attempts=self.settings.reliability.retries.max_attempts,
             )
 
+        late = cpu.late_duplicates
         counts = {
             "total": len(tasks),
-            "parsed": parse_report.parsed,
+            "parsed": parse_report.parsed - late,
             "chunked": parse_report.chunked,
             "embedded": embed_report.embedded,
             "indexed": indexer.written,
-            "deduplicated": parse_report.deduplicated,
+            "deduplicated": parse_report.deduplicated + late,
             "skipped": parse_report.empty,
             "dead_lettered": parse_report.dead_lettered + len(failed),
         }
@@ -284,6 +302,9 @@ class IngestionService:
         if self.cache is not None and (indexer.written or indexer.trimmed):
             await self.cache.invalidate(f"ingest job {record.job_id} indexed {indexer.written}")
 
+        spans.record("settle", settle_started)
+        stages.close()
+        self._store_trace(settled, spans, created_at)
         _logger.info("ingest finished", extra={"job_id": record.job_id, **counts})
         _logger.info(
             "embedding usage reconciled",
@@ -296,6 +317,27 @@ class IngestionService:
             },
         )
         return settled
+
+    def _store_trace(self, settled: JobRecord, spans: SpanRecorder, created_at: str) -> None:
+        """Persist the job's stage timings as an ``ingest`` trace (TASK-0487)."""
+        if self.traces is None or not self.traces.enabled:
+            return
+        self.traces.store(
+            Trace(
+                trace_id=current_trace_id(),
+                query="",
+                collection=settled.collection,
+                tenant=settled.tenant,
+                result={
+                    "job_id": settled.job_id,
+                    "status": settled.status,
+                    "counts": dict(settled.counts),
+                },
+                spans=spans.spans,
+                created_at=created_at,
+                kind="ingest",
+            )
+        )
 
     async def _publish_metrics(
         self, record: JobRecord, counts: dict[str, int], *, elapsed: float

@@ -554,3 +554,30 @@ def test_resetting_drops_every_shared_breaker() -> None:
     reset_shared_breakers()
 
     assert shared_breaker("llm", configured) is not before
+
+
+def test_a_released_probe_frees_the_slot_for_the_next_caller() -> None:
+    """A probe with no verdict held the half-open slot until its lease lapsed (TASK-0546)."""
+    subject = breaker(failure_threshold=1, reset_timeout_ms=1000)
+    fail(subject)
+    age(subject, 1500)
+    probe = subject.check()
+
+    subject.release(probe)
+
+    assert isinstance(subject.check(), Admission)
+    assert subject.state is CircuitState.HALF_OPEN
+
+
+def test_a_release_from_an_earlier_state_frees_nothing() -> None:
+    """An admission from before the circuit opened cannot hand back the current probe."""
+    subject = breaker(failure_threshold=1, reset_timeout_ms=1000)
+    stale = subject.check()
+    fail(subject)
+    age(subject, 1500)
+    subject.check()
+
+    subject.release(stale)
+
+    with pytest.raises(CircuitOpenError):
+        subject.check()

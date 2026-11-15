@@ -18,11 +18,14 @@ from typing import Any
 from fastapi import APIRouter
 
 from fasterrag.api.dependencies import (
+    CurrentActor,
     CurrentSettings,
     CurrentTenant,
     CurrentVectorDB,
+    JournalDep,
 )
 from fasterrag.api.schemas import EstimateRequest, ExportRequest, ImportRequest
+from fasterrag.observability.audit import audited
 from fasterrag.services.archive import export_archive
 from fasterrag.services.archive_import import import_archive, open_archive
 from fasterrag.services.composition import create_embedding_router
@@ -46,9 +49,10 @@ async def doctor_report(settings: CurrentSettings) -> dict[str, Any]:
 
 
 @router.post("/admin/doctor/fix")
-async def doctor_fix(settings: CurrentSettings) -> dict[str, Any]:
+async def doctor_fix(settings: CurrentSettings, actor: CurrentActor) -> dict[str, Any]:
     """Repair what is safe to repair, then report the machine as it stands (TASK-0258)."""
-    return (await apply_fixes(settings)).as_dict()
+    with audited("doctor.fix", "deployment", actor):
+        return (await apply_fixes(settings)).as_dict()
 
 
 def _reported(result: ProvisionResult) -> dict[str, Any]:
@@ -62,13 +66,14 @@ def _reported(result: ProvisionResult) -> dict[str, Any]:
 
 
 @router.post("/admin/provision/{tool}")
-async def provision(tool: str, settings: CurrentSettings) -> dict[str, Any]:
+async def provision(tool: str, settings: CurrentSettings, actor: CurrentActor) -> dict[str, Any]:
     """Provision a managed dependency. Idempotent and doctor-gated by the service.
 
     Which tools exist is decided by ``services/provision_registry``, the same table the CLI
     dispatches through, so this surface cannot offer less than ``fasterrag provision`` again.
     """
-    return _reported(await provision_tool(tool, settings))
+    with audited("provision.up", tool, actor):
+        return _reported(await provision_tool(tool, settings))
 
 
 @router.get("/admin/provision/{tool}/status")
@@ -78,9 +83,12 @@ async def provision_status(tool: str, settings: CurrentSettings) -> dict[str, An
 
 
 @router.delete("/admin/provision/{tool}")
-async def provision_down(tool: str, settings: CurrentSettings) -> dict[str, Any]:
+async def provision_down(
+    tool: str, settings: CurrentSettings, actor: CurrentActor
+) -> dict[str, Any]:
     """Stop a managed dependency's containers, the REST half of ``provision <tool> --down``."""
-    return _reported(await stop_tool(tool, settings))
+    with audited("provision.down", tool, actor):
+        return _reported(await stop_tool(tool, settings))
 
 
 @router.post("/estimate")
@@ -103,26 +111,31 @@ async def export_collection(
     settings: CurrentSettings,
     adapter: CurrentVectorDB,
     tenant: CurrentTenant,
+    actor: CurrentActor,
 ) -> dict[str, Any]:
     """Write a collection to a portable archive (D11).
 
     The destination is confined to ``security.allowed_archive_roots`` before anything is
     written: the caller names a path on the server, so it is an authorization boundary.
     """
-    destination = guard_archive_path(body.out, settings)
-    collection = scoped_name(body.collection or settings.vector_db.collection.default_name, tenant)
-    store = create_lock_store(settings)
-    lock = store.read(collection) if store is not None and store.enabled else None
+    named = body.collection or settings.vector_db.collection.default_name
+    with audited("archive.export", named, actor) as entry:
+        entry.detail["out"] = body.out
+        destination = guard_archive_path(body.out, settings)
+        collection = scoped_name(named, tenant)
+        store = create_lock_store(settings)
+        lock = store.read(collection) if store is not None and store.enabled else None
 
-    counts = await export_archive(
-        settings,
-        adapter,
-        collection=collection,
-        destination=destination,
-        include_vectors=body.include_vectors,
-        lock=lock,
-        tenant=tenant,
-    )
+        counts = await export_archive(
+            settings,
+            adapter,
+            collection=collection,
+            destination=destination,
+            include_vectors=body.include_vectors,
+            lock=lock,
+            tenant=tenant,
+        )
+        entry.detail.update(counts.as_dict())
     return {"collection": unscoped_name(collection, tenant), **counts.as_dict()}
 
 
@@ -131,11 +144,17 @@ async def import_collection(
     body: ImportRequest,
     settings: CurrentSettings,
     adapter: CurrentVectorDB,
+    journal: JournalDep,
     tenant: CurrentTenant,
+    actor: CurrentActor,
 ) -> dict[str, Any]:
     """Import a previously exported archive (D11)."""
-    with open_archive(guard_archive_path(body.archive, settings)) as reader:
+    with (
+        audited("archive.import", body.archive, actor) as entry,
+        open_archive(guard_archive_path(body.archive, settings)) as reader,
+    ):
         target = scoped_name(body.target_collection or reader.collection, tenant)
+        entry.detail["collection"] = unscoped_name(target, tenant)
 
         router_ = create_embedding_router(settings) if body.reembed else None
         try:
@@ -146,10 +165,12 @@ async def import_collection(
                 collection=target,
                 reembed=body.reembed,
                 router=router_,
+                journal=journal,
             )
         finally:
             if router_ is not None:
                 await router_.close()
+        entry.detail.update(counts.as_dict())
 
     return {
         "collection": unscoped_name(target, tenant),

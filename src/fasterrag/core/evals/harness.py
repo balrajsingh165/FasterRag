@@ -1,6 +1,6 @@
 """The retrieval eval harness.
 
-Runs a golden set through a retriever and reports recall@k, MRR, and nDCG@k. It is what
+Runs a golden set through a retriever and reports recall@k, precision@k, MRR, and nDCG@k. It is what
 turns "retrieval seems better" into a number, and it is the only thing that can populate the
 benchmark ledger for retrieval quality (``docs/benchmarks.md``).
 
@@ -12,8 +12,8 @@ Two reporting rules keep the numbers honest:
 * **Per-query results are kept**, not just the aggregate. An average that moved is only
   actionable once you can see which queries moved it.
 
-Faithfulness is deliberately absent: it scores a generated answer against its context and
-needs the LLM call site that arrives with the generation slice.
+Faithfulness is deliberately absent: it scores a generated answer, costs model calls, and
+lives in ``services.evaluation.score_faithfulness`` behind ``--faithfulness`` (TASK-0481).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from fasterrag.core.evals.golden import GoldenRecord
-from fasterrag.core.evals.metrics import ndcg_at_k, recall_at_k, reciprocal_rank
+from fasterrag.core.evals.metrics import ndcg_at_k, precision_at_k, recall_at_k, reciprocal_rank
 from fasterrag.core.retrieval.models import ScoredChunk
 from fasterrag.observability.logging import get_logger
 
@@ -59,6 +59,7 @@ class QueryScore:
     reciprocal_rank: float
     ndcg: float
     adversarial: bool = False
+    precision: float = 0.0
 
     @property
     def found_nothing_relevant(self) -> bool:
@@ -77,6 +78,7 @@ class EvalReport:
     mrr: float
     ndcg_at_k: float
     per_query: list[QueryScore] = field(default_factory=list)
+    precision_at_k: float = 0.0
 
     @property
     def misses(self) -> list[QueryScore]:
@@ -90,6 +92,7 @@ class EvalReport:
             "scored": self.scored,
             "adversarial": self.adversarial,
             "recall_at_k": round(self.recall_at_k, 4),
+            "precision_at_k": round(self.precision_at_k, 4),
             "mrr": round(self.mrr, 4),
             "ndcg_at_k": round(self.ndcg_at_k, 4),
             "misses": [score.id for score in self.misses],
@@ -131,6 +134,7 @@ async def evaluate(
                 reciprocal_rank=reciprocal_rank(hits),
                 ndcg=ndcg_at_k(hits, total, k),
                 adversarial=record.adversarial,
+                precision=precision_at_k(hits, k),
             )
         )
 
@@ -143,6 +147,7 @@ async def evaluate(
         mrr=_mean([score.reciprocal_rank for score in measurable]),
         ndcg_at_k=_mean([score.ndcg for score in measurable]),
         per_query=scores,
+        precision_at_k=_mean([score.precision for score in measurable]),
     )
 
     _logger.info("evaluated a golden set", extra=report.as_dict())

@@ -14,20 +14,34 @@ The contract, top to bottom. A module may import its own layer and any layer bel
 
     cli
     api | facade | dashboard        (siblings: none of the three imports another)
+    http
     services
     workers
     adapters
     core
+    interfaces
     observability
     config
     errors
+    logging
 
 ``facade`` is the importable surface: ``fasterrag/__init__.py``, ``facade.py``, ``sync.py``
-and the five re-export modules beside them. ``dashboard`` is
+and the five re-export modules beside them, plus ``testing``, the contract suites a plugin
+author runs (it imports adapters and core, and nothing imports it). ``dashboard`` is
 ``observability/dashboard.py``, which is a second web application rather than
 instrumentation, so it sits with the entry points instead of dragging the whole
 ``observability`` package up to their level. ``cli`` is above the other three because the
 terminal is what starts the API and the dashboard.
+
+Three more layers are modules carved out of a package the same way (TASK-0529, 2026-11-15).
+``http`` is ``api/auth.py`` and ``api/problems.py``: the authentication middleware and the
+problem+json responses both web applications serve, so the dashboard uses them without
+importing its sibling. ``interfaces`` is the three adapter base modules,
+``adapters/{vectordb,embeddings,llm}/base.py``: ``core`` names the abstract adapter it is
+handed, never a concrete one or a factory, and those three modules import only ``config``,
+``errors`` and each other. ``logging`` is ``observability/logging.py``, which imports nothing
+from the package, so the configuration loader and the error base class can log and read the
+trace id through it.
 
 What counts as an import:
 
@@ -100,13 +114,16 @@ VACUOUS: Final = "vacuous-scan"
 RANKS: Final[tuple[tuple[str, ...], ...]] = (
     ("cli",),
     ("api", "facade", "dashboard"),
+    ("http",),
     ("services",),
     ("workers",),
     ("adapters",),
     ("core",),
+    ("interfaces",),
     ("observability",),
     ("config",),
     ("errors",),
+    ("logging",),
 )
 
 LAYERS: Final[dict[str, tuple[str, ...]]] = {
@@ -120,15 +137,23 @@ LAYERS: Final[dict[str, tuple[str, ...]]] = {
         "fasterrag.parsing",
         "fasterrag.rerank",
         "fasterrag.retrieval",
+        "fasterrag.testing",
     ),
     "dashboard": ("fasterrag.observability.dashboard",),
+    "http": ("fasterrag.api.auth", "fasterrag.api.problems"),
     "services": ("fasterrag.services",),
     "workers": ("fasterrag.workers",),
     "adapters": ("fasterrag.adapters",),
     "core": ("fasterrag.core",),
+    "interfaces": (
+        "fasterrag.adapters.vectordb.base",
+        "fasterrag.adapters.embeddings.base",
+        "fasterrag.adapters.llm.base",
+    ),
     "observability": ("fasterrag.observability",),
     "config": ("fasterrag.config",),
     "errors": ("fasterrag.errors",),
+    "logging": ("fasterrag.observability.logging",),
 }
 
 ROOT_LAYER: Final = "facade"
@@ -144,53 +169,7 @@ As a *target* the package root is skipped. Importing any submodule already runs 
 # is the one thing this table must never be used for — move the code, or move the interface
 # it needs down a layer. Keyed by module pair and never by line number: several people edit
 # this tree at once and a line-keyed waiver would excuse a different import within the hour.
-EXCEPTIONS: Final[dict[str, str]] = {
-    "fasterrag.facade -> fasterrag.cli.sources": (
-        "TASK-0456: directory expansion lives in the CLI; it belongs beside services/sources.py"
-    ),
-    "fasterrag.workers.cpu_pool -> fasterrag.services.journal": (
-        "TASK-0456 step 3: the journal a worker writes to is defined by a service"
-    ),
-    "fasterrag.workers.embed_pool -> fasterrag.services.budget": (
-        "TASK-0456 step 3: the cost governor a worker charges is defined by a service"
-    ),
-    "fasterrag.workers.embed_pool -> fasterrag.services.estimation": (
-        "TASK-0456 step 3: a function-level import of the price table"
-    ),
-    "fasterrag.core.cache.embedding -> fasterrag.adapters.embeddings.base": (
-        "TASK-0456 step 4: core names an adapter base interface; the rule is undecided"
-    ),
-    "fasterrag.core.cache.embedding -> fasterrag.adapters.vectordb.base": (
-        "TASK-0456 step 4: core names an adapter base interface; the rule is undecided"
-    ),
-    "fasterrag.core.chunking.enrichment -> fasterrag.adapters.llm.base": (
-        "TASK-0456 step 4: core names an adapter base interface; the rule is undecided"
-    ),
-    "fasterrag.core.evals.generator -> fasterrag.adapters.llm.base": (
-        "TASK-0456 step 4: core names an adapter base interface; the rule is undecided"
-    ),
-    "fasterrag.core.faithfulness -> fasterrag.adapters.llm.base": (
-        "TASK-0456 step 4: core names an adapter base interface; the rule is undecided"
-    ),
-    "fasterrag.core.retrieval.bm25 -> fasterrag.adapters.vectordb.base": (
-        "TASK-0456 step 4: core names an adapter base interface; the rule is undecided"
-    ),
-    "fasterrag.config.loader -> fasterrag.observability.logging": (
-        "TASK-0456: the loader logs through a layer above it"
-    ),
-    "fasterrag.errors -> fasterrag.observability.logging": (
-        "TASK-0456: the error base class reads the trace id from a layer above it"
-    ),
-    "fasterrag.observability.langfuse_export -> fasterrag.core.tracing": (
-        "TASK-0456: a trace exporter needs the trace model, which lives in core"
-    ),
-    "fasterrag.observability.otel_export -> fasterrag.core.tracing": (
-        "TASK-0456: a trace exporter needs the trace model, which lives in core"
-    ),
-    "fasterrag.observability.dashboard -> fasterrag.api.auth": (
-        "TASK-0456: the dashboard reuses the REST layer's authentication middleware"
-    ),
-}
+EXCEPTIONS: Final[dict[str, str]] = {}
 
 _REFERENCE: Final = re.compile(
     r"^" + PACKAGE + r"(?:\.[A-Za-z_][A-Za-z0-9_]*)+(?::[A-Za-z_][A-Za-z0-9_.]*)?$"
@@ -466,10 +445,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if excess:
         sys.stderr.write(
-            "Imports point one way: cli -> api | facade | dashboard -> services -> workers "
-            "-> adapters -> core -> observability -> config -> errors. Move the code that "
-            "needs the import up, or move the interface it needs down. Do not add an entry "
-            "to EXCEPTIONS in scripts/check_layering.py to make a new import pass.\n"
+            "Imports point one way: cli -> api | facade | dashboard -> http -> services -> "
+            "workers -> adapters -> core -> interfaces -> observability -> config -> errors "
+            "-> logging. Move the code that needs the import up, or move the interface it "
+            "needs down. Do not add an entry to EXCEPTIONS in scripts/check_layering.py to "
+            "make a new import pass.\n"
         )
         return 1
     return 0

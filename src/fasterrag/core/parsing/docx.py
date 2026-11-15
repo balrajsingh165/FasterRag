@@ -189,12 +189,7 @@ def _parse(data: bytes, builder: DocumentBuilder) -> None:
 
 
 def parse_docx(data: bytes, *, mime_type: str = _MIME) -> ParsedDocument:
-    """Parse a DOCX file into structural blocks in reading order.
-
-    Raises:
-        IngestionError: ``PAYLOAD_TOO_LARGE`` when the archive unpacks past the limit.
-        ParseError: When the file is not a readable DOCX.
-    """
+    """Parse a DOCX file into structural blocks in reading order."""
     builder = DocumentBuilder(mime_type=mime_type, parser="docx")
     try:
         _refuse_a_bomb(data)

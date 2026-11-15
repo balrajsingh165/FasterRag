@@ -20,6 +20,7 @@ from reportlab.pdfgen import canvas
 from fasterrag.core.parsing import (
     DEFAULT_PARSING_OPTIONS,
     parse_csv,
+    parse_html,
     parse_json,
     parse_markdown,
     parse_pdf,
@@ -155,16 +156,16 @@ def test_a_scanned_page_is_rasterised_and_handed_to_ocr(monkeypatch: pytest.Monk
     assert width == round(LETTER[0] / 72 * DEFAULT_PARSING_OPTIONS.ocr_resolution)
 
 
+@pytest.mark.must_run
 def test_real_ocr_reads_the_scanned_fixture() -> None:
     """End to end through tesseract. Runs only where the ``ocr`` extra and binary exist.
 
-    No CI lane installs either (the unit lanes install ``.[dev]``), so in CI this skips;
-    the rasterisation half of the path is proven above with a stand-in recogniser.
+    The unit lanes install neither and skip it; CI's ``ocr`` job installs both and runs it,
+    and ``must_run`` fails the build if that job ever skips it too (TASK-0544).
     """
     if importlib.util.find_spec("pytesseract") is None or shutil.which("tesseract") is None:
         pytest.skip(
-            "OCR needs the 'ocr' extra and the tesseract binary; neither is installed in "
-            "any CI lane, so this case runs only on a machine that has both"
+            "OCR needs the 'ocr' extra and the tesseract binary; CI's ocr job installs both"
         )
 
     document = parse_pdf(scanned_pdf_bytes())
@@ -220,3 +221,66 @@ def test_json_one_level_past_the_limit_is_refused() -> None:
         parse_json(b"[" * depth + b"1" + b"]" * depth)
 
     assert caught.value.code is ErrorCode.NESTING_TOO_DEEP
+
+
+RUSSIAN = "\u041f\u0440\u0438\u0432\u0435\u0442, \u043c\u0438\u0440"
+JAPANESE = "\u65e5\u672c\u8a9e\u306e\u6587\u66f8"
+
+
+def html_page(head: str, body: str) -> str:
+    """Return a minimal page with ``head`` inside <head> and ``body`` as its one paragraph."""
+    return f"<html><head>{head}<title>t</title></head><body><p>{body}</p></body></html>"
+
+
+@pytest.mark.parametrize(
+    ("declaration", "codec", "text"),
+    [
+        ('<meta charset="windows-1251">', "cp1251", RUSSIAN),
+        ("<meta charset=koi8-r>", "koi8_r", RUSSIAN),
+        (
+            '<meta http-equiv="Content-Type" content="text/html; charset=Shift_JIS">',
+            "shift_jis",
+            JAPANESE,
+        ),
+    ],
+)
+def test_an_html_page_is_decoded_with_the_charset_it_declares(
+    declaration: str, codec: str, text: str
+) -> None:
+    """TASK-0544: `<meta charset>` was ignored, so a Cyrillic page indexed as Latin mojibake."""
+    document = parse_html(html_page(declaration, text).encode(codec))
+
+    assert document.text == text
+    assert ParseFlag.ENCODING_FALLBACK.value not in document.flags
+
+
+def test_a_byte_order_mark_outranks_the_declared_charset() -> None:
+    """The HTML encoding-sniffing order: a BOM wins over whatever the page says about itself."""
+    page = html_page('<meta charset="windows-1251">', "caf\xe9 \u65e5\u672c")
+
+    assert parse_html(codecs.BOM_UTF8 + page.encode("utf-8")).text == "caf\xe9 \u65e5\u672c"
+
+
+def test_a_declared_latin_1_page_is_read_as_windows_1252() -> None:
+    """Browsers read `iso-8859-1` as windows-1252, so 0x80 is a euro sign, not a control code."""
+    page = html_page('<meta charset="iso-8859-1">', "\u20ac5 caf\xe9")
+
+    assert parse_html(page.encode("cp1252")).text == "\u20ac5 caf\xe9"
+
+
+@pytest.mark.parametrize("declared", ["x-no-such-charset", "utf-8", "base64", "hex", "rot13"])
+def test_a_declaration_that_cannot_be_honoured_falls_back_and_says_so(declared: str) -> None:
+    """An unknown name, or bytes the named codec cannot read, take the plain-text fallback."""
+    page = html_page(f'<meta charset="{declared}">', "caf\xe9 cr\xe8me")
+
+    document = parse_html(page.encode("cp1252"))
+
+    assert document.text == "caf\xe9 cr\xe8me"
+    assert ParseFlag.ENCODING_FALLBACK.value in document.flags
+
+
+def test_a_utf_16_declaration_on_ascii_bytes_is_read_as_utf_8() -> None:
+    """A page cannot declare UTF-16 in a meta tag it could then not be parsed to find."""
+    page = html_page('<meta charset="utf-16">', "caf\xe9")
+
+    assert parse_html(page.encode("utf-8")).text == "caf\xe9"

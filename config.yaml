@@ -4,6 +4,8 @@
 # the complete example in docs/config-reference.md (drift between the two is a bug).
 # Every integration toggle defaults to false.
 
+schema_version: 1
+
 app:
   host: 127.0.0.1
   port: 8000
@@ -41,6 +43,7 @@ embeddings:
   api_key_env: null
   batch_size: 64
   dimensions: null
+  base_url: null
   cache:
     enabled: true
     backend: disk
@@ -88,7 +91,7 @@ retrieval:
   rerank: false
   reranker_model: BAAI/bge-reranker-v2-m3
   rerank_top_n: 100
-  verify_lock: warn
+  verify_lock: refuse
 
 generation:
   grounded_or_refuse: false
@@ -127,6 +130,9 @@ ingestion:
   # Directories a `path` source may read from. Empty is unconfined, which is
   # refused outright once security.auth is on -- see docs/security.md.
   allowed_source_roots: []
+  # Suffix -> parser plugin (fasterrag.parsers entry point), e.g. .rtf: acme-rtf.
+  # An installed parser package reads nothing until it is named here.
+  parsers: {}
 
 index:
   lockfile: true
@@ -213,3 +219,6 @@ security:
   # Browser origins allowed to call the API cross-origin, each scheme://host[:port]. Empty
   # allows none.
   cors_allowed_origins: []
+  # Also append the audit trail of administrative actions to this file, as JSON lines.
+  # null writes it to the normal log only -- see docs/security.md.
+  audit_log_file: null

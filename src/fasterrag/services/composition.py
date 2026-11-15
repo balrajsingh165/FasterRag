@@ -79,6 +79,7 @@ def build_generation(
     tenant: str | None = None,
     *,
     llm: LLMAdapter | None = None,
+    fallback: LLMAdapter | None = None,
 ) -> GenerationService:
     """Assemble the query path every entry point uses, so no two of them can diverge.
 
@@ -93,6 +94,7 @@ def build_generation(
         tenant=tenant,
         embedder=router.default,
         owns_llm=llm is None,
+        fallback=fallback,
     )
 
 
@@ -117,6 +119,7 @@ def build_ingestion(
     cache: SemanticCache | None,
     *,
     router: TieringRouter | None = None,
+    traces: TraceStore | None = None,
 ) -> IngestionService:
     """Assemble ingestion against the caller's adapter.
 
@@ -130,4 +133,5 @@ def build_ingestion(
         router=router,
         cache=cache,
         locks=create_lock_store(settings),
+        traces=traces,
     )
