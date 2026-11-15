@@ -96,7 +96,7 @@ EMBEDDING_PRICES: Final[dict[str, TokenPrice]] = {
     **_table(
         "openai",
         _OPENAI_SOURCE,
-        "2026-08-09",
+        "2026-11-15",
         {
             "text-embedding-3-small": (0.02, None),
             "text-embedding-3-large": (0.13, None),
@@ -114,8 +114,8 @@ EMBEDDING_PRICES: Final[dict[str, TokenPrice]] = {
         },
         dict.fromkeys(
             ("embed-english-v3.0", "embed-multilingual-v3.0", "embed-english-light-v3.0"),
-            "a re-check on 2026-08-09 found no per-token embed rate stated on the pricing "
-            "page, so this figure stands at its original date rather than a fresher one",
+            "re-checks on 2026-08-09 and 2026-11-15 found no per-token embed rate stated on "
+            "the pricing page, so this figure stands at its original date",
         ),
     ),
 }
@@ -124,9 +124,14 @@ GENERATION_PRICES: Final[dict[str, TokenPrice]] = {
     **_table(
         "openai",
         _OPENAI_SOURCE,
-        "2026-08-09",
+        "2026-11-15",
         {
-            "gpt-5.6-sol": (5.00, 30.00),
+            "gpt-6-astra": (10.00, 50.00),
+            "gpt-6.1-sol": (2.00, 10.00),
+            "gpt-6.1-terra": (1.00, 5.00),
+            "gpt-6-sol": (2.00, 10.00),
+            "gpt-6-luna": (0.10, 0.50),
+            "gpt-5.6-sol": (4.00, 20.00),
             "gpt-5.6-terra": (2.00, 12.00),
             "gpt-5.6-luna": (0.20, 1.20),
             "gpt-5.5": (5.00, 30.00),
@@ -144,14 +149,35 @@ GENERATION_PRICES: Final[dict[str, TokenPrice]] = {
             "gpt-5-pro": (15.00, 120.00),
             "gpt-4.1": (2.00, 8.00),
             "gpt-4.1-mini": (0.40, 1.60),
-            "gpt-4.1-nano": (0.10, 0.40),
             "gpt-4o": (2.50, 10.00),
-            "gpt-4o-2024-05-13": (5.00, 15.00),
             "gpt-4o-mini": (0.15, 0.60),
-            "o1": (15.00, 60.00),
-            "o1-pro": (150.00, 600.00),
             "o3": (2.00, 8.00),
             "o3-pro": (20.00, 80.00),
+        },
+        {
+            **dict.fromkeys(
+                ("gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"),
+                "published rate covers prompts up to 272K tokens; a longer prompt costs more",
+            ),
+            **dict.fromkeys(
+                ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
+                "published rate covers prompts up to 272K tokens; a longer prompt costs more",
+            ),
+            "gpt-5.5": "published rate covers requests under 272K context",
+            "gpt-5.5-pro": "published rate covers requests under 272K context",
+            "gpt-5.4": "published rate covers requests under 272K context",
+            "gpt-5.4-pro": "published rate covers requests under 272K context",
+        },
+    ),
+    **_table(
+        "openai",
+        _OPENAI_SOURCE,
+        "2026-08-09",
+        {
+            "gpt-4.1-nano": (0.10, 0.40),
+            "gpt-4o-2024-05-13": (5.00, 15.00),
+            "o1": (15.00, 60.00),
+            "o1-pro": (150.00, 600.00),
             "o3-mini": (1.10, 4.40),
             "o4-mini": (1.10, 4.40),
             "gpt-4-turbo-2024-04-09": (10.00, 30.00),
@@ -160,12 +186,23 @@ GENERATION_PRICES: Final[dict[str, TokenPrice]] = {
             "gpt-3.5-turbo-0125": (0.50, 1.50),
             "gpt-3.5-turbo-1106": (1.00, 2.00),
         },
-        {
-            "gpt-5.5": "published rate covers requests under 272K context",
-            "gpt-5.5-pro": "published rate covers requests under 272K context",
-            "gpt-5.4": "published rate covers requests under 272K context",
-            "gpt-5.4-pro": "published rate covers requests under 272K context",
-        },
+        dict.fromkeys(
+            (
+                "gpt-4.1-nano",
+                "gpt-4o-2024-05-13",
+                "o1",
+                "o1-pro",
+                "o3-mini",
+                "o4-mini",
+                "gpt-4-turbo-2024-04-09",
+                "gpt-4-0613",
+                "gpt-3.5-turbo",
+                "gpt-3.5-turbo-0125",
+                "gpt-3.5-turbo-1106",
+            ),
+            "no longer on the pricing page at the 2026-11-15 re-check, so this rate stands "
+            "at the date it was last read rather than a fresher one",
+        ),
     ),
     **_table(
         "anthropic",
@@ -207,7 +244,7 @@ GENERATION_PRICES: Final[dict[str, TokenPrice]] = {
     **_table(
         "cohere",
         _COHERE_SOURCE,
-        "2026-08-09",
+        "2026-11-15",
         {"command-r-plus-08-2024": (2.50, 10.00)},
     ),
 }
