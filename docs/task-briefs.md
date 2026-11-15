@@ -264,62 +264,6 @@ Do TASK-0454 early: retrieval, performance and half of testing cannot move witho
 
 **Moves:** security.
 
-### TASK-0467 — A disconnected client stops paying for tokens
-
-**Where.** `api/query.py:57-88`: the streaming response relies on the server cancelling the generator; the `finally` closes the service. Nothing checks `request.is_disconnected()`, and no test covers a disconnect.
-
-**Steps.** Write the test first: a scripted LLM that yields slowly; close the client mid-stream; assert the LLM stream was closed and a partial trace was stored with `aborted: true`. Fix what it finds.
-
-**Moves:** core RAG, reliability.
-
-### TASK-0471 — Deduplication under concurrency and with the switch off
-
-**NOT VERIFIED.** `workers/cpu_pool.py:256` and `:281` update the in-job `known` map in submission order — and `:281` does so even when `ingestion.dedup: false`, so the switch is ignored within a job. `known` is loaded once per `process()` (`:235`), so two concurrent jobs carrying the same content under different names both miss and both index.
-
-**Steps.** Reproduce each with a unit test. Honour the switch. For the cross-job race, check the dedup record again at commit time under the journal's lock (TASK-0437), and treat a late duplicate as `deduplicated`, deleting the chunks just written.
-
-**Moves:** ingestion, reliability.
-
-### TASK-0481 — Evaluate the answer, not only the retrieval
-
-**Where.** `services/evaluation.py:166` `score_faithfulness` has no production caller. Metrics are recall, reciprocal rank and nDCG; there is no precision and no answer-relevance measure. The `eval-gate` job gates retrieval only, so a prompt change is gated by nothing.
-
-**Steps.** Add `precision_at_k`. Wire `score_faithfulness` into `fasterrag benchmark --suite eval` behind a flag (it costs model calls). Record a generation baseline beside the retrieval one; gate it in the nightly, not on every push.
-
-**Moves:** testing, retrieval, core RAG. Prerequisite for TASK-0446's "gated".
-
-### TASK-0487 — Timings that localise a slow request
-
-**Where.** `services/generation.py:403-439` records spans for retrieval, reranker (started at the *retrieval* start, so not a rerank duration), context assembly, and generation (non-streamed only). No embed, dense, sparse or fuse breakdown; `timings_ms` holds retrieve, assemble, generate, grade, cache. `observability/otel_export.py` exports four query spans and no ingestion spans.
-
-**Steps.** Time each leg in `RetrievalService._run_legs` and return it with the result; fix the reranker span's start; add parse, chunk, embed and upsert spans to ingestion, labelled on the existing `stage_duration_seconds` metric.
-
-**Moves:** performance, developer experience.
-
-### TASK-0488 — Measure on a schedule
-
-**Where.** `nightly.yml` `measure` runs `pytest -m eval`, then `fasterrag benchmark --suite ingest` (parse and chunk over the handbook corpus), then `scripts/compare_nightly.py --tolerance 1.25`. The query suite is unmeasured. `tests/load/` and `tests/soak/` run in no workflow. Related open tasks: TASK-0405, TASK-0406, TASK-0243, TASK-0084.
-
-**Steps.** Add the query suite against a service-container Qdrant to the nightly; add a weekly short soak (`FASTERRAG_SOAK_SECONDS`) and a load smoke; add an import-time budget test for `import fasterrag` (the existing guard is `tests/unit/test_facade.py:57`).
-
-**Moves:** performance, testing.
-
-### TASK-0493 — An audit trail for administrative actions
-
-**Where.** Nothing in `src/` records who dropped a collection, ran a restore, provisioned a tool or imported an archive.
-
-**Steps.** A structured audit logger (`fasterrag.audit`) emitting key name, tenant, action, target and outcome for every route requiring the `admin` or `collections` scope and the destructive CLI commands; documented in [security.md](security.md) and [observability.md](observability.md).
-
-**Moves:** security.
-
-### TASK-0502 — Configuration that can be upgraded
-
-**Where.** No version key in `config.yaml` or the schema; [migration-guide.md](migration-guide.md) covers arriving from other frameworks, not moving between fasterRag versions.
-
-**Steps.** `schema_version` at the top of `config.yaml`; the loader names the migration when it meets an older one; an "Upgrading" section per release in the changelog. Decide this before the first release, not after.
-
-**Moves:** packaging, developer experience.
-
 ---
 
 ## 3. P2 — competitiveness; each needs a measurement before it becomes a default
@@ -424,7 +368,7 @@ These predate the audit and are defined in [todo.md](todo.md). They have no brie
 | TASK-0300 | 63 surviving mutants from the first mutation run. The nightly `mutation` job runs `scripts/mutation_run.py` with a ratchet (`CEILING`, `:376-383`); some line numbers in the entry have shifted. |
 | TASK-0084, TASK-0085 | Release mechanics; measurement on reference hardware (blocked on hardware); the disaster-recovery restore drill ([disaster-recovery.md](disaster-recovery.md) §2 is a manual procedure today). |
 | TASK-0079, TASK-0049 | Export/import and the Pinecone adapter — the two open slice items named in `CLAUDE.md`. |
-| TASK-0405, TASK-0406, TASK-0243 | Findings from the load and soak tiers, which no workflow runs (see TASK-0488). |
+| TASK-0405, TASK-0406, TASK-0243 | Findings from the load and soak tiers, which `.github/workflows/weekly.yml` runs since TASK-0488 ✅ (2026-11-15). |
 | TASK-0354 | The decision on randomised test ordering (see TASK-0490). |
 
 ---
@@ -436,16 +380,16 @@ Use this to choose work by the category you want to move. The bar each category 
 | Category | Tasks |
 |---|---|
 | Architecture and design | TASK-0456, TASK-0130, TASK-0457 |
-| Core RAG functionality | TASK-0458, TASK-0467, TASK-0485 |
-| Document ingestion and processing | TASK-0459, TASK-0471, TASK-0462 |
-| Retrieval and search quality | TASK-0454, TASK-0447, TASK-0448, TASK-0481, TASK-0463, TASK-0480 |
+| Core RAG functionality | TASK-0458, TASK-0485 |
+| Document ingestion and processing | TASK-0459, TASK-0462 |
+| Retrieval and search quality | TASK-0454, TASK-0447, TASK-0448, TASK-0463, TASK-0480 |
 | Embedding and vector infrastructure | TASK-0451, TASK-0452, TASK-0412, TASK-0352, TASK-0464, TASK-0479, TASK-0049 |
 | Advanced RAG capabilities | TASK-0465, TASK-0448, TASK-0482, TASK-0483, TASK-0484, TASK-0463 |
 | Extensibility and modularity | TASK-0486 |
-| Performance and scalability | TASK-0454, TASK-0130, TASK-0487, TASK-0488, TASK-0407 to TASK-0410 |
+| Performance and scalability | TASK-0454, TASK-0130, TASK-0407 to TASK-0410 |
 | Reliability and error handling | TASK-0474 |
-| Testing and quality assurance | TASK-0412, TASK-0454, TASK-0481, TASK-0300 |
-| Security | TASK-0339, TASK-0381, TASK-0460, TASK-0326, TASK-0493, TASK-0495 |
+| Testing and quality assurance | TASK-0412, TASK-0454, TASK-0300 |
+| Security | TASK-0339, TASK-0381, TASK-0460, TASK-0326, TASK-0495 |
 | Developer experience and APIs | TASK-0500 |
 | Documentation | TASK-0501 |
-| Packaging and release readiness | TASK-0502, TASK-0503 |
+| Packaging and release readiness | TASK-0503 |
