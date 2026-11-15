@@ -115,7 +115,7 @@ def _attributes(trace: TraceView) -> dict[str, Any]:
 
 
 def build_spans(trace: TraceView) -> list[Any]:
-    """Return the OTLP spans for one trace: a root span with a child per stage."""
+    """Return the OTLP spans for one trace: a root span named for its kind, a child per stage."""
     sdk = _sdk()
     started = _started_at(trace)
     base = _epoch_nanoseconds(started)
@@ -123,7 +123,8 @@ def build_spans(trace: TraceView) -> list[Any]:
     resource = sdk.Resource.create({"service.name": SERVICE_NAME})
     scope = sdk.InstrumentationScope(SCOPE_NAME)
     trace_id = int(trace.trace_id, 16)
-    root_id = span_id_for(trace.trace_id, _ROOT_SPAN)
+    root_name = trace.kind or _ROOT_SPAN
+    root_id = span_id_for(trace.trace_id, root_name)
 
     last = max((span.end_ms for span in trace.spans), default=0.0)
 
@@ -136,7 +137,7 @@ def build_spans(trace: TraceView) -> list[Any]:
 
     spans = [
         sdk.ReadableSpan(
-            name=_ROOT_SPAN,
+            name=root_name,
             context=root_context,
             parent=None,
             resource=resource,

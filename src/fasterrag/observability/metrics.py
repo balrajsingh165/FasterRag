@@ -31,6 +31,7 @@ __all__ = [
     "Histogram",
     "Registry",
     "Sample",
+    "observe_stage",
     "render",
 ]
 
@@ -459,6 +460,11 @@ DEGRADED_RESPONSES = REGISTRY.counter(
     "Degradation-ladder activations (D4).",
     ("mode",),
 )
+
+
+def observe_stage(stage: str, seconds: float) -> None:
+    """Record one interval of a stage in ``fasterrag_stage_duration_seconds`` (TASK-0487)."""
+    STAGE_DURATION.observe(seconds, stage=stage)
 
 
 def render() -> str:

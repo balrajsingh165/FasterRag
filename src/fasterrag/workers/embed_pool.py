@@ -47,9 +47,11 @@ from fasterrag.core.breaker import Admission, CircuitBreaker, CircuitOpenError, 
 from fasterrag.core.budget import CostGovernor, shared_governor
 from fasterrag.core.chunking.models import Segment
 from fasterrag.core.pricing import price_for
+from fasterrag.core.tracing import StageClock
 from fasterrag.errors import ErrorCode, FasterRagError, IngestionError
 from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger
+from fasterrag.observability.metrics import observe_stage
 from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload, EmbeddedBatch
 
@@ -139,8 +141,9 @@ class EmbeddingWorkerPool:
         tenant: str | None = None,
         governor: CostGovernor | None = None,
         ledger: IndexLedger | None = None,
+        stages: StageClock | None = None,
     ) -> None:
-        """Build the pool."""
+        """Build the pool, timing its ``embed`` and ``upsert`` stages on ``stages``."""
         self.settings = settings
         self.router = router
         self.sink = sink
@@ -157,6 +160,7 @@ class EmbeddingWorkerPool:
         self.size = settings.workers.embedding_pool_size
         self.batch_size = settings.embeddings.batch_size
         self.report = EmbedReport()
+        self.stages = stages or StageClock(observe=observe_stage)
 
     async def run(self, source: BoundedQueue[ChunkPayload]) -> EmbedReport:
         """Consume ``source`` until it closes, embedding and writing every chunk.
@@ -280,11 +284,12 @@ class EmbeddingWorkerPool:
                 # opens mid-batch must stop the *remaining* attempts — checking once at the
                 # top would spend the whole retry budget on a provider already known dead.
                 admission = self.breaker.check()
-                result = (
-                    await self._embed_pooled(cast(PoolingAdapter, adapter), documents)
-                    if documents
-                    else await adapter.embed_documents([payload.text for payload in group])
-                )
+                with self.stages.timing("embed"):
+                    result = (
+                        await self._embed_pooled(cast(PoolingAdapter, adapter), documents)
+                        if documents
+                        else await adapter.embed_documents([payload.text for payload in group])
+                    )
             except EmbedTooLargeError as exc:
                 # CRITICAL: a size refusal is the caller's fault and proof the provider is up.
                 # Recording it as a failure would open the breaker on a healthy provider, and
@@ -400,7 +405,8 @@ class EmbeddingWorkerPool:
 
         for attempt in range(attempts + 1):
             try:
-                await self.sink.write(batch)
+                with self.stages.timing("upsert"):
+                    await self.sink.write(batch)
             except FasterRagError as exc:
                 last = exc
                 if not exc.retryable or attempt == attempts:

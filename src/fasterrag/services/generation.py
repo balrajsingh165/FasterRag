@@ -602,19 +602,31 @@ class GenerationService:
         canonical = json.dumps(scoped, sort_keys=True, default=str, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
 
-    async def _cache_vector(self, question: str) -> list[float] | None:
+    async def _cache_vector(self, question: str, spans: SpanRecorder) -> list[float] | None:
         """Return the question's vector for cache use, or ``None`` if caching is off."""
         if not self.caching or self.embedder is None:
             return None
 
         try:
-            return await self.embedder.embed_query(question)
+            started = spans.elapsed_ms
+            vector = await self.embedder.embed_query(question)
+            span = spans.record("query-embedding", started)
+            metrics.observe_stage("embed_query", span.duration_ms / 1000)
+            return vector
         except FasterRagError as exc:
             _logger.warning(
                 "could not embed the question for the semantic cache; skipping the lookup",
                 extra={"code": exc.code.value, "trace_id": exc.trace_id},
             )
             return None
+
+    def _retrieval_vector(self, vector: list[float] | None) -> list[float] | None:
+        """Return the cache's vector for retrieval to reuse, when both embed alike (TASK-0515).
+
+        Only a vector from the adapter retrieval itself would call is reusable.
+        """
+        router = getattr(self.retrieval, "router", None)
+        return vector if router is not None and router.default is self.embedder else None
 
     async def _prepare(
         self,
@@ -624,6 +636,7 @@ class GenerationService:
         top_k: int | None,
         filters: Mapping[str, Any] | None,
         recorder: SpanRecorder | None = None,
+        vector: list[float] | None = None,
     ) -> _Prepared:
         """Retrieve and assemble everything generation and grading both need."""
         spans = recorder or SpanRecorder()
@@ -631,7 +644,12 @@ class GenerationService:
         retrieval_started = spans.elapsed_ms
         started = time.perf_counter()
         retrieved = await self.retrieval.search(
-            question, collection=collection, top_k=top_k, filters=filters
+            question,
+            collection=collection,
+            top_k=top_k,
+            filters=filters,
+            vector=vector,
+            recorder=spans,
         )
         retrieve_ms = int((time.perf_counter() - started) * 1000)
         spans.record(
@@ -641,17 +659,6 @@ class GenerationService:
             mode=retrieved.mode,
             hybrid=self.settings.retrieval.hybrid,
         )
-
-        # CRITICAL: reranking is reported as its own span only when it actually ran. A
-        # zero-duration span for a skipped stage is indistinguishable from a stage that ran
-        # instantly, and D4's whole point is telling those apart.
-        if self.settings.retrieval.rerank and retrieved.mode == FULL_MODE:
-            spans.record(
-                "reranker",
-                retrieval_started,
-                model=self.settings.retrieval.reranker_model,
-                reranked=sum(1 for chunk in retrieved.chunks if chunk.rerank_score is not None),
-            )
 
         assemble_started = spans.elapsed_ms
         started = time.perf_counter()
@@ -769,8 +776,11 @@ class GenerationService:
             return UNGRADED
 
         started = time.perf_counter()
+        grading_started = prepared.spans.elapsed_ms if prepared.spans is not None else 0.0
         verdict = await grade(self.grader, question, answer, prepared.context, prepared.texts)
         timings["grade"] = int((time.perf_counter() - started) * 1000)
+        if prepared.spans is not None:
+            prepared.spans.record("grading", grading_started, score=verdict.score)
         if verdict.score is not None:
             metrics.FAITHFULNESS.observe(verdict.score)
         return verdict
@@ -1074,9 +1084,11 @@ class GenerationService:
         trace_id = current_trace_id()
         deadline = _Deadline.starting_now(self.settings.reliability.request_deadline_ms)
         started = time.perf_counter()
+        spans = SpanRecorder()
         async with deadline.bounding("looking up the semantic cache"):
-            vector = await self._cache_vector(question)
+            vector = await self._cache_vector(question, spans)
             cache_ms = int((time.perf_counter() - started) * 1000)
+            lookup_started = spans.elapsed_ms
             hit = (
                 await self.cache.lookup(
                     vector,
@@ -1086,6 +1098,8 @@ class GenerationService:
                 if vector is not None and self.cache is not None
                 else None
             )
+            if vector is not None:
+                spans.record("semantic-cache", lookup_started, hit=hit is not None)
 
         if hit is not None:
             cached = _cached_answer(hit, trace_id, cache_ms)
@@ -1096,7 +1110,12 @@ class GenerationService:
 
         async with deadline.bounding("retrieving"):
             prepared = await self._prepare(
-                question, collection=collection, top_k=top_k, filters=filters
+                question,
+                collection=collection,
+                top_k=top_k,
+                filters=filters,
+                recorder=spans,
+                vector=self._retrieval_vector(vector),
             )
         timings = prepared.timings
         if vector is not None:

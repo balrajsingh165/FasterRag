@@ -57,6 +57,16 @@ def test_the_trace_becomes_one_trace_create_event() -> None:
     assert body["output"] == "The allowance is 41."
 
 
+def test_an_ingest_trace_is_named_as_an_ingest() -> None:
+    """Every trace was named `query`, so an ingest trace would read as one (TASK-0487)."""
+    from dataclasses import replace
+
+    (created,) = events_by_type(build_batch(replace(trace(), kind="ingest")), "trace-create")
+
+    assert isinstance(created["body"], dict)
+    assert created["body"]["name"] == "ingest"
+
+
 def test_every_span_becomes_an_observation() -> None:
     batch = build_batch(trace())
 

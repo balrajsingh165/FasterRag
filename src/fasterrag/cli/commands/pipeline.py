@@ -212,7 +212,12 @@ async def run_ingest(args: argparse.Namespace, console: Console) -> ExitCode:
         return ExitCode.SUCCESS
 
     journal = create_journal(settings)
-    service = IngestionService(settings, journal=journal, locks=create_lock_store(settings))
+    service = IngestionService(
+        settings,
+        journal=journal,
+        locks=create_lock_store(settings),
+        traces=create_trace_store(settings),
+    )
     try:
         if watching:
             accepted = await service.accept(sources, collection=args.collection)

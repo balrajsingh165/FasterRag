@@ -46,6 +46,10 @@ class TraceView(Protocol):
         """Return the 32-hex trace id."""
 
     @property
+    def kind(self) -> str:
+        """Return what the trace records: ``query`` or ``ingest``."""
+
+    @property
     def query(self) -> str:
         """Return the query text."""
 
