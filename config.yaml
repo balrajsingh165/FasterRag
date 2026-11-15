@@ -41,6 +41,7 @@ embeddings:
   api_key_env: null
   batch_size: 64
   dimensions: null
+  base_url: null
   cache:
     enabled: true
     backend: disk

@@ -256,3 +256,35 @@ def test_every_lock_field_that_changes_chunks_is_compared(field_name: str) -> No
     report = detect_drift(lock(Settings()), changed, collection="docs")
 
     assert field_name in report.fields
+
+
+WRITTEN_BY_BETA = {
+    "off": "ebe830d544170a9d03d7da8bb8f5f0227333ab29131d9abdce1ab11cc08cfcc0",
+    "warn": "541b23f3097ab415685ae6f8cf3053d381412a5e52d3462874888ef07414b3e8",
+    "refuse": "d222fca93dbaaa9ad977f9213ddd8f9845828756fcf84cc543a5d351a73bcb77",
+}
+"""The ``config_hash`` 0.1.0b1 and 0.1.0b2 recorded for a default configuration, per mode.
+
+Both hashed ``retrieval.verify_lock`` with the rest of ``retrieval``; TASK-0549 left it out.
+"""
+
+
+@pytest.mark.parametrize("written", sorted(WRITTEN_BY_BETA))
+@pytest.mark.parametrize("live", sorted(WRITTEN_BY_BETA))
+def test_a_lock_written_by_a_beta_reports_no_drift(written: str, live: str) -> None:
+    """Excluding ``verify_lock`` from the hash must not make every beta's lock look drifted."""
+    settings = Settings.model_validate({"retrieval": {"verify_lock": live}})
+    beta_lock = lock(settings, config_hash=WRITTEN_BY_BETA[written])
+
+    report = detect_drift(beta_lock, settings, collection="docs")
+
+    assert "config_hash" not in report.fields
+
+
+def test_a_beta_lock_still_reports_a_setting_that_really_moved() -> None:
+    settings = Settings.model_validate({"retrieval": {"rrf_k": 30}})
+    beta_lock = lock(settings, config_hash=WRITTEN_BY_BETA["warn"])
+
+    report = detect_drift(beta_lock, settings, collection="docs")
+
+    assert "config_hash" in report.fields

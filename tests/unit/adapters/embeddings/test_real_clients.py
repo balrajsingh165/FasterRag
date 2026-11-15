@@ -17,12 +17,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 
 from fasterrag.adapters.embeddings.cohere import CohereEmbedder
 from fasterrag.adapters.embeddings.ollama import OllamaEmbedder
 from fasterrag.config.schema import Settings
-from fasterrag.errors import EmbedError
+from fasterrag.errors import ConfigError, EmbedError
 from tests.unit.adapters.recordings import (
     COHERE_EMBED,
     OLLAMA_EMBED,
@@ -33,6 +34,7 @@ from tests.unit.adapters.recordings import (
     assert_same_shape,
     json_reply,
     parsed,
+    record_closes,
     refusing_connections,
     require_library,
 )
@@ -59,6 +61,12 @@ def ollama_library(monkeypatch: pytest.MonkeyPatch) -> None:
     """Require the library and clear the one variable that would redirect the client."""
     require_library("ollama")
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
+
+
+@pytest.fixture
+def closed_clients(monkeypatch: pytest.MonkeyPatch) -> list[httpx.AsyncClient]:
+    """Record every HTTP client whose connection pool is closed, then close it for real."""
+    return record_closes(monkeypatch)
 
 
 @pytest.fixture
@@ -243,3 +251,124 @@ async def test_the_fake_cohere_embedding_has_the_shape_the_real_client_returns(
     )
 
     assert_same_shape(real, parsed(COHERE_EMBED))
+
+
+@pytest.mark.usefixtures("ollama_library")
+async def test_embeddings_base_url_points_the_embedder_at_its_own_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An Ollama LLM on one server and Ollama embeddings on another could not be expressed."""
+    replay = Replay(monkeypatch, {"/api/embed": json_reply(OLLAMA_EMBED)})
+    monkeypatch.setenv("OLLAMA_HOST", "http://from-the-environment:11434")
+    llm = {"provider": "ollama", "api_key_env": None, "base_url": "http://llm.internal:11434"}
+    settings = ollama_settings(llm, base_url="http://embeddings.internal:11434")
+
+    await OllamaEmbedder(settings).embed_documents(["a", "b"])
+
+    assert replay.requests[0][0].host == "embeddings.internal"
+
+
+@pytest.mark.usefixtures("ollama_library")
+async def test_the_configured_dimension_is_sent_to_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``embeddings.dimensions`` was dropped, so the server answered at the model's full width."""
+    replay = Replay(monkeypatch, {"/api/embed": json_reply(OLLAMA_EMBED)})
+
+    await OllamaEmbedder(ollama_settings(dimensions=256)).embed_documents(["a", "b"])
+
+    assert replay.bodies[0]["dimensions"] == 256
+
+
+@pytest.mark.usefixtures("ollama_library")
+async def test_no_dimension_is_sent_to_ollama_unless_one_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay = Replay(monkeypatch, {"/api/embed": json_reply(OLLAMA_EMBED)})
+
+    await OllamaEmbedder(ollama_settings()).embed_documents(["a", "b"])
+
+    assert "dimensions" not in replay.bodies[0]
+
+
+@pytest.mark.usefixtures("ollama_library")
+async def test_a_client_too_old_to_send_a_dimension_refuses_rather_than_ignores_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clients before ollama 0.5.4 have no ``dimensions`` argument on ``embed``."""
+    from ollama import AsyncClient
+
+    current = AsyncClient.embed
+
+    async def without_dimensions(self: Any, model: str = "", **request: Any) -> Any:
+        return await current(self, model=model, **request)
+
+    monkeypatch.setattr(AsyncClient, "embed", without_dimensions)
+    replay = Replay(monkeypatch, {"/api/embed": json_reply(OLLAMA_EMBED)})
+
+    with pytest.raises(ConfigError, match=r"ollama>=0\.5\.4"):
+        await OllamaEmbedder(ollama_settings(dimensions=256)).embed_documents(["a", "b"])
+
+    assert replay.requests == []
+
+
+@pytest.mark.usefixtures("ollama_library")
+async def test_closing_the_ollama_embedder_closes_its_connection_pool(
+    monkeypatch: pytest.MonkeyPatch, closed_clients: list[httpx.AsyncClient]
+) -> None:
+    """``close()`` dropped the client and left its pooled connections open."""
+    Replay(monkeypatch, {"/api/embed": json_reply(OLLAMA_EMBED)})
+    adapter = OllamaEmbedder(ollama_settings())
+    await adapter.embed_documents(["a", "b"])
+
+    await adapter.close()
+
+    assert len(closed_clients) == 1
+    assert closed_clients[0].is_closed
+
+
+@pytest.mark.usefixtures("cohere_key")
+async def test_a_rate_limited_cohere_embed_is_sent_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The SDK retried a 429 by itself, under the worker pool's own retry policy."""
+    replay = Replay(monkeypatch, {"/v1/embed": json_reply({"message": "slow down"}, status=429)})
+
+    with pytest.raises(EmbedError) as caught:
+        await CohereEmbedder(cohere_settings()).embed_documents(["a", "b"])
+
+    assert caught.value.retryable is True
+    assert replay.paths == ["/v1/embed"]
+
+
+@pytest.mark.usefixtures("cohere_key")
+async def test_a_failing_cohere_server_is_asked_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    replay = Replay(monkeypatch, {"/v1/embed": json_reply({"message": "down"}, status=503)})
+
+    with pytest.raises(EmbedError):
+        await CohereEmbedder(cohere_settings()).embed_documents(["a", "b"])
+
+    assert replay.paths == ["/v1/embed"]
+
+
+@pytest.mark.usefixtures("cohere_key")
+async def test_closing_the_cohere_embedder_closes_its_connection_pool(
+    monkeypatch: pytest.MonkeyPatch, closed_clients: list[httpx.AsyncClient]
+) -> None:
+    """``close()`` dropped the client and left its pooled connections open."""
+    Replay(monkeypatch, {"/v1/embed": json_reply(COHERE_EMBED)})
+    adapter = CohereEmbedder(cohere_settings())
+    await adapter.embed_documents(["a", "b"])
+
+    await adapter.close()
+
+    assert len(closed_clients) == 1
+    assert closed_clients[0].is_closed
+
+
+@pytest.mark.usefixtures("cohere_key")
+async def test_embeddings_base_url_points_the_cohere_embedder_at_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay = Replay(monkeypatch, {"/v1/embed": json_reply(COHERE_EMBED)})
+    settings = cohere_settings(base_url="https://cohere-gateway.internal")
+
+    await CohereEmbedder(settings).embed_documents(["a", "b"])
+
+    assert replay.requests[0][0].host == "cohere-gateway.internal"

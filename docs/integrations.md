@@ -54,9 +54,9 @@ Backend swap = config change + D2 zero-downtime reindex (or D11 vector copy wher
 | Provider | Value | Secret (env var) | Local? | Notes |
 |---|---|---|---|---|
 | HuggingFace / sentence-transformers | `huggingface` | — | ✅ | Default; runs on CPU/GPU in the embedding pool; no data leaves the host. |
-| OpenAI | `openai` | `OPENAI_API_KEY` | ❌ | Batched API calls; prompt caching honored where offered. |
-| Cohere | `cohere` | `COHERE_API_KEY` | ❌ | Batched, through the v1 `embed` call. |
-| Ollama (local server) | `ollama` | — | ✅ | One request per batch on `/api/embed`, so the server must serve that route; the adapter does not fall back to the superseded per-text `/api/embeddings`. Needs `ollama>=0.4`. There is no `embeddings.base_url`: the server is `llm.base_url` when `llm.provider` is also `ollama`, and otherwise the client's own default — the `OLLAMA_HOST` environment variable, else `http://127.0.0.1:11434`. `embeddings.dimensions` is not sent to the server. |
+| OpenAI | `openai` | `OPENAI_API_KEY` | ❌ | Batched API calls; prompt caching honored where offered. `embeddings.base_url` overrides the endpoint, for an OpenAI-compatible embeddings gateway. |
+| Cohere | `cohere` | `COHERE_API_KEY` | ❌ | Batched, through the v1 `embed` call. The client library's own retries are switched off per request, so the worker pool's retry policy is the only one. `embeddings.base_url` overrides the endpoint. |
+| Ollama (local server) | `ollama` | — | ✅ | One request per batch on `/api/embed`, so the server must serve that route; the adapter does not fall back to the superseded per-text `/api/embeddings`. Needs `ollama>=0.4`. The server is `embeddings.base_url` when set; otherwise `llm.base_url` when `llm.provider` is also `ollama`, and otherwise the client's own default — the `OLLAMA_HOST` environment variable, else `http://127.0.0.1:11434`. `embeddings.dimensions` is sent as the request's `dimensions`, which needs `ollama>=0.5.4`; with an older client a set dimension is refused with a `ConfigError` rather than ignored. |
 
 **Tiered embedding** (`embeddings.tiering`): route document classes to different models — cheap models for high-volume/low-priority classes, higher-cost models where retrieval precision matters:
 
