@@ -74,6 +74,7 @@ fasterRag/
 │       │   ├── doctor.py         # D10 preflight checks; gates provisioning
 │       │   ├── journal.py        # D3 checkpoints, dedup, DLQ; async over *_blocking twins
 │       │   ├── estimation.py     # D9 preflight token counts and projected cost
+│       │   ├── source_expansion.py # Directory arguments expanded into files (CLI and facade)
 │       │   ├── composition.py    # Composition root: the service builders the API, CLI, facade and eval harness share
 │       │   ├── embedding_router.py # The embedding router every entry point uses, cached when configured
 │       │   ├── ingestion.py      # Job lifecycle: run both pools, checkpoint, settle
@@ -83,6 +84,9 @@ fasterRag/
 │       ├── core/                 # RAG pipeline (pure domain logic)
 │       │   ├── identity.py       # Deterministic document, chunk, and config hashes
 │       │   ├── tenancy.py        # The payload field naming a chunk's owning tenant
+│       │   ├── budget.py         # D9 runtime cost governor (token budgets)
+│       │   ├── pricing.py        # Published list prices; price_for / price_generation
+│       │   ├── journaling.py     # DocumentRecord + the DocumentJournal protocol parse workers use
 │       │   ├── parsing/          # PDF/HTML/MD/DOCX/OCR parsers, table extraction
 │       │   ├── chunking/         # fixed, recursive, semantic, layout, late, contextual
 │       │   ├── retrieval/        # bm25.py sparse encoding; fusion and filters
@@ -113,6 +117,7 @@ fasterRag/
 │       │   └── config.local.yaml # The local profile: embedded Chroma, local embeddings, no keys
 │       ├── observability/        # Metrics, tracing, dashboard
 │       │   ├── logging.py        # Structured JSON logging + correlation ids
+│       │   ├── trace_view.py     # Read-only trace protocols the exporters are typed against
 │       │   ├── otel_export.py    # Span helpers (retrieval/reranker/context/generation)
 │       │   ├── metrics.py        # Metrics catalogue export
 │       │   └── dashboard.py      # Read-only inspection UI (observability ONLY)
@@ -149,11 +154,17 @@ fasterRag/
 
 Imports point one way. A module may import its own layer and any layer listed after it, never one listed before it:
 
-`cli/` → `api/` | the facade | the dashboard → `services/` → `workers/` → `adapters/` → `core/` → `observability/` → `config/` → `errors.py`
+`cli/` → `api/` | the facade | the dashboard → *http* → `services/` → `workers/` → `adapters/` → `core/` → *interfaces* → `observability/` → `config/` → `errors.py` → *logging*
 
 The three in the second position are siblings and may not import each other: the facade is `__init__.py`, `facade.py`, `sync.py` and the re-export modules beside them, and the dashboard is `observability/dashboard.py`, a second web application rather than instrumentation. `cli/` sits above them because the terminal is what starts the API and the dashboard.
 
-`scripts/check_layering.py` enforces this in CI's `quality` job and in the unit tier, reading every import statement at any depth — a function-level import is how the facade used to reach into `api/` unseen. **The tree does not satisfy the rule yet** (TASK-0456): the imports that break it are listed by name in that script's `EXCEPTIONS` table, each with the step that removes it, and the gate fails on any import not in the table and on any entry the tree no longer needs. Whether `core/` may name the adapter base interfaces — which the table below says it does, and which the order above does not allow — is the open decision in that task.
+The three layers in italics are single modules carved out of a package (TASK-0529):
+
+- *http* is `api/auth.py` and `api/problems.py` — the authentication middleware and the problem+json responses both web applications serve, so the dashboard uses them without importing its sibling.
+- *interfaces* is `adapters/vectordb/base.py`, `adapters/embeddings/base.py` and `adapters/llm/base.py`. `core/` may name an abstract adapter it is handed, never a concrete adapter or a factory; the three base modules import only `config`, `errors` and each other.
+- *logging* is `observability/logging.py`, which imports nothing from the package, so the configuration loader and the error base class can log and read the trace id.
+
+`scripts/check_layering.py` enforces this in CI's `quality` job and in the unit tier, reading every import statement at any depth — a function-level import is how the facade used to reach into `api/` unseen. Its `EXCEPTIONS` table is **empty** since TASK-0529: the gate fails on any import against the order above, and an entry may never be added to make a new import pass — move the code, or move the interface it needs down a layer. The gate reads module names, not package initialisers: importing `adapters/llm/base.py` still runs `adapters/llm/__init__.py`, which loads the concrete adapters, so the *interfaces* rule holds for the source and not yet for what the interpreter loads.
 
 ## Separation-of-concerns rationale
 

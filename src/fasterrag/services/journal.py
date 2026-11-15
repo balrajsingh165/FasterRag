@@ -31,6 +31,10 @@ away, so a reader or a crash at any step finds a whole record; a torn one is det
 the previous good copy is kept so a damaged record degrades to resuming slightly earlier
 rather than to losing the job (``docs/reliability.md`` §3, ``docs/failure-modes.md`` rows 32
 and 33, ``docs/adr/ADR-0009-journal-stays-on-files.md``).
+
+``DocumentRecord`` and ``DocumentStatus`` are defined in :mod:`fasterrag.core.journaling` since
+2026-11-15 (TASK-0529), beside the ``DocumentJournal`` protocol the parse workers are typed
+against, and are re-exported here as the same objects.
 """
 
 from __future__ import annotations
@@ -54,6 +58,7 @@ from typing import Any, Final
 from fasterrag.config.schema import Settings
 from fasterrag.core.identity import job_id as new_job_id
 from fasterrag.core.identity import text_hash
+from fasterrag.core.journaling import DocumentRecord, DocumentStatus
 from fasterrag.errors import ErrorCode, IngestionError
 from fasterrag.observability.logging import get_logger
 
@@ -98,7 +103,6 @@ _INTERRUPTED: Final = "INTERRUPTED"
 _PRUNE_INTERVAL_SECONDS: Final = 3600.0
 _SECONDS_PER_DAY: Final = 86400
 
-DocumentStatus = str
 JobStatus = str
 
 _logger = get_logger(__name__)
@@ -115,31 +119,6 @@ class Checkpoint:
 
     last_document_index: int
     written_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class DocumentRecord:
-    """The outcome for one document, and the dead-letter entry when it failed.
-
-    ``detail`` is human-readable and never contains a secret value; ``reason_code`` is
-    drawn from the stable error-code table so a client can branch on it.
-    """
-
-    document_id: str
-    source: str
-    status: DocumentStatus
-    content_hash: str | None = None
-    reason_code: str | None = None
-    detail: str | None = None
-    attempts: int = 0
-    trace_id: str | None = None
-    first_failed_at: str | None = None
-    last_failed_at: str | None = None
-
-    @property
-    def dead_lettered(self) -> bool:
-        """Return whether this document was dead-lettered."""
-        return self.status == "dead_lettered"
 
 
 @dataclass

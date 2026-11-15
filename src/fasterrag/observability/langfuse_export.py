@@ -30,8 +30,8 @@ from typing import Any, Final
 
 import httpx
 
-from fasterrag.core.tracing import Trace
 from fasterrag.observability.logging import get_logger
+from fasterrag.observability.trace_view import TraceView
 
 __all__ = ["LangfuseExporter", "build_batch"]
 
@@ -64,7 +64,7 @@ def _parse_created_at(value: str, trace_id: str) -> datetime:
         return datetime.now(tz=UTC)
 
 
-def build_batch(trace: Trace, *, release: str | None = None) -> list[dict[str, Any]]:
+def build_batch(trace: TraceView, *, release: str | None = None) -> list[dict[str, Any]]:
     """Return the ingestion events for one trace."""
     started = _parse_created_at(trace.created_at, trace.trace_id)
     usage = trace.result.get("usage") or {}
@@ -160,7 +160,7 @@ class LangfuseExporter:
         }
         self._client: httpx.AsyncClient | None = None
 
-    async def export(self, trace: Trace) -> bool:
+    async def export(self, trace: TraceView) -> bool:
         """Send one trace, reporting whether it landed."""
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout, headers=self._headers)
@@ -187,7 +187,7 @@ class LangfuseExporter:
         return self._all_events_accepted(response, trace)
 
     @staticmethod
-    def _all_events_accepted(response: httpx.Response, trace: Trace) -> bool:
+    def _all_events_accepted(response: httpx.Response, trace: TraceView) -> bool:
         """Return whether Langfuse stored every event, not merely that it answered."""
         try:
             body = response.json()

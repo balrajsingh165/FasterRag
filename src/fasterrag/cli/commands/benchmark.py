@@ -18,7 +18,6 @@ from pathlib import Path
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.commands.pipeline import _build_generation, _settings_or_none
 from fasterrag.cli.output import Console, ExitCode
-from fasterrag.cli.sources import expand_sources
 from fasterrag.config.schema import Settings
 from fasterrag.errors import FasterRagError
 from fasterrag.services.benchmark import (
@@ -31,6 +30,7 @@ from fasterrag.services.benchmark import (
 from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.estimation import estimate_sources
 from fasterrag.services.evaluation import run_eval, summarize
+from fasterrag.services.source_expansion import expand_sources
 
 __all__ = ["run_benchmark"]
 

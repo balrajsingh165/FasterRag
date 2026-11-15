@@ -1458,31 +1458,6 @@ Args:
     Raises:
         ConfigError: If the file or any override is invalid.
 
-## `src/fasterrag/cli/sources.py`
-
-### `expand_sources`
-
-> Return the sources with any directory replaced by the files inside it.
-
-Anything that is not an existing directory passes through untouched, so URLs, inline
-    payloads, and plain file paths are unaffected.
-
-    Args:
-        sources: The sources as given on the command line.
-        recursive: Whether to descend into subdirectories. Without it only a directory's
-            immediate files are taken, which is what makes ``--recursive`` mean something.
-
-    Returns:
-        The expanded sources. Files from one directory are sorted, because document ids
-        and job order derive from this list and an arbitrary filesystem order would make
-        the same command produce a different job each run.
-
-A source the filesystem cannot even stat is not a directory; leave it for the pipeline to report as unreadable with its own reason code.
-
-### `SKIPPED_DIRECTORIES`
-
-Walking these wastes a full parse pass on files no corpus contains. Ingesting a project folder should not mean parsing its virtualenv.
-
 ## `src/fasterrag/config/loader.py`
 
 ### `load_settings`
@@ -1690,6 +1665,54 @@ A failed probe re-opens immediately: half-open exists to test recovery with one 
 A breaker counts *consecutive* failures, and a count a caller rebuilds per unit of work
     never exceeds one. The REST API builds its services per request, so a breaker owned by
     the service could not open there at all; sharing one instance is what makes it work.
+
+## `src/fasterrag/core/budget.py`
+
+### `create_governor`
+
+> Build the governor from ``cost.*``.
+
+Always returned, never ``None``: a governor with both budgets at their ``0`` default
+    permits everything, and a caller that has to decide whether it has one is a caller that
+    can forget to ask.
+
+### `CostGovernor.check`
+
+> Refuse a request that would exceed either budget.
+
+Args:
+            tokens: The worst case this request can cost — prompt plus ``llm.max_tokens``.
+            tenant: The tenant to charge, or ``None`` for a single-tenant deployment. All
+                untenanted traffic shares one bucket, which is what a deployment with
+                ``security.multi_tenancy: false`` means by a per-tenant budget.
+            now: Monotonic clock override, for tests.
+
+        Raises:
+            FasterRagError: ``BUDGET_EXCEEDED`` when the request does not fit. The message
+                names which budget refused it and by how much, because "budget exceeded"
+                alone leaves an operator unable to tell a too-large query from an exhausted
+                account.
+
+### `CostGovernor.record`
+
+> Charge a completed request's actual token usage to its tenant.
+
+Recorded after the call rather than at the check, so a tenant is charged what the
+        query really cost rather than the ceiling it was admitted against. Admitting on the
+        worst case and charging the real one is the combination that neither overspends nor
+        over-refuses.
+
+### `ROLLING_WINDOW_SECONDS`
+
+The documented budget is "rolling" without naming a period, and a rolling window means nothing without one. A day is the shortest period over which a spend cap is normally reasoned about, and it is stated in config-reference.md rather than left to be inferred.
+
+### `CostGovernor._alive`
+
+> Evict every bucket wholly outside the window; ``None`` once none is left.
+
+A tenant whose spend has aged out is **forgotten**, not left holding an empty
+        window: this instance lives as long as the process (TASK-0337) and a tenant id is
+        chosen by the caller, so a map that only grew would be a leak keyed on client input.
 
 ## `src/fasterrag/core/cache/__init__.py`
 
@@ -3472,54 +3495,6 @@ Every one of the seven mandatory fields is emitted, populated from what was actu
     measured. A template with a blank to fill in by hand is a template someone eventually
     commits with the blank still in it.
 
-## `src/fasterrag/services/budget.py`
-
-### `create_governor`
-
-> Build the governor from ``cost.*``.
-
-Always returned, never ``None``: a governor with both budgets at their ``0`` default
-    permits everything, and a caller that has to decide whether it has one is a caller that
-    can forget to ask.
-
-### `CostGovernor.check`
-
-> Refuse a request that would exceed either budget.
-
-Args:
-            tokens: The worst case this request can cost — prompt plus ``llm.max_tokens``.
-            tenant: The tenant to charge, or ``None`` for a single-tenant deployment. All
-                untenanted traffic shares one bucket, which is what a deployment with
-                ``security.multi_tenancy: false`` means by a per-tenant budget.
-            now: Monotonic clock override, for tests.
-
-        Raises:
-            FasterRagError: ``BUDGET_EXCEEDED`` when the request does not fit. The message
-                names which budget refused it and by how much, because "budget exceeded"
-                alone leaves an operator unable to tell a too-large query from an exhausted
-                account.
-
-### `CostGovernor.record`
-
-> Charge a completed request's actual token usage to its tenant.
-
-Recorded after the call rather than at the check, so a tenant is charged what the
-        query really cost rather than the ceiling it was admitted against. Admitting on the
-        worst case and charging the real one is the combination that neither overspends nor
-        over-refuses.
-
-### `ROLLING_WINDOW_SECONDS`
-
-The documented budget is "rolling" without naming a period, and a rolling window means nothing without one. A day is the shortest period over which a spend cap is normally reasoned about, and it is stated in config-reference.md rather than left to be inferred.
-
-### `CostGovernor._alive`
-
-> Evict every bucket wholly outside the window; ``None`` once none is left.
-
-A tenant whose spend has aged out is **forgotten**, not left holding an empty
-        window: this instance lives as long as the process (TASK-0337) and a tenant id is
-        chosen by the caller, so a map that only grew would be a leak keyed on client input.
-
 ## `src/fasterrag/services/ci_status.py`
 
 ### `parse_remote`
@@ -4691,6 +4666,31 @@ Args:
     Raises:
         FasterRagError: With ``VALIDATION_FAILED`` if the service would record a trace,
             because that would silently corrupt the record being investigated.
+
+## `src/fasterrag/services/source_expansion.py`
+
+### `expand_sources`
+
+> Return the sources with any directory replaced by the files inside it.
+
+Anything that is not an existing directory passes through untouched, so URLs, inline
+    payloads, and plain file paths are unaffected.
+
+    Args:
+        sources: The sources as given on the command line.
+        recursive: Whether to descend into subdirectories. Without it only a directory's
+            immediate files are taken, which is what makes ``--recursive`` mean something.
+
+    Returns:
+        The expanded sources. Files from one directory are sorted, because document ids
+        and job order derive from this list and an arbitrary filesystem order would make
+        the same command produce a different job each run.
+
+A source the filesystem cannot even stat is not a directory; leave it for the pipeline to report as unreadable with its own reason code.
+
+### `SKIPPED_DIRECTORIES`
+
+Walking these wastes a full parse pass on files no corpus contains. Ingesting a project folder should not mean parsing its virtualenv.
 
 ## `src/fasterrag/services/sources.py`
 

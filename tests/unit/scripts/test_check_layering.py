@@ -26,13 +26,17 @@ SKELETON = {
     "errors.py": "",
     "config/__init__.py": "",
     "observability/__init__.py": "",
-    "observability/logging.py": "from fasterrag.errors import X\n",
+    "observability/logging.py": "",
+    "observability/metrics.py": "from fasterrag.errors import X\n",
     "observability/dashboard.py": "",
     "core/__init__.py": "",
     "adapters/__init__.py": "",
+    "adapters/vectordb/__init__.py": "",
+    "adapters/vectordb/base.py": "",
     "workers/__init__.py": "",
     "services/__init__.py": "",
     "api/__init__.py": "",
+    "api/auth.py": "",
     "cli/__init__.py": "",
     "facade.py": "",
 }
@@ -73,6 +77,11 @@ def test_every_layer_has_exactly_one_rank() -> None:
 def test_every_exception_names_the_task_that_removes_it() -> None:
     """A waiver with no owner is a permission; these are a backlog."""
     assert all("TASK-" in reason for reason in EXCEPTIONS.values())
+
+
+def test_the_exception_table_is_empty() -> None:
+    """TASK-0529's acceptance check: every edge the gate once waived has been removed."""
+    assert EXCEPTIONS == {}
 
 
 def test_a_downward_import_is_allowed(tmp_path: Path) -> None:
@@ -225,7 +234,7 @@ def test_an_empty_tree_is_vacuous_not_clean(tmp_path: Path) -> None:
 
 def test_a_tree_with_no_internal_import_is_vacuous(tmp_path: Path) -> None:
     """A scan that stops reading imports would otherwise report a perfectly layered tree."""
-    found = check(build(tmp_path, **{"observability/logging.py": ""}), exceptions={})
+    found = check(build(tmp_path, **{"observability/metrics.py": ""}), exceptions={})
 
     assert [finding.rule for finding in found] == [VACUOUS]
 
@@ -247,7 +256,12 @@ def test_a_layer_with_no_module_is_vacuous(tmp_path: Path) -> None:
         ("fasterrag", "facade"),
         ("fasterrag.sync", "facade"),
         ("fasterrag.observability.dashboard", "dashboard"),
-        ("fasterrag.observability.logging", "observability"),
+        ("fasterrag.observability.logging", "logging"),
+        ("fasterrag.observability.metrics", "observability"),
+        ("fasterrag.adapters.llm.base", "interfaces"),
+        ("fasterrag.adapters.llm.factory", "adapters"),
+        ("fasterrag.api.auth", "http"),
+        ("fasterrag.api.problems", "http"),
         ("fasterrag.api.dependencies", "api"),
         ("fasterrag.apiary", None),
     ],
@@ -265,3 +279,60 @@ def test_a_new_violation_fails_the_gate_and_says_how_to_fix_it(
     reported = capsys.readouterr().err
     assert "fasterrag.core.thing (core) imports fasterrag.services.journal (services)" in reported
     assert "Do not add an entry to EXCEPTIONS" in reported
+
+
+def test_core_may_name_an_adapter_base_interface(tmp_path: Path) -> None:
+    """TASK-0529: core is handed abstract adapters, so it may name their base classes."""
+    source = "from fasterrag.adapters.vectordb.base import VectorDBAdapter\n"
+
+    assert broken(tmp_path, **{"core/retrieval.py": source}) == []
+
+
+def test_core_may_not_name_a_concrete_adapter_or_a_factory(tmp_path: Path) -> None:
+    """Only the three base modules moved down; the rest of adapters/ is still above core."""
+    modules = {
+        "adapters/vectordb/factory.py": "",
+        "core/retrieval.py": "from fasterrag.adapters.vectordb.factory import create\n",
+    }
+
+    assert [finding.key for finding in broken(tmp_path, **modules)] == [
+        "fasterrag.core.retrieval -> fasterrag.adapters.vectordb.factory"
+    ]
+
+
+def test_an_adapter_base_interface_may_not_import_core(tmp_path: Path) -> None:
+    """The interfaces sit below core; one that reached up would bring the cycle back."""
+    modules = {"adapters/vectordb/base.py": "from fasterrag.core.tenancy import KEY\n"}
+
+    assert [finding.rule for finding in broken(tmp_path, **modules)] == [UPWARD]
+
+
+def test_the_error_base_class_and_the_loader_may_log(tmp_path: Path) -> None:
+    """observability/logging.py imports nothing from the package, so it sits below errors."""
+    modules = {
+        "errors.py": "from fasterrag.observability.logging import current_trace_id\n",
+        "config/loader.py": "from fasterrag.observability.logging import get_logger\n",
+    }
+
+    assert broken(tmp_path, **modules) == []
+
+
+def test_the_logging_module_may_not_import_the_package(tmp_path: Path) -> None:
+    """Being the bottom layer only holds while logging.py imports nothing above it."""
+    modules = {"observability/logging.py": "from fasterrag.errors import ErrorCode\n"}
+
+    assert [finding.rule for finding in broken(tmp_path, **modules)] == [UPWARD]
+
+
+def test_the_dashboard_may_use_the_shared_http_modules_but_not_the_api(tmp_path: Path) -> None:
+    """auth.py and problems.py serve both web applications; the rest of api/ is a sibling."""
+    source = (
+        "from fasterrag.api.auth import AuthMiddleware\nfrom fasterrag.api.main import create_app\n"
+    )
+    modules = {"api/main.py": "", "observability/dashboard.py": source}
+
+    found = broken(tmp_path, **modules)
+
+    assert [(finding.rule, finding.key) for finding in found] == [
+        (SIDEWAYS, "fasterrag.observability.dashboard -> fasterrag.api.main")
+    ]
