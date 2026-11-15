@@ -21,6 +21,7 @@ from fasterrag.api.dependencies import (
     CurrentSettings,
     CurrentTenant,
     CurrentVectorDB,
+    JournalDep,
 )
 from fasterrag.api.schemas import EstimateRequest, ExportRequest, ImportRequest
 from fasterrag.services.archive import export_archive
@@ -131,6 +132,7 @@ async def import_collection(
     body: ImportRequest,
     settings: CurrentSettings,
     adapter: CurrentVectorDB,
+    journal: JournalDep,
     tenant: CurrentTenant,
 ) -> dict[str, Any]:
     """Import a previously exported archive (D11)."""
@@ -146,6 +148,7 @@ async def import_collection(
                 collection=target,
                 reembed=body.reembed,
                 router=router_,
+                journal=journal,
             )
         finally:
             if router_ is not None:

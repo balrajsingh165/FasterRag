@@ -77,10 +77,18 @@ from fasterrag.config.schema import Settings
 from fasterrag.core.chunking import SentenceEmbedder, create_chunker, create_token_counter
 from fasterrag.core.confinement import resolved_within
 from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
+from fasterrag.core.journaling import (
+    DeletionWatch,
+    DocumentJournal,
+    DocumentRecord,
+    Extent,
+    IndexOutcome,
+)
 from fasterrag.core.parsing import create_parsing_options, parse_bytes
+from fasterrag.core.tracing import StageClock
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError, ParseError
 from fasterrag.observability.logging import current_trace_id, get_logger
-from fasterrag.services.journal import DocumentRecord, Extent, Journal
+from fasterrag.observability.metrics import observe_stage
 from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload, DocumentTask, ParseOutcome
 
@@ -224,6 +232,7 @@ def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
 
 def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
     """Do the work of :func:`parse_and_chunk`, raising whatever the parsers raise."""
+    started = perf_counter()
     limit = settings.ingestion.max_document_mb * _MEGABYTE
     if task.location is None:
         _confine(task.source, settings)
@@ -235,6 +244,7 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
         options=create_parsing_options(settings),
     )
 
+    parsed = perf_counter()
     embedder = sentence_embedder(settings) if settings.chunking.strategy == "semantic" else None
     chunker = create_chunker(settings, embedder=embedder)
     chunker_hash = chunker_config_hash(settings)
@@ -252,6 +262,7 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
         )
         for chunk in chunker.split(document)
     ]
+    chunked = perf_counter()
 
     return ParseOutcome(
         task=task,
@@ -265,7 +276,20 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
             if settings.chunking.contextual_enrichment or settings.chunking.strategy == "late"
             else ""
         ),
+        parse_seconds=parsed - started,
+        chunk_seconds=chunked - parsed,
     )
+
+
+def _time_outcome(stages: StageClock, outcome: ParseOutcome) -> None:
+    """Count a returned document's parse and chunk times, ending as it arrived here.
+
+    The worker's clock is not this process's, so the intervals are placed back from now.
+    """
+    arrived = stages.elapsed_ms
+    chunking = arrived - outcome.chunk_seconds * 1000
+    stages.interval("parse", chunking - outcome.parse_seconds * 1000, chunking)
+    stages.interval("chunk", chunking, arrived)
 
 
 def _confine(source: str, settings: Settings) -> None:
@@ -386,7 +410,7 @@ class CpuWorkerPool:
         self,
         settings: Settings,
         *,
-        journal: Journal | None = None,
+        journal: DocumentJournal | None = None,
         executor_factory: Callable[[int], Executor] | None = None,
         llm: LLMAdapter | None = None,
         trim: Callable[[str, int], Awaitable[None]] | None = None,
@@ -560,8 +584,9 @@ class CpuWorkerPool:
         resume_from: int = 0,
         on_progress: Callable[[int], Awaitable[None]] | None = None,
         ledger: IndexLedger | None = None,
+        stages: StageClock | None = None,
     ) -> PoolReport:
-        """Parse and chunk every task, streaming chunks into ``sink``."""
+        """Parse and chunk every task, streaming chunks into ``sink``, timing both stages."""
         if self._executor is None:
             raise IngestionError(
                 "the cpu worker pool is not running; use it as an async context manager",
@@ -569,6 +594,9 @@ class CpuWorkerPool:
                 retryable=False,
             )
 
+        watch = None
+        if self.journal is not None and job is not None:
+            watch = await self.journal.watch_deletions(collection)
         known: dict[str, str] = {}
         if self.journal is not None and self.settings.ingestion.dedup:
             known = await self.journal.known_content(collection)
@@ -596,6 +624,7 @@ class CpuWorkerPool:
                     continue
 
                 outcome = result
+                _time_outcome(stages or StageClock(observe=observe_stage), outcome)
                 if not outcome.chunks:
                     # CRITICAL: before the dedup check, and never through the ledger's
                     # commit. "indexed" is a statement about the vector database, and the
@@ -603,7 +632,7 @@ class CpuWorkerPool:
                     empty += 1
                     async with tracker.journal_lock:
                         if task.document_id in indexed_before:
-                            await self._retire(collection, task)
+                            await self._retire(collection, task, indexed_before)
                         elif task.document_id in extents:
                             await self._supersede(task.document_id, extents, 0)
                         if task.document_id in extents:
@@ -638,6 +667,7 @@ class CpuWorkerPool:
                         outcome,
                         extents,
                         update=task.document_id in indexed_before,
+                        watch=watch,
                     ),
                 )
                 for payload in payloads:
@@ -786,6 +816,7 @@ class CpuWorkerPool:
         extents: dict[str, list[Extent]],
         *,
         update: bool = False,
+        watch: DeletionWatch | None = None,
     ) -> Callable[[], Awaitable[None]]:
         """Return the callback that journals this document once it is fully indexed.
 
@@ -800,11 +831,14 @@ class CpuWorkerPool:
             await self._supersede(document, extents, chunks)
             if update and unrecorded and self._trim is not None:
                 await self._trim(document, chunks)
-            holder = await self._index_document(job, collection, task, outcome)
-            if holder is not None:
-                await self._withdraw(job, collection, task, outcome, holder, update=update)
-                chunks = 0
-            await self._settle_extent(collection, document, extents, chunks)
+            recorded = await self._index_document(job, collection, task, outcome, watch)
+            if recorded.deleted and self._trim is not None:
+                await self._trim(document, 0)
+            if recorded.holder is not None:
+                await self._withdraw(job, collection, task, outcome, recorded.holder, update=update)
+            await self._settle_extent(
+                collection, document, extents, chunks if recorded.indexed else 0
+            )
 
         return commit
 
@@ -919,7 +953,9 @@ class CpuWorkerPool:
 
         await self.journal.record_document(job, self._outcome(task, status, digest))
 
-    async def _retire(self, collection: str, task: DocumentTask) -> None:
+    async def _retire(
+        self, collection: str, task: DocumentTask, indexed_before: frozenset[str]
+    ) -> None:
         """Remove the chunks and the dedup record of an indexed document that is now empty.
 
         Its whole previous version is the stale tail; the chunks go first, so a failed trim
@@ -930,7 +966,7 @@ class CpuWorkerPool:
 
         await self._trim(task.document_id, 0)
         if self.journal is not None:
-            await self.journal.forget_document(collection, task.document_id)
+            await self.journal.forget_document(collection, task.document_id, known=indexed_before)
 
     async def _skip_empty(self, job: str | None, task: DocumentTask, outcome: ParseOutcome) -> None:
         """Record a document that parsed to nothing as skipped, with the reason."""
@@ -949,20 +985,26 @@ class CpuWorkerPool:
         await self.journal.record_document(job, record)
 
     async def _index_document(
-        self, job: str | None, collection: str, task: DocumentTask, outcome: ParseOutcome
-    ) -> str | None:
-        """Claim the content hash and record the document indexed, in one thread hop.
+        self,
+        job: str | None,
+        collection: str,
+        task: DocumentTask,
+        outcome: ParseOutcome,
+        watch: DeletionWatch | None = None,
+    ) -> IndexOutcome:
+        """Claim the hash and record the document indexed, in one thread hop (BENCH-0006).
 
-        Returns the other document already holding the hash, if one does (TASK-0471).
+        Deleted after ``watch`` (TASK-0519) or a late duplicate (TASK-0471): its chunks go.
         """
         if self.journal is None or job is None:
-            return None
+            return IndexOutcome()
 
         return await self.journal.record_indexed(
             job,
             collection,
             self._outcome(task, "indexed", outcome.content_hash),
             dedup=self.settings.ingestion.dedup,
+            watch=watch,
         )
 
     def _outcome(

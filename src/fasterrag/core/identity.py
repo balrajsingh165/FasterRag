@@ -22,7 +22,7 @@ import string
 import threading
 import time
 from secrets import token_hex
-from typing import Any, Final
+from typing import Any, Final, get_args
 
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, IngestionError
@@ -35,6 +35,7 @@ __all__ = [
     "content_hash",
     "document_id",
     "job_id",
+    "legacy_retrieval_config_hashes",
     "normalise_source",
     "retrieval_config_hash",
     "text_hash",
@@ -180,23 +181,46 @@ def chunker_config_hash(settings: Settings) -> str:
     return _digest(_stable(covered))
 
 
+# CRITICAL: `retrieval` keys that decide whether a query is answered, never how results
+# rank, so moving one cannot drift an index. 0.1.0b1 and 0.1.0b2 hashed `verify_lock`;
+# `legacy_retrieval_config_hashes` keeps the locks they wrote matching (TASK-0549).
+_UNHASHED_RETRIEVAL_KEYS: Final = frozenset({"verify_lock"})
+
+
+def _hashed_payload(settings: Settings) -> dict[str, Any]:
+    """Return the retrieval-affecting configuration subset ``retrieval_config_hash`` covers."""
+    retrieval = settings.retrieval.model_dump(mode="json", exclude=set(_UNHASHED_RETRIEVAL_KEYS))
+    return {
+        "chunking": settings.chunking.model_dump(mode="json"),
+        "embeddings": {
+            "provider": settings.embeddings.provider,
+            "model": settings.embeddings.model,
+            "dimensions": settings.embeddings.dimensions,
+            "tiering": settings.embeddings.tiering.model_dump(mode="json"),
+        },
+        "retrieval": retrieval,
+    }
+
+
 def retrieval_config_hash(settings: Settings) -> str:
     """Return a hash of the retrieval-affecting configuration subset.
 
     The value recorded in ``index.lock`` (D1). Deliberately *not* a hash of the whole
     file: editing an unrelated key such as ``app.port`` must not report index drift.
     """
-    return _digest(
-        _stable(
-            {
-                "chunking": settings.chunking.model_dump(mode="json"),
-                "embeddings": {
-                    "provider": settings.embeddings.provider,
-                    "model": settings.embeddings.model,
-                    "dimensions": settings.embeddings.dimensions,
-                    "tiering": settings.embeddings.tiering.model_dump(mode="json"),
-                },
-                "retrieval": settings.retrieval.model_dump(mode="json"),
-            }
-        )
-    )
+    return _digest(_stable(_hashed_payload(settings)))
+
+
+def legacy_retrieval_config_hashes(settings: Settings) -> frozenset[str]:
+    """Return every hash 0.1.0b1/b2 could have recorded for these settings, one per mode.
+
+    Those releases hashed ``retrieval.verify_lock``, so a lock they wrote matches the live
+    configuration when any of these does, whichever mode it was written under.
+    """
+    payload = _hashed_payload(settings)
+    annotation = type(settings.retrieval).model_fields["verify_lock"].annotation
+    hashes: set[str] = set()
+    for mode in get_args(annotation):
+        legacy = {**payload, "retrieval": {**payload["retrieval"], "verify_lock": mode}}
+        hashes.add(_digest(_stable(legacy)))
+    return frozenset(hashes)

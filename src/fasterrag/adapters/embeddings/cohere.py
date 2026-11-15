@@ -35,6 +35,12 @@ __all__ = ["CohereEmbedder"]
 _DOCUMENT_INPUT: Final = "search_document"
 _QUERY_INPUT: Final = "search_query"
 
+# CRITICAL: the SDK uv.lock resolves (7.3) retries 429 and 5xx twice by itself, sleeping in
+# between, under the worker pool's own retry policy, so one rate limit cost three provider
+# calls per pool attempt (TASK-0512). Set per request rather than as `max_retries=0` on the
+# client, because cohere 5.8, the supported floor, has no such constructor argument.
+_NO_SDK_RETRIES: Final[dict[str, Any]] = {"max_retries": 0}
+
 
 class CohereEmbedder(EmbeddingAdapter):
     """Embeds through Cohere's embed API."""
@@ -70,9 +76,13 @@ class CohereEmbedder(EmbeddingAdapter):
             except ImportError as exc:
                 raise require_extra(self.provider, "cohere", "cohere") from exc
 
+            endpoint: dict[str, Any] = {}
+            if self.config.base_url is not None:
+                endpoint["base_url"] = self.config.base_url
             self._client = AsyncClient(
                 api_key=require_key(self.config.api_key_env, self.provider),
                 timeout=self._timeout,
+                **endpoint,
             )
         return self._client
 
@@ -86,6 +96,7 @@ class CohereEmbedder(EmbeddingAdapter):
                 model=self.config.model,
                 input_type=input_type,
                 embedding_types=["float"],
+                request_options=_NO_SDK_RETRIES,
             )
         except ConfigError:
             raise
@@ -137,8 +148,10 @@ class CohereEmbedder(EmbeddingAdapter):
         return HealthStatus(healthy=True, detail=f"{self.provider} reachable")
 
     async def close(self) -> None:
-        """Close the client."""
-        self._client = None
+        """Close the client and its connection pool."""
+        if self._client is not None:
+            client, self._client = self._client, None
+            await client.__aexit__(None, None, None)
 
 
 def _billed_tokens(response: Any) -> int | None:

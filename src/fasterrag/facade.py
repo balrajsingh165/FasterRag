@@ -239,7 +239,7 @@ class FasterRag:
         A directory is replaced by the files inside it, as ``fasterrag ingest`` does;
         ``recursive`` descends into subdirectories.
         """
-        from fasterrag.cli.sources import expand_sources
+        from fasterrag.services.source_expansion import expand_sources
 
         self._require_started()
         expanded = expand_sources(sources, recursive=recursive)
@@ -249,8 +249,15 @@ class FasterRag:
                 "visible files. Pass recursive=True to descend into subdirectories",
                 code=ErrorCode.VALIDATION_FAILED,
             )
+        from fasterrag.services.traces import create_trace_store
+
         service = build_ingestion(
-            self.settings, self.vector_db, self.journal, self.cache, router=self.embeddings
+            self.settings,
+            self.vector_db,
+            self.journal,
+            self.cache,
+            router=self.embeddings,
+            traces=create_trace_store(self.settings),
         )
         return await service.ingest(
             expanded,
@@ -355,9 +362,10 @@ class FasterRag:
         )
 
     async def drop_collection(self, name: str) -> bool:
-        """Drop a collection, returning whether it existed."""
+        """Drop a collection and its dedup record, returning whether it existed."""
         self._require_started()
-        return await self.vector_db.drop_collection(name)
+        service = build_documents(self.settings, self.vector_db, self.journal, self.cache)
+        return await service.drop_collection(name)
 
     async def delete_document(
         self,

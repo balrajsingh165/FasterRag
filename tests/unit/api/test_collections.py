@@ -185,6 +185,20 @@ def test_deleting_with_force_returns_204(client: TestClient, vector_db: StubVect
     assert vector_db.dropped == ["docs"]
 
 
+def test_deleting_a_collection_forgets_its_dedup_record(
+    app: FastAPI, client: TestClient, vector_db: StubVectorDB
+) -> None:
+    """A re-created collection reported every re-ingested document deduplicated (TASK-0519)."""
+    vector_db.collections = [CollectionInfo(name="docs", vectors=1)]
+    journal = app.state.journal
+    journal.remember_content_blocking("docs", "hash-1", "d_1")
+
+    response = client.delete("/v1/collections/docs?force=true")
+
+    assert response.status_code == 204
+    assert journal.document_hashes_blocking("docs") == {}
+
+
 def test_deleting_an_absent_collection_is_404(client: TestClient) -> None:
     response = client.delete("/v1/collections/absent?force=true")
 

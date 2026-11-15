@@ -53,6 +53,12 @@ Import is idempotent by the same mechanism ingestion uses: chunk ids are determi
 importing an archive twice upserts over itself rather than duplicating. That is also the
 recovery path when a write fails partway: a collection this import created is dropped, and
 one that already existed is named in the error, because re-running completes it.
+
+**The imported documents are recorded in the ingestion journal** (TASK-0538) when the caller
+passes one and ``ingestion.dedup`` is on, exactly as ingestion records what it indexed: one
+dedup line per document that carries a ``content_hash``, written after every chunk is. The
+document listing reads that record, so an imported collection lists its documents, and an
+ingest of the same sources afterwards finds them already indexed.
 """
 
 from __future__ import annotations
@@ -90,6 +96,7 @@ from fasterrag.services.archive import (
     READABLE_MAJORS,
     VECTORS_NAME,
 )
+from fasterrag.services.journal import Journal
 from fasterrag.services.lockfile import LockStore, build_lock, create_lock_store
 
 __all__ = [
@@ -768,8 +775,13 @@ async def import_archive(
     router: TieringRouter | None = None,
     batch_size: int = 64,
     lock_root: Path | None = None,
+    journal: Journal | None = None,
 ) -> ImportCounts:
-    """Write a verified archive into a collection."""
+    """Write a verified archive into a collection, then record its documents in ``journal``.
+
+    The dedup record is what the document listing reads and what lets a later ingest of
+    the same sources skip them (TASK-0538); it is written only once every chunk is.
+    """
     if reembed and router is None:
         raise FasterRagError(
             "re-embedding needs an embedding router; none was supplied",
@@ -828,6 +840,9 @@ async def import_archive(
         )
     except Exception as exc:
         await _abandon(adapter, collection, created=collection not in existing, cause=exc)
+
+    if journal is not None and settings.ingestion.dedup:
+        await journal.remember_documents(collection, _archived_hashes(reader))
 
     _write_lockfiles(
         settings,
@@ -1026,6 +1041,16 @@ def _write_lockfiles(
             "could not retain the archived lockfile; the import itself is unaffected",
             extra={"collection": collection, "error": str(exc)},
         )
+
+
+def _archived_hashes(reader: ArchiveReader) -> dict[str, str]:
+    """Return the archive's ``document_id → content_hash`` map, leaving out unhashed rows."""
+    hashes: dict[str, str] = {}
+    for row in reader.documents():
+        document, digest = str(row.get("document_id") or ""), str(row.get("content_hash") or "")
+        if document and digest:
+            hashes[document] = digest
+    return hashes
 
 
 def _restored_payload(

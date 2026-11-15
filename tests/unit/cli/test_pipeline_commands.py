@@ -253,6 +253,22 @@ async def test_deleting_without_force_is_refused(
     assert "--force" in capsys.readouterr().err
 
 
+async def test_deleting_with_force_forgets_the_collections_dedup_record(
+    config: str, adapter: FakeAdapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-created collection reported every re-ingested document deduplicated (TASK-0519)."""
+    journal = Journal(tmp_path / "journal")
+    journal.remember_content_blocking("docs", "hash-1", "d_1")
+    monkeypatch.setattr(pipeline, "create_journal", lambda settings: journal)
+
+    code = await pipeline.run_index(
+        namespace(config=config, action="delete", name="docs", force=True), Console()
+    )
+
+    assert code == ExitCode.SUCCESS
+    assert journal.document_hashes_blocking("docs") == {}
+
+
 async def test_deleting_with_force_drops_the_collection(config: str, adapter: FakeAdapter) -> None:
     adapter.collections = [CollectionInfo(name="docs", vectors=1)]
 

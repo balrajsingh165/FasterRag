@@ -29,6 +29,13 @@ succeed into a resumable, auditable batch system:
   held, and the new one never received them (TASK-0550). A log written before that change
   sits at the collection's root and is claimed, once, by the first backend that reads it:
   the one the configuration names when the upgraded release first runs.
+* **Deletes against running jobs.** A delete appends the document id to the collection's
+  deletion log and removes the chunks while holding that log's lock; a job takes a
+  :class:`DeletionWatch` under the same lock before it loads its dedup map, and each commit
+  reads the log's new lines under it again. A document deleted after the watch was taken is
+  not remembered and is recorded ``skipped`` with reason ``DELETED_DURING_INGEST``, and the
+  job removes the chunks it wrote, so a delete is never undone by a job that was already
+  running (TASK-0519).
 
 Every rewrite of a record is atomic and durable — written to a uniquely named temporary
 file, flushed, renamed over the live file, and the directory flushed where the platform
@@ -37,6 +44,10 @@ away, so a reader or a crash at any step finds a whole record; a torn one is det
 the previous good copy is kept so a damaged record degrades to resuming slightly earlier
 rather than to losing the job (``docs/reliability.md`` §3, ``docs/failure-modes.md`` rows 32
 and 33, ``docs/adr/ADR-0009-journal-stays-on-files.md``).
+
+``DocumentRecord`` and ``DocumentStatus`` are defined in :mod:`fasterrag.core.journaling` since
+2026-11-15 (TASK-0529), beside the ``DocumentJournal`` protocol the parse workers are typed
+against, and are re-exported here as the same objects.
 """
 
 from __future__ import annotations
@@ -50,17 +61,24 @@ import secrets
 import shutil
 import sys
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Collection, Coroutine, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, Final, NamedTuple
+from typing import Any, Final
 
 from fasterrag.config.schema import Settings
 from fasterrag.core.identity import job_id as new_job_id
 from fasterrag.core.identity import text_hash
+from fasterrag.core.journaling import (
+    DeletionWatch,
+    DocumentRecord,
+    DocumentStatus,
+    Extent,
+    IndexOutcome,
+)
 from fasterrag.errors import ErrorCode, IngestionError
 from fasterrag.observability.logging import get_logger
 
@@ -71,10 +89,13 @@ else:
 
 __all__ = [
     "DEFAULT_JOURNAL_ROOT",
+    "DELETED_DURING_INGEST",
     "Checkpoint",
+    "DeletionWatch",
     "DocumentRecord",
     "DocumentStatus",
     "Extent",
+    "IndexOutcome",
     "JobRecord",
     "JobStatus",
     "Journal",
@@ -87,6 +108,7 @@ __all__ = [
 ]
 
 DEFAULT_JOURNAL_ROOT: Final = Path(".fasterrag") / "journal"
+DELETED_DURING_INGEST: Final = "DELETED_DURING_INGEST"
 
 _JOBS_DIR: Final = "jobs"
 _COLLECTIONS_DIR: Final = "collections"
@@ -95,6 +117,7 @@ _DEDUP_FILE: Final = "content-hashes.jsonl"
 _BACKENDS_DIR: Final = "backends"
 _EXTENTS_FILE: Final = "chunk-extents.jsonl"
 _BACKEND_SLUG: Final = re.compile(r"[^a-z0-9_-]+")
+_DELETIONS_FILE: Final = "deletions.jsonl"
 _PREVIOUS_SUFFIX: Final = ".prev"
 _TOMBSTONE_KEY: Final = "tombstone"
 _TEMPORARY_SUFFIX: Final = ".tmp"
@@ -110,7 +133,6 @@ _INTERRUPTED: Final = "INTERRUPTED"
 _PRUNE_INTERVAL_SECONDS: Final = 3600.0
 _SECONDS_PER_DAY: Final = 86400
 
-DocumentStatus = str
 JobStatus = str
 
 _logger = get_logger(__name__)
@@ -127,31 +149,6 @@ class Checkpoint:
 
     last_document_index: int
     written_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class DocumentRecord:
-    """The outcome for one document, and the dead-letter entry when it failed.
-
-    ``detail`` is human-readable and never contains a secret value; ``reason_code`` is
-    drawn from the stable error-code table so a client can branch on it.
-    """
-
-    document_id: str
-    source: str
-    status: DocumentStatus
-    content_hash: str | None = None
-    reason_code: str | None = None
-    detail: str | None = None
-    attempts: int = 0
-    trace_id: str | None = None
-    first_failed_at: str | None = None
-    last_failed_at: str | None = None
-
-    @property
-    def dead_lettered(self) -> bool:
-        """Return whether this document was dead-lettered."""
-        return self.status == "dead_lettered"
 
 
 @dataclass
@@ -457,6 +454,33 @@ def _append_failed(path: Path, exc: OSError) -> IngestionError:
     )
 
 
+def _catch_up(path: Path, watch: DeletionWatch) -> None:
+    """Add the documents deleted since ``watch`` was last advanced, reading only new lines."""
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        size = 0
+    if size < watch.offset:
+        watch.offset = 0
+    if size == watch.offset:
+        return
+    with path.open("rb") as handle:
+        handle.seek(watch.offset)
+        data = handle.read(size - watch.offset)
+    complete = data.rfind(b"\n") + 1
+    for line in data[:complete].splitlines():
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            _logger.warning(
+                "skipping a deletion log line a crash left unfinished", extra={"path": str(path)}
+            )
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("document_id"), str):
+            watch.deleted.add(payload["document_id"])
+    watch.offset += complete
+
+
 def _logged_lines(path: Path) -> list[dict[str, Any]]:
     """Return the parsed lines of an append-only log, skipping a fragment a crash left."""
     try:
@@ -486,7 +510,14 @@ def _sync_if_present(path: Path) -> None:
 def _live_content(lines: Sequence[dict[str, Any]]) -> dict[str, str]:
     """Return the hash to document-id map an ordered dedup log means (tombstones applied)."""
     known: dict[str, str] = {}
-    held: dict[str, str] = {}
+    _apply_dedup(lines, known, {})
+    return known
+
+
+def _apply_dedup(
+    lines: Sequence[dict[str, Any]], known: dict[str, str], held: dict[str, str]
+) -> None:
+    """Fold dedup log lines, in order, into a hash map and its document-to-hash inverse."""
     for payload in lines:
         document = payload["document_id"]
         superseded = held.pop(document, None)
@@ -496,15 +527,36 @@ def _live_content(lines: Sequence[dict[str, Any]]) -> dict[str, str]:
             continue
         held[document] = payload["content_hash"]
         known[held[document]] = document
-    return known
 
 
-class Extent(NamedTuple):
-    """A document's chunks ``0..chunks-1`` under one chunker; ``settled`` once all were written."""
+@dataclass(slots=True)
+class _DedupView:
+    """What one dedup log meant up to ``offset`` bytes, for the file ``identity`` names."""
 
-    chunker: str
-    chunks: int
-    settled: bool
+    identity: tuple[int, int]
+    offset: int = 0
+    known: dict[str, str] = field(default_factory=dict)
+    held: dict[str, str] = field(default_factory=dict)
+
+
+def _new_lines(path: Path, view: _DedupView, size: int) -> list[dict[str, Any]]:
+    """Return the whole lines appended past ``view.offset``, advancing it over them."""
+    with path.open("rb") as handle:
+        handle.seek(view.offset)
+        data = handle.read(size - view.offset)
+    complete = data.rfind(b"\n") + 1
+    parsed: list[dict[str, Any]] = []
+    for line in data[:complete].splitlines():
+        if not line.strip():
+            continue
+        try:
+            parsed.append(json.loads(line))
+        except json.JSONDecodeError:
+            _logger.warning(
+                "skipping a journal line a crash left unfinished", extra={"path": str(path)}
+            )
+    view.offset += complete
+    return parsed
 
 
 def _live_extents(lines: Sequence[dict[str, Any]]) -> dict[str, list[Extent]]:
@@ -625,6 +677,7 @@ class Journal:
         self.retention_days = retention_days
         self.backend = backend
         self._claimed: set[str] = set()
+        self._views: dict[Path, _DedupView] = {}
         self._tails: dict[Path, int] = {}
         self._last_pruned: float | None = None
 
@@ -635,6 +688,10 @@ class Journal:
     def _documents_path(self, job: str) -> Path:
         """Return the path of a job's per-document log."""
         return self.root / _JOBS_DIR / job / _DOCUMENTS_FILE
+
+    def _deletions_path(self, collection: str) -> Path:
+        """Return the path of a collection's deletion log (TASK-0519)."""
+        return self.root / _COLLECTIONS_DIR / collection / _DELETIONS_FILE
 
     def _dedup_path(self, collection: str) -> Path:
         """Return the path of a collection's content-hash index for this journal's backend."""
@@ -670,6 +727,18 @@ class Journal:
             "configured vector database",
             extra={"path": str(path), "backend": self.backend},
         )
+
+    def _deletion_lock(self, collection: str) -> AbstractContextManager[None]:
+        """Return the lock that orders a collection's deletes against its commits (TASK-0519)."""
+        path = self._deletions_path(collection)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise IngestionError(
+                f"the ingestion journal could not create {path.parent}: {exc}",
+                code=ErrorCode.INTERNAL,
+            ) from exc
+        return _exclusive(path)
 
     async def create_job(
         self,
@@ -1026,29 +1095,67 @@ class Journal:
         _append_line(self._documents_path(job), line, self._tails)
 
     async def record_indexed(
-        self, job: str, collection: str, record: DocumentRecord, *, dedup: bool
-    ) -> str | None:
+        self,
+        job: str,
+        collection: str,
+        record: DocumentRecord,
+        *,
+        dedup: bool,
+        watch: DeletionWatch | None = None,
+    ) -> IndexOutcome:
         """Claim a parsed document's hash and log it indexed, in one hop off the event loop.
 
-        Returns the document already holding the hash, and then writes nothing (TASK-0471).
-        One hop, not two: the handoff costs more than either append (BENCH-0006).
+        One hop, because the thread handoff costs more than either append (BENCH-0006). The
+        outcome says whether it was deleted since ``watch`` (TASK-0519) or a late duplicate.
         """
         return await asyncio.to_thread(
-            self.record_indexed_blocking, job, collection, record, dedup=dedup
+            self.record_indexed_blocking, job, collection, record, dedup=dedup, watch=watch
         )
 
     def record_indexed_blocking(
+        self,
+        job: str,
+        collection: str,
+        record: DocumentRecord,
+        *,
+        dedup: bool,
+        watch: DeletionWatch | None = None,
+    ) -> IndexOutcome:
+        """Claim a hash and log the document; :meth:`record_indexed` is this off the loop.
+
+        A document deleted after ``watch`` was taken is logged skipped, not remembered, and
+        its chunks are the caller's to remove; so are a late duplicate's (TASK-0471).
+        """
+        if watch is None:
+            return self._record_indexed(job, collection, record, dedup=dedup)
+        with self._deletion_lock(collection):
+            _catch_up(self._deletions_path(collection), watch)
+            if record.document_id not in watch.deleted:
+                return self._record_indexed(job, collection, record, dedup=dedup)
+            self.record_document_blocking(
+                job,
+                replace(
+                    record,
+                    status="skipped",
+                    reason_code=DELETED_DURING_INGEST,
+                    detail=f"{record.source} was deleted from {collection} while this job ran",
+                ),
+            )
+            self.forget_document_blocking(collection, record.document_id)
+        return IndexOutcome(deleted=True)
+
+    def _record_indexed(
         self, job: str, collection: str, record: DocumentRecord, *, dedup: bool
-    ) -> str | None:
-        """Claim a hash and log the document; :meth:`record_indexed` is this off the loop."""
+    ) -> IndexOutcome:
+        """Claim the hash under the dedup lock, then log the document; no deletion check."""
         if dedup and record.content_hash is not None:
             holder = self.claim_content_blocking(
                 collection, record.content_hash, record.document_id
             )
             if holder is not None:
-                return holder
+                return IndexOutcome(holder=holder)
         self.record_document_blocking(job, record)
-        return None
+        return IndexOutcome()
 
     async def dead_letter(
         self,
@@ -1160,13 +1267,32 @@ class Journal:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with _exclusive(path):
-                holder = _live_content(_logged_lines(path)).get(content)
+                holder = self._held_content(path).get(content)
                 if holder is not None and holder != document:
                     return holder
                 _append_held(path, _dedup_line(content, document), self._tails)
         except OSError as exc:
             raise _append_failed(path, exc) from exc
         return None
+
+    def _held_content(self, path: Path) -> dict[str, str]:
+        """Return a dedup log's hash map, reading only lines added since this journal last did.
+
+        The caller holds the log's lock. A commit per document must not re-read the whole
+        file (TASK-0534); a log rewritten or removed since is read again from the start.
+        """
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            self._views.pop(path, None)
+            return {}
+        identity = (stat.st_dev, stat.st_ino)
+        view = self._views.get(path)
+        if view is None or view.identity != identity or stat.st_size < view.offset:
+            view = self._views[path] = _DedupView(identity)
+        if stat.st_size > view.offset:
+            _apply_dedup(_new_lines(path, view, stat.st_size), view.known, view.held)
+        return view.known
 
     def _extents_path(self, collection: str) -> Path:
         """Return the path of a collection's chunk-extent log, beside its dedup log."""
@@ -1201,17 +1327,34 @@ class Journal:
         line = _extent_line(document, chunker, chunks, settled=settled)
         _append_line(self._extents_path(collection), line, self._tails)
 
-    async def forget_document(self, collection: str, document: str) -> bool:
+    async def remember_documents(self, collection: str, hashes: dict[str, str]) -> None:
+        """Record many indexed documents in one append, off the event loop (TASK-0538)."""
+        await asyncio.to_thread(self.remember_documents_blocking, collection, hashes)
+
+    def remember_documents_blocking(self, collection: str, hashes: dict[str, str]) -> None:
+        """Record ``document_id → content_hash`` pairs under one lock; the async twin is above."""
+        if hashes:
+            lines = "\n".join(_dedup_line(digest, doc) for doc, digest in sorted(hashes.items()))
+            _append_line(self._dedup_path(collection), lines, self._tails)
+
+    async def forget_document(
+        self, collection: str, document: str, *, known: Collection[str] | None = None
+    ) -> bool:
         """Tombstone a document in a collection's dedup index, off the event loop."""
-        return await asyncio.to_thread(self.forget_document_blocking, collection, document)
+        return await asyncio.to_thread(
+            self.forget_document_blocking, collection, document, known=known
+        )
 
-    def forget_document_blocking(self, collection: str, document: str) -> bool:
-        """Tombstone a document; :meth:`forget_document` is this off the event loop.
+    def forget_document_blocking(
+        self, collection: str, document: str, *, known: Collection[str] | None = None
+    ) -> bool:
+        """Tombstone a live document; returns whether it was live, writing nothing if not.
 
-        Returns whether a live record was there. Nothing is written otherwise, so a
-        retried delete does not grow the file (TASK-0443).
+        ``known`` is the live document ids a caller already loaded, which spares reading
+        the whole dedup file once per document (TASK-0534); without it the file is read.
         """
-        if document not in self.known_content_blocking(collection).values():
+        held = known if known is not None else self.known_content_blocking(collection).values()
+        if document not in held:
             return False
 
         line = json.dumps(
@@ -1219,6 +1362,87 @@ class Journal:
         )
         _append_line(self._dedup_path(collection), line, self._tails)
         return True
+
+    async def delete_document(
+        self,
+        collection: str,
+        document: str,
+        remove: Callable[[], Coroutine[Any, Any, None]],
+    ) -> bool:
+        """Log a delete, tombstone the document and await ``remove``, under the deletion lock.
+
+        Returns whether the dedup record held the document. A job's commit waits for the
+        whole delete, so the two never interleave (TASK-0519).
+        """
+        loop = asyncio.get_running_loop()
+
+        def removing() -> None:
+            asyncio.run_coroutine_threadsafe(remove(), loop).result()
+
+        return await asyncio.to_thread(
+            self.delete_document_blocking, collection, document, removing
+        )
+
+    def delete_document_blocking(
+        self, collection: str, document: str, remove: Callable[[], None]
+    ) -> bool:
+        """Log, tombstone and remove a document; :meth:`delete_document` is this off the loop."""
+        line = json.dumps({"deleted_at": _now(), "document_id": document}, sort_keys=True)
+        with self._deletion_lock(collection):
+            try:
+                _append_held(self._deletions_path(collection), line, self._tails)
+            except OSError as exc:
+                raise IngestionError(
+                    f"the ingestion journal could not record the delete of {document}: {exc}",
+                    code=ErrorCode.INTERNAL,
+                ) from exc
+            known = self.forget_document_blocking(collection, document)
+            remove()
+        return known
+
+    async def watch_deletions(self, collection: str) -> DeletionWatch:
+        """Mark where a job starts watching a collection's deletes, off the event loop."""
+        return await asyncio.to_thread(self.watch_deletions_blocking, collection)
+
+    def watch_deletions_blocking(self, collection: str) -> DeletionWatch:
+        """Mark where a job starts watching deletes; :meth:`watch_deletions` off the loop.
+
+        Taken under the deletion lock, so a delete in progress is wholly before it or after.
+        """
+        with self._deletion_lock(collection):
+            path = self._deletions_path(collection)
+            try:
+                return DeletionWatch(offset=path.stat().st_size)
+            except FileNotFoundError:
+                return DeletionWatch()
+
+    async def forget_collection(self, collection: str) -> bool:
+        """Drop a collection's whole dedup record, off the event loop (TASK-0519)."""
+        return await asyncio.to_thread(self.forget_collection_blocking, collection)
+
+    def forget_collection_blocking(self, collection: str) -> bool:
+        """Drop a collection's dedup record; :meth:`forget_collection` is this off the loop.
+
+        Returns whether there was one. Held under the append lock, so no line lands in a
+        file that is being removed.
+        """
+        path = self._dedup_path(collection)
+        if not path.parent.is_dir():
+            return False
+        try:
+            with _exclusive(path):
+                existed = path.is_file()
+                _patiently(partial(path.unlink, missing_ok=True))
+                self._tails.pop(path, None)
+            extents = self._extents_path(collection)
+            with _exclusive(extents):
+                _patiently(partial(extents.unlink, missing_ok=True))
+                self._tails.pop(extents, None)
+        except OSError as exc:
+            raise IngestionError(
+                f"the dedup record {path} could not be removed: {exc}", code=ErrorCode.INTERNAL
+            ) from exc
+        return existed
 
     async def known_content(self, collection: str) -> dict[str, str]:
         """Return the collection's content-hash to document-id map, off the event loop."""

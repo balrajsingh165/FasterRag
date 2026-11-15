@@ -38,6 +38,7 @@ from fasterrag.api.dependencies import (
     JournalDep,
 )
 from fasterrag.api.schemas import IngestRequest, Source
+from fasterrag.api.traces import get_trace_store
 from fasterrag.errors import ErrorCode, FasterRagError
 from fasterrag.observability.logging import current_trace_id, get_logger, use_trace_id
 from fasterrag.services.composition import build_ingestion, create_embedding_router
@@ -120,6 +121,7 @@ async def _run_job(request: Request, record: JobRecord, metadata: dict[str, Any]
         journal,
         getattr(request.app.state, "cache", None),
         router=embedding_router,
+        traces=get_trace_store(request),
     )
 
     with use_trace_id():

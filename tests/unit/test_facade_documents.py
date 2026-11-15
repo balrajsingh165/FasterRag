@@ -101,6 +101,15 @@ async def test_the_facades_own_journal_and_cache_are_the_ones_updated(
     assert len(cache.reasons) == 1
 
 
+async def test_dropping_a_collection_forgets_its_dedup_record(
+    started: facade.FasterRag,
+) -> None:
+    """A re-created collection reported every re-ingested document deduplicated (TASK-0519)."""
+    assert await started.drop_collection("default") is True
+
+    assert await started.journal.document_hashes("default") == {}
+
+
 async def test_deleting_a_document_that_does_not_exist_is_not_an_error(
     started: facade.FasterRag, backend: MemoryAdapter
 ) -> None:

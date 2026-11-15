@@ -67,6 +67,13 @@ def test_a_root_span_wraps_every_stage() -> None:
     ]
 
 
+def test_an_ingest_trace_is_rooted_as_an_ingest() -> None:
+    """An ingest trace exported under a `query` root would read as a query (TASK-0487)."""
+    spans = build_spans(trace(kind="ingest", spans=[Span("parse", 1.0, 2.0, {"count": 1})]))
+
+    assert [span.name for span in spans] == ["ingest", "parse"]
+
+
 def test_the_fasterrag_trace_id_is_preserved() -> None:
     """The id in a problem+json body must be the id pasted into a trace viewer's search."""
     spans = build_spans(trace())

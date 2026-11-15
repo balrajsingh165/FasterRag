@@ -147,11 +147,14 @@ async def get_collection(
 @router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_collection(
     name: str,
+    settings: CurrentSettings,
     adapter: CurrentVectorDB,
+    journal: JournalDep,
+    cache: CurrentCache,
     tenant: CurrentTenant,
     force: Annotated[bool, Query()] = False,
 ) -> Response:
-    """Drop a collection and everything in it.
+    """Drop a collection and everything in it, its dedup record included (TASK-0519).
 
     Refuses without ``?force=true``. The vectors do not come back, and a DELETE that a proxy
     or a retry could replay is not something to make easy.
@@ -163,7 +166,8 @@ async def delete_collection(
             retryable=False,
         )
 
-    if not await adapter.drop_collection(scoped_name(name, tenant)):
+    service = build_documents(settings, adapter, journal, cache)
+    if not await service.drop_collection(scoped_name(name, tenant)):
         raise FasterRagError(
             f"no collection named {name!r}", code=ErrorCode.NOT_FOUND, retryable=False
         )
