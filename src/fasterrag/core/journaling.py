@@ -15,11 +15,18 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from fasterrag.errors import ErrorCode
 
-__all__ = ["DeletionWatch", "DocumentJournal", "DocumentRecord", "DocumentStatus"]
+__all__ = [
+    "DeletionWatch",
+    "DocumentJournal",
+    "DocumentRecord",
+    "DocumentStatus",
+    "Extent",
+    "IndexOutcome",
+]
 
 DocumentStatus = str
 
@@ -49,6 +56,30 @@ class DocumentRecord:
         return self.status == "dead_lettered"
 
 
+class Extent(NamedTuple):
+    """A document's chunks ``0..chunks-1`` under one chunker; ``settled`` once all were written."""
+
+    chunker: str
+    chunks: int
+    settled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class IndexOutcome:
+    """What recording an indexed document did: kept, deleted since the watch, or a duplicate.
+
+    ``holder`` is the other document already holding the same content (TASK-0471).
+    """
+
+    deleted: bool = False
+    holder: str | None = None
+
+    @property
+    def indexed(self) -> bool:
+        """Return whether the document was recorded indexed."""
+        return not self.deleted and self.holder is None
+
+
 class DocumentJournal(Protocol):
     """The journal calls a parse worker makes: outcomes, dead letters and the dedup index."""
 
@@ -66,8 +97,8 @@ class DocumentJournal(Protocol):
         *,
         dedup: bool,
         watch: DeletionWatch | None = None,
-    ) -> bool:
-        """Log a parsed document unless deleted since ``watch``; return whether it was kept."""
+    ) -> IndexOutcome:
+        """Claim the hash and log the document, unless deleted since ``watch`` or a duplicate."""
 
     async def dead_letter(
         self,
@@ -90,6 +121,14 @@ class DocumentJournal(Protocol):
 
     async def watch_deletions(self, collection: str) -> DeletionWatch:
         """Mark where a job starts watching the collection's deletes."""
+
+    async def chunk_extents(self, collection: str) -> dict[str, list[Extent]]:
+        """Return each document's chunk extents since its last settled one (TASK-0518)."""
+
+    async def record_extent(
+        self, collection: str, document: str, chunker: str, chunks: int, *, settled: bool
+    ) -> None:
+        """Record a document's chunk extent: an attempt, or settled once all are written."""
 
 
 @dataclass(slots=True)

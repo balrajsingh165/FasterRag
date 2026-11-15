@@ -243,6 +243,7 @@ class IngestionService:
                 executor_factory=self._executor_factory,
                 llm=enricher,
                 trim=indexer.trim,
+                discard=indexer.discard,
             ) as cpu:
                 pipeline_started = spans.record("setup", setup_started).end_ms
                 parse_report, embed_report = await _pipe(
@@ -275,13 +276,14 @@ class IngestionService:
                 attempts=self.settings.reliability.retries.max_attempts,
             )
 
+        late = cpu.late_duplicates
         counts = {
             "total": len(tasks),
-            "parsed": parse_report.parsed,
+            "parsed": parse_report.parsed - late,
             "chunked": parse_report.chunked,
             "embedded": embed_report.embedded,
             "indexed": indexer.written,
-            "deduplicated": parse_report.deduplicated,
+            "deduplicated": parse_report.deduplicated + late,
             "skipped": parse_report.empty,
             "dead_lettered": parse_report.dead_lettered + len(failed),
         }

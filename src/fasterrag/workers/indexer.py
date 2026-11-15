@@ -21,12 +21,19 @@ removes it, by the ``document_id`` and ``chunk_index`` this module writes into e
 chunks are in — trimming first would leave a window in which the document has no chunks —
 and only for a document the journal already knew, because a filtered delete per document on
 a first bulk load would be paid for tails that cannot exist.
+
+Since TASK-0518 the usual path is :meth:`Indexer.discard` instead: the journal records each
+document's chunk extents, so the stale ids are known and are deleted by id — the tail of a
+shorter version, what a failed attempt wrote, and chunks written under another chunker, all of
+which the filter could miss. :meth:`Indexer.trim` remains for a document indexed before
+extents were recorded.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, Final
 
 from fasterrag.adapters.vectordb.base import (
     CollectionSpec,
@@ -45,6 +52,8 @@ from fasterrag.workers.queues import ChunkPayload, EmbeddedBatch
 __all__ = ["Indexer", "chunk_payload"]
 
 _logger = get_logger(__name__)
+
+_DISCARD_BATCH: Final = 1000
 
 
 def chunk_payload(payload: ChunkPayload, *, model: str, model_version: str) -> dict[str, Any]:
@@ -176,6 +185,40 @@ class Indexer:
             collection=self.collection,
             filters={"document_id": document_id, "chunk_index": {"$gte": keep}},
         )
+        if not await self._delete(selector, document_id):
+            return
+
+        self.trimmed += 1
+        _logger.info(
+            "trimmed a re-ingested document",
+            extra={"collection": self.collection, "document_id": document_id, "keep": keep},
+        )
+
+    async def discard(self, document_id: str, point_ids: Sequence[str]) -> None:
+        """Delete chunks of a document by id: what an earlier version or attempt left.
+
+        In batches of ``_DISCARD_BATCH``, retried like :meth:`trim` (TASK-0518).
+        """
+        for start in range(0, len(point_ids), _DISCARD_BATCH):
+            batch = list(point_ids[start : start + _DISCARD_BATCH])
+            selector = PointSelector(collection=self.collection, point_ids=batch)
+            if not await self._delete(selector, document_id):
+                return
+        if not point_ids:
+            return
+
+        self.trimmed += 1
+        _logger.info(
+            "deleted the stale chunks of a re-ingested document",
+            extra={
+                "collection": self.collection,
+                "document_id": document_id,
+                "chunks": len(point_ids),
+            },
+        )
+
+    async def _delete(self, selector: PointSelector, document_id: str) -> bool:
+        """Delete what ``selector`` names, retrying; False when the collection does not exist."""
         attempts = self.settings.reliability.retries.max_attempts
         for attempt in range(attempts + 1):
             try:
@@ -186,7 +229,7 @@ class Indexer:
                         "no collection to trim; a collection that does not exist holds no tail",
                         extra={"collection": self.collection, "trace_id": exc.trace_id},
                     )
-                    return
+                    return False
                 if not exc.retryable or attempt == attempts:
                     raise
                 delay = backoff_delay(attempt + 1, self.settings)
@@ -203,9 +246,4 @@ class Indexer:
                 await asyncio.sleep(delay)
                 continue
             break
-
-        self.trimmed += 1
-        _logger.info(
-            "trimmed a re-ingested document",
-            extra={"collection": self.collection, "document_id": document_id, "keep": keep},
-        )
+        return True

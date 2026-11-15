@@ -117,9 +117,24 @@ Drift = any mismatch between this file and live config/corpus. Reported, never s
 | `first_failed_at` / `last_failed_at` | str | Timestamps |
 | `trace_id` | str | Correlates to logs and spans |
 
+### Chunk extent
+
+One JSON object per line in `<journal>/collections/<collection>/backends/<backend>/chunk-extents.jsonl` (beside the dedup file; TASK-0518), written whatever `ingestion.dedup` says, never for a job run without a journal.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `document_id` | str | The document |
+| `chunker` | str | `chunker_config_hash` of the configuration that chunked it — with the document id and the chunk index, what a chunk id is derived from |
+| `chunks` | int | How many chunks, so the ids are `chunk_id(document_id, 0..chunks-1, chunker)` |
+| `settled` | bool | `false`: written before the chunks, so they may be in the index whether or not the ingest finished. `true`: every chunk of this version is written and every older one deleted |
+
+A document may hold any chunk an extent names from its last settled line onward. Committing a new version deletes, by id, every such chunk the new version does not name, then appends a settled line; a document that became empty settles at `0`. The retention pass compacts the file to those lines.
+
 ### Dedup record and tombstone
 
-One JSON object per line in `<journal>/collections/<collection>/content-hashes.jsonl`. The file is append-only; it is read in order and the order is the meaning.
+One JSON object per line in `<journal>/collections/<collection>/backends/<backend>/content-hashes.jsonl`. The file is append-only; it is read in order and the order is the meaning.
+
+**One file per vector database** (TASK-0550). `<backend>` is `services/journal.py::backend_identity`: the provider name and a 12-character hash of where it lives — `vector_db.host` and `vector_db.port`, or `vector_db.chroma.path` for Chroma, or `vector_db.pgvector.dsn_env` and `db_schema` for pgvector (the variable's name, never the DSN). Switching `vector_db.provider`, or pointing it at another server, therefore starts with nothing known, and a re-ingest indexes every file into the new store; switching back finds the first file again. A file written by a release before 0.1.0b3 sits at `<journal>/collections/<collection>/content-hashes.jsonl` and is moved, under its lock, to the first backend that reads it — the one the configuration names when the upgraded release first runs. If the configuration had already been switched before upgrading, that file is attributed to the new backend: ingest once with `--set ingestion.dedup=false` to fill it.
 
 | Record | Fields | Written |
 |---|---|---|

@@ -127,7 +127,7 @@ async def test_a_commit_waits_for_a_delete_in_progress_and_then_yields_to_it(
 
     release.set()
     assert await deleting is False
-    assert await committing is False
+    assert (await committing).deleted
     assert await journal.document_hashes(COLLECTION) == {}
 
 
@@ -142,7 +142,8 @@ async def test_a_delete_finished_before_the_job_started_does_not_cancel_it(
     watch = await journal.watch_deletions(COLLECTION)
     record = DocumentRecord(document_id="d_1", source="d_1.md", status="indexed", content_hash="h")
 
-    assert await journal.record_indexed("job", COLLECTION, record, dedup=True, watch=watch)
+    recorded = await journal.record_indexed("job", COLLECTION, record, dedup=True, watch=watch)
+    assert recorded.indexed
     assert await journal.document_hashes(COLLECTION) == {"d_1": "h"}
 
 

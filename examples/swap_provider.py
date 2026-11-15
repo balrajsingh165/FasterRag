@@ -5,10 +5,12 @@ overrides one key, ``vector_db.provider``, to the ``memory`` store from the samp
 examples/plugin-vectordb. No line of application code changes between the two. The same
 override works from the shell as ``FASTERRAG_SET=vector_db.provider=memory`` or ``--set``.
 
-The second run also turns ``ingestion.dedup`` off. The dedup journal lives on disk beside the
-config and remembers that the first run already indexed these files; the memory store starts
-empty in every process, so with dedup on the second ingest would skip every file and leave
-nothing to retrieve.
+The second run also turns ``ingestion.dedup`` off, for a reason that belongs to the sample store
+and not to swapping. The dedup journal is kept per vector database, so a backend it has not seen
+starts with nothing known and receives every file. But the memory store forgets everything when
+its process exits while the journal on disk does not, so from this script's second run on, the
+journal would remember files the store no longer holds. A backend that keeps its data needs no
+such override.
 
     pip install ./examples/plugin-vectordb
     fasterrag config init --profile local
