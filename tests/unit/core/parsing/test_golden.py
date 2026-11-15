@@ -13,6 +13,7 @@ from fasterrag.core.parsing import (
     parse_markdown,
     parse_pdf,
 )
+from fasterrag.core.parsing.options import ParsingOptions
 from tests.unit.core.parsing.conftest import (
     CSV,
     HTML,
@@ -45,4 +46,6 @@ def test_docx_golden() -> None:
 
 
 def test_pdf_golden() -> None:
-    assert_matches_golden("pdf", parse_pdf(pdf_bytes(pages=2)))
+    """Pin the text layer; the sparse second page would be OCR'd wherever tesseract is installed."""
+    text_layer_only = ParsingOptions(minimum_chars_per_page=0)
+    assert_matches_golden("pdf", parse_pdf(pdf_bytes(pages=2), options=text_layer_only))
