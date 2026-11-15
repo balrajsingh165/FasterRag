@@ -25,12 +25,18 @@ does and what an existing corpus needs before it is turned on.
 Reranking runs last, over the fused shortlist, and truncates to ``retrieval.top_k``. A
 reranker that cannot load or score degrades the response to ``hybrid_only`` rather than
 failing the query, because unranked results beat no answer (D4).
+
+**Every leg is timed here** (TASK-0487): ``query-embedding``, ``dense-search``,
+``keyword-search``, ``fusion`` and ``reranker`` spans go to the caller's recorder, each also
+observed in ``fasterrag_stage_duration_seconds`` (``embed_query``, ``retrieve_dense``,
+``retrieve_bm25``, ``fuse``, ``rerank``). A reranker that failed or timed out is still timed,
+because the slow rerank is the one FMEA row 19's alarm exists for.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,7 +55,9 @@ from fasterrag.core.rerank import Reranker
 from fasterrag.core.retrieval.bm25 import encode_query
 from fasterrag.core.retrieval.fusion import Ranking, rrf_fuse
 from fasterrag.core.retrieval.models import DENSE_LEG, SPARSE_LEG, ScoredChunk
+from fasterrag.core.tracing import Span, SpanRecorder
 from fasterrag.errors import ErrorCode, FasterRagError, RetrievalError
+from fasterrag.observability import metrics
 from fasterrag.observability.logging import get_logger
 from fasterrag.services.degradation import DegradationMode, serving
 from fasterrag.services.lockfile import verify_query_lock
@@ -76,6 +84,7 @@ class Retrieval:
 
     chunks: list[ScoredChunk] = field(default_factory=list)
     mode: str = FULL_MODE
+    timings_ms: dict[str, float] = field(default_factory=dict)
 
     @property
     def degraded(self) -> bool:
@@ -103,6 +112,35 @@ def require_query_text(text: str) -> None:
             code=ErrorCode.VALIDATION_FAILED,
             retryable=False,
         )
+
+
+def _timed(
+    spans: SpanRecorder,
+    timings: dict[str, float],
+    name: str,
+    stage: str,
+    started: float,
+    **attributes: Any,
+) -> Span:
+    """Close span ``name`` begun at ``started`` and observe it as metric stage ``stage``."""
+    span = spans.record(name, started, **attributes)
+    timings[stage] = round(span.duration_ms, 3)
+    metrics.observe_stage(stage, span.duration_ms / 1000)
+    return span
+
+
+async def _timed_leg(
+    spans: SpanRecorder,
+    timings: dict[str, float],
+    name: str,
+    stage: str,
+    search: Awaitable[list[ScoredPoint]],
+) -> list[ScoredPoint]:
+    """Await one search leg, timed from when it starts, not from when it was built."""
+    started = spans.elapsed_ms
+    hits = await search
+    _timed(spans, timings, name, stage, started, hits=len(hits))
+    return hits
 
 
 def _missing_collection(exc: FasterRagError, collection: str) -> FasterRagError:
@@ -159,11 +197,13 @@ class RetrievalService:
         top_k: int | None = None,
         filters: Filter | None = None,
         vector: Sequence[float] | None = None,
+        recorder: SpanRecorder | None = None,
     ) -> Retrieval:
         """Retrieve, and report which stages actually ran (D4).
 
         ``vector`` is the question already embedded by ``router.default``, so a caller that
-        needed it first does not pay for a second embedding (TASK-0515).
+        needed it first does not pay for a second embedding (TASK-0515). Each leg is timed
+        on ``recorder`` (TASK-0487).
         """
         require_query_text(text)
         validate_filter(filters)
@@ -174,11 +214,15 @@ class RetrievalService:
         limit = top_k or retrieval.top_k
         candidates = max(retrieval.rerank_top_n, limit) if self._reranking else limit
 
-        legs = await self._run_legs(text, target, candidates, scoped, vector)
+        spans = recorder or SpanRecorder()
+        timings: dict[str, float] = {}
+        legs = await self._run_legs(text, target, candidates, scoped, vector, spans, timings)
+        fuse_started = spans.elapsed_ms
         fused = self._fuse(legs)
         shortlist = self._assemble(fused, legs, candidates)
+        _timed(spans, timings, "fusion", "fuse", fuse_started, fused=len(shortlist))
 
-        results, mode = await self._rerank(text, shortlist, limit)
+        results, mode = await self._rerank(text, shortlist, limit, spans, timings)
 
         _logger.info(
             "retrieved",
@@ -190,7 +234,7 @@ class RetrievalService:
                 "returned": len(results),
             },
         )
-        return Retrieval(chunks=results, mode=mode)
+        return Retrieval(chunks=results, mode=mode, timings_ms=timings)
 
     def _tenant_scoped(self, filters: Filter | None) -> Filter | None:
         """Return the filter both legs receive, carrying the caller's tenant when scoped.
@@ -227,16 +271,24 @@ class RetrievalService:
         return self.settings.retrieval.rerank and self.reranker is not None
 
     async def _rerank(
-        self, text: str, shortlist: list[ScoredChunk], limit: int
+        self,
+        text: str,
+        shortlist: list[ScoredChunk],
+        limit: int,
+        spans: SpanRecorder,
+        timings: dict[str, float],
     ) -> tuple[list[ScoredChunk], str]:
         """Rerank the shortlist, degrading to the fused order if the reranker fails."""
         reranker = self.reranker
         if reranker is None or not self.settings.retrieval.rerank:
             return shortlist[:limit], FULL_MODE
 
+        started = spans.elapsed_ms
+        model = self.settings.retrieval.reranker_model
         try:
             reordered = await self._bounded_rerank(reranker, text, shortlist)
         except FasterRagError as exc:
+            _timed(spans, timings, "reranker", "rerank", started, model=model, code=exc.code.value)
             # CRITICAL: the mode comes from the ladder's registry, never from a literal. That
             # is what makes "which rungs are built" a question the tree answers rather than a
             # grep, and it is why a rung cannot be served without registering itself.
@@ -247,6 +299,7 @@ class RetrievalService:
             )
             return fused_shortlist(shortlist, limit), mode
 
+        _timed(spans, timings, "reranker", "rerank", started, model=model, reranked=len(reordered))
         return reordered[:limit], FULL_MODE
 
     async def _bounded_rerank(
@@ -277,7 +330,9 @@ class RetrievalService:
         collection: str,
         candidates: int,
         filters: Filter | None,
-        vector: Sequence[float] | None = None,
+        vector: Sequence[float] | None,
+        spans: SpanRecorder,
+        timings: dict[str, float],
     ) -> dict[str, list[ScoredPoint]]:
         """Run the legs behind the vector-database breaker."""
         # CRITICAL: the query is embedded *outside* the guarded region. It is an embedding
@@ -286,11 +341,15 @@ class RetrievalService:
         # — shedding reads against a backend that is perfectly healthy, and hiding the real
         # provider behind the wrong gauge.
         if vector is None:
+            started = spans.elapsed_ms
             vector = await self.router.default.embed_query(text)
+            _timed(spans, timings, "query-embedding", "embed_query", started)
 
         admission = self.breaker.check()
         try:
-            legs = await self._execute_legs(vector, text, collection, candidates, filters)
+            legs = await self._execute_legs(
+                vector, text, collection, candidates, filters, spans, timings
+            )
         except FasterRagError as exc:
             named = _missing_collection(exc, collection)
             self.breaker.record_failure(admission, named)
@@ -308,15 +367,23 @@ class RetrievalService:
         collection: str,
         candidates: int,
         filters: Filter | None,
+        spans: SpanRecorder,
+        timings: dict[str, float],
     ) -> dict[str, list[ScoredPoint]]:
         """Run every configured leg concurrently and return their results by name."""
-        dense = self.adapter.search(
-            SearchQuery(
-                collection=collection,
-                vector=vector,
-                limit=candidates,
-                filters=filters,
-            )
+        dense = _timed_leg(
+            spans,
+            timings,
+            "dense-search",
+            "retrieve_dense",
+            self.adapter.search(
+                SearchQuery(
+                    collection=collection,
+                    vector=vector,
+                    limit=candidates,
+                    filters=filters,
+                )
+            ),
         )
 
         if not self.settings.retrieval.hybrid:
@@ -327,13 +394,19 @@ class RetrievalService:
             _logger.info("query has no indexable terms, so the keyword leg is skipped")
             return {DENSE_LEG: await dense}
 
-        sparse = self.adapter.search(
-            SearchQuery(
-                collection=collection,
-                sparse=sparse_query,
-                limit=candidates,
-                filters=filters,
-            )
+        sparse = _timed_leg(
+            spans,
+            timings,
+            "keyword-search",
+            "retrieve_bm25",
+            self.adapter.search(
+                SearchQuery(
+                    collection=collection,
+                    sparse=sparse_query,
+                    limit=candidates,
+                    filters=filters,
+                )
+            ),
         )
         dense_hits, sparse_hits = await asyncio.gather(dense, sparse)
         return {DENSE_LEG: dense_hits, SPARSE_LEG: sparse_hits}

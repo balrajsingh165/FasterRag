@@ -185,8 +185,9 @@ Persisted for every query when `traces.store: true`; the substrate for replay (D
 | `prompt` | str | Exact assembled prompt sent to the LLM |
 | `response` | str | Exact response received |
 | `result` | QueryResult | The returned result, minus `chunks` |
-| `spans` | list[Span] | `retrieval`, `reranker`, `context-assembly`, `generation` — each `{name, start_ms, end_ms, attributes}` |
+| `spans` | list[Span] | `retrieval`, `reranker`, `context-assembly`, `generation`, and the retrieval legs `query-embedding`, `dense-search`, `keyword-search`, `fusion` (TASK-0487) — each `{name, start_ms, end_ms, attributes}`; an ingest trace's are listed in [observability.md](observability.md) §3 |
 | `created_at` | str | Retained for `traces.retention_days` |
+| `kind` | str | `query`, or `ingest` for a settled ingest job's stage timings (TASK-0487), whose `query` is empty and whose `result` holds `job_id`, `status` and `counts`. A trace stored before the field existed reads as `query` |
 
 ## Invariants (asserted by tests)
 

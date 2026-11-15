@@ -249,8 +249,15 @@ class FasterRag:
                 "visible files. Pass recursive=True to descend into subdirectories",
                 code=ErrorCode.VALIDATION_FAILED,
             )
+        from fasterrag.services.traces import create_trace_store
+
         service = build_ingestion(
-            self.settings, self.vector_db, self.journal, self.cache, router=self.embeddings
+            self.settings,
+            self.vector_db,
+            self.journal,
+            self.cache,
+            router=self.embeddings,
+            traces=create_trace_store(self.settings),
         )
         return await service.ingest(
             expanded,

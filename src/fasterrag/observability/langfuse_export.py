@@ -76,7 +76,7 @@ def build_batch(trace: Trace, *, release: str | None = None) -> list[dict[str, A
             "timestamp": started.isoformat(),
             "body": {
                 "id": trace.trace_id,
-                "name": "query",
+                "name": trace.kind,
                 "input": trace.query,
                 "output": trace.result.get("answer"),
                 "release": release,

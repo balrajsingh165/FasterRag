@@ -117,6 +117,7 @@ def build_ingestion(
     cache: SemanticCache | None,
     *,
     router: TieringRouter | None = None,
+    traces: TraceStore | None = None,
 ) -> IngestionService:
     """Assemble ingestion against the caller's adapter.
 
@@ -130,4 +131,5 @@ def build_ingestion(
         router=router,
         cache=cache,
         locks=create_lock_store(settings),
+        traces=traces,
     )

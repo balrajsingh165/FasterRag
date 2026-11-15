@@ -78,8 +78,10 @@ from fasterrag.core.chunking import SentenceEmbedder, create_chunker, create_tok
 from fasterrag.core.confinement import resolved_within
 from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
 from fasterrag.core.parsing import create_parsing_options, parse_bytes
+from fasterrag.core.tracing import StageClock
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError, ParseError
 from fasterrag.observability.logging import current_trace_id, get_logger
+from fasterrag.observability.metrics import observe_stage
 from fasterrag.services.journal import DocumentRecord, Journal
 from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload, DocumentTask, ParseOutcome
@@ -224,6 +226,7 @@ def parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
 
 def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
     """Do the work of :func:`parse_and_chunk`, raising whatever the parsers raise."""
+    started = perf_counter()
     limit = settings.ingestion.max_document_mb * _MEGABYTE
     if task.location is None:
         _confine(task.source, settings)
@@ -235,6 +238,7 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
         options=create_parsing_options(settings),
     )
 
+    parsed = perf_counter()
     embedder = sentence_embedder(settings) if settings.chunking.strategy == "semantic" else None
     chunker = create_chunker(settings, embedder=embedder)
     chunker_hash = chunker_config_hash(settings)
@@ -252,6 +256,7 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
         )
         for chunk in chunker.split(document)
     ]
+    chunked = perf_counter()
 
     return ParseOutcome(
         task=task,
@@ -265,7 +270,20 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
             if settings.chunking.contextual_enrichment or settings.chunking.strategy == "late"
             else ""
         ),
+        parse_seconds=parsed - started,
+        chunk_seconds=chunked - parsed,
     )
+
+
+def _time_outcome(stages: StageClock, outcome: ParseOutcome) -> None:
+    """Count a returned document's parse and chunk times, ending as it arrived here.
+
+    The worker's clock is not this process's, so the intervals are placed back from now.
+    """
+    arrived = stages.elapsed_ms
+    chunking = arrived - outcome.chunk_seconds * 1000
+    stages.interval("parse", chunking - outcome.parse_seconds * 1000, chunking)
+    stages.interval("chunk", chunking, arrived)
 
 
 def _confine(source: str, settings: Settings) -> None:
@@ -556,8 +574,9 @@ class CpuWorkerPool:
         resume_from: int = 0,
         on_progress: Callable[[int], Awaitable[None]] | None = None,
         ledger: IndexLedger | None = None,
+        stages: StageClock | None = None,
     ) -> PoolReport:
-        """Parse and chunk every task, streaming chunks into ``sink``."""
+        """Parse and chunk every task, streaming chunks into ``sink``, timing both stages."""
         if self._executor is None:
             raise IngestionError(
                 "the cpu worker pool is not running; use it as an async context manager",
@@ -589,6 +608,7 @@ class CpuWorkerPool:
                     continue
 
                 outcome = result
+                _time_outcome(stages or StageClock(observe=observe_stage), outcome)
                 if not outcome.chunks:
                     # CRITICAL: before the dedup check, and never through the ledger's
                     # commit. "indexed" is a statement about the vector database, and the
