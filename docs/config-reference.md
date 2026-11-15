@@ -11,6 +11,8 @@ Conventions used below:
 ## Complete example (all defaults shown; secrets referenced by env-var name only)
 
 ```yaml
+schema_version: 1
+
 app:
   host: 127.0.0.1
   port: 8000
@@ -216,6 +218,28 @@ security:
 ```
 
 ---
+
+## `schema_version`
+
+| Name | Type | Default | Allowed values / validation | Description |
+|---|---|---|---|---|
+| `schema_version` | int | `1` | a whole number ≥ 1; must be the version this release reads | The layout of this file (TASK-0502). It is checked before any other key, so a file written for a different release is refused with an error that says what to change instead of failing on whichever renamed key it reaches first. A file without it is read as version `1`, the layout 0.1.0b1 and 0.1.0b2 wrote, so those files load unchanged. See [Upgrading](#upgrading). |
+
+## Upgrading
+
+Every release states the configuration layout it reads as `schema_version`; this release reads **1**. When a release changes the layout it raises the number and records one migration step — exactly what to rename, move or delete — in `CONFIG_MIGRATIONS` (`src/fasterrag/config/loader.py`) and in the table below. Steps are never edited or removed, so a file several releases old is upgraded through each one in turn.
+
+What the loader does with the `schema_version` it finds:
+
+- **Missing** — read as `1`. Every configuration written by 0.1.0b1 or 0.1.0b2 is version 1 and loads without change; add `schema_version: 1` at the top when you next edit it.
+- **Equal to this release's** — loads.
+- **Higher** — refused with `CONFIG_INVALID`: the file was written by a newer release. The error names the command, `pip install --upgrade fasterrag`, or rewrite the file for this release's version.
+- **Lower** — refused with `CONFIG_INVALID`, listing every step between the file's version and this release's in order (`1 -> 2: …`), then `set schema_version: N`. Apply the steps by hand; nothing rewrites your file.
+- **Not a whole number ≥ 1** — refused with `CONFIG_INVALID`.
+
+| From | To | Release | What to change |
+|---|---|---|---|
+| — | 1 | 0.1.0b1 | The first versioned layout. Nothing to change. |
 
 ## `app`
 

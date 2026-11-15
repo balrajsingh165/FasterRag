@@ -12,6 +12,8 @@
 # `fasterrag query` additionally needs an LLM; this profile names a local Ollama, which
 # needs no key — install Ollama and `ollama pull llama3.1`, or point llm at any provider.
 
+schema_version: 1
+
 vector_db:
   provider: chroma
   api_key_env: null

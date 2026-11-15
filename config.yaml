@@ -4,6 +4,8 @@
 # the complete example in docs/config-reference.md (drift between the two is a bug).
 # Every integration toggle defaults to false.
 
+schema_version: 1
+
 app:
   host: 127.0.0.1
   port: 8000
