@@ -616,6 +616,14 @@ class GenerationService:
             )
             return None
 
+    def _retrieval_vector(self, vector: list[float] | None) -> list[float] | None:
+        """Return the cache's vector for retrieval to reuse, when both embed alike (TASK-0515).
+
+        Only a vector from the adapter retrieval itself would call is reusable.
+        """
+        router = getattr(self.retrieval, "router", None)
+        return vector if router is not None and router.default is self.embedder else None
+
     async def _prepare(
         self,
         question: str,
@@ -624,6 +632,7 @@ class GenerationService:
         top_k: int | None,
         filters: Mapping[str, Any] | None,
         recorder: SpanRecorder | None = None,
+        vector: list[float] | None = None,
     ) -> _Prepared:
         """Retrieve and assemble everything generation and grading both need."""
         spans = recorder or SpanRecorder()
@@ -631,7 +640,7 @@ class GenerationService:
         retrieval_started = spans.elapsed_ms
         started = time.perf_counter()
         retrieved = await self.retrieval.search(
-            question, collection=collection, top_k=top_k, filters=filters
+            question, collection=collection, top_k=top_k, filters=filters, vector=vector
         )
         retrieve_ms = int((time.perf_counter() - started) * 1000)
         spans.record(
@@ -1096,7 +1105,11 @@ class GenerationService:
 
         async with deadline.bounding("retrieving"):
             prepared = await self._prepare(
-                question, collection=collection, top_k=top_k, filters=filters
+                question,
+                collection=collection,
+                top_k=top_k,
+                filters=filters,
+                vector=self._retrieval_vector(vector),
             )
         timings = prepared.timings
         if vector is not None:

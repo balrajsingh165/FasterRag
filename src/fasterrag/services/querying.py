@@ -158,11 +158,12 @@ class RetrievalService:
         collection: str | None = None,
         top_k: int | None = None,
         filters: Filter | None = None,
+        vector: Sequence[float] | None = None,
     ) -> Retrieval:
-        """Retrieve, and report which stages actually ran.
+        """Retrieve, and report which stages actually ran (D4).
 
-        The detailed form. Generation needs the mode so a degraded answer can be labelled
-        as one rather than passed off as a full-quality result (D4).
+        ``vector`` is the question already embedded by ``router.default``, so a caller that
+        needed it first does not pay for a second embedding (TASK-0515).
         """
         require_query_text(text)
         validate_filter(filters)
@@ -173,7 +174,7 @@ class RetrievalService:
         limit = top_k or retrieval.top_k
         candidates = max(retrieval.rerank_top_n, limit) if self._reranking else limit
 
-        legs = await self._run_legs(text, target, candidates, scoped)
+        legs = await self._run_legs(text, target, candidates, scoped, vector)
         fused = self._fuse(legs)
         shortlist = self._assemble(fused, legs, candidates)
 
@@ -276,6 +277,7 @@ class RetrievalService:
         collection: str,
         candidates: int,
         filters: Filter | None,
+        vector: Sequence[float] | None = None,
     ) -> dict[str, list[ScoredPoint]]:
         """Run the legs behind the vector-database breaker."""
         # CRITICAL: the query is embedded *outside* the guarded region. It is an embedding
@@ -283,7 +285,8 @@ class RetrievalService:
         # open the vector-database breaker for an outage the vector database had no part in
         # — shedding reads against a backend that is perfectly healthy, and hiding the real
         # provider behind the wrong gauge.
-        vector = await self.router.default.embed_query(text)
+        if vector is None:
+            vector = await self.router.default.embed_query(text)
 
         admission = self.breaker.check()
         try:
