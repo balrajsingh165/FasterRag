@@ -23,11 +23,11 @@ unparseable verdict never withholds: the grader failed open exactly when it was 
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
-from fasterrag.adapters.llm.base import LLMAdapter
+from fasterrag.adapters.llm.base import Completion, LLMAdapter
 from fasterrag.core.context import AssembledContext
 from fasterrag.core.generation import build_context_block, enclose, new_boundary
 from fasterrag.errors import FasterRagError
@@ -161,11 +161,19 @@ async def grade(
     answer: str,
     context: AssembledContext,
     texts: Sequence[str],
+    *,
+    complete: Callable[[str, str], Awaitable[Completion]] | None = None,
 ) -> FaithfulnessVerdict:
-    """Score how well ``context`` supports ``answer``."""
+    """Score how well ``context`` supports ``answer``.
+
+    ``complete`` replaces the bare grader call; the service passes one that retries.
+    """
     prompt = build_grading_prompt(question, answer, context, texts)
     try:
-        completion = await grader.complete(prompt, system=P3_SYSTEM_PROMPT)
+        if complete is None:
+            completion = await grader.complete(prompt, system=P3_SYSTEM_PROMPT)
+        else:
+            completion = await complete(prompt, P3_SYSTEM_PROMPT)
     except FasterRagError as exc:
         _logger.warning(
             "faithfulness grading failed; the answer is returned ungated",

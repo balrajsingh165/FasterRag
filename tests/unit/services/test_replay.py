@@ -343,3 +343,21 @@ async def test_the_replay_body_carries_the_documented_members() -> None:
         "original",
         "replayed",
     }
+
+
+def test_the_snapshot_names_the_configured_fallback_provider() -> None:
+    """A replay could not tell which ``llm.fallback`` a trace ran under (TASK-0546 item 2)."""
+    configured = Settings.model_validate(
+        {"llm": {"fallback": {"provider": "ollama", "model": "llama3.1:8b"}}}
+    )
+
+    assert config_snapshot(Settings())["llm"]["fallback"] is None
+    assert config_snapshot(configured)["llm"]["fallback"] == {
+        "provider": "ollama",
+        "model": "llama3.1:8b",
+    }
+    changes = diff_config(config_snapshot(Settings()), config_snapshot(configured))
+    assert [change["key"] for change in changes] == [
+        "llm.fallback.model",
+        "llm.fallback.provider",
+    ]

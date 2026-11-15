@@ -289,6 +289,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await llm.close()
             app.state.llm = None
 
+        fallback = getattr(app.state, "llm_fallback", None)
+        if fallback is not None:
+            await fallback.close()
+            app.state.llm_fallback = None
+
         embeddings = getattr(app.state, "embeddings", None)
         if embeddings is not None:
             await embeddings.close()

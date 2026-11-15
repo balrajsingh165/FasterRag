@@ -23,6 +23,7 @@ from fasterrag.core.cache.semantic import SemanticCache
 from fasterrag.observability.audit import KEY_ID_LENGTH, Actor
 from fasterrag.services import composition
 from fasterrag.services.composition import create_embedding_router, create_semantic_cache
+from fasterrag.services.generation import fallback_settings
 from fasterrag.services.jobs import JobRegistry
 from fasterrag.services.journal import Journal, create_journal
 
@@ -46,6 +47,7 @@ __all__ = [
     "get_vector_db",
     "shared_cache",
     "shared_embedding_router",
+    "shared_fallback_llm",
     "shared_llm",
 ]
 
@@ -111,6 +113,21 @@ def shared_llm(request: Request) -> LLMAdapter:
     return llm
 
 
+def shared_fallback_llm(request: Request) -> LLMAdapter | None:
+    """Return the application's ``llm.fallback`` adapter, or ``None`` when none is configured.
+
+    Lent like the primary (TASK-0546); building one opens no connection until it is called.
+    """
+    configured = fallback_settings(request.app.state.settings)
+    if configured is None:
+        return None
+    llm: LLMAdapter | None = getattr(request.app.state, "llm_fallback", None)
+    if llm is None:
+        llm = composition.create_llm_adapter(configured)
+        request.app.state.llm_fallback = llm
+    return llm
+
+
 def current_tenant(request: Request) -> str | None:
     """Return the tenant the auth middleware resolved for this request.
 
@@ -141,6 +158,7 @@ CurrentVectorDB = Annotated[VectorDBAdapter, Depends(get_vector_db)]
 CurrentEmbeddings = Annotated[TieringRouter, Depends(shared_embedding_router)]
 CurrentCache = Annotated[SemanticCache, Depends(shared_cache)]
 CurrentLLM = Annotated[LLMAdapter, Depends(shared_llm)]
+CurrentFallbackLLM = Annotated[LLMAdapter | None, Depends(shared_fallback_llm)]
 JournalDep = Annotated[Journal, Depends(get_journal)]
 CurrentJobs = Annotated[JobRegistry, Depends(get_jobs)]
 AcceptingJobs = Annotated[JobRegistry, Depends(accepting_jobs)]

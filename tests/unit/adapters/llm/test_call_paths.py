@@ -9,17 +9,19 @@ Clients are faked. The point is the mapping between fasterRag's contract and eac
 shape; a real call would test the vendor's uptime.
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 
 from fasterrag.adapters.llm.anthropic import AnthropicGenerator
-from fasterrag.adapters.llm.base import Completion
+from fasterrag.adapters.llm.base import Completion, LLMAdapter
+from fasterrag.adapters.llm.cohere import CohereGenerator
 from fasterrag.adapters.llm.ollama import OllamaGenerator
 from fasterrag.adapters.llm.openai import OpenAIGenerator
 from fasterrag.config.schema import Settings
-from fasterrag.errors import GenerationError
+from fasterrag.errors import ErrorCode, GenerationError
 
 
 def settings(provider: str = "openai", **llm: Any) -> Settings:
@@ -304,3 +306,42 @@ def test_a_completion_at_the_token_ceiling_is_truncated() -> None:
 def test_every_generator_declares_its_provider(generator: type, provider: str) -> None:
     """The provider name labels metrics and the circuit breaker; a wrong one mislabels both."""
     assert generator(settings(provider)).provider == provider
+
+
+async def _hang(**request: Any) -> Any:
+    """Never answer, the way a provider that keeps a connection alive without finishing does."""
+    await asyncio.Event().wait()
+
+
+def _hanging_client(provider: str) -> Any:
+    """Return a fake client whose whole-answer call never returns."""
+    calls = type("calls", (), {"create": staticmethod(_hang)})()
+    if provider == "openai":
+        return type("c", (), {"chat": type("ch", (), {"completions": calls})()})()
+    if provider == "anthropic":
+        return type("c", (), {"messages": calls})()
+    return type("c", (), {"chat": staticmethod(_hang)})()
+
+
+@pytest.mark.parametrize(
+    ("provider", "adapter_class"),
+    [
+        ("openai", OpenAIGenerator),
+        ("anthropic", AnthropicGenerator),
+        ("cohere", CohereGenerator),
+        ("ollama", OllamaGenerator),
+    ],
+)
+async def test_a_whole_answer_call_is_bounded_end_to_end_by_llm_ms(
+    provider: str, adapter_class: type[LLMAdapter]
+) -> None:
+    """``llm_ms`` reached the client per read only, so a call that never finished never ended."""
+    adapter = adapter_class(settings(provider))
+    adapter._client = _hanging_client(provider)
+    adapter.timeout = 0.05
+
+    with pytest.raises(GenerationError) as failure:
+        await asyncio.wait_for(adapter.complete("the question"), 5)
+
+    assert failure.value.code is ErrorCode.GENERATION_TIMEOUT
+    assert failure.value.retryable is True

@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1904,3 +1904,103 @@ async def test_both_surfaces_leave_the_same_outcome(name: str, tmp_path: Path) -
 
     assert case.holds(whole), whole
     assert streamed == whole
+
+
+async def test_a_stream_interrupted_after_text_stores_its_partial_trace(tmp_path: Path) -> None:
+    """A stream that failed after its first token stored no trace at all (TASK-0546 item 5)."""
+    service, llm = build(error=GenerationError("provider vanished"))
+    llm.fail_after = 2
+    service.traces = TraceStore(tmp_path)
+
+    events = await collect(service)
+    stored = service.traces.load(events[0].data["trace_id"])
+
+    assert events[-1].type == "error"
+    assert stored is not None
+    assert stored.response == "The notice "
+    assert stored.result["answer"] == "The notice "
+    assert stored.result["interrupted"] == {
+        "code": ErrorCode.GENERATION_FAILED.value,
+        "detail": "provider vanished",
+        "retryable": True,
+    }
+    assert "aborted" not in stored.result
+
+
+async def test_a_consumer_that_stops_mid_stream_closes_the_provider_and_stores_an_aborted_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leaving a stream part-way left the provider's stream open and stored nothing (TASK-0467)."""
+    service, llm = build()
+    llm.hang_after = 2
+    service.traces = TraceStore(tmp_path)
+    closed = asyncio.Event()
+    stream = llm.stream
+
+    async def watched(prompt: str, *, system: str | None = None) -> AsyncIterator[str]:
+        try:
+            async for text in stream(prompt, system=system):
+                yield text
+        finally:
+            closed.set()
+
+    monkeypatch.setattr(llm, "stream", watched)
+    events = service.stream("q")
+    assert isinstance(events, AsyncGenerator)
+    seen = [await anext(events), await anext(events)]
+    await events.aclose()
+
+    stored = service.traces.load(seen[0].data["trace_id"])
+    assert closed.is_set()
+    assert stored is not None
+    assert stored.result["aborted"] is True
+    assert stored.response == "The "
+
+
+async def test_a_stream_that_fails_for_good_after_text_stores_its_partial_trace(
+    tmp_path: Path,
+) -> None:
+    """A misconfiguration surfacing after the first token left no trace either."""
+    service, llm = build(error=GenerationError("model not found", retryable=False))
+    llm.fail_after = 1
+    service.traces = TraceStore(tmp_path)
+    events: list[QueryEvent] = []
+
+    with pytest.raises(GenerationError):
+        await collect_into(events, service)
+    stored = service.traces.load(events[0].data["trace_id"])
+
+    assert stored is not None
+    assert stored.response == "The "
+    assert stored.result["interrupted"]["retryable"] is False
+
+
+async def test_a_grader_that_fails_once_is_retried_rather_than_skipped() -> None:
+    """Only the P1 call retried, so one 503 from the grader left the answer ungraded (item 3)."""
+    service, _ = build(
+        grounded_or_refuse=True,
+        verdict='{"score": 0.9, "unsupported_claims": []}',
+        grader_error=GenerationError("status 503", retryable=True),
+    )
+    assert isinstance(service.grader, ScriptedLLM)
+    service.grader.failures = 1
+
+    answer = await service.answer("q")
+
+    assert answer.faithfulness == 0.9
+    assert len(service.grader.prompts) == 2
+
+
+async def test_a_half_open_probe_cut_off_by_the_deadline_frees_the_probe_slot() -> None:
+    """A probe past the deadline recorded nothing, so its slot stayed held for a full lease."""
+    service, llm = with_deadline()
+    llm.hang_after = 0
+    service.breaker.failure_threshold = 1
+    service.breaker.record_failure(service.breaker.check(), GenerationError("503"))
+    service.breaker._opened_at -= service.breaker.reset_timeout_ms / 1000 + 1
+
+    answer = await asyncio.wait_for(service.answer("q"), 10)
+
+    assert answer.mode == EXTRACTIVE_MODE
+    assert service.breaker.state.name == "HALF_OPEN"
+    assert service.breaker.check() is not None
