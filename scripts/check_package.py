@@ -45,9 +45,15 @@ EXTRA_ONLY_MODULES: Final = (
     "docx",
     "bs4",
     "lxml",
+    "pytest",
 )
 
 NAMED_EXTRAS: Final = (
+    (
+        "the adapter contract suite",
+        "try:\n    import fasterrag.testing\nexcept ImportError as exc:\n    print(exc)\n",
+        'pip install "fasterrag[testing]"',
+    ),
     (
         "a PDF document",
         "from fasterrag.errors import ParseError\n"

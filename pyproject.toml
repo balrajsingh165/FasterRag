@@ -77,6 +77,9 @@ otel = [
     "opentelemetry-exporter-otlp-proto-http>=1.27",
     "opentelemetry-sdk>=1.27",
 ]
+# TASK-0551: the adapter contract suite, fasterrag.testing, runs under pytest. A plugin author
+# installs this to run it against their plugin; a deployment never needs it, so it is not in `all`.
+testing = ["pytest>=8.3", "pytest-asyncio>=0.24"]
 all = [
     "anthropic>=0.40",
     "beautifulsoup4>=4.12",

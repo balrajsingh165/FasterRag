@@ -21,13 +21,17 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from fasterrag.config.plugins import (
+    BUILTIN_CHUNKING_STRATEGIES,
     BUILTIN_EMBEDDING_PROVIDERS,
     BUILTIN_LLM_PROVIDERS,
     BUILTIN_VECTOR_DB_PROVIDERS,
+    CHUNKERS_GROUP,
     EMBEDDINGS_GROUP,
     LLM_GROUP,
+    PARSERS_GROUP,
     PLANNED_VECTOR_DB_PROVIDERS,
     VECTOR_DB_GROUP,
+    registered_names,
     require_selectable,
 )
 
@@ -68,6 +72,7 @@ _COLLECTION_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _PG_IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 _DOCKER_VOLUME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 _HTTP_HEADER_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+_FILE_SUFFIX_RE = re.compile(r"^\.[a-z0-9][a-z0-9_+-]*$")
 _PATH_LIKE_RE = re.compile(r"^(~|\.{1,2}[\\/]|[A-Za-z]:[\\/])|[\\/]")
 
 _REMOVED_APP_WORKERS = (
@@ -84,7 +89,6 @@ _REMOVED_DEGRADATION_LADDER = (
     "(docs/reliability.md)"
 )
 
-ChunkStrategy = Literal["fixed", "recursive", "semantic", "layout", "late"]
 TokenCounterMode = Literal["auto", "estimate", "model"]
 
 PROVIDERS_REQUIRING_EMBEDDING_KEY: frozenset[str] = frozenset({"openai", "cohere"})
@@ -594,7 +598,7 @@ class ParsingSettings(Section):
 class ChunkingSettings(Section):
     """Chunking strategy, sizing, and contextual enrichment."""
 
-    strategy: ChunkStrategy = "recursive"
+    strategy: str = "recursive"
     chunk_size: Annotated[int, Field(ge=64, le=2500)] = 768
     overlap: Annotated[int, Field(ge=0)] = 64
     token_counter: TokenCounterMode = "auto"
@@ -602,6 +606,14 @@ class ChunkingSettings(Section):
     semantic_percentile: Annotated[float, Field(ge=0.50, le=0.99)] = 0.95
     contextual_enrichment: bool = False
     context_tokens: Annotated[int, Field(ge=25, le=150)] = 75
+
+    @field_validator("strategy")
+    @classmethod
+    def _check_strategy(cls, value: str) -> str:
+        """Require a built-in strategy or one an installed ``fasterrag.chunkers`` plugin names."""
+        return require_selectable(
+            value, builtin=BUILTIN_CHUNKING_STRATEGIES, group=CHUNKERS_GROUP, kind="chunker"
+        )
 
     @model_validator(mode="after")
     def _check_overlap(self) -> Self:
@@ -721,6 +733,28 @@ class IngestionSettings(Section):
     # `security.auth` is on. Leaving it empty therefore cannot silently expose a served
     # deployment; it can only break one loudly, at the request, naming this setting.
     allowed_source_roots: list[str] = []
+    parsers: dict[str, str] = {}
+
+    @field_validator("parsers")
+    @classmethod
+    def _check_parsers(cls, value: dict[str, str]) -> dict[str, str]:
+        """Require lower-case suffix keys naming installed ``fasterrag.parsers`` plugins."""
+        for suffix in value:
+            if not _FILE_SUFFIX_RE.match(suffix):
+                raise ValueError(
+                    f"ingestion.parsers key {suffix!r} is not a lower-case file suffix such "
+                    "as '.rtf'; a key no file name can end in would enable nothing"
+                )
+        installed = registered_names(PARSERS_GROUP) if value else frozenset()
+        for suffix, name in value.items():
+            if name not in installed:
+                raise ValueError(
+                    f"ingestion.parsers maps {suffix!r} to {name!r}, which no installed package "
+                    f"registers under the {PARSERS_GROUP!r} entry-point group (installed: "
+                    f"{', '.join(sorted(installed)) or 'none'}); install the package that "
+                    "provides it, or remove the line"
+                )
+        return value
 
 
 class ReindexSettings(Section):

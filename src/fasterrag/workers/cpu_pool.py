@@ -73,12 +73,18 @@ from time import perf_counter
 from typing import Final
 
 from fasterrag.adapters.llm.base import LLMAdapter
+from fasterrag.config.plugins import BUILTIN_CHUNKING_STRATEGIES
 from fasterrag.config.schema import Settings
-from fasterrag.core.chunking import SentenceEmbedder, create_chunker, create_token_counter
+from fasterrag.core.chunking import (
+    SentenceEmbedder,
+    create_chunker,
+    create_token_counter,
+    resolve_chunker_class,
+)
 from fasterrag.core.confinement import resolved_within
 from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
 from fasterrag.core.journaling import DeletionWatch, DocumentJournal, DocumentRecord
-from fasterrag.core.parsing import create_parsing_options, parse_bytes
+from fasterrag.core.parsing import create_parsing_options, parse_bytes, resolve_parser_class
 from fasterrag.core.tracing import StageClock
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError, ParseError
 from fasterrag.observability.logging import current_trace_id, get_logger
@@ -166,7 +172,14 @@ def reset_shared_sentence_embedders() -> None:
 
 
 def require_runnable_chunker(settings: Settings) -> None:
-    """Refuse a chunking strategy the parse workers cannot run with these settings."""
+    """Refuse a chunking strategy, or a configured parser, the parse workers cannot run.
+
+    Plugins are loaded here, in the parent, so a broken one stops the job before any document.
+    """
+    if settings.chunking.strategy not in BUILTIN_CHUNKING_STRATEGIES:
+        resolve_chunker_class(settings.chunking.strategy)
+    for name in settings.ingestion.parsers.values():
+        resolve_parser_class(name)
     provider = settings.embeddings.provider
     if settings.chunking.strategy != "semantic" or provider in LOCAL_SENTENCE_EMBEDDERS:
         return
@@ -236,6 +249,7 @@ def _parse_and_chunk(task: DocumentTask, settings: Settings) -> ParseOutcome:
         filename=Path(task.readable).name,
         max_bytes=limit,
         options=create_parsing_options(settings),
+        parsers=settings.ingestion.parsers,
     )
 
     parsed = perf_counter()

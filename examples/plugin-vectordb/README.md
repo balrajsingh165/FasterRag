@@ -5,7 +5,7 @@ worked example for [docs/plugins.md](../../docs/plugins.md), and CI installs it 
 fasterRag's shared vector-database contract suite against it on every push.
 
 ```bash
-pip install ./examples/plugin-vectordb
+pip install "./examples/plugin-vectordb[test]"
 ```
 
 ```yaml
@@ -24,7 +24,8 @@ demonstrations, not deployments.
 | `src/fasterrag_memory_vectordb/adapter.py` | `MemoryVectorDB(VectorDBAdapter)`, declaring `adapter_api_version = "1.0"` |
 | `tests/test_contract.py` | The unmodified contract suite, against the adapter as installed |
 
-Run the contract suite from a fasterRag checkout, where `tests/contract/vectordb.py` lives:
+The suite is imported from the installed fasterrag as `fasterrag.testing.vectordb` (the
+`testing` extra, which the `test` extra above pulls in), so it runs without a fasterRag checkout:
 
 ```bash
 python -m pytest examples/plugin-vectordb/tests
