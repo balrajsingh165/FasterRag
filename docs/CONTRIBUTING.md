@@ -89,13 +89,13 @@ The supply-chain audit is defined **once**, as the composite action `.github/act
 
 ## 7a. Code examples in documents
 
-Every fenced `python` block in `README.md`, [quickstart.md](quickstart.md) and [python-api.md](python-api.md) is executed by `tests/unit/docs/test_doc_examples.py` (TASK-0499), as a script, from a directory holding the files the examples name and a `config.yaml` that selects in-memory providers through real entry points. An example that calls a method that does not exist, or reads a field an object does not have, fails the build. A block that cannot run as written — it uses names it never defines, or a file the reader supplies — is marked by putting
+Every fenced `python` block in `README.md`, [quickstart.md](quickstart.md), [python-api.md](python-api.md) and every page of the published site (`userdocs/*.md`, including the indented blocks inside its `=== "Python"` tabs) is executed by `tests/unit/docs/test_doc_examples.py` (TASK-0499, TASK-0552), as a script, from a directory holding the files the examples name and a `config.yaml` that selects in-memory providers through real entry points. An example that calls a method that does not exist, or reads a field an object does not have, fails the build. A block that cannot run as written — it uses names it never defines, or a file the reader supplies — is marked by putting
 
 ```html
 <!-- doc-example: illustrative -->
 ```
 
-on the last non-blank line before its fence. The comment renders as nothing on GitHub and in MkDocs. A marked block must still compile. Mark a block only when it truly cannot run; a block that needs another file or name in the test's workspace is better served by adding it there.
+on the last non-blank line before its fence. The comment renders as nothing on GitHub and in MkDocs. A marked block must still compile; it may use a top-level `await`. Mark a block only when it truly cannot run; a block that needs another file or name in the test's workspace is better served by adding it there.
 
 ## 8. Adding a provider adapter
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.commands.pipeline import _build_generation, _settings_or_none
@@ -29,7 +30,17 @@ from fasterrag.services.benchmark import (
 )
 from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.estimation import estimate_sources
-from fasterrag.services.evaluation import run_eval, summarize
+from fasterrag.services.evaluation import (
+    GENERATION_BASELINE_NAME,
+    GenerationGate,
+    check_generation,
+    load_dataset,
+    load_generation_baseline,
+    run_eval,
+    score_faithfulness,
+    summarize,
+    write_generation_baseline,
+)
 from fasterrag.services.source_expansion import expand_sources
 
 __all__ = ["run_benchmark"]
@@ -143,7 +154,7 @@ async def _ingest_suite(
 
 
 async def _eval_suite(args: argparse.Namespace, console: Console) -> ExitCode:
-    """Score a collection against a committed dataset and report the gate's verdict."""
+    """Score a collection against a committed dataset and report the gates' verdicts."""
     settings = _settings_or_none(args, console)
     if settings is None:
         return ExitCode.USAGE
@@ -155,10 +166,16 @@ async def _eval_suite(args: argparse.Namespace, console: Console) -> ExitCode:
     collection = args.collection or settings.vector_db.collection.default_name
     adapter = create_vector_db_adapter(settings)
     router = create_embedding_router(settings)
+    root = Path(args.dataset)
 
     try:
-        report, gate = await run_eval(
-            Path(args.dataset), settings, adapter, router, collection=collection
+        report, gate = await run_eval(root, settings, adapter, router, collection=collection)
+        scores = (
+            await score_faithfulness(
+                load_dataset(root), settings, adapter, router, collection=collection
+            )
+            if args.faithfulness
+            else None
         )
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
@@ -170,14 +187,46 @@ async def _eval_suite(args: argparse.Namespace, console: Console) -> ExitCode:
     console.emit(f"collection      {collection}")
     console.emit(f"scored          {report.scored} ({report.adversarial} adversarial)")
     console.emit(f"recall@{report.k}        {report.recall_at_k:.4f}")
+    console.emit(f"precision@{report.k}     {report.precision_at_k:.4f}")
     console.emit(f"mrr             {report.mrr:.4f}")
     console.emit(f"ndcg@{report.k}          {report.ndcg_at_k:.4f}")
     console.emit(f"gate            {gate.summary()}")
-    console.document({"eval": summarize(report), "gate": gate.as_dict()})
+    document: dict[str, Any] = {"eval": summarize(report), "gate": gate.as_dict()}
+    passed = gate.passed
+
+    if scores is not None:
+        generation_gate = _generation_gate(args, root, scores, settings, console)
+        if generation_gate is None:
+            return ExitCode.FAILURE
+        console.emit(f"faithfulness    {scores['mean_faithfulness']:.4f}")
+        console.emit(f"citation rate   {scores['citation_rate']:.4f}")
+        console.emit(f"generation gate {generation_gate.summary()}")
+        document["generation"] = scores
+        document["generation_gate"] = generation_gate.as_dict()
+        passed = passed and generation_gate.passed
+    console.document(document)
 
     # CRITICAL: exit 5, the documented regression-gate code, so CI can tell a blocked gate
     # from a crashed run.
-    return ExitCode.SUCCESS if gate.passed else ExitCode.REGRESSION
+    return ExitCode.SUCCESS if passed else ExitCode.REGRESSION
+
+
+def _generation_gate(
+    args: argparse.Namespace,
+    root: Path,
+    scores: dict[str, Any],
+    settings: Settings,
+    console: Console,
+) -> GenerationGate | None:
+    """Judge a faithfulness run, recording it as the baseline first when asked to."""
+    try:
+        if args.record_generation_baseline:
+            write_generation_baseline(root, scores, settings)
+            console.emit(f"recorded        {root / GENERATION_BASELINE_NAME}")
+        return check_generation(scores, load_generation_baseline(root), settings)
+    except FasterRagError as exc:
+        console.problem(exc.code.value, exc.detail)
+        return None
 
 
 async def run_benchmark(args: argparse.Namespace, console: Console) -> ExitCode:

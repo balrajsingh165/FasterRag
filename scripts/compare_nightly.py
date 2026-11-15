@@ -50,6 +50,7 @@ from typing import Any, Final
 __all__ = [
     "EXIT_CODES",
     "MACHINE_FIELDS",
+    "SERIES_LIMIT",
     "TOLERANCE",
     "TRACKED_METRICS",
     "ComparisonReport",
@@ -57,12 +58,18 @@ __all__ = [
     "Verdict",
     "compare",
     "compare_files",
+    "extend_series",
     "load_document",
+    "load_series",
     "machine_mismatch",
     "main",
+    "required_suites_missing",
+    "series_markdown",
+    "series_row",
 ]
 
 TOLERANCE: Final = 0.10
+SERIES_LIMIT: Final = 60
 
 # CRITICAL: these are the fingerprint fields that describe the *machine*. The fingerprint
 # also carries `python` and `fasterrag`, and their absence here is deliberate: a version
@@ -377,9 +384,19 @@ def _verdict(comparisons: list[MetricComparison], notes: list[str]) -> Verdict:
 
 
 def compare(
-    previous: dict[str, Any], current: dict[str, Any], *, tolerance: float = TOLERANCE
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    tolerance: float = TOLERANCE,
+    required: tuple[str, ...] = (),
 ) -> ComparisonReport:
-    """Compare every tracked metric of every suite the two documents share."""
+    """Compare every tracked metric of every suite the two documents share.
+
+    A suite named in ``required`` that tonight's run did not record is not comparable.
+    """
+    missing = required_suites_missing(current, required)
+    if missing:
+        return ComparisonReport(Verdict.NOT_COMPARABLE, tolerance, [], missing)
     mismatch = machine_mismatch(previous, current)
     if mismatch:
         return ComparisonReport(Verdict.NOT_COMPARABLE, tolerance, [], [mismatch])
@@ -417,7 +434,7 @@ def compare(
 
 
 def compare_files(
-    previous: Path, current: Path, *, tolerance: float = TOLERANCE
+    previous: Path, current: Path, *, tolerance: float = TOLERANCE, required: tuple[str, ...] = ()
 ) -> ComparisonReport:
     """Load both documents and compare them; an unreadable one is not comparable."""
     current_document, current_problem = load_document(current)
@@ -427,7 +444,89 @@ def compare_files(
         problems = [problem for problem in (previous_problem, current_problem) if problem]
         return ComparisonReport(Verdict.NOT_COMPARABLE, tolerance, [], problems)
 
-    return compare(previous_document, current_document, tolerance=tolerance)
+    return compare(previous_document, current_document, tolerance=tolerance, required=required)
+
+
+def required_suites_missing(current: dict[str, Any], required: tuple[str, ...]) -> list[str]:
+    """Return a note for every required suite tonight's document does not carry.
+
+    A night that stopped running a suite would otherwise only lose a row from the table,
+    and a series that silently ends is the measuring-nothing failure (TASK-0314) again.
+    """
+    present = _suites(current)
+    return [
+        f"the {name} suite is required and tonight's run did not record it, so it measured "
+        "nothing that night"
+        for name in required
+        if name not in present
+    ]
+
+
+def load_series(path: Path | None) -> list[dict[str, Any]]:
+    """Read the previous night's series, one JSON object per line; absent or torn is empty.
+
+    The series is a record, not a verdict input, so a missing one starts afresh instead of
+    failing the night; the comparison above already judged the night.
+    """
+    if path is None or not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        sys.stderr.write(f"could not read the series {path}, starting a new one: {exc}\n")
+        return []
+    for line in lines:
+        try:
+            row: Any = json.loads(line)
+        except json.JSONDecodeError:
+            sys.stderr.write(f"skipped an unreadable series line in {path}\n")
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def series_row(current: dict[str, Any], label: str, verdict: Verdict) -> dict[str, Any]:
+    """Return tonight's row: each suite's warmed medians for the tracked metrics."""
+    suites = {
+        name: {
+            metric: _number(_mapping(result.get("median")).get(metric))
+            for metric, _ in TRACKED_METRICS
+        }
+        for name, result in sorted(_suites(current).items())
+    }
+    return {"run": label, "verdict": verdict.value, "suites": suites}
+
+
+def extend_series(
+    rows: list[dict[str, Any]], row: dict[str, Any], *, limit: int = SERIES_LIMIT
+) -> list[dict[str, Any]]:
+    """Append tonight's row and keep the newest ``limit`` rows."""
+    return [*rows, row][-limit:]
+
+
+def series_markdown(
+    rows: list[dict[str, Any]], *, suite: str = "query", metric: str = "p50_ms", last: int = 14
+) -> str:
+    """Return the job-summary table of one suite's metric over the latest nights."""
+    shown = rows[-last:]
+    cells = [
+        f"| `{_mapping(row).get('run', '')}` | "
+        f"{_cell(_number(_mapping(_mapping(row.get('suites')).get(suite)).get(metric)))} | "
+        f"{row.get('verdict', '')} |"
+        for row in shown
+    ]
+    return "\n".join(
+        [
+            f"### `{suite}.{metric}` over the last {len(shown)} nights",
+            "",
+            "| Run | Value | Verdict |",
+            "|---|---|---|",
+            *cells,
+            "",
+        ]
+    )
 
 
 def _tolerance(value: str) -> float:
@@ -469,9 +568,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--summary", type=Path, default=None, help="append a markdown summary to this file"
     )
+    parser.add_argument(
+        "--require-suite",
+        action="append",
+        default=[],
+        help="a suite tonight's run must carry, or the night is not comparable (repeatable)",
+    )
+    parser.add_argument(
+        "--series", type=Path, default=None, help="the previous night's series.jsonl"
+    )
+    parser.add_argument(
+        "--series-out", type=Path, default=None, help="write the series with tonight appended"
+    )
+    parser.add_argument("--run-label", default="", help="tonight's label in the series")
     args = parser.parse_args(argv)
 
-    report = compare_files(args.previous, args.current, tolerance=args.tolerance)
+    report = compare_files(
+        args.previous,
+        args.current,
+        tolerance=args.tolerance,
+        required=tuple(args.require_suite),
+    )
 
     sys.stdout.write(f"{report.summary()}\n")
     for entry in report.comparisons:
@@ -484,6 +601,15 @@ def main(argv: list[str] | None = None) -> int:
         _write(args.json_out, f"{payload}\n", append=False)
     if args.summary is not None:
         _write(args.summary, report.markdown(), append=True)
+    if args.series_out is not None:
+        current, _ = load_document(args.current)
+        rows = extend_series(
+            load_series(args.series), series_row(current or {}, args.run_label, report.verdict)
+        )
+        lines = "".join(f"{json.dumps(row, sort_keys=True)}\n" for row in rows)
+        _write(args.series_out, lines, append=False)
+        if args.summary is not None:
+            _write(args.summary, series_markdown(rows), append=True)
 
     return EXIT_CODES[report.verdict]
 

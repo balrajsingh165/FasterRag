@@ -3865,9 +3865,12 @@ Separate from :func:`score_collection` because the costs are not comparable. Ret
     exactly the right thing.
 
     Returns:
-        The mean faithfulness over graded answers, how many were graded, and how many were
-        refused. Refusals are reported rather than folded into the mean: withholding an
-        answer is a correct outcome under D5, not a score of zero.
+        The mean faithfulness over graded answers, the citation rate (answers citing at least
+        one supplied passage), and how many were graded, refused and ungraded. Since
+        TASK-0481 grading is forced on for the run, and a withheld answer's grader score is
+        counted in the mean: it is the score the answer earned, not a zero, and leaving it
+        out let a prompt that produced unsupported answers report a perfect mean over the
+        few it did not withhold. `refused` still counts the withholdings separately.
 
 ### `EvalDataset.resolved`
 

@@ -28,7 +28,7 @@ vector_db:
 | `huggingface` (default, runs locally) | `huggingface` | none |
 | `openai` | `openai` | `OPENAI_API_KEY` |
 | `cohere` | `cohere` | `COHERE_API_KEY` |
-| `ollama` (local server) | `ollama` | none |
+| `ollama` (local server) | `ollama` | none; `embeddings.base_url` names the server (else `llm.base_url` when the LLM is also Ollama, else `OLLAMA_HOST`) |
 
 Changing the embedding model of a collection that already holds data needs a rebuild:
 `fasterrag index reembed <collection> <paths>`.

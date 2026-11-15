@@ -62,6 +62,7 @@ same `code`, `retryable` and `trace_id` the REST API returns.
 
 Bring your own LLM step:
 
+<!-- doc-example: illustrative -->
 ```python
 chunks = await rag.retrieve("termination clause", top_k=10, filters={"department": "legal"})
 context = "\n\n".join(chunk.text for chunk in chunks)

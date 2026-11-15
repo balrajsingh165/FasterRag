@@ -7,23 +7,70 @@ answers with the first sentence of the first passage and cites that passage, so 
 its citation and its trace are all real outputs of the pipeline; only the wording is not a
 model's. It is selected by configuration like any other provider; nothing in fasterRag knows
 it exists.
+
+It also grades. Called with the P3 system prompt (``docs/prompts.md``), it scores the answer
+the way the contract asks, deterministically: each sentence of the answer is a claim, and a
+claim is supported when its words occur, in order and contiguously, in the context passages.
+That makes ``fasterrag benchmark --suite eval --faithfulness`` a reproducible gate in CI: a
+change that stops the right context reaching the prompt makes the scripted answer
+unsupported, and the score falls. It measures the pipeline, never a model's judgement.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import AsyncIterator
 from typing import ClassVar, Final
 
 from fasterrag.adapters.llm.base import Completion, LLMAdapter
 from fasterrag.adapters.vectordb.base import HealthStatus
+from fasterrag.core.faithfulness import P3_SYSTEM_PROMPT
 
-__all__ = ["NO_CONTEXT_ANSWER", "ScriptedLLM", "scripted_answer"]
+__all__ = ["NO_CONTEXT_ANSWER", "ScriptedLLM", "scripted_answer", "scripted_verdict"]
 
 NO_CONTEXT_ANSWER: Final = "The provided context does not contain an answer."
 
 _MARKER: Final = re.compile(r"^\[\^([A-Za-z0-9_\-]+)\]")
 _SENTENCE: Final = re.compile(r"(.+?[.!?])(?:\s|$)", re.S)
+_SECTION: Final = re.compile(r"<(context|answer)-([0-9a-f]+)>\n(.*?)\n</\1-\2>", re.S)
+_CITATION: Final = re.compile(r"\[[^\]]*\]")
+_WORD: Final = re.compile(r"[a-z0-9]+")
+
+
+def _words(text: str) -> str:
+    """Return ``text`` as its lower-cased words, space-separated and space-padded."""
+    return f" {' '.join(_WORD.findall(_CITATION.sub(' ', text).lower()))} "
+
+
+def scripted_verdict(prompt: str) -> str:
+    """Grade a P3 prompt: the share of the answer's sentences found verbatim in the context."""
+    sections = {match.group(1): match.group(3) for match in _SECTION.finditer(prompt)}
+    passages = [
+        line
+        for line in sections.get("context", "").splitlines()
+        if not _MARKER.match(line) and not line.lstrip().startswith("#")
+    ]
+    context = _words(" ".join(passages))
+    answer = " ".join(sections.get("answer", "").split())
+    claims = [
+        claim
+        for claim in (match.group(1) for match in _SENTENCE.finditer(f"{answer} "))
+        if _words(claim).strip()
+    ]
+    if answer == NO_CONTEXT_ANSWER or not claims:
+        unsupported: list[str] = []
+        score = 1.0
+    else:
+        unsupported = [claim for claim in claims if _words(claim) not in context]
+        score = 1 - len(unsupported) / len(claims)
+    return json.dumps(
+        {
+            "score": round(score, 4),
+            "unsupported_claims": unsupported,
+            "reasoning": "scripted: a claim is supported when its words occur in the context",
+        }
+    )
 
 
 def scripted_answer(prompt: str) -> str:
@@ -55,8 +102,8 @@ class ScriptedLLM(LLMAdapter):
     adapter_api_version: ClassVar[str] = "1.0"
 
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
-        """Return the scripted answer whole."""
-        text = scripted_answer(prompt)
+        """Return the scripted answer whole, or a scripted P3 verdict when asked to grade."""
+        text = scripted_verdict(prompt) if system == P3_SYSTEM_PROMPT else scripted_answer(prompt)
         return Completion(
             text=text,
             model=self.model,

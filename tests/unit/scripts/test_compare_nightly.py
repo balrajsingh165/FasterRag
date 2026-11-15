@@ -362,18 +362,109 @@ def test_the_benchmark_step_does_not_suppress_its_own_failure() -> None:
     assert benchmark["continue-on-error"] is True
 
 
-def test_the_measure_job_declares_no_backend_because_it_reaches_none() -> None:
+def test_the_measure_job_declares_qdrant_only_beside_the_steps_that_reach_it() -> None:
     """A declared dependency nothing uses is how 83 days of measuring nothing hid.
 
-    The job ran `--suite ingest`, which builds no vector-db adapter, while declaring a
-    Qdrant service it never opened a socket to (TASK-0323). The service is gone; this
-    pins the honest state rather than the symmetry with the eval gate it once asserted.
+    TASK-0323 removed a Qdrant service no step opened a socket to. TASK-0488 restored it with
+    the steps that contact it, so this asserts the contact rather than the declaration.
     """
     measure = workflow("nightly")["jobs"]["measure"]
 
-    assert "services" not in measure, (
-        "the measure job declares a service again; either it now reaches that backend "
-        "-- in which case assert the contact, not the declaration -- or the declaration "
-        "is decoration and the next reader will believe it"
+    assert set(measure["services"]) == {"qdrant"}
+    assert "localhost:6333/readyz" in step(measure, "Wait for Qdrant")["run"]
+    assert "ingest" in step(measure, "Build the handbook collection")["run"]
+    benchmark = step(measure, "Benchmark suite")["run"]
+    assert "--suite all" in benchmark
+    assert "--collection handbook" in benchmark
+    assert (
+        "--faithfulness"
+        in step(measure, "Generation gate (faithfulness and citations, scripted LLM)")["run"]
     )
-    assert "--suite ingest" in step(measure, "Benchmark suite")["run"]
+
+
+def test_the_nightly_comparison_requires_the_query_suite_and_keeps_its_series() -> None:
+    """Without the requirement a night that stopped measuring queries lost one table row."""
+    compare_step = step(
+        workflow("nightly")["jobs"]["measure"], "Compare against the previous night"
+    )["run"]
+
+    assert "--require-suite query" in compare_step
+    assert "--series-out artifacts/series.jsonl" in compare_step
+
+
+def two_suites(query_p50: float = 80.0) -> dict[str, Any]:
+    """A night that measured both the ingest and the query suite."""
+    ingest = document(suite="ingest", p50=2.0)
+    query = document(suite="query", p50=query_p50)
+    return {"hardware": MACHINE, "suites": [*ingest["suites"], *query["suites"]]}
+
+
+def test_a_night_without_a_required_suite_is_not_comparable(tmp_path: Path) -> None:
+    """A night that silently stopped measuring the query suite only lost a table row."""
+    previous = write(tmp_path / "previous.json", two_suites())
+    current = write(tmp_path / "current.json", document(suite="ingest", p50=2.0))
+
+    report = compare_files(previous, current, required=("ingest", "query"))
+
+    assert report.verdict is Verdict.NOT_COMPARABLE
+    assert any("query suite is required" in note for note in report.notes)
+
+
+def test_required_suites_that_are_present_are_compared(tmp_path: Path) -> None:
+    previous = write(tmp_path / "previous.json", two_suites())
+    current = write(tmp_path / "current.json", two_suites(query_p50=81.0))
+
+    report = compare_files(previous, current, required=("ingest", "query"))
+
+    assert report.verdict is Verdict.WITHIN_TOLERANCE
+    assert {entry.suite for entry in report.comparisons} == {"ingest", "query"}
+
+
+def test_the_query_latency_series_is_carried_forward_night_over_night(tmp_path: Path) -> None:
+    """Nothing kept a query-latency series: each night saw only the night before."""
+    previous = write(tmp_path / "previous.json", two_suites(query_p50=80.0))
+    series = tmp_path / "series.jsonl"
+    summary = tmp_path / "summary.md"
+    nights = [(tmp_path / f"night-{n}.json", 80.0 + n) for n in range(3)]
+    for night, (path, p50) in enumerate(nights):
+        write(path, two_suites(query_p50=p50))
+        arguments = [
+            "--previous",
+            str(previous),
+            "--current",
+            str(path),
+            "--require-suite",
+            "query",
+            "--series-out",
+            str(series),
+            "--run-label",
+            f"run-{night}",
+            "--summary",
+            str(summary),
+        ]
+        if night:
+            arguments += ["--series", str(series)]
+        assert main(arguments) == 0
+
+    rows = [json.loads(line) for line in series.read_text(encoding="utf-8").splitlines()]
+    assert [row["run"] for row in rows] == ["run-0", "run-1", "run-2"]
+    assert [row["suites"]["query"]["p50_ms"] for row in rows] == [80.0, 81.0, 82.0]
+    assert "`query.p50_ms` over the last 3 nights" in summary.read_text(encoding="utf-8")
+
+
+def test_the_series_keeps_only_the_newest_nights() -> None:
+    from compare_nightly import extend_series
+
+    rows = [{"run": str(index)} for index in range(5)]
+
+    assert [row["run"] for row in extend_series(rows, {"run": "5"}, limit=3)] == ["3", "4", "5"]
+
+
+def test_a_missing_or_torn_series_starts_afresh(tmp_path: Path) -> None:
+    from compare_nightly import load_series
+
+    torn = tmp_path / "series.jsonl"
+    torn.write_text('{"run": "a"}\n{"run": \n', encoding="utf-8")
+
+    assert load_series(tmp_path / "absent.jsonl") == []
+    assert load_series(torn) == [{"run": "a"}]

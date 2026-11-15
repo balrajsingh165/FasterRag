@@ -355,6 +355,16 @@ def _add_benchmark(subparsers: argparse._SubParsersAction[argparse.ArgumentParse
     parser.add_argument("--query", default=None, help="question for the query suite")
     parser.add_argument("--iterations", type=int, default=20, help="calls per repetition")
     parser.add_argument("--ledger", action="store_true", help="emit ledger-formatted entries")
+    parser.add_argument(
+        "--faithfulness",
+        action="store_true",
+        help="eval suite: also answer and grade every golden query (two model calls each)",
+    )
+    parser.add_argument(
+        "--record-generation-baseline",
+        action="store_true",
+        help="with --faithfulness: record this run as the dataset's generation baseline",
+    )
 
 
 def _add_portability(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

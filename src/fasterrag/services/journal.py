@@ -103,6 +103,7 @@ _PREVIOUS_SUFFIX: Final = ".prev"
 _TOMBSTONE_KEY: Final = "tombstone"
 _TEMPORARY_SUFFIX: Final = ".tmp"
 _BUSY_DELAYS: Final = (0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2)
+_BUSY_IS_TRANSIENT: Final = sys.platform == "win32"
 _DISK_FULL: Final = frozenset({errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)})
 _LOCK_SUFFIX: Final = ".lock"
 _KEY_INDEX_DIR: Final = "job-keys"
@@ -337,6 +338,12 @@ def _write_atomically(
             _sync_directory(path.parent)
     except OSError as exc:
         _discard(staged)
+        if isinstance(exc, PermissionError) and _BUSY_IS_TRANSIENT:
+            raise IngestionError(
+                f"the journal record {path.name} stayed busy through a short retry while "
+                f"another task replaced it: {exc}. Nothing was lost; retry the request",
+                code=ErrorCode.NOT_READY,
+            ) from exc
         raise IngestionError(
             f"the ingestion journal could not be written to {path}: {exc}. "
             "The last checkpoint is still readable, so the job can be resumed once the "
