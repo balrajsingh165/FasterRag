@@ -199,12 +199,7 @@ class RetrievalService:
         vector: Sequence[float] | None = None,
         recorder: SpanRecorder | None = None,
     ) -> Retrieval:
-        """Retrieve, and report which stages actually ran (D4).
-
-        ``vector`` is the question already embedded by ``router.default``, so a caller that
-        needed it first does not pay for a second embedding (TASK-0515). Each leg is timed
-        on ``recorder`` (TASK-0487).
-        """
+        """Retrieve, and report which stages actually ran (D4)."""
         require_query_text(text)
         validate_filter(filters)
         scoped = self._tenant_scoped(filters)

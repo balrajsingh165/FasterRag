@@ -2522,6 +2522,14 @@ The result is clamped into 1-6. A converter emitting a custom ``Heading 0`` styl
     underneath it instead of resetting the path, and the whole document came back sectioned
     under one bogus root.
 
+### `parse_docx`
+
+> Parse a DOCX file into structural blocks in reading order.
+
+Raises:
+        IngestionError: ``PAYLOAD_TOO_LARGE`` when the archive unpacks past the limit.
+        ParseError: When the file is not a readable DOCX.
+
 ## `src/fasterrag/core/parsing/options.py`
 
 ### `ParsingOptions`
@@ -2562,7 +2570,14 @@ Args:
 
 ### `decode`
 
-> Decode bytes as UTF-8, dropping a byte-order mark and flagging a lenient fallback.
+> Decode bytes by byte-order mark, then UTF-8, then Windows-1252, flagging any guess.
+
+Raises:
+        ParseError: ``ENCODING_UNREADABLE`` when no codec reads it and the lenient result
+            is mostly replacement characters.
+
+Earlier note, from when this function decoded as UTF-8 only (summary then: "Decode bytes as
+UTF-8, dropping a byte-order mark and flagging a lenient fallback"):
 
 The codec is ``utf-8-sig`` rather than ``utf-8`` because U+FEFF is not whitespace, so
     ``str.strip`` leaves it in place and a leading BOM reaches the first block. Every parser
@@ -4557,6 +4572,14 @@ Retrieval is the one outbound call on the query path with nowhere to degrade to:
 
         ``CircuitOpenError`` carries ``CIRCUIT_OPEN``, which the problem table already maps
         to a retryable 503, so shedding is reported as the temporary condition it is.
+
+### `RetrievalService.search`
+
+> Retrieve, and report which stages actually ran (D4).
+
+``vector`` is the question already embedded by ``router.default``, so a caller that
+        needed it first does not pay for a second embedding (TASK-0515). Each leg is timed
+        on ``recorder`` (TASK-0487).
 
 ## `src/fasterrag/services/regression.py`
 

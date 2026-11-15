@@ -84,3 +84,13 @@ Not blocked — *unreviewed*. Each resolved an ambiguity no document covered, an
 |---|---|---|
 | **B9.1** | TASK-0098 | Enable branch protection on `main` — require PRs, block direct pushes. |
 | **B9.2** | TASK-0111 | Tag the landed slice boundaries `v0.1.0-s1` and `v0.2.0-s2`. |
+
+---
+
+## B10 — Defaults that need a maintainer's decision
+
+Nothing is broken and nothing waits on hardware: each is a default someone must choose, because either choice changes what an existing deployment sees.
+
+| | Task | Decision needed |
+|---|---|---|
+| **B10.1** | TASK-0560 | Whether `retrieval.verify_lock` becomes `refuse` by default. config-reference.md promises it after one release of `warn`; two have shipped, and the flip turns a warned query against a drifted index into a `409 INDEX_DRIFT`. |

@@ -226,7 +226,7 @@ Non-streaming `200`:
      "span": {"start": 128, "end": 342}, "score": 0.91}
   ],
   "usage": {"prompt_tokens": 3211, "completion_tokens": 187},
-  "timings_ms": {"embed": 8, "retrieve": 41, "fuse": 1, "rerank": 143, "assemble": 6, "generate": 902, "total": 1101},
+  "timings_ms": {"cache": 8, "retrieve": 184, "assemble": 6, "generate": 902, "grade": 311},
   "degraded": false,
   "mode": "full",
   "truncated": false,
@@ -236,6 +236,8 @@ Non-streaming `200`:
   "cache": {"semantic_hit": false}
 }
 ```
+
+`timings_ms` holds whole milliseconds for each stage that ran, and only those: `retrieve` (the whole retrieval call — embedding the question unless the cache already did, both search legs, fusion and reranking), `assemble` and `generate`; `cache` when the question was embedded for a semantic-cache lookup (that embedding, which retrieval then reuses, TASK-0515); `grade` when the answer was graded. A semantic-cache hit carries `cache` only. There is no `total`, and no per-leg key: the legs inside `retrieve` are the trace's spans and the `fasterrag_stage_duration_seconds` stages ([observability.md](observability.md), TASK-0487).
 
 `truncated` is `true` when the model stopped at `llm.max_tokens` rather than finishing. The answer is still served — a partial answer with a flag beats no answer — but a caller cannot otherwise tell a complete answer from one that ran out mid-sentence. A reasoning model can spend the whole ceiling before emitting anything, which arrives as an **empty** `answer` with `truncated: true`; this was observed against a real OpenAI-compatible endpoint (TASK-0206).
 
