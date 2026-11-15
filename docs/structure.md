@@ -56,7 +56,7 @@ fasterRag/
 ├── userdocs/                     # Source of the published site (mkdocs.yml docs_dir): a short user guide linking back to docs/
 ├── examples/                     # Runnable scripts, each executed by CI's `examples` job
 │   ├── README.md                 # What each shows, and how CI runs them without a model or a key
-│   ├── plugin-vectordb/          # Sample installable plugin; passes tests/contract/vectordb.py
+│   ├── plugin-vectordb/          # Sample installable plugin; passes fasterrag.testing.vectordb
 │   └── scripted-llm/             # Offline stand-in LLM selected by config for the generation examples
 ├── src/
 │   └── fasterrag/
@@ -99,6 +99,7 @@ fasterRag/
 │       │   │                     # tiering (metadata-routed model selection), sync bridge
 │       │   ├── llm/              # base, factory, provider clients (streaming)
 │       │   └── plugin_api.py     # re-exports core/plugin_api.py's version check for the factories
+│       ├── testing/              # Adapter contract suite for plugin authors (the `testing` extra)
 │       ├── workers/              # Parallel pools
 │       │   ├── cpu_pool.py       # load/parse/chunk workers (CPU-bound)
 │       │   ├── embed_pool.py     # stateful embedding workers (model loaded once)
@@ -135,7 +136,8 @@ fasterRag/
 |---|---|
 | `api/` | HTTP surface only. Routers validate requests (Pydantic), call one service function, shape the response. **No business logic in routers.** |
 | `services/` | Use-case orchestration. Compose core pipeline pieces and adapters into ingestion, querying, collection, provisioning, and diagnostic workflows. Own transactions/job state. |
-| `tests/contract/` | The shared adapter contract suite. Vendor-neutral by construction: a subclass supplies the adapter and collection fixtures, so third-party providers registered through entry points run the identical suite. |
+| `tests/contract/` | Re-exports the shared adapter contract suite from `src/fasterrag/testing/` (TASK-0551), so every built-in adapter's contract test keeps its import path while running exactly what a third-party plugin runs. |
+| `src/fasterrag/testing/` | The shared adapter contract suite, shipped in the wheel so a plugin author can run it from an installed fasterrag (`pip install "fasterrag[testing]"`). Vendor-neutral by construction: a subclass supplies the adapter and collection fixtures, so third-party providers registered through entry points run the identical suite. Nothing else in the package imports it, so the core install never needs pytest. |
 | `core/` | The RAG pipeline itself — parsing, chunking, retrieval, rerank, context assembly, generation. Pure domain logic; depends on adapter *interfaces*, never concrete vendors. |
 | `adapters/` | All vendor code (vector DBs, embedding providers, LLM providers). Each adapter implements a base interface; a factory instantiates the concrete one from config. Vendor types never leak past this boundary. |
 | `workers/` | Parallel execution: CPU pool for parse/chunk, stateful embedding pool, bounded queues, batch indexer. Owns backpressure and retry policy. |

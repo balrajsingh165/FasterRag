@@ -2,9 +2,10 @@
 
 The adapter is resolved through the factory by its registered name, never imported directly:
 a pass here proves the installed entry point, the adapter API version check and the contract
-together. Run it from a fasterRag checkout, where ``tests/contract/vectordb.py`` lives::
+together. The suite is imported from the installed fasterrag (``fasterrag.testing``, the
+``testing`` extra), so no fasterRag checkout is needed::
 
-    pip install ./examples/plugin-vectordb
+    pip install "fasterrag[testing]" ./examples/plugin-vectordb
     python -m pytest examples/plugin-vectordb/tests
 """
 
@@ -14,11 +15,11 @@ import uuid
 from collections.abc import AsyncIterator
 
 import pytest
-from tests.contract.vectordb import DIMENSIONS, VectorDBContract
 
 from fasterrag.adapters.vectordb.base import CollectionSpec, VectorDBAdapter
 from fasterrag.adapters.vectordb.factory import available_providers, create_vector_db_adapter
 from fasterrag.config.schema import Settings
+from fasterrag.testing.vectordb import DIMENSIONS, VectorDBContract
 
 
 def test_the_plugin_is_installed_under_its_entry_point() -> None:

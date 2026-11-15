@@ -23,7 +23,8 @@ The contract, top to bottom. A module may import its own layer and any layer bel
     errors
 
 ``facade`` is the importable surface: ``fasterrag/__init__.py``, ``facade.py``, ``sync.py``
-and the five re-export modules beside them. ``dashboard`` is
+and the five re-export modules beside them, plus ``testing``, the contract suites a plugin
+author runs (it imports adapters and core, and nothing imports it). ``dashboard`` is
 ``observability/dashboard.py``, which is a second web application rather than
 instrumentation, so it sits with the entry points instead of dragging the whole
 ``observability`` package up to their level. ``cli`` is above the other three because the
@@ -120,6 +121,7 @@ LAYERS: Final[dict[str, tuple[str, ...]]] = {
         "fasterrag.parsing",
         "fasterrag.rerank",
         "fasterrag.retrieval",
+        "fasterrag.testing",
     ),
     "dashboard": ("fasterrag.observability.dashboard",),
     "services": ("fasterrag.services",),

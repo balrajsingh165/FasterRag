@@ -6,7 +6,7 @@ subclasses one of the adapter base classes (or implements the chunker or parser 
 registers the subclass under an entry-point group; once it is installed, one line of
 `config.yaml` selects it. This page walks through the whole job using the sample package in the
 repository, `examples/plugin-vectordb/`, which CI installs with pip and runs against the shared
-contract suite on every push.
+contract suite, `fasterrag.testing`, on every push.
 
 The reference for the extension surface — every abstract member, the credential rules, the
 `provider` attribute — is [python-api.md](python-api.md#extending-the-framework-plugin-contract).
@@ -76,21 +76,36 @@ cannot be taken over: built-ins always win, so a package cannot silently interce
 
 ## 4. Pass the contract suite
 
-The shared contract suite, `tests/contract/vectordb.py` in the fasterRag repository, is what
-every built-in vector database passes, and a plugin is conformant only when it passes it too.
+The shared contract suite, `fasterrag.testing.vectordb`, is what every built-in vector database
+passes, and a plugin is conformant only when it passes it too. It ships in the wheel; pytest and
+pytest-asyncio come with the `testing` extra, which a deployment never needs:
+
+```bash
+pip install "fasterrag[testing]"
+```
+
 Subclass `VectorDBContract` and supply three fixtures: `adapter`, `collection` (a fresh, empty
 collection with `DIMENSIONS` dimensions) and `hybrid_collection` (the same with
 `sparse=True`). The sample's `tests/test_contract.py` builds the adapter through the factory,
 by name, so a pass proves the entry point and the version check as well as the behaviour:
 
+```python
+from fasterrag.testing.vectordb import DIMENSIONS, VectorDBContract
+
+
+class TestMyVectorDB(VectorDBContract):
+    ...  # the adapter, collection and hybrid_collection fixtures
+```
+
 ```bash
-pip install ./examples/plugin-vectordb
+pip install "./examples/plugin-vectordb[test]"
 python -m pytest examples/plugin-vectordb/tests
 ```
 
-The suite ships in the source distribution and the repository, not in the wheel, so run it
-from a fasterRag checkout (or an unpacked sdist) with your package installed. For an embedding or
-LLM provider, follow the recorded-response pattern in `tests/unit/adapters/`.
+The cases are coroutines, so your pytest configuration needs `asyncio_mode = "auto"`, as the
+sample's `pyproject.toml` sets. No fasterRag checkout is needed (TASK-0551); inside the
+repository, `tests/contract/vectordb.py` re-exports the same suite for the built-in adapters.
+For an embedding or LLM provider, follow the recorded-response pattern in `tests/unit/adapters/`.
 
 ## 5. Select it
 
