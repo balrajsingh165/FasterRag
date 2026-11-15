@@ -1,21 +1,27 @@
-"""The Python examples in README.md, quickstart.md and python-api.md must run (TASK-0499).
+"""The Python examples in README.md, quickstart.md, python-api.md and the site must run.
 
 Nothing executed a document's code, which is how two examples came to call a facade method
-that never existed (TASK-0435). Every fenced ``python`` block in :data:`DOCUMENTS` is run
-here, as a script (``__name__ == "__main__"``), from a directory holding the files the
-examples name and a ``config.yaml`` that selects in-memory providers by entry point
-(``tests/support/doc_examples.py``). No fasterRag code is replaced: the facade, the loader,
-the pipeline and its parse workers are the real ones.
+that never existed (TASK-0435); the published site's pages (``userdocs/*.md``) then sat
+outside the test that closed it (TASK-0499, TASK-0552). Every fenced ``python`` block in
+:data:`DOCUMENTS` is run here, as a script (``__name__ == "__main__"``), from a directory
+holding the files the examples name and a ``config.yaml`` that selects in-memory providers
+by entry point (``tests/support/doc_examples.py``). No fasterRag code is replaced: the
+facade, the loader, the pipeline and its parse workers are the real ones.
 
 **Illustrative blocks.** A block that cannot run as written — it uses names it never
 defines, or a file the reader is meant to supply — carries the marker
 ``<!-- doc-example: illustrative -->`` as the last non-blank line before its fence. The
 comment renders as nothing on GitHub and in MkDocs. The marker is the only way out, and a
-block carrying it must still compile, so a syntax error is caught either way.
+block carrying it must still compile, so a syntax error is caught either way; an illustrative
+fragment may use a top-level ``await``, the form a reader pastes into an asyncio REPL.
+
+**Indented fences.** The site's tabbed blocks (``=== "Python"``) indent their fence. Such a
+block is extracted and dedented, so the example a site reader copies is the one that runs.
 """
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import re
 from collections.abc import Iterator
@@ -32,11 +38,27 @@ from tests.support import doc_examples
 from tests.support.plugins import install_distribution
 
 ROOT: Final = Path(__file__).resolve().parents[3]
-DOCUMENTS: Final = ("README.md", "docs/quickstart.md", "docs/python-api.md")
+REPOSITORY_DOCUMENTS: Final = ("README.md", "docs/quickstart.md", "docs/python-api.md")
+SITE_DOCUMENTS: Final = tuple(
+    path.relative_to(ROOT).as_posix() for path in sorted((ROOT / "userdocs").glob("*.md"))
+)
+DOCUMENTS: Final = (*REPOSITORY_DOCUMENTS, *SITE_DOCUMENTS)
 MARKER: Final = "<!-- doc-example: illustrative -->"
 PLUGIN: Final = "tests.support"
 
-_FENCE_OPEN: Final = re.compile(r"^```python\s*$")
+_FENCE_OPEN: Final = re.compile(r"^(?P<indent>[ \t]*)```python\s*$")
+
+AWAITING_MARKER: Final = {
+    ("userdocs/python.md", "chunks = await rag.retrieve("): (
+        "a fragment with a top-level await and a `rag` it never defines; it needs the "
+        "illustrative marker, and userdocs/ changes only with the maintainer"
+    ),
+}
+"""Unmarked blocks known not to run, keyed by document and the start of the block's first line.
+
+Each is an expected failure until its document gains the marker. An entry that no longer names
+an unmarked block fails ``test_every_awaiting_marker_entry_is_still_needed``.
+"""
 
 CONFIG: Final = """\
 vector_db:
@@ -78,6 +100,16 @@ class Block:
         """Return ``document:line``, the id a failure is reported under."""
         return f"{self.document}:{self.line}"
 
+    @property
+    def key(self) -> tuple[str, str]:
+        """Return the document and the start of the first line, the :data:`AWAITING_MARKER` key."""
+        return self.document, self.code.lstrip().splitlines()[0][:28]
+
+    @property
+    def awaiting_marker(self) -> str | None:
+        """Return why this unmarked block is known not to run, or ``None``."""
+        return None if self.illustrative else AWAITING_MARKER.get(self.key)
+
 
 def extract(document: str, text: str) -> list[Block]:
     """Return every ``python`` block of ``text``, with whether it is marked illustrative."""
@@ -85,12 +117,14 @@ def extract(document: str, text: str) -> list[Block]:
     blocks: list[Block] = []
     index = 0
     while index < len(lines):
-        if not _FENCE_OPEN.match(lines[index]):
+        fence = _FENCE_OPEN.match(lines[index])
+        if fence is None:
             index += 1
             continue
+        indent = fence.group("indent")
         before = next((line.strip() for line in reversed(lines[:index]) if line.strip()), "")
-        end = next(i for i in range(index + 1, len(lines)) if lines[i].startswith("```"))
-        code = "\n".join(lines[index + 1 : end]) + "\n"
+        end = next(i for i in range(index + 1, len(lines)) if lines[i].startswith(f"{indent}```"))
+        code = "\n".join(line.removeprefix(indent) for line in lines[index + 1 : end]) + "\n"
         blocks.append(Block(document, index + 1, code, before == MARKER))
         index = end + 1
     return blocks
@@ -154,20 +188,45 @@ def _exercise(namespace: dict[str, Any]) -> None:
 def test_the_documents_have_examples_to_run() -> None:
     """An extractor that silently found nothing would make every test below vacuous."""
     runnable = {block.document for block in BLOCKS if not block.illustrative}
-    assert runnable == set(DOCUMENTS)
+    assert set(REPOSITORY_DOCUMENTS) <= runnable
+    assert {"userdocs/index.md", "userdocs/python.md", "userdocs/quickstart.md"} <= runnable
 
 
-@pytest.mark.parametrize("block", BLOCKS, ids=[block.name for block in BLOCKS])
+def test_every_python_fence_yields_a_block() -> None:
+    """The site's tabbed blocks are indented, and a column-0 extractor silently missed them."""
+    for document in DOCUMENTS:
+        lines = (ROOT / document).read_text(encoding="utf-8").splitlines()
+        fences = sum(1 for line in lines if line.strip() == "```python")
+        assert fences == sum(1 for block in BLOCKS if block.document == document), document
+
+
+def test_every_awaiting_marker_entry_is_still_needed() -> None:
+    """Once a document carries the marker, its entry must go, or the table hides nothing."""
+    assert {block.key for block in BLOCKS if block.awaiting_marker} == set(AWAITING_MARKER)
+
+
+def _params(blocks: list[Block]) -> list[Any]:
+    """Wrap each block as a parameter, expecting failure from one still awaiting its marker."""
+    return [
+        pytest.param(
+            block,
+            id=block.name,
+            marks=[pytest.mark.xfail(reason=block.awaiting_marker, strict=True)]
+            if block.awaiting_marker
+            else [],
+        )
+        for block in blocks
+    ]
+
+
+@pytest.mark.parametrize("block", _params(BLOCKS))
 def test_every_python_block_compiles(block: Block) -> None:
     """Even an illustrative block must be valid Python."""
-    compile(block.code, block.name, "exec")
+    flags = ast.PyCF_ALLOW_TOP_LEVEL_AWAIT if block.illustrative else 0
+    compile(block.code, block.name, "exec", flags=flags)
 
 
-@pytest.mark.parametrize(
-    "block",
-    [block for block in BLOCKS if not block.illustrative],
-    ids=[block.name for block in BLOCKS if not block.illustrative],
-)
+@pytest.mark.parametrize("block", _params([block for block in BLOCKS if not block.illustrative]))
 def test_every_runnable_python_block_runs(block: Block, workspace: Path) -> None:
     """The defect: a documented example could call a method that did not exist (TASK-0435)."""
     namespace: dict[str, Any] = {"__name__": "__main__"}
@@ -179,3 +238,10 @@ def test_the_marker_must_sit_directly_before_a_fence() -> None:
     """Pins the extractor: a marker separated from its fence by prose marks nothing."""
     text = f"{MARKER}\n\n```python\nx = 1\n```\n{MARKER}\nprose\n```python\ny = 2\n```\n"
     assert [block.illustrative for block in extract("doc.md", text)] == [True, False]
+
+
+def test_an_indented_fence_is_extracted_and_dedented() -> None:
+    """Pins the extractor on the site's tab syntax, where the fence sits four spaces in."""
+    text = '=== "Python"\n\n    ```python\n    if True:\n        x = 1\n    ```\n'
+    [block] = extract("doc.md", text)
+    assert block.code == "if True:\n    x = 1\n"
