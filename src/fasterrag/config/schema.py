@@ -639,7 +639,7 @@ class RetrievalSettings(Section):
     rerank: bool = False
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_top_n: Annotated[int, Field(ge=10, le=1000)] = 100
-    verify_lock: Literal["off", "warn", "refuse"] = "warn"
+    verify_lock: Literal["off", "warn", "refuse"] = "refuse"
 
     @model_validator(mode="after")
     def _check_retrieval_rules(self) -> Self:

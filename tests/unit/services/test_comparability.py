@@ -78,7 +78,7 @@ NEUTRAL_MUTATIONS: dict[str, dict[str, Any]] = {
     "embeddings.base_url": {"embeddings": {"base_url": "http://embeddings.internal:11434"}},
     "embeddings.batch_size": {"embeddings": {"batch_size": 32}},
     "embeddings.cache": {"embeddings": {"cache": {"enabled": False, "backend": "memory"}}},
-    "retrieval.verify_lock": {"retrieval": {"verify_lock": "refuse"}},
+    "retrieval.verify_lock": {"retrieval": {"verify_lock": "warn"}},
 }
 
 

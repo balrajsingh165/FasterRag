@@ -84,6 +84,23 @@ async def test_a_query_under_a_changed_embedding_model_is_refused() -> None:
     assert "org/model-b" in refused.value.detail
 
 
+async def test_a_drifted_index_is_refused_by_default() -> None:
+    """``refuse`` is the default since TASK-0560; the betas shipped ``warn``."""
+    index_with("org/model-a")
+    defaults = Settings.model_validate(
+        {
+            "embeddings": {"provider": "huggingface", "model": "org/model-b"},
+            "retrieval": {"rerank": False, "hybrid": False},
+        }
+    )
+
+    with pytest.raises(RetrievalError) as refused:
+        await service(defaults).search("meal allowance", collection=COLLECTION)
+
+    assert defaults.retrieval.verify_lock == "refuse"
+    assert refused.value.code is ErrorCode.INDEX_DRIFT
+
+
 async def test_the_refusal_is_a_409_problem() -> None:
     index_with("org/model-a")
 

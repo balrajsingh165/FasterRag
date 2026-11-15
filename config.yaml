@@ -91,7 +91,7 @@ retrieval:
   rerank: false
   reranker_model: BAAI/bge-reranker-v2-m3
   rerank_top_n: 100
-  verify_lock: warn
+  verify_lock: refuse
 
 generation:
   grounded_or_refuse: false

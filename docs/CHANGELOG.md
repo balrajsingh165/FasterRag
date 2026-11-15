@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **A query against an index another embedding model built is now refused by default** (2026-11-15, TASK-0560). `retrieval.verify_lock` defaults to `refuse`; 0.1.0b1 and 0.1.0b2 defaulted to `warn`. When a collection's `index.lock` names a different embedding model, model version or dimension count than the configured embedder, the query now fails with `409 INDEX_DRIFT` naming `fasterrag index reembed`, instead of answering from two embedding spaces with a logged warning. **Upgrading:** a deployment that has been querying a drifted collection starts getting 409s; rebuild it with `fasterrag index reembed <collection> <sources...>`, or set `retrieval.verify_lock: warn` until it is rebuilt. Collections without a lockfile are unaffected.
+
 - **The journal's full-disk behaviour was re-proven on a real full filesystem** (2026-11-15, TASK-0535). The disk-full chaos tests ran in CI against the current journal writer and passed, and they are now required to run rather than allowed to skip.
 
 - **Every model the configuration and documentation name has a price** (2026-11-15, TASK-0554). A test now fails when a model id in `config.yaml`, a packaged template or the documentation has no list price, and the OpenAI and Cohere price tables were re-read on 2026-11-15, adding the current OpenAI models. Cost estimates for the newly listed models are no longer `null`.

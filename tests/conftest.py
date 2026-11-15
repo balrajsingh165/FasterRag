@@ -209,6 +209,28 @@ def _an_embedding_cache_of_its_own(tmp_path_factory: pytest.TempPathFactory) -> 
         setattr(cache_package, "EMBEDDING_CACHE_ROOT", original)  # noqa: B010
 
 
+_lock_roots = itertools.count()
+
+
+# CRITICAL: the index lock store defaults to `.fasterrag/locks` under the working directory,
+# which for a test run is the checkout. Tests that ingest without changing directory left
+# `default.lock.json` there, and once `retrieval.verify_lock` defaulted to `refuse`
+# (TASK-0560) every later query test was refused as drifted against a lock a stub embedder
+# never wrote. Patched by hand, not through `monkeypatch`, as the embedding cache root is.
+@pytest.fixture(autouse=True)
+def _an_index_lock_root_of_its_own(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Point the default index lock store at an empty directory for this test alone."""
+    from fasterrag.services import lockfile
+
+    original = lockfile.DEFAULT_LOCK_ROOT
+    root = tmp_path_factory.getbasetemp() / "index-locks" / str(next(_lock_roots))
+    setattr(lockfile, "DEFAULT_LOCK_ROOT", root)  # noqa: B010
+    try:
+        yield
+    finally:
+        setattr(lockfile, "DEFAULT_LOCK_ROOT", original)  # noqa: B010
+
+
 MUST_RUN_MARKER: Final = "must_run"
 MUST_RUN_REPORT_VAR: Final = "FASTERRAG_MUST_RUN_REPORT"
 MUST_RUN_REPORT_VERSION: Final = 1
