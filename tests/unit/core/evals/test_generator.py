@@ -127,7 +127,7 @@ def test_no_chunk_is_sampled_twice() -> None:
 def test_the_prompt_carries_the_passage() -> None:
     prompt = build_generation_prompt(chunks(("d1", 1))[0])
 
-    assert "<passage>" in prompt
+    assert prompt.startswith("<passage-")
     assert "passage 0 of d1" in prompt
 
 

@@ -20,6 +20,7 @@ from fasterrag.cli.output import Console, ExitCode
 from fasterrag.config.loader import load_settings
 from fasterrag.core.rerank import CrossEncoderReranker
 from fasterrag.errors import ConfigError, FasterRagError
+from fasterrag.observability.logging import mask_secret_env
 from fasterrag.services.composition import create_embedding_router
 from fasterrag.services.generation import GenerationService
 from fasterrag.services.querying import RetrievalService
@@ -82,6 +83,7 @@ async def run_replay(args: argparse.Namespace, console: Console) -> ExitCode:
         except ConfigError as exc:
             console.problem(exc.code.value, exc.detail)
             return ExitCode.USAGE
+        mask_secret_env(candidate.referenced_env_vars())
 
     trace = create_trace_store(settings).load(args.trace)
     if trace is None:
