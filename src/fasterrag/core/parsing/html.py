@@ -10,10 +10,19 @@ Text that sits in no content element — straight inside a ``div``, a ``span`` o
 is gathered into a paragraph, closed at every block-level boundary. The walk keeps its own
 stack instead of recursing, so nesting depth costs memory, never the interpreter's
 recursion limit (TASK-0459, TASK-0489).
+
+Bytes are decoded in the order a browser uses (TASK-0544): a byte-order mark wins; then the
+charset the page declares in a ``<meta charset>`` or ``http-equiv`` tag within its first
+1024 bytes, provided Python knows the codec and the bytes decode under it; then the
+plain-text fallback of UTF-8 and Windows-1252, flagged ``encoding_fallback``. As in a
+browser, a declared ``iso-8859-1`` or ``ascii`` is read as Windows-1252, and a declared
+UTF-16 or UTF-32 as UTF-8, since a page that could state it in ASCII is not in either.
 """
 
 from __future__ import annotations
 
+import codecs
+import re
 from typing import Final
 
 from bs4 import BeautifulSoup, Tag
@@ -38,6 +47,38 @@ _INLINE: Final[frozenset[str]] = frozenset(
 )
 _LINE_BREAKS: Final[frozenset[str]] = frozenset({"br", "wbr"})
 _BOUNDARY: Final = object()
+_PRESCAN_BYTES: Final = 1024
+_DECLARED_CHARSET: Final = re.compile(
+    rb"""<meta\b[^>]*?charset\s*=\s*["']?\s*([A-Za-z0-9._:-]+)""", re.IGNORECASE
+)
+_BYTE_ORDER_MARKS: Final = (codecs.BOM_UTF8, codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)
+_AS_BROWSERS_READ: Final[dict[str, str]] = {"iso8859-1": "cp1252", "ascii": "cp1252"}
+
+
+def _declared_codec(data: bytes) -> str | None:
+    """Return the Python codec for the charset a page declares, or ``None`` for none usable."""
+    found = _DECLARED_CHARSET.search(data[:_PRESCAN_BYTES])
+    if found is None:
+        return None
+    try:
+        name = codecs.lookup(found.group(1).decode("ascii")).name
+    except LookupError:
+        return None
+    if name.startswith(("utf-16", "utf-32")):
+        return "utf-8"
+    return _AS_BROWSERS_READ.get(name, name)
+
+
+def _decode_page(data: bytes, builder: DocumentBuilder) -> str:
+    """Decode by byte-order mark, then by the declared charset, then by the text fallback."""
+    if not data.startswith(_BYTE_ORDER_MARKS):
+        codec = _declared_codec(data)
+        if codec is not None:
+            try:
+                return data.decode(codec)
+            except (UnicodeError, LookupError):
+                builder.flag(ParseFlag.ENCODING_FALLBACK)
+    return decode(data, builder)
 
 
 def _table_text(table: Tag) -> str:
@@ -100,7 +141,7 @@ def _walk(root: Tag, builder: DocumentBuilder) -> None:
 def parse_html(data: bytes, *, mime_type: str = "text/html") -> ParsedDocument:
     """Parse HTML into structural blocks, preserving reading order."""
     builder = DocumentBuilder(mime_type=mime_type, parser="html")
-    soup = BeautifulSoup(decode(data, builder), "lxml")
+    soup = BeautifulSoup(_decode_page(data, builder), "lxml")
 
     for element in soup.find_all(list(_DROPPED)):
         element.decompose()

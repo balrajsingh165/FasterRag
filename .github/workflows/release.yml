@@ -269,14 +269,26 @@ jobs:
 
   # (g, rehearsed) The smoke test the post-publish job will run, run first against the wheel
   # that is about to be uploaded. The container is the Dockerfile's own digest-pinned base,
-  # read from that file so there is one pin to keep current, and it sees two read-only
+  # read from that file so there is one pin to keep current, and it sees three read-only
   # mounts and nothing else: no checkout, no cache, no credentials.
+  #
+  # Twice (TASK-0556): as documented, which also runs the local profile end to end with
+  # scripts/local_profile_probe.py (TASK-0542), and with `--pre`, which takes pre-releases of
+  # every dependency. 0.1.0b1 broke under `--pre`, and no smoke test had ever used it.
   smoke:
     needs: [verify, build]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pip_flags: ""
+            local_profile: true
+          - pip_flags: "--pre"
+            local_profile: false
     env:
       VERSION: ${{ needs.verify.outputs.version }}
     steps:
@@ -290,14 +302,26 @@ jobs:
           path: dist
 
       - name: Install the built wheel in a clean container and exercise it
+        env:
+          PIP_FLAGS: ${{ matrix.pip_flags }}
+          LOCAL_PROFILE: ${{ matrix.local_profile }}
         run: |
           base="$(sed -n 's/^FROM \(python:[^ ]*\) AS base$/\1/p' Dockerfile)"
           test -n "${base}"
+          wheel="/dist/fasterrag-${VERSION}-py3-none-any.whl"
+          local_profile=()
+          if [ "${LOCAL_PROFILE}" = "true" ]; then
+            local_profile=(--env LOCAL_PROFILE_REQUIREMENT="${wheel}[chroma,huggingface]"
+              --env LOCAL_PROFILE_PROBE=/probe/local_profile_probe.py)
+          fi
           docker run --rm \
             --volume "${PWD}/.github/scripts:/smoke:ro" \
+            --volume "${PWD}/scripts/local_profile_probe.py:/probe/local_profile_probe.py:ro" \
             --volume "${PWD}/dist:/dist:ro" \
-            --env REQUIREMENT="/dist/fasterrag-${VERSION}-py3-none-any.whl" \
+            --env REQUIREMENT="${wheel}" \
+            --env PIP_FLAGS="${PIP_FLAGS}" \
             --env VERSION="${VERSION}" \
+            "${local_profile[@]}" \
             "${base}" bash /smoke/release_smoke.sh
 
   # (e, first half) Build the image and prove it is the one the documents describe. It is
@@ -458,18 +482,29 @@ jobs:
           fi
           gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" "${flags[@]}" "${assets[@]}"
 
-  # (g) A stranger's install. The same script `smoke` ran, in the same clean container,
-  # but the requirement is `fasterrag==<version>` from the public index. A new upload takes
-  # a moment to reach every mirror, so the install is retried for up to ten minutes. A
-  # failure here cannot unpublish anything; it is what tells the maintainer to yank and
-  # ship the next number (docs/release.md §4).
+  # (g) A stranger's install. The same script `smoke` ran, in the same clean container, but
+  # from the public index and with the command the documents give users:
+  # `pip install "fasterrag>=<version>"`, plus the local profile's
+  # `"fasterrag[chroma,huggingface]>=<version>"`. Then again with `--pre`, the command
+  # 0.1.0b1's documents gave and that pulled a development httpx (TASK-0556). A new upload
+  # takes a moment to reach every mirror, so the install is retried for up to ten minutes. A
+  # failure here cannot unpublish anything; it is what tells the maintainer to yank and ship
+  # the next number (docs/release.md §4).
   post-publish:
     needs: [verify, publish-pypi]
     if: ${{ needs.verify.outputs.publish == 'true' && startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.dry_run == false) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pip_flags: ""
+            local_profile: true
+          - pip_flags: "--pre"
+            local_profile: false
     env:
       VERSION: ${{ needs.verify.outputs.version }}
     steps:
@@ -478,12 +513,23 @@ jobs:
           persist-credentials: false
 
       - name: Install the published version in a clean container and exercise it
+        env:
+          PIP_FLAGS: ${{ matrix.pip_flags }}
+          LOCAL_PROFILE: ${{ matrix.local_profile }}
         run: |
           base="$(sed -n 's/^FROM \(python:[^ ]*\) AS base$/\1/p' Dockerfile)"
           test -n "${base}"
+          local_profile=()
+          if [ "${LOCAL_PROFILE}" = "true" ]; then
+            local_profile=(--env LOCAL_PROFILE_REQUIREMENT="fasterrag[chroma,huggingface]>=${VERSION}"
+              --env LOCAL_PROFILE_PROBE=/probe/local_profile_probe.py)
+          fi
           docker run --rm \
             --volume "${PWD}/.github/scripts:/smoke:ro" \
-            --env REQUIREMENT="fasterrag==${VERSION}" \
+            --volume "${PWD}/scripts/local_profile_probe.py:/probe/local_profile_probe.py:ro" \
+            --env REQUIREMENT="fasterrag>=${VERSION}" \
+            --env PIP_FLAGS="${PIP_FLAGS}" \
             --env VERSION="${VERSION}" \
             --env ATTEMPTS=20 \
+            "${local_profile[@]}" \
             "${base}" bash /smoke/release_smoke.sh

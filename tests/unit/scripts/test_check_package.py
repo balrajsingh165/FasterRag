@@ -1,3 +1,4 @@
+import re
 import sys
 import tomllib
 import venv
@@ -137,3 +138,66 @@ def test_every_extra_the_slim_core_moved_out_exists_and_is_in_all() -> None:
     for name in ("server", "qdrant", "pdf", "docx", "html", "chroma", "huggingface"):
         assert extras[name], name
         assert set(extras[name]) <= set(extras["all"]), name
+
+
+def _requirements_users_install() -> dict[str, list[str]]:
+    """Return the core requirements and every extra's, keyed by where they are declared."""
+    manifest = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    project = manifest["project"]
+    declared = {"dependencies": list(project["dependencies"])}
+    for extra, requirements in project["optional-dependencies"].items():
+        if extra != "dev":
+            declared[f"[{extra}]"] = list(requirements)
+    return declared
+
+
+def test_every_requirement_a_user_installs_is_capped_below_its_next_major() -> None:
+    """TASK-0556: an uncapped httpx let `pip install --pre` pull 1.0.dev6 and break the CLI."""
+    uncapped = [
+        f"{where}: {requirement}"
+        for where, requirements in _requirements_users_install().items()
+        for requirement in requirements
+        if "<" not in requirement
+    ]
+
+    assert uncapped == []
+
+
+def test_a_requirement_listed_twice_carries_the_same_bounds_everywhere() -> None:
+    """The `all` and `dev` copies of an extra's requirement must not drift from the extra's."""
+    manifest = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    project = manifest["project"]
+    seen: dict[str, set[str]] = {}
+    for requirements in [project["dependencies"], *project["optional-dependencies"].values()]:
+        for requirement in requirements:
+            name = re.split(r"[\[<>=!~ ]", requirement, maxsplit=1)[0].lower()
+            seen.setdefault(name, set()).add(requirement.split(name, 1)[-1].split("]")[-1])
+
+    assert {name: specs for name, specs in seen.items() if len(specs) > 1} == {}
+
+
+def test_the_local_profile_note_is_several_chunks_and_only_one_answers() -> None:
+    """TASK-0542: a one-chunk note proved ingested text returns, not that the right chunk ranks."""
+    from local_profile_probe import ANSWER, NOTE
+
+    from fasterrag.chunking import RecursiveChunker
+    from fasterrag.parsing import parse_bytes
+
+    chunks = RecursiveChunker(chunk_size=768, overlap=64).split(
+        parse_bytes(NOTE.encode("utf-8"), filename="note.md")
+    )
+    answering = [chunk for chunk in chunks if ANSWER in chunk.text]
+
+    assert len(chunks) >= 3
+    assert len(answering) == 1
+
+
+def test_the_release_smoke_and_the_package_gate_run_the_same_local_profile_probe() -> None:
+    """One probe, two callers: the post-publish smoke cannot prove less than the build gate."""
+    smoke = (REPOSITORY_ROOT / ".github" / "scripts" / "release_smoke.sh").read_text(
+        encoding="utf-8"
+    )
+    gate = (REPOSITORY_ROOT / "scripts" / "check_package.py").read_text(encoding="utf-8")
+
+    assert "LOCAL_PROFILE_PROBE" in smoke
+    assert "local_profile_probe.py" in gate
