@@ -67,9 +67,11 @@ openai = ["openai>=1.40,<4"]
 anthropic = ["anthropic>=0.40,<3"]
 # Both floors are measured, not guessed (TASK-0441): the recorded responses in
 # tests/unit/adapters/recordings.py were replayed through each release named here. The
-# Cohere generator needs AsyncClientV2, which 5.6.2 does not have and 5.8.0 does. The Ollama
+# Cohere generator needs AsyncClientV2, which 5.6.2 does not have and 5.8.0 does, and it
+# builds it with `max_retries=0`, which AsyncClientV2 accepts from 7.0.5 (7.0.4 raises
+# TypeError; the recorded-response suites pass on 7.0.5, re-measured 2026-11-15). The Ollama
 # adapters read the typed responses 0.4.0 introduced; 0.3.3 returns plain dicts and fails.
-cohere = ["cohere>=5.8,<8"]
+cohere = ["cohere>=7.0.5,<8"]
 ollama = ["ollama>=0.4,<1"]
 redis = ["redis>=5.0,<9"]
 pgvector = ["psycopg[binary,pool]>=3.2,<4", "pgvector>=0.3,<1"]
@@ -87,7 +89,7 @@ all = [
     "anthropic>=0.40,<3",
     "beautifulsoup4>=4.12,<5",
     "chromadb>=1.5,<2",
-    "cohere>=5.8,<8",
+    "cohere>=7.0.5,<8",
     "fastapi>=0.115,<1",
     "lxml>=5.0,<7",
     "ollama>=0.4,<1",
@@ -136,7 +138,7 @@ dev = [
     # core until TASK-0444, and the API, Qdrant and parser suites gate on them in every lane.
     "beautifulsoup4>=4.12,<5",
     "chromadb>=1.5,<2",
-    "cohere>=5.8,<8",
+    "cohere>=7.0.5,<8",
     "fakeredis>=2.26",
     "fastapi>=0.115,<1",
     "lxml>=5.0,<7",
