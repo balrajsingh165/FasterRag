@@ -23,6 +23,12 @@ succeed into a resumable, auditable batch system:
   which can still be run — and compacts each dedup log to the lines that still count. A hash
   a live document holds is never dropped, however old: it is all that tells a re-ingest the
   document is already indexed (TASK-0474).
+* **Per backend.** A dedup log answers for one vector database, named by
+  :func:`backend_identity` — the provider and where it lives. Keyed by the collection name
+  alone, switching ``vector_db.provider`` made a re-ingest skip every file the old backend
+  held, and the new one never received them (TASK-0550). A log written before that change
+  sits at the collection's root and is claimed, once, by the first backend that reads it:
+  the one the configuration names when the upgraded release first runs.
 
 Every rewrite of a record is atomic and durable — written to a uniquely named temporary
 file, flushed, renamed over the live file, and the directory flushed where the platform
@@ -39,6 +45,7 @@ import asyncio
 import errno
 import json
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -72,6 +79,7 @@ __all__ = [
     "Journal",
     "PruneReport",
     "QuietJobs",
+    "backend_identity",
     "create_journal",
     "envelope",
     "open_envelope",
@@ -83,6 +91,8 @@ _JOBS_DIR: Final = "jobs"
 _COLLECTIONS_DIR: Final = "collections"
 _DOCUMENTS_FILE: Final = "documents.jsonl"
 _DEDUP_FILE: Final = "content-hashes.jsonl"
+_BACKENDS_DIR: Final = "backends"
+_BACKEND_SLUG: Final = re.compile(r"[^a-z0-9_-]+")
 _PREVIOUS_SUFFIX: Final = ".prev"
 _TOMBSTONE_KEY: Final = "tombstone"
 _TEMPORARY_SUFFIX: Final = ".tmp"
@@ -481,6 +491,23 @@ def _dedup_line(content: str, document: str) -> str:
     return json.dumps({"content_hash": content, "document_id": document})
 
 
+def backend_identity(settings: Settings) -> str:
+    """Return the name a dedup log is kept under: the vector database's provider and location.
+
+    Only names, never a secret: pgvector is identified by the variable holding its DSN.
+    """
+    vector_db = settings.vector_db
+    location: list[object]
+    if vector_db.provider == "chroma":
+        location = [vector_db.chroma.path]
+    elif vector_db.provider == "pgvector":
+        location = [vector_db.pgvector.dsn_env, vector_db.pgvector.db_schema]
+    else:
+        location = [vector_db.host, vector_db.port]
+    slug = _BACKEND_SLUG.sub("-", vector_db.provider.lower()).strip("-")[:32] or "backend"
+    return f"{slug}-{text_hash(json.dumps([vector_db.provider, location]))[:12]}"
+
+
 def _finished_before(record: JobRecord, cutoff: float) -> bool:
     """Return whether a settled job finished before ``cutoff``; an unreadable time is old."""
     if record.finished_at is None:
@@ -534,12 +561,18 @@ class Journal:
         checkpoint_every: int = 100,
         enabled: bool = True,
         retention_days: int = 0,
+        backend: str | None = None,
     ) -> None:
-        """Open a journal rooted at ``root``; ``retention_days`` of 0 keeps every job."""
+        """Open a journal rooted at ``root``; ``retention_days`` of 0 keeps every job.
+
+        ``backend`` (see :func:`backend_identity`) scopes dedup logs; None keeps one per collection.
+        """
         self.root = Path(root)
         self.checkpoint_every = checkpoint_every
         self.enabled = enabled
         self.retention_days = retention_days
+        self.backend = backend
+        self._claimed: set[str] = set()
         self._tails: dict[Path, int] = {}
         self._last_pruned: float | None = None
 
@@ -552,8 +585,39 @@ class Journal:
         return self.root / _JOBS_DIR / job / _DOCUMENTS_FILE
 
     def _dedup_path(self, collection: str) -> Path:
-        """Return the path of a collection's content-hash index."""
-        return self.root / _COLLECTIONS_DIR / collection / _DEDUP_FILE
+        """Return the path of a collection's content-hash index for this journal's backend."""
+        directory = self.root / _COLLECTIONS_DIR / collection
+        if self.backend is None:
+            return directory / _DEDUP_FILE
+        path = directory / _BACKENDS_DIR / self.backend / _DEDUP_FILE
+        if collection not in self._claimed:
+            self._claim_legacy(directory / _DEDUP_FILE, path)
+            self._claimed.add(collection)
+        return path
+
+    def _claim_legacy(self, legacy: Path, path: Path) -> None:
+        """Move a dedup log written before logs were kept per backend to this backend's place.
+
+        Under the old log's lock, so an append from a process still on that path is not lost.
+        """
+        if not legacy.is_file() or path.exists():
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with _exclusive(legacy):
+                if not legacy.is_file() or path.exists():
+                    return
+                _patiently(partial(os.replace, legacy, path))
+        except OSError as exc:
+            raise IngestionError(
+                f"the dedup log {legacy} could not be moved to {path}: {exc}",
+                code=ErrorCode.INTERNAL,
+            ) from exc
+        _logger.info(
+            "a dedup log written before logs were kept per backend now belongs to the "
+            "configured vector database",
+            extra={"path": str(path), "backend": self.backend},
+        )
 
     async def create_job(
         self,
@@ -1091,7 +1155,12 @@ class Journal:
         cutoff = time.time() - self.retention_days * _SECONDS_PER_DAY
         pruned, failed = self._prune_jobs(cutoff)
         dropped = 0
-        for path in sorted((self.root / _COLLECTIONS_DIR).glob(f"*/{_DEDUP_FILE}")):
+        collections = self.root / _COLLECTIONS_DIR
+        logs = [
+            *collections.glob(f"*/{_DEDUP_FILE}"),
+            *collections.glob(f"*/{_BACKENDS_DIR}/*/{_DEDUP_FILE}"),
+        ]
+        for path in sorted(logs):
             try:
                 dropped += self._compact_dedup(path)
             except IngestionError as exc:
@@ -1214,4 +1283,5 @@ def create_journal(settings: Settings, root: str | Path = DEFAULT_JOURNAL_ROOT) 
         checkpoint_every=journal.checkpoint_every,
         enabled=journal.enabled,
         retention_days=journal.retention_days,
+        backend=backend_identity(settings),
     )

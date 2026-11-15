@@ -119,7 +119,9 @@ Drift = any mismatch between this file and live config/corpus. Reported, never s
 
 ### Dedup record and tombstone
 
-One JSON object per line in `<journal>/collections/<collection>/content-hashes.jsonl`. The file is append-only; it is read in order and the order is the meaning.
+One JSON object per line in `<journal>/collections/<collection>/backends/<backend>/content-hashes.jsonl`. The file is append-only; it is read in order and the order is the meaning.
+
+**One file per vector database** (TASK-0550). `<backend>` is `services/journal.py::backend_identity`: the provider name and a 12-character hash of where it lives — `vector_db.host` and `vector_db.port`, or `vector_db.chroma.path` for Chroma, or `vector_db.pgvector.dsn_env` and `db_schema` for pgvector (the variable's name, never the DSN). Switching `vector_db.provider`, or pointing it at another server, therefore starts with nothing known, and a re-ingest indexes every file into the new store; switching back finds the first file again. A file written by a release before 0.1.0b3 sits at `<journal>/collections/<collection>/content-hashes.jsonl` and is moved, under its lock, to the first backend that reads it — the one the configuration names when the upgraded release first runs. If the configuration had already been switched before upgrading, that file is attributed to the new backend: ingest once with `--set ingestion.dedup=false` to fill it.
 
 | Record | Fields | Written |
 |---|---|---|
