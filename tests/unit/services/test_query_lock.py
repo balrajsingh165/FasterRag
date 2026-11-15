@@ -7,11 +7,11 @@ query compared vectors from two embedding spaces and returned confident, wrong r
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from fasterrag.adapters.embeddings.base import EmbeddingResult
+from fasterrag.adapters.embeddings.base import EmbeddingAdapter, EmbeddingResult
 from fasterrag.adapters.embeddings.tiering import TieringRouter
 from fasterrag.config.schema import Settings
 from fasterrag.errors import ErrorCode, RetrievalError
@@ -195,3 +195,32 @@ async def test_the_check_is_callable_on_its_own() -> None:
         await verify_query_lock(settings, TieringRouter(ConfiguredEmbedder(settings)), COLLECTION)
 
     lockfile.reset_verified_locks()
+
+
+class ModelOnlyEmbedder:
+    """A duck-typed plugin embedder that states its model and nothing else."""
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+
+
+def stating_only(model: str) -> TieringRouter:
+    return TieringRouter(cast(EmbeddingAdapter, ModelOnlyEmbedder(model)))
+
+
+async def test_an_embedder_that_states_only_its_model_is_refused_under_another_model() -> None:
+    """No test covered an embedder with no version or size; it is compared on the model."""
+    index_with("org/model-a")
+
+    with pytest.raises(RetrievalError) as refused:
+        await verify_query_lock(configured("org/model-b"), stating_only("org/model-b"), COLLECTION)
+
+    assert refused.value.code is ErrorCode.INDEX_DRIFT
+    assert "embedding_model was 'org/model-a'" in refused.value.detail
+
+
+async def test_an_embedder_that_states_only_its_model_is_served_under_the_same_model() -> None:
+    """The lock's version and size are not held against an embedder that states neither."""
+    index_with("org/model-a")
+
+    await verify_query_lock(configured("org/model-a"), stating_only("org/model-a"), COLLECTION)

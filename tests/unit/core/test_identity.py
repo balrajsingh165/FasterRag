@@ -247,3 +247,23 @@ def test_stable_serialisation_ignores_the_order_keys_were_built_in() -> None:
     """Two equal mappings must hash equally, or an unchanged config reports index drift."""
     assert _stable({"a": 1, "b": 2}) == _stable({"b": 2, "a": 1})
     assert _stable({"outer": {"a": 1, "b": 2}}) == _stable({"outer": {"b": 2, "a": 1}})
+
+
+DEFAULT_RETRIEVAL_HASH = "5d4507eef9654e8e58cbc20016c973a50b2f9899cb8b2818bde9f0b447d26798"
+"""``retrieval_config_hash(Settings())`` with ``retrieval.verify_lock`` left out (TASK-0549).
+
+A changed value here means every ``index.lock`` written under a default configuration
+reports ``config_hash`` drift: change it only deliberately, and say so in the changelog.
+"""
+
+
+def test_the_retrieval_hash_of_a_default_config_is_pinned() -> None:
+    assert retrieval_config_hash(Settings()) == DEFAULT_RETRIEVAL_HASH
+
+
+@pytest.mark.parametrize("mode", ["off", "warn", "refuse"])
+def test_verify_lock_does_not_move_the_retrieval_hash(mode: str) -> None:
+    """It decides whether a query is answered, never how results rank, yet it moved the hash."""
+    configured = Settings.model_validate({"retrieval": {"verify_lock": mode}})
+
+    assert retrieval_config_hash(configured) == DEFAULT_RETRIEVAL_HASH

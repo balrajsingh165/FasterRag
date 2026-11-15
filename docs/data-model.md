@@ -81,7 +81,7 @@ The reproducibility contract of an index (D1). Written atomically (write-temp-th
 |---|---|---|
 | `lock_version` | str | SemVer of the lockfile format |
 | `collection` | str | Collection name |
-| `config_hash` | str | Hash of the retrieval-affecting config subset (chunking, embeddings, retrieval) — **not** the whole file, so unrelated edits don't false-positive |
+| `config_hash` | str | Hash of the retrieval-affecting config subset (chunking, embeddings, retrieval) — **not** the whole file, so unrelated edits don't false-positive. `retrieval.verify_lock` is left out (TASK-0549); a lock written by 0.1.0b1/b2, which hashed it, is still matched |
 | `embedding_model` / `embedding_model_version` / `dimensions` | str / str / int | What produced the vectors |
 | `chunker_strategy` / `chunker_version` / `chunk_size` / `overlap` | str / str / int / int | How chunks were produced |
 | `contextual_enrichment` | bool | Whether chunks carry a context prefix |
