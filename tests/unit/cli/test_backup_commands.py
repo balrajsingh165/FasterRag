@@ -267,3 +267,60 @@ def test_a_failed_restore_maps_the_error_to_its_documented_code(
 
 def test_an_invalid_config_never_reaches_the_restore(bad_config: str, tmp_path: Path) -> None:
     assert main(["restore", "--config", bad_config, str(tmp_path / "set")]) == ExitCode.USAGE
+
+
+def audit_trail(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str, str]]:
+    """Return ``(action, outcome, via)`` for every audit record written (TASK-0493)."""
+    return [
+        (vars(record)["action"], vars(record)["outcome"], vars(record)["via"])
+        for record in caplog.records
+        if record.name == "fasterrag.audit"
+    ]
+
+
+def test_a_backup_leaves_one_audit_record(
+    config: str,
+    tmp_path: Path,
+    adapter: Closeable,
+    backing_up: Recorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Nothing recorded who took a backup, or where it went."""
+    caplog.set_level("INFO", logger="fasterrag.audit")
+    main(["backup", "--config", config, str(tmp_path / "out")])
+
+    assert audit_trail(caplog) == [("backup.create", "succeeded", "cli")]
+
+
+def test_a_restore_with_mismatches_is_audited_as_failed(
+    config: str,
+    tmp_path: Path,
+    adapter: Closeable,
+    restoring: Recorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A restore that returns with mismatches did not succeed, and the trail must say so."""
+    caplog.set_level("INFO", logger="fasterrag.audit")
+    restoring.report["mismatches"] = [{"collection": "docs"}]
+
+    main(["restore", "--config", config, str(tmp_path / "in")])
+
+    assert audit_trail(caplog) == [("backup.restore", "failed", "cli")]
+    assert [vars(r)["error_code"] for r in caplog.records if r.name == "fasterrag.audit"] == [
+        "RESTORE_MISMATCH"
+    ]
+
+
+def test_a_failed_restore_is_audited_with_its_error_code(
+    config: str,
+    tmp_path: Path,
+    adapter: Closeable,
+    restoring: Recorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    restoring.error = FasterRagError("no manifest")
+    caplog.set_level("INFO", logger="fasterrag.audit")
+
+    main(["restore", "--config", config, str(tmp_path / "in")])
+
+    assert audit_trail(caplog) == [("backup.restore", "failed", "cli")]

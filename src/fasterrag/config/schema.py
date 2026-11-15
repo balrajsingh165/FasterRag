@@ -928,6 +928,8 @@ class SecuritySettings(Section):
     # credential-bearing control plane to every page on the web.
     cors_allowed_origins: list[str] = []
 
+    audit_log_file: Annotated[str | None, Field(min_length=1)] = None
+
     @field_validator("cors_allowed_origins")
     @classmethod
     def _check_cors_allowed_origins(cls, value: list[str]) -> list[str]:

@@ -17,6 +17,7 @@ from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.commands.pipeline import _settings_or_none
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.errors import FasterRagError
+from fasterrag.observability.audit import audited, cli_actor
 from fasterrag.services.backup import back_up, restore
 
 __all__ = ["run_backup", "run_restore"]
@@ -30,13 +31,15 @@ async def run_backup(args: argparse.Namespace, console: Console) -> ExitCode:
 
     adapter = create_vector_db_adapter(settings)
     try:
-        manifest = await back_up(
-            Path(args.destination),
-            adapter,
-            config_path=Path(args.config),
-            collections=args.collections or None,
-            retain=args.retain,
-        )
+        with audited("backup.create", args.destination, cli_actor()) as entry:
+            manifest = await back_up(
+                Path(args.destination),
+                adapter,
+                config_path=Path(args.config),
+                collections=args.collections or None,
+                retain=args.retain,
+            )
+            entry.detail["collections"] = sorted(manifest.collections)
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE
@@ -62,12 +65,17 @@ async def run_restore(args: argparse.Namespace, console: Console) -> ExitCode:
 
     adapter = create_vector_db_adapter(settings)
     try:
-        report = await restore(
-            Path(args.source),
-            adapter,
-            collections=args.collections or None,
-            restore_files=not args.collections_only,
-        )
+        with audited("backup.restore", args.source, cli_actor()) as entry:
+            report = await restore(
+                Path(args.source),
+                adapter,
+                collections=args.collections or None,
+                restore_files=not args.collections_only,
+            )
+            entry.detail["collections"] = list(report["collections"])
+            if report["mismatches"]:
+                entry.detail["mismatches"] = len(report["mismatches"])
+                entry.fail("RESTORE_MISMATCH")
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
         return ExitCode.UNREACHABLE if exc.retryable else ExitCode.FAILURE

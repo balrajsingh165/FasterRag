@@ -215,3 +215,6 @@ security:
   # Browser origins allowed to call the API cross-origin, each scheme://host[:port]. Empty
   # allows none.
   cors_allowed_origins: []
+  # Also append the audit trail of administrative actions to this file, as JSON lines.
+  # null writes it to the normal log only -- see docs/security.md.
+  audit_log_file: null

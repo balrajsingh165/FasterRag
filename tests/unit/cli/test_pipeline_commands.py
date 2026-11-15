@@ -1093,3 +1093,20 @@ def test_the_text_summary_of_a_job_prints_how_many_documents_were_skipped(
     pipeline._report_job(record, Console(), announce=False)
 
     assert "skipped         3" in capsys.readouterr().out
+
+
+async def test_dropping_a_collection_leaves_one_audit_record(
+    config: str, adapter: FakeAdapter, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Nothing recorded who dropped a collection (TASK-0493)."""
+    caplog.set_level("INFO", logger="fasterrag.audit")
+    adapter.collections = [CollectionInfo(name="docs", vectors=1)]
+
+    await pipeline.run_index(
+        namespace(config=config, action="delete", name="docs", force=True), Console()
+    )
+
+    records = [record for record in caplog.records if record.name == "fasterrag.audit"]
+    assert [
+        (vars(r)["action"], vars(r)["target"], vars(r)["outcome"], vars(r)["via"]) for r in records
+    ] == [("collection.drop", "docs", "succeeded", "cli")]
