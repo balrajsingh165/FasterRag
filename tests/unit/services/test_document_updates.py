@@ -22,6 +22,7 @@ from fasterrag.adapters.vectordb.base import Point, PointSelector, UpsertResult
 from fasterrag.config.schema import Settings
 from fasterrag.core.identity import document_id
 from fasterrag.errors import FasterRagError, RetrievalError
+from fasterrag.services import journal as journal_module
 from fasterrag.services.documents import DocumentService
 from fasterrag.services.ingestion import IngestionService
 from fasterrag.services.journal import Journal
@@ -378,3 +379,48 @@ async def test_an_empty_document_never_indexed_before_deletes_nothing(
 
     assert settled.counts["skipped"] == 1
     assert adapter.selectors == []
+
+
+def _dedup_reads(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Count every read of a dedup file the journal makes from here on."""
+    reads: list[Path] = []
+    original = journal_module._logged_lines
+
+    def counted(path: Path) -> list[dict[str, Any]]:
+        if path.name == "content-hashes.jsonl":
+            reads.append(path)
+        return original(path)
+
+    monkeypatch.setattr(journal_module, "_logged_lines", counted)
+    return reads
+
+
+async def _reads_for_a_reingest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int, replacement: str
+) -> int:
+    """Ingest ``count`` documents, rewrite each, and count the re-ingest's dedup reads."""
+    service, _ = build(tmp_path / str(count) / replacement[:1])
+    corpus = tmp_path / str(count) / f"corpus-{len(replacement)}"
+    corpus.mkdir(parents=True)
+    paths = [corpus / f"doc-{number}.md" for number in range(count)]
+    for number, path in enumerate(paths):
+        path.write_text(f"{LONG}\n\nDocument {number}.\n", encoding="utf-8")
+    await service.run(await service.accept([str(path) for path in paths]))
+    for number, path in enumerate(paths):
+        path.write_text(replacement.format(number=number), encoding="utf-8")
+
+    reads = _dedup_reads(monkeypatch)
+    await service.run(await service.accept([str(path) for path in paths]))
+    monkeypatch.undo()
+    return len(reads)
+
+
+@pytest.mark.parametrize("replacement", [SHORT + "\nEdition {number}.\n", ""])
+async def test_reingesting_k_changed_documents_reads_the_dedup_file_a_fixed_number_of_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str
+) -> None:
+    """Retiring each emptied document re-read the whole dedup file, O(k x file size) (TASK-0534)."""
+    one = await _reads_for_a_reingest(tmp_path, monkeypatch, 1, replacement)
+    five = await _reads_for_a_reingest(tmp_path, monkeypatch, 5, replacement)
+
+    assert five == one

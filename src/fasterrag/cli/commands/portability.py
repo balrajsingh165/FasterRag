@@ -21,6 +21,7 @@ from fasterrag.errors import ConfigError, FasterRagError
 from fasterrag.services.archive import export_archive
 from fasterrag.services.archive_import import import_archive, open_archive
 from fasterrag.services.composition import create_embedding_router
+from fasterrag.services.journal import create_journal
 from fasterrag.services.lockfile import create_lock_store
 
 __all__ = ["run_export", "run_import"]
@@ -95,6 +96,7 @@ async def run_import(args: argparse.Namespace, console: Console) -> ExitCode:
                 collection=target,
                 reembed=args.reembed,
                 router=router,
+                journal=create_journal(settings),
             )
         except FasterRagError as exc:
             console.problem(exc.code.value, exc.detail)

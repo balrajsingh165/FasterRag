@@ -44,6 +44,7 @@ from fasterrag.services.backfill import (
     inventory_untagged,
 )
 from fasterrag.services.composition import create_embedding_router
+from fasterrag.services.documents import DocumentService
 from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.evaluation import run_eval
 from fasterrag.services.generation import GenerationService
@@ -584,14 +585,14 @@ async def _index_create(
 
 
 async def _index_delete(
-    args: argparse.Namespace, adapter: VectorDBAdapter, console: Console
+    args: argparse.Namespace, settings: Settings, adapter: VectorDBAdapter, console: Console
 ) -> ExitCode:
-    """Drop a collection, requiring ``--force`` because the data does not come back."""
+    """Drop a collection and its dedup record, requiring ``--force``: the data does not return."""
     if not args.force:
         console.error(f"deleting {args.name!r} destroys its vectors; pass --force to confirm")
         return ExitCode.USAGE
 
-    dropped = await adapter.drop_collection(args.name)
+    dropped = await DocumentService(adapter, create_journal(settings)).drop_collection(args.name)
     console.emit(f"{'deleted' if dropped else 'no such collection:'} {args.name}")
     console.document({"name": args.name, "deleted": dropped})
     return ExitCode.SUCCESS
@@ -744,7 +745,7 @@ async def run_index(args: argparse.Namespace, console: Console) -> ExitCode:
             return await _index_rollback(args, adapter, console)
         if args.action == "create":
             return await _index_create(args, settings, adapter, console)
-        return await _index_delete(args, adapter, console)
+        return await _index_delete(args, settings, adapter, console)
     except FasterRagError as exc:
         console.problem(exc.code.value, exc.detail)
         console.document({"error": exc.code.value, "detail": exc.detail})
