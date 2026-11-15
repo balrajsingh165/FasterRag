@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from fasterrag.cli.sources import expand_sources
 from fasterrag.services.journal import Journal
+from fasterrag.services.source_expansion import expand_sources
 from tests.unit.workers.test_hostile_documents import GOOD, link, run_directory, settings
 
 

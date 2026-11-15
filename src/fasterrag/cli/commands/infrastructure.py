@@ -17,10 +17,10 @@ import argparse
 
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import settings_from
-from fasterrag.cli.sources import expand_sources
 from fasterrag.errors import ConfigError, FasterRagError, ProvisioningError
 from fasterrag.services.estimation import estimate_sources, require_estimator
 from fasterrag.services.provision_registry import provision_tool, stop_tool, tool_status
+from fasterrag.services.source_expansion import expand_sources
 
 __all__ = ["run_estimate", "run_provision"]
 

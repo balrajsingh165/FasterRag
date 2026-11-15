@@ -27,7 +27,6 @@ from fasterrag.adapters.vectordb.base import CollectionSpec, Distance, VectorDBA
 from fasterrag.adapters.vectordb.factory import create_vector_db_adapter
 from fasterrag.cli.output import Console, ExitCode
 from fasterrag.cli.settings import settings_from
-from fasterrag.cli.sources import expand_sources
 from fasterrag.config.schema import Settings
 from fasterrag.core.cache import create_semantic_store
 from fasterrag.core.cache.semantic import MISS, SemanticCache
@@ -53,6 +52,7 @@ from fasterrag.services.lockfile import create_lock_store, detect_drift
 from fasterrag.services.querying import RetrievalService
 from fasterrag.services.regression import GateResult
 from fasterrag.services.reindex import plan_reindex, require_keyword_leg, retire, rollback, swap
+from fasterrag.services.source_expansion import expand_sources
 from fasterrag.services.traces import create_trace_store
 
 __all__ = ["run_index", "run_ingest", "run_query"]

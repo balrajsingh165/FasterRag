@@ -239,7 +239,7 @@ class FasterRag:
         A directory is replaced by the files inside it, as ``fasterrag ingest`` does;
         ``recursive`` descends into subdirectories.
         """
-        from fasterrag.cli.sources import expand_sources
+        from fasterrag.services.source_expansion import expand_sources
 
         self._require_started()
         expanded = expand_sources(sources, recursive=recursive)

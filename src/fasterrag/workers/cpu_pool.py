@@ -77,10 +77,10 @@ from fasterrag.config.schema import Settings
 from fasterrag.core.chunking import SentenceEmbedder, create_chunker, create_token_counter
 from fasterrag.core.confinement import resolved_within
 from fasterrag.core.identity import chunk_id, chunker_config_hash, content_hash, document_id
+from fasterrag.core.journaling import DocumentJournal, DocumentRecord
 from fasterrag.core.parsing import create_parsing_options, parse_bytes
 from fasterrag.errors import ConfigError, ErrorCode, FasterRagError, IngestionError, ParseError
 from fasterrag.observability.logging import current_trace_id, get_logger
-from fasterrag.services.journal import DocumentRecord, Journal
 from fasterrag.workers.ledger import IndexLedger
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload, DocumentTask, ParseOutcome
 
@@ -386,7 +386,7 @@ class CpuWorkerPool:
         self,
         settings: Settings,
         *,
-        journal: Journal | None = None,
+        journal: DocumentJournal | None = None,
         executor_factory: Callable[[int], Executor] | None = None,
         llm: LLMAdapter | None = None,
         trim: Callable[[str, int], Awaitable[None]] | None = None,

@@ -12,9 +12,9 @@ from typing import Any, Final
 
 import pytest
 
-from fasterrag.cli.sources import expand_sources
 from fasterrag.config.schema import Settings
 from fasterrag.services.journal import Journal
+from fasterrag.services.source_expansion import expand_sources
 from fasterrag.services.sources import resolve_sources, typed_source
 from fasterrag.workers.cpu_pool import CpuWorkerPool
 from fasterrag.workers.queues import BoundedQueue, ChunkPayload

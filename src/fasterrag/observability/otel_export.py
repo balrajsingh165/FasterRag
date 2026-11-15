@@ -22,9 +22,9 @@ from datetime import UTC, datetime
 from hashlib import blake2b
 from typing import Any, Final
 
-from fasterrag.core.tracing import Trace
 from fasterrag.errors import ConfigError
 from fasterrag.observability.logging import get_logger
+from fasterrag.observability.trace_view import TraceView
 
 __all__ = [
     "SCOPE_NAME",
@@ -68,7 +68,7 @@ def _epoch_nanoseconds(moment: datetime) -> int:
     return int(moment.timestamp() * 1_000_000_000)
 
 
-def _started_at(trace: Trace) -> datetime:
+def _started_at(trace: TraceView) -> datetime:
     """Return the trace's start time, falling back to now when it is unusable."""
     try:
         parsed = datetime.fromisoformat(trace.created_at)
@@ -93,7 +93,7 @@ def _attribute(value: Any) -> Any:
     return str(value)
 
 
-def _attributes(trace: Trace) -> dict[str, Any]:
+def _attributes(trace: TraceView) -> dict[str, Any]:
     """Return the root span's attributes, naming what the query did and produced."""
     result = trace.result or {}
     usage = result.get("usage") or {}
@@ -114,7 +114,7 @@ def _attributes(trace: Trace) -> dict[str, Any]:
     return {key: _attribute(value) for key, value in candidate.items() if value is not None}
 
 
-def build_spans(trace: Trace) -> list[Any]:
+def build_spans(trace: TraceView) -> list[Any]:
     """Return the OTLP spans for one trace: a root span with a child per stage."""
     sdk = _sdk()
     started = _started_at(trace)
@@ -232,7 +232,7 @@ class OtelExporter:
         self.endpoint = signal_endpoint(endpoint, "traces")
         self._exporter = OTLPSpanExporter(endpoint=self.endpoint, timeout=timeout)
 
-    async def export(self, trace: Trace) -> bool:
+    async def export(self, trace: TraceView) -> bool:
         """Send one trace, reporting whether the collector accepted it.
 
         Never raises. A trace is a record of a query that has already been answered, so an
