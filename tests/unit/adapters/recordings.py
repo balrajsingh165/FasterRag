@@ -242,6 +242,19 @@ def ndjson_reply(parts: Iterable[dict[str, Any]]) -> Route:
     )
 
 
+def record_closes(monkeypatch: pytest.MonkeyPatch) -> list[httpx.AsyncClient]:
+    """Return a list that collects every HTTP client whose connection pool is then closed."""
+    closed: list[httpx.AsyncClient] = []
+    original = httpx.AsyncClient.aclose
+
+    async def recording(client: httpx.AsyncClient) -> None:
+        closed.append(client)
+        await original(client)
+
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", recording)
+    return closed
+
+
 def refusing_connections(_request: dict[str, Any]) -> httpx.Response:
     """Fail the way a server that is not running does."""
     raise httpx.ConnectError("All connection attempts failed")

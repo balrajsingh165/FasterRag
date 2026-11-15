@@ -14,16 +14,23 @@ and is priced at zero (``LOCAL_PROVIDERS`` in ``services.estimation``), so the f
 no bill; it is reported because a server that states a count has given a receipt, and
 ``None`` is reserved for a reply that states none.
 
-**Where the server address comes from.** There is no ``embeddings.base_url`` key. When
-``llm.provider`` is ``ollama`` the embedder uses ``llm.base_url``, because one Ollama
+**Where the server address comes from.** ``embeddings.base_url`` when it is set (TASK-0511),
+so an Ollama LLM on one server and Ollama embeddings on another can be expressed. Unset,
+and ``llm.provider`` is ``ollama``, the embedder uses ``llm.base_url``, because one Ollama
 server normally serves both. When the LLM is any other provider, ``llm.base_url`` is that
-provider's endpoint — an OpenAI-compatible gateway, say — and the embedder no longer
-borrows it: the client is built with no host, so it applies its own rule, the
+provider's endpoint — an OpenAI-compatible gateway, say — and the embedder does not
+borrow it: the client is built with no host, so it applies its own rule, the
 ``OLLAMA_HOST`` environment variable and otherwise ``http://127.0.0.1:11434``.
+
+**Dimensions.** ``embeddings.dimensions`` is sent as the request's ``dimensions``, which the
+client's ``embed`` accepts from ``ollama`` 0.5.4. An older client has no way to send it, and
+the adapter refuses with a ``ConfigError`` naming the upgrade rather than embedding at the
+model's full width and leaving the mismatch to fail later at the vector database.
 """
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Sequence
 from typing import Any
 
@@ -51,7 +58,8 @@ class OllamaEmbedder(EmbeddingAdapter):
         super().__init__(settings)
         self._client: Any | None = None
         self._timeout = settings.reliability.timeouts.embeddings_ms / 1000
-        self._host = settings.llm.base_url if settings.llm.provider == self.provider else None
+        borrowed = settings.llm.base_url if settings.llm.provider == self.provider else None
+        self._host = self.config.base_url or borrowed
 
     @property
     def model(self) -> str:
@@ -76,13 +84,23 @@ class OllamaEmbedder(EmbeddingAdapter):
             except ImportError as exc:
                 raise require_extra(self.provider, "ollama", "ollama") from exc
 
-            self._client = AsyncClient(host=self._host, timeout=self._timeout)
+            client = AsyncClient(host=self._host, timeout=self._timeout)
+            if self.config.dimensions is not None and not _sends_dimensions(client):
+                raise ConfigError(
+                    f"embeddings.dimensions is {self.config.dimensions}, but the installed "
+                    "ollama client cannot send a dimension; upgrade it with "
+                    'pip install "ollama>=0.5.4", or set embeddings.dimensions to null'
+                )
+            self._client = client
         return self._client
 
     async def _embed(self, texts: Sequence[str]) -> tuple[list[list[float]], int | None]:
         """Embed one batch in one request, returning vectors and the tokens Ollama counted."""
         try:
-            response = await self._connected().embed(model=self.config.model, input=list(texts))
+            request: dict[str, Any] = {"model": self.config.model, "input": list(texts)}
+            if self.config.dimensions is not None:
+                request["dimensions"] = self.config.dimensions
+            response = await self._connected().embed(**request)
         except ConfigError:
             raise
         # CRITICAL: the catch stays broad because the SDK raises a deep hierarchy of
@@ -137,5 +155,25 @@ class OllamaEmbedder(EmbeddingAdapter):
         return HealthStatus(healthy=True, detail=f"{self.provider} reachable")
 
     async def close(self) -> None:
-        """Release the client."""
-        self._client = None
+        """Close the client and its connection pool."""
+        if self._client is not None:
+            client, self._client = self._client, None
+            await close_ollama_client(client)
+
+
+def _sends_dimensions(client: Any) -> bool:
+    """Return whether the client's ``embed`` can carry a ``dimensions`` argument."""
+    return "dimensions" in inspect.signature(client.embed).parameters
+
+
+async def close_ollama_client(client: Any) -> None:
+    """Close an ``ollama.AsyncClient``'s connection pool on every supported client version.
+
+    ``close()`` arrived after ``ollama`` 0.4, the supported floor, whose client holds the
+    same ``httpx.AsyncClient`` as ``_client`` with no public way to close it.
+    """
+    close = getattr(client, "close", None)
+    if close is not None:
+        await close()
+    else:
+        await client._client.aclose()

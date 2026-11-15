@@ -131,6 +131,7 @@ COMPARABILITY_FIELDS: Final[tuple[str, ...]] = (
 BEHAVIOUR_NEUTRAL_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "embeddings.api_key_env",
+        "embeddings.base_url",
         "embeddings.batch_size",
         "embeddings.cache",
         "retrieval.verify_lock",

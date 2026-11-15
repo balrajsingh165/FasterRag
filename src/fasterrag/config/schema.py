@@ -139,6 +139,15 @@ def _validate_env_var_name(value: str | None) -> str | None:
     return value
 
 
+def _validate_base_url(value: str | None) -> str | None:
+    """Require an absolute HTTP(S) URL when an endpoint override is set."""
+    if value is None:
+        return None
+    if not value.startswith(("http://", "https://")):
+        raise ValueError(f"{value!r} must be an absolute http:// or https:// URL")
+    return value
+
+
 _ORIGIN_RE = re.compile(r"^https?://[^/\s*]+$")
 
 
@@ -435,6 +444,7 @@ class EmbeddingsSettings(Section):
     api_key_env: str | None = None
     batch_size: Annotated[int, Field(ge=1, le=2048)] = 64
     dimensions: Annotated[int, Field(ge=8)] | None = None
+    base_url: str | None = None
     cache: EmbeddingCacheSettings = EmbeddingCacheSettings()
     tiering: TieringSettings = TieringSettings()
 
@@ -459,6 +469,12 @@ class EmbeddingsSettings(Section):
     def _check_api_key_env(cls, value: str | None) -> str | None:
         """Require an environment-variable name, never a key value."""
         return _validate_env_var_name(value)
+
+    @field_validator("base_url")
+    @classmethod
+    def _check_base_url(cls, value: str | None) -> str | None:
+        """Require an absolute HTTP(S) URL when an endpoint override is set."""
+        return _validate_base_url(value)
 
     @model_validator(mode="after")
     def _check_key_required(self) -> Self:
