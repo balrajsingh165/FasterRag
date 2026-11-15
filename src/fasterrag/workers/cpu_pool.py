@@ -402,6 +402,7 @@ class CpuWorkerPool:
         )
         self._executor: Executor | None = None
         self._stranded = False
+        self.late_duplicates = 0
 
     async def __aenter__(self) -> CpuWorkerPool:
         """Start the worker processes and pay the tokenizer load up front."""
@@ -628,7 +629,8 @@ class CpuWorkerPool:
 
                 parsed += 1
                 chunked += len(outcome.chunks)
-                known[outcome.content_hash] = task.document_id
+                if self.settings.ingestion.dedup:
+                    known[outcome.content_hash] = task.document_id
                 if standalone:
                     await tracker.written(payloads)
         finally:
@@ -777,9 +779,36 @@ class CpuWorkerPool:
         async def commit() -> None:
             if update and self._trim is not None:
                 await self._trim(task.document_id, len(outcome.chunks))
-            await self._index_document(job, collection, task, outcome)
+            holder = await self._index_document(job, collection, task, outcome)
+            if holder is not None:
+                await self._withdraw(job, collection, task, outcome, holder, update=update)
 
         return commit
+
+    async def _withdraw(
+        self,
+        job: str | None,
+        collection: str,
+        task: DocumentTask,
+        outcome: ParseOutcome,
+        holder: str,
+        *,
+        update: bool,
+    ) -> None:
+        """Undo a document another job indexed the same content as first: a late duplicate.
+
+        Its chunks just written are deleted and it is recorded ``deduplicated`` (TASK-0471).
+        """
+        self.late_duplicates += 1
+        _logger.info(
+            "document deduplicated at commit: another job indexed the same content first",
+            extra={"document_id": task.document_id, "holder": holder, "job_id": job},
+        )
+        if self._trim is not None:
+            await self._trim(task.document_id, 0)
+        if update and self.journal is not None:
+            await self.journal.forget_document(collection, task.document_id)
+        await self._record(job, task, "deduplicated", outcome.content_hash)
 
     def _addressed(self, outcome: ParseOutcome) -> list[ChunkPayload]:
         """Return the outcome's chunks, carrying the document text late chunking needs."""
@@ -851,16 +880,15 @@ class CpuWorkerPool:
 
     async def _index_document(
         self, job: str | None, collection: str, task: DocumentTask, outcome: ParseOutcome
-    ) -> None:
-        """Record an indexed document and remember its content hash, in one thread hop.
+    ) -> str | None:
+        """Claim the content hash and record the document indexed, in one thread hop.
 
-        One hop rather than two: this runs once per document, and the handoff costs more
-        than either append does (``docs/benchmarks.md`` BENCH-0006).
+        Returns the other document already holding the hash, if one does (TASK-0471).
         """
         if self.journal is None or job is None:
-            return
+            return None
 
-        await self.journal.record_indexed(
+        return await self.journal.record_indexed(
             job,
             collection,
             self._outcome(task, "indexed", outcome.content_hash),

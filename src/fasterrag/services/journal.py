@@ -429,19 +429,30 @@ def _append_line(path: Path, line: str, tails: dict[Path, int]) -> None:
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with _exclusive(path), path.open("ab") as handle:
-            size = os.fstat(handle.fileno()).st_size
-            whole = size == 0 or tails.get(path) == size or _ends_a_line(path)
-            data = (b"" if whole else b"\n") + line.encode("utf-8") + b"\n"
-            handle.write(data)
-            handle.flush()
-            tails[path] = size + len(data)
+        with _exclusive(path):
+            _append_held(path, line, tails)
     except OSError as exc:
-        raise IngestionError(
-            f"the ingestion journal could not append to {path}: {exc}. The documents after "
-            "the last checkpoint are processed again once the condition clears",
-            code=ErrorCode.INTERNAL,
-        ) from exc
+        raise _append_failed(path, exc) from exc
+
+
+def _append_held(path: Path, line: str, tails: dict[Path, int]) -> None:
+    """Append one line to a log whose lock the caller already holds."""
+    with path.open("ab") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        whole = size == 0 or tails.get(path) == size or _ends_a_line(path)
+        data = (b"" if whole else b"\n") + line.encode("utf-8") + b"\n"
+        handle.write(data)
+        handle.flush()
+        tails[path] = size + len(data)
+
+
+def _append_failed(path: Path, exc: OSError) -> IngestionError:
+    """Return the error for an append the operating system refused."""
+    return IngestionError(
+        f"the ingestion journal could not append to {path}: {exc}. The documents after "
+        "the last checkpoint are processed again once the condition clears",
+        code=ErrorCode.INTERNAL,
+    )
 
 
 def _logged_lines(path: Path) -> list[dict[str, Any]]:
@@ -975,21 +986,28 @@ class Journal:
 
     async def record_indexed(
         self, job: str, collection: str, record: DocumentRecord, *, dedup: bool
-    ) -> None:
-        """Log a parsed document and remember its hash in one hop off the event loop.
+    ) -> str | None:
+        """Claim a parsed document's hash and log it indexed, in one hop off the event loop.
 
-        One hop rather than two: the per-document path runs millions of times, and the
-        thread handoff costs more than either append (``docs/benchmarks.md`` BENCH-0006).
+        Returns the document already holding the hash, and then writes nothing (TASK-0471).
+        One hop, not two: the handoff costs more than either append (BENCH-0006).
         """
-        await asyncio.to_thread(self.record_indexed_blocking, job, collection, record, dedup=dedup)
+        return await asyncio.to_thread(
+            self.record_indexed_blocking, job, collection, record, dedup=dedup
+        )
 
     def record_indexed_blocking(
         self, job: str, collection: str, record: DocumentRecord, *, dedup: bool
-    ) -> None:
-        """Log a document and its hash; :meth:`record_indexed` is this off the loop."""
-        self.record_document_blocking(job, record)
+    ) -> str | None:
+        """Claim a hash and log the document; :meth:`record_indexed` is this off the loop."""
         if dedup and record.content_hash is not None:
-            self.remember_content_blocking(collection, record.content_hash, record.document_id)
+            holder = self.claim_content_blocking(
+                collection, record.content_hash, record.document_id
+            )
+            if holder is not None:
+                return holder
+        self.record_document_blocking(job, record)
+        return None
 
     async def dead_letter(
         self,
@@ -1086,6 +1104,28 @@ class Journal:
     def remember_content_blocking(self, collection: str, content: str, document: str) -> None:
         """Record an indexed content hash; :meth:`remember_content` is this off the loop."""
         _append_line(self._dedup_path(collection), _dedup_line(content, document), self._tails)
+
+    async def claim_content(self, collection: str, content: str, document: str) -> str | None:
+        """Remember a hash unless another document holds it, off the event loop."""
+        return await asyncio.to_thread(self.claim_content_blocking, collection, content, document)
+
+    def claim_content_blocking(self, collection: str, content: str, document: str) -> str | None:
+        """Remember a hash, or return the other document holding it; checked under the lock.
+
+        Check and append are one step, so of two jobs committing the same content at once
+        exactly one claims it, whichever process each runs in (TASK-0471).
+        """
+        path = self._dedup_path(collection)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with _exclusive(path):
+                holder = _live_content(_logged_lines(path)).get(content)
+                if holder is not None and holder != document:
+                    return holder
+                _append_held(path, _dedup_line(content, document), self._tails)
+        except OSError as exc:
+            raise _append_failed(path, exc) from exc
+        return None
 
     async def forget_document(self, collection: str, document: str) -> bool:
         """Tombstone a document in a collection's dedup index, off the event loop."""
