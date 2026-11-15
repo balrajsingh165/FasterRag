@@ -152,7 +152,7 @@ async def test_a_size_refusal_answers_a_half_open_probe() -> None:
     configured = settings(embeddings={"batch_size": 2})
     breaker = CircuitBreaker("embeddings", failure_threshold=1, reset_timeout_ms=50)
     breaker.record_failure(breaker.check())
-    time.sleep(0.06)
+    time.sleep(0.2)
     embedder = SizeLimitedEmbedder(configured, limit=1)
 
     report = await run(
