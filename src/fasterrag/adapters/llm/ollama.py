@@ -71,7 +71,9 @@ class OllamaGenerator(LLMAdapter):
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         """Generate a whole answer."""
         try:
-            response = await self._connected().chat(**self._request(prompt, system, stream=False))
+            response = await self._bounded(
+                self._connected().chat(**self._request(prompt, system, stream=False))
+            )
         except ConfigError:
             raise
         # CRITICAL: the catch stays broad because the SDK raises a deep hierarchy of

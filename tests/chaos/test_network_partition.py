@@ -63,6 +63,14 @@ TIMEOUT_SLACK_SECONDS: Final = 5.0
 HANG_BUDGET_SECONDS: Final = 30.0
 SHED_BUDGET_SECONDS: Final = 0.5
 RESET_TIMEOUT_MS: Final = 200
+LLM_TIMEOUT_MS: Final = 1000
+LLM_TIMEOUT_SLACK_SECONDS: Final = 1.0
+"""What a generation call may run past ``llm_ms``: the cancellation and the error mapping.
+
+Five seconds until TASK-0548, when the window also held the client's first-use imports.
+"""
+
+TRICKLE_GAP_SECONDS: Final = 0.2
 
 # CRITICAL: waiting exactly RESET_TIMEOUT_MS asserts on the clock, not on the breaker.
 # asyncio fires a timer up to one `clock_resolution` EARLY by design, and that resolution is
@@ -114,6 +122,54 @@ class Blackhole:
             server.close()
             await server.wait_closed()
         self._servers.clear()
+
+
+class Trickle:
+    """A listener that answers with headers, then one body byte every ``TRICKLE_GAP_SECONDS``.
+
+    Each read completes well inside ``llm_ms``, so only a bound on the whole call ends it.
+    """
+
+    def __init__(self) -> None:
+        """Start with no server; :meth:`open` binds it."""
+        self._server: asyncio.Server | None = None
+        self._handlers: list[asyncio.Task[None]] = []
+        self.port = 0
+
+    async def _drip(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Send a response that is always about to finish and never does."""
+        handler = asyncio.current_task()
+        if handler is not None:
+            self._handlers.append(handler)
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Content-Length: 1000000\r\n\r\n"
+            )
+            while True:
+                writer.write(b" ")
+                await writer.drain()
+                await asyncio.sleep(TRICKLE_GAP_SECONDS)
+        finally:
+            writer.close()
+
+    async def open(self) -> None:
+        """Bind the listener on an ephemeral port."""
+        self._server = await asyncio.start_server(self._drip, "127.0.0.1", 0)
+        self.port = int(self._server.sockets[0].getsockname()[1])
+
+    async def close(self) -> None:
+        """Cancel every handler and stop listening."""
+        for handler in self._handlers:
+            handler.cancel()
+        if self._handlers:
+            await asyncio.gather(*self._handlers, return_exceptions=True)
+        self._handlers.clear()
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
 
 
 def handler_tasks() -> list[asyncio.Task[Any]]:
@@ -175,6 +231,15 @@ async def blackhole() -> AsyncIterator[Blackhole]:
     await partition.open()
     yield partition
     await partition.close()
+
+
+@pytest.fixture
+async def trickle() -> AsyncIterator[Trickle]:
+    """Return a listener that answers one byte at a time, forever."""
+    peer = Trickle()
+    await peer.open()
+    yield peer
+    await peer.close()
 
 
 @pytest.fixture
@@ -277,28 +342,32 @@ async def test_a_host_that_does_not_resolve_fails_typed_and_retryable() -> None:
     assert elapsed < settings.reliability.timeouts.vector_db_ms / 1000 + TIMEOUT_SLACK_SECONDS
 
 
-async def test_a_partitioned_generation_provider_fails_typed_and_retryable(
-    blackhole: Blackhole, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Row 35 per provider: the same partition against the LLM leg is classified the same."""
-    pytest.importorskip("openai", reason="the openai extra is not installed in this environment")
-
-    monkeypatch.setenv("FASTERRAG_CHAOS_LLM_KEY", "not-a-real-key")
-    settings = Settings.model_validate(
+def generation_settings(port: int) -> Settings:
+    """Return settings whose OpenAI-compatible provider is the listener on ``port``."""
+    return Settings.model_validate(
         {
             "vector_db": {"provider": "qdrant", "mode": "external", "api_key_env": None},
             "embeddings": {"provider": "huggingface"},
             "llm": {
                 "provider": "openai_compatible",
                 "api_key_env": "FASTERRAG_CHAOS_LLM_KEY",
-                "base_url": f"http://127.0.0.1:{blackhole.rest_port}/v1",
+                "base_url": f"http://127.0.0.1:{port}/v1",
             },
-            "reliability": {"timeouts": {"llm_ms": 1000}},
+            "reliability": {"timeouts": {"llm_ms": LLM_TIMEOUT_MS}},
         }
     )
+
+
+async def failing_completion(settings: Settings) -> tuple[GenerationError, float]:
+    """Run one completion that cannot succeed, timing the call alone.
+
+    The client is built, and the SDK's lazily imported chat resource touched, before the
+    clock starts: that first-use cost is a synchronous import, not the call ``llm_ms`` bounds.
+    """
     from fasterrag.adapters.llm.openai import OpenAICompatibleGenerator
 
     generator = OpenAICompatibleGenerator(settings)
+    assert generator._connected().chat.completions is not None
     started = time.perf_counter()
     try:
         with pytest.raises(GenerationError) as failure:
@@ -307,10 +376,34 @@ async def test_a_partitioned_generation_provider_fails_typed_and_retryable(
             )
     finally:
         await generator.close()
-    elapsed = time.perf_counter() - started
+    return failure.value, time.perf_counter() - started
 
-    assert failure.value.retryable is True
-    assert elapsed < settings.reliability.timeouts.llm_ms / 1000 + TIMEOUT_SLACK_SECONDS
+
+async def test_a_partitioned_generation_provider_fails_typed_and_retryable(
+    blackhole: Blackhole, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row 35 per provider: the same partition against the LLM leg is classified the same."""
+    pytest.importorskip("openai", reason="the openai extra is not installed in this environment")
+    monkeypatch.setenv("FASTERRAG_CHAOS_LLM_KEY", "not-a-real-key")
+
+    failure, elapsed = await failing_completion(generation_settings(blackhole.rest_port))
+
+    assert failure.retryable is True
+    assert LLM_TIMEOUT_MS / 2000 <= elapsed < LLM_TIMEOUT_MS / 1000 + LLM_TIMEOUT_SLACK_SECONDS
+
+
+async def test_a_provider_that_trickles_bytes_is_cut_off_at_llm_ms(
+    trickle: Trickle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``llm_ms`` bounded each socket read, so a peer sending a byte a beat never timed out."""
+    pytest.importorskip("openai", reason="the openai extra is not installed in this environment")
+    monkeypatch.setenv("FASTERRAG_CHAOS_LLM_KEY", "not-a-real-key")
+
+    failure, elapsed = await failing_completion(generation_settings(trickle.port))
+
+    assert failure.code is ErrorCode.GENERATION_TIMEOUT
+    assert failure.retryable is True
+    assert elapsed < LLM_TIMEOUT_MS / 1000 + LLM_TIMEOUT_SLACK_SECONDS
 
 
 def service_for(partitioned: Settings, breaker: CircuitBreaker) -> RetrievalService:

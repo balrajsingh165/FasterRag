@@ -77,7 +77,7 @@ class CohereGenerator(LLMAdapter):
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
         """Generate a whole answer."""
         try:
-            response = await self._connected().chat(**self._request(prompt, system))
+            response = await self._bounded(self._connected().chat(**self._request(prompt, system)))
         except ConfigError:
             raise
         # CRITICAL: the catch stays broad because the SDK raises a deep hierarchy of

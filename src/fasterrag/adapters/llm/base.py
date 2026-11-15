@@ -13,9 +13,10 @@ in one place, and a provider that refused a credential is never hammered
 
 from __future__ import annotations
 
+import asyncio
 import os
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -215,6 +216,15 @@ class LLMAdapter(ABC):
     def temperature(self) -> float:
         """Return ``llm.temperature``, or the low default that favours grounded answers."""
         return DEFAULT_TEMPERATURE if self.config.temperature is None else self.config.temperature
+
+    async def _bounded[T](self, call: Awaitable[T]) -> T:
+        """Await ``call`` within ``reliability.timeouts.llm_ms``, end to end (TASK-0548).
+
+        An SDK applies its timeout per connect, read, write and pool phase, so a peer that
+        sends a byte inside every read window never timed out; this bounds the whole call.
+        """
+        async with asyncio.timeout(self.timeout):
+            return await call
 
     @abstractmethod
     async def complete(self, prompt: str, *, system: str | None = None) -> Completion:
