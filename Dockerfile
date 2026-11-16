@@ -20,11 +20,11 @@
 # becoming a way of never taking a security fix.
 #
 # python:3.12-slim — 3.12.16-slim-trixie, resolved 2026-11-12
-FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS base
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS base
 
 # ghcr.io/astral-sh/uv:0.12.3 — resolved 2026-11-12. A stage of its own rather than a
 # `COPY --from=<image>` so the pin sits on a FROM line, the only place Dependabot looks.
-FROM ghcr.io/astral-sh/uv:0.12.3@sha256:2d890623d310b57771ce840f0da5eed5fc6d657da05ffaa45d82797b53fa3abc AS uv
+FROM ghcr.io/astral-sh/uv:0.13.8@sha256:5cc1805e2426484abca4ad46ea783bab281fdb225fd82d8ce6d66a81254bac85 AS uv
 
 
 FROM base AS builder
